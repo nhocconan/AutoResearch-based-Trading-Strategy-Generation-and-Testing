@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour price channels with 1-day volume confirmation and regime filter
-# Works in bull/bear by capturing breakouts from established ranges, volume filters false signals,
-# and choppiness regime filter ensures we only trade in trending conditions.
-# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4-hour Donchian channel breakout with 12-hour trend filter and volume confirmation
+# Works in bull/bear because breakouts capture strong directional moves, 12h EMA filter ensures
+# alignment with higher timeframe trend, and volume filters out false breakouts.
+# Target: 80-150 trades over 4 years (20-38/year) to balance opportunity and fee drag.
 
-name = "exp_13012_12h_channel_breakout_1d_vol_chop_v1"
-timeframe = "12h"
+name = "exp_13013_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CHANNEL_PERIOD = 20
+DONCHIAN_PERIOD = 20
+EMA_FAST = 9
+EMA_SLOW = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-CHOP_PERIOD = 14
-CHOP_THRESHOLD = 61.8  # Above 61.8 = choppy (range), below = trending
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,47 +31,46 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period):
-    """Calculate Choppiness Index"""
-    atr_sum = pd.Series(calculate_atr(high, low, close, 1)).rolling(window=period, min_periods=period).sum()
-    max_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    min_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(period)
-    return chop.values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, 50)  # 50-period EMA on 12h
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 1d volume MA
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # 1d choppiness
-    chop_1d = calculate_choppiness(high_1d, low_1d, close_1d, CHOP_PERIOD)
-    
-    # Align to 12h timeframe
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Calculate 12h price channels
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper_channel = pd.Series(high).rolling(window=CHANNEL_PERIOD, min_periods=CHANNEL_PERIOD).max().values
-    lower_channel = pd.Series(low).rolling(window=CHANNEL_PERIOD, min_periods=CHANNEL_PERIOD).min().values
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
+    # EMA for entry timing
+    ema_fast = calculate_ema(close, EMA_FAST)
+    ema_slow = calculate_ema(close, EMA_SLOW)
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -80,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(CHANNEL_PERIOD, VOLUME_MA_PERIOD, CHOP_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(volume_ma_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,15 +102,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (1d volume > 1.5x MA)
-        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_aligned[i]) else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Regime filter: only trade when NOT choppy (trending market)
-        trending = chop_aligned[i] < CHOP_THRESHOLD
+        # Trend filter: 12h EMA slope (using close vs EMA)
+        trend_up = close_12h[i] > ema_12h[i] if not np.isnan(ema_12h[i]) else False
+        trend_down = close_12h[i] < ema_12h[i] if not np.isnan(ema_12h[i]) else False
         
-        # Breakout signals
-        breakout_long = volume_ok and trending and close[i] >= upper_channel[i]
-        breakout_short = volume_ok and trending and close[i] <= lower_channel[i]
+        # Breakout conditions
+        breakout_long = volume_ok and trend_up and close[i] >= donch_upper[i]
+        breakout_short = volume_ok and trend_down and close[i] <= donch_lower[i]
         
         # Generate signals
         if position == 0:
