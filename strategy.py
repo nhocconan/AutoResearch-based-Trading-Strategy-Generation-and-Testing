@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal with 1d EMA(50) filter and volume confirmation
-# Long when price closes below S3 and reverses above S2 with volume > 1.5x average and price > 1d EMA(50)
-# Short when price closes above R3 and reverses below R2 with volume > 1.5x average and price < 1d EMA(50)
-# Exit when price reaches opposite Camarilla level (S4 for long, R4 for short) or stops at 2*ATR
-# Position size: 0.25
-# Uses Camarilla levels from daily pivot for mean reversion in ranging markets
-# Works in both bull/bear by filtering with 1d EMA(50) trend
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) filter and volume confirmation
+# Long when price breaks above 4h Donchian upper band, price > 1d EMA(50), and volume > 1.8x weekly average
+# Short when price breaks below 4h Donchian lower band, price < 1d EMA(50), and volume > 1.8x weekly average
+# Exit when price returns to 1d EMA(50) or opposite breakout occurs
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses 1d EMA for trend filter and weekly volume to confirm breakout strength
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "6h_camarilla_1d_ema_vol_v2"
-timeframe = "6h"
+name = "4h_donchian20_1d_ema_1w_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,64 +27,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate Camarilla levels from previous day
-    # Using close of previous day (shifted by 1 to avoid look-ahead)
-    if len(close_1d) < 2:
-        return np.zeros(n)
+    # 4h Donchian(20) channels
+    high_series = pd.Series(high_4h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_4h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Previous day's OHLC
-    prev_close = close_1d[:-1]  # t-1
-    prev_high = high_1d[:-1]    # t-1
-    prev_low = low_1d[:-1]      # t-1
-    
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    s1 = close_1d[:-1] - (range_val * 1.0833)
-    s2 = close_1d[:-1] - (range_val * 1.1666)
-    s3 = close_1d[:-1] - (range_val * 1.2500)
-    s4 = close_1d[:-1] - (range_val * 1.5000)
-    
-    r1 = close_1d[:-1] + (range_val * 1.0833)
-    r2 = close_1d[:-1] + (range_val * 1.1666)
-    r3 = close_1d[:-1] + (range_val * 1.2500)
-    r4 = close_1d[:-1] + (range_val * 1.5000)
-    
-    # Align Camarilla levels to 6h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    # Align Donchian bands to 4h timeframe (already aligned, but use for safety)
+    upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
     
     # 1d EMA(50) for trend filter
-    if len(close_1d) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation - use 1d average volume
-    volume_1d = df_1d['volume'].values
-    if len(volume_1d) < 20:
+    # 1w volume for confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    volume_1w = df_1w['volume'].values
+    volume_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_1w)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -100,10 +78,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma_1w_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -117,8 +93,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price reaches S4 (target) or breaks below S3 (stop)
-            elif close[i] <= s4_aligned[i] or close[i] < s3_aligned[i]:
+            # Exit: price returns to EMA or breaks below lower band
+            elif close[i] <= ema_1d_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -130,30 +106,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price reaches R4 (target) or breaks above R3 (stop)
-            elif close[i] >= r4_aligned[i] or close[i] > r3_aligned[i]:
+            # Exit: price returns to EMA or breaks above upper band
+            elif close[i] >= ema_1d_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for reversal entries with volume confirmation
-            # Long: price was below S3 (oversold) and now reverses above S2
-            # Only in uptrend (price > EMA) or ranging market
-            if (close[i-1] <= s3_aligned[i] and  # Was at or below S3
-                close[i] > s2_aligned[i] and      # Now above S2
-                volume[i] > 1.5 * volume_ma_1d_aligned[i] and  # Volume confirmation
-                (close[i] > ema_1d_aligned[i] or abs(close[i] - ema_1d_aligned[i]) < 0.5 * atr[i])):  # Not strongly bearish
+            # Look for entries with volume confirmation and trend alignment
+            # Long: price breaks above upper band, price above EMA (bullish trend), volume spike
+            if (close[i] > upper_aligned[i] and
+                close[i] > ema_1d_aligned[i] and
+                volume[i] > 1.8 * volume_ma_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price was above R3 (overbought) and now reverses below R2
-            # Only in downtrend (price < EMA) or ranging market
-            elif (close[i-1] >= r3_aligned[i] and   # Was at or above R3
-                  close[i] < r2_aligned[i] and      # Now below R2
-                  volume[i] > 1.5 * volume_ma_1d_aligned[i] and  # Volume confirmation
-                  (close[i] < ema_1d_aligned[i] or abs(close[i] - ema_1d_aligned[i]) < 0.5 * atr[i])):  # Not strongly bullish
+            # Short: price breaks below lower band, price below EMA (bearish trend), volume spike
+            elif (close[i] < lower_aligned[i] and
+                  close[i] < ema_1d_aligned[i] and
+                  volume[i] > 1.8 * volume_ma_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
