@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Exponential Moving Average crossover with 1-week RSI momentum filter and volume confirmation.
-# EMA crossover provides trend-following signals with reduced whipsaw.
-# RSI filter avoids counter-trend entries in overbought/oversold conditions.
-# Volume confirmation ensures institutional participation.
-# Designed for 1d timeframe to target 30-100 trades over 4 years with low frequency.
+# Hypothesis: 1-day Bollinger Band breakout with 1-week volume confirmation and ADX trend filter.
+# Buys when price breaks above upper BB(20,2) with volume > 1.5x weekly average and ADX > 20.
+# Sells when price breaks below lower BB(20,2) with volume > 1.5x weekly average and ADX > 20.
+# Uses position size 0.25 to limit drawdown. Designed for 1d timeframe to target 30-100 trades over 4 years.
 
-name = "1d_ema20_50_rsi1w_vol_v1"
+name = "1d_bb20_1w_vol_adx_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -20,41 +19,79 @@ def generate_signals(prices):
     
     # Price and volume data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day EMA(20) and EMA(50) for trend signals
-    ema20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False).mean().values
+    # 1-day Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean()
+    bb_std = close_s.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_upper = bb_upper.values
+    bb_lower = bb_lower.values
     
-    # 1-week RSI(14) for momentum filter
+    # 1-week ADX(14) for trend strength filtering
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # RSI calculation
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # True Range and Directional Movement
+    tr = np.full(len(close_1w), np.nan)
+    dm_plus = np.full(len(close_1w), np.nan)
+    dm_minus = np.full(len(close_1w), np.nan)
     
-    avg_gain = np.full(len(close_1w), np.nan)
-    avg_loss = np.full(len(close_1w), np.nan)
+    if len(close_1w) > 1:
+        tr[0] = high_1w[0] - low_1w[0]
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        for i in range(1, len(close_1w)):
+            tr[i] = max(high_1w[i] - low_1w[i],
+                       abs(high_1w[i] - close_1w[i-1]),
+                       abs(low_1w[i] - close_1w[i-1]))
+            dm_plus[i] = max(high_1w[i] - high_1w[i-1], 0)
+            dm_minus[i] = max(low_1w[i-1] - low_1w[i], 0)
+            dm_plus[i] = dm_plus[i] if dm_plus[i] > dm_minus[i] else 0
+            dm_minus[i] = dm_minus[i] if dm_minus[i] > dm_plus[i] else 0
     
-    for i in range(14, len(close_1w)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Smoothed TR, DM+, DM-
+    atr_1w = np.full(len(close_1w), np.nan)
+    s_dm_plus = np.full(len(close_1w), np.nan)
+    s_dm_minus = np.full(len(close_1w), np.nan)
     
-    rsi = np.full(len(close_1w), np.nan)
-    for i in range(14, len(close_1w)):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
+    if len(close_1w) >= 14:
+        atr_1w[13] = np.nansum(tr[1:14])
+        s_dm_plus[13] = np.nansum(dm_plus[1:14])
+        s_dm_minus[13] = np.nansum(dm_minus[1:14])
+        for i in range(14, len(close_1w)):
+            atr_1w[i] = atr_1w[i-1] - (atr_1w[i-1]/14) + tr[i]
+            s_dm_plus[i] = s_dm_plus[i-1] - (s_dm_plus[i-1]/14) + dm_plus[i]
+            s_dm_minus[i] = s_dm_minus[i-1] - (s_dm_minus[i-1]/14) + dm_minus[i]
     
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    # DI+ and DI-
+    di_plus = np.full(len(close_1w), np.nan)
+    di_minus = np.full(len(close_1w), np.nan)
+    dx = np.full(len(close_1w), np.nan)
+    
+    for i in range(13, len(close_1w)):
+        if atr_1w[i] != 0:
+            di_plus[i] = 100 * s_dm_plus[i] / atr_1w[i]
+            di_minus[i] = 100 * s_dm_minus[i] / atr_1w[i]
+            if di_plus[i] + di_minus[i] != 0:
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+    
+    # ADX calculation
+    adx = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 27:  # Need 14 for DX + 14 for smoothing
+        dx_valid = dx[13:]  # Skip first 14 where DX is NaN
+        if len(dx_valid) >= 14:
+            adx[26] = np.nanmean(dx_valid[:14])  # First ADX at index 26
+            for i in range(27, len(close_1w)):
+                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # 1-week volume average for confirmation
     vol_1w = df_1w['volume'].values
@@ -69,50 +106,51 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 14, 4)  # EMA50 needs 50, RSI needs 14, volume needs 4
+    start = max(20, 27, 4)  # BB needs 20, ADX needs 27, volume needs 4
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.3
+        # Volume condition: current volume > 1.5x weekly average
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        
+        # ADX filter: only trade when trending (ADX > 20)
+        trending_market = adx_aligned[i] > 20
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: EMA crossover down or stoploss
-            if (ema20[i] < ema50[i] or 
+            # Exit: price below middle BB or stoploss
+            if (close[i] < bb_middle[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: EMA crossover up or stoploss
-            if (ema20[i] > ema50[i] or 
+            # Exit: price above middle BB or stoploss
+            if (close[i] > bb_middle[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with EMA crossover and RSI filter
-            if volume_filter:
-                # Long: EMA20 crosses above EMA50 and RSI not overbought
-                if (ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1] and 
-                    rsi_aligned[i] < 70):
+            # Look for entries in trending markets with volume confirmation
+            if trending_market and volume_filter:
+                # Long: price breaks above upper BB
+                if close[i] > bb_upper[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: EMA20 crosses below EMA50 and RSI not oversold
-                elif (ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1] and 
-                      rsi_aligned[i] > 30):
+                # Short: price breaks below lower BB
+                elif close[i] < bb_lower[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
