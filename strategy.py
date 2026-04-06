@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12867_6h_1d_weekly_pivot_breakout_v1"
-timeframe = "6h"
+name = "exp_12868_12h_weekly_pivot_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-VOLUME_MA_PERIOD = 24
-VOLUME_THRESHOLD = 1.8
+PIVOT_PERIOD = 1  # weekly
+VOLUME_MA_PERIOD = 24  # 12 days for 12h timeframe
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 48  # Max 12 days (48 * 6h)
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 16  # 8 days (16 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -24,7 +25,7 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
+def calculate_pivot_points(high, low, close):
     """Calculate weekly pivot points"""
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
@@ -57,7 +58,7 @@ def generate_signals(prices):
     s3_vals = np.zeros(len(close_w))
     
     for i in range(len(close_w)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_weekly_pivot(high_w[i], low_w[i], close_w[i])
+        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
         pivot_vals[i] = pivot
         r1_vals[i] = r1
         r2_vals[i] = r2
@@ -66,7 +67,7 @@ def generate_signals(prices):
         s2_vals[i] = s2
         s3_vals[i] = s3
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
     r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
     r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
@@ -75,7 +76,7 @@ def generate_signals(prices):
     s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
     s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
