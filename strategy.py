@@ -8,13 +8,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema_vol_v2"
+name = "4h_donchian20_1d_ema_vol_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 210:
+    if n < 200:
         return np.zeros(n)
     
     # Load 1d data for EMA(50) trend (once before loop)
@@ -30,7 +30,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
     # Donchian(20) channels
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
