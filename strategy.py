@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA trend filter and volume capture.
-- Long: break above upper Donchian + above 1d EMA + volume > 1.5x average
-- Short: break below lower Donchian + below 1d EMA + volume > 1.5x average
+1d Donchian breakout with 1w EMA trend filter and volume confirmation.
+- Long: break above weekly upper Donchian + above 1w EMA + volume > 1.5x average
+- Short: break below weekly lower Donchian + below 1w EMA + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
-- Target: 75-200 trades over 4 years (19-50/year)
+- Target: 30-100 trades over 4 years (7-25/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14189_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14190_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -31,25 +31,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA(20) trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 1w data for EMA(20) trend filter and Donchian channels (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(20) on 1d close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate EMA(20) on 1w close
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align EMA to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Align EMA to 1d timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # 4h data
+    # Weekly Donchian channels (20-period)
+    highest_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian levels to daily timeframe
+    highest_high_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_1w)
+    lowest_low_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_1w)
+    
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,8 +74,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high_1w_aligned[i]) or np.isnan(lowest_low_1w_aligned[i]) or \
+           np.isnan(ema_20_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,10 +98,10 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above 1d EMA + volume
-        # Short: break below lower band + below 1d EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
+        # Long: break above weekly upper band + above 1w EMA + volume
+        # Short: break below weekly lower band + below 1w EMA + volume
+        breakout_long = (close[i] > highest_high_1w_aligned[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low_1w_aligned[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
@@ -113,14 +119,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Exit long on stop or breakdown of lower band
-            if close[i] <= stop_price or close[i] < lowest_low[i-1]:
+            if close[i] <= stop_price or close[i] < lowest_low_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short on stop or breakout of upper band
-            if close[i] >= stop_price or close[i] > highest_high[i-1]:
+            if close[i] >= stop_price or close[i] > highest_high_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
