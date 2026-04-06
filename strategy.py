@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku cloud with 1d trend filter and volume confirmation
-# Enter long when: Tenkan > Kijun (bullish TK cross), price above cloud, price > 1d EMA(200), volume > 1.5x avg
-# Enter short when: Tenkan < Kijun (bearish TK cross), price below cloud, price < 1d EMA(200), volume > 1.5x avg
-# Exit when: TK cross reverses OR price crosses opposite cloud boundary
-# Uses Ichimoku for momentum/trend structure and daily EMA for higher timeframe filter
-# Targets 50-150 trades over 4 years with strict entry conditions
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when: price breaks above 6h Donchian upper channel, price > 1d EMA(50), volume > 1.5x avg
+# Short when: price breaks below 6h Donchian lower channel, price < 1d EMA(50), volume > 1.5x avg
+# Exit when: price crosses back through Donchian midline (10-period average of high/low)
+# Uses daily trend to filter breakouts, targeting 50-150 trades over 4 years
 
-name = "6h_ichimoku_1dema_vol_v1"
+name = "6h_donchian20_1d_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,30 +24,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = ((high_9 + low_9) / 2).values
+    # 6h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_roll + low_roll) / 2.0
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = ((high_26 + low_26) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # 1d EMA(200) for trend filter
+    # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,44 +42,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Wait for Senkou B to stabilize
+    for i in range(20, n):  # Wait for Donchian to stabilize
         # Skip if required data not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(ema_200_aligned[i]) or np.isnan(volume_threshold[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
-        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
-        
         if position == 1:  # long position
-            # Exit: TK cross bearish OR price below cloud
-            if tenkan[i] < kijun[i] or close[i] < lower_cloud:
+            # Exit: price crosses below Donchian midline
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: TK cross bullish OR price above cloud
-            if tenkan[i] > kijun[i] or close[i] > upper_cloud:
+            # Exit: price crosses above Donchian midline
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: TK cross + cloud position + trend filter + volume
+            # Look for breakout entries
             if volume[i] > volume_threshold[i]:
-                # Bullish: TK cross bullish, price above cloud, above daily EMA
-                if tenkan[i] > kijun[i] and close[i] > upper_cloud and close[i] > ema_200_aligned[i]:
+                # Long breakout: price breaks above upper channel
+                if close[i] > high_roll[i] and close[i] > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish: TK cross bearish, price below cloud, below daily EMA
-                elif tenkan[i] < kijun[i] and close[i] < lower_cloud and close[i] < ema_200_aligned[i]:
+                # Short breakout: price breaks below lower channel
+                elif close[i] < low_roll[i] and close[i] < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
     
