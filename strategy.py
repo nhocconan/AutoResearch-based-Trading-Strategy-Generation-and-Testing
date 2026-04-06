@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-# Donchian(20) breakout captures momentum in trending markets.
+# Hypothesis: 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+# Donchian(20) breakout on 12h timeframe captures momentum in trending markets.
 # EMA50 on 1-day provides trend bias: only long when price > EMA50, short when price < EMA50.
 # Volume confirmation (current volume > 1.5x 20-period average) ensures institutional participation.
-# Designed for 12h timeframe to target 50-150 trades over 4 years.
+# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
 # Works in bull/bear markets via EMA-based directional bias and breakout entries.
 
 name = "12h_donchian20_1d_ema50_vol_v1"
