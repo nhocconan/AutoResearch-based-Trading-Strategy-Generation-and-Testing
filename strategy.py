@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #12386: 4h Donchian Breakout + 1d Trend + Volume Confirmation
-Hypothesis: Use 1d EMA for trend direction, 4h Donchian(20) breakouts for entry,
-and volume spikes for confirmation. Designed to work in bull (breakouts) and bear (breakdowns) with controlled trade frequency.
+Experiment #12388: 12h Donchian Breakout + 1w Trend + Volume Confirmation
+Hypothesis: Use 1-week EMA for trend direction, 12-hour Donchian(20) breakouts for entry,
+and volume spikes for confirmation. Target 100-150 total trades over 4 years.
+Works in bull markets via breakouts and in bear via short breakdowns.
+The 12h timeframe reduces trade frequency vs lower timeframes, minimizing fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12386_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12388_12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -46,14 +48,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1-week data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1-week EMA for trend
+    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -72,8 +74,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if 1w EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,17 +97,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (1d)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Trend filter (1-week)
+        uptrend_1w = close[i] > ema_1w_aligned[i]
+        downtrend_1w = close[i] < ema_1w_aligned[i]
         
         # Donchian breakout conditions
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_1d and long_breakout
-        short_entry = volume_ok and downtrend_1d and short_breakout
+        long_entry = volume_ok and uptrend_1w and long_breakout
+        short_entry = volume_ok and downtrend_1w and short_breakout
         
         # Generate signals
         if position == 0:
