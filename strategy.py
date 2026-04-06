@@ -3,11 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(20) trend filter and volume confirmation.
-# Uses 12h EMA for trend filter (instead of 1d) to align with 4h timeframe and reduce lag.
-# Volume filter ensures institutional participation. Target: 75-200 trades over 4 years.
-name = "exp_14133_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14134_1h_donchian20_4h_ema1d_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -21,21 +18,25 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA(20) trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    # Calculate EMA(20) on 4h close
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Calculate EMA(20) on 12h close
-    ema_20 = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on 1d close
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align EMA to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20)
-    
-    # 4h data
+    # 1h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -57,15 +58,15 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 20 for volume, 14 for ATR)
-    start = max(20, 20, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for 4h EMA, 50 for 1d EMA, 20 for volume, 14 for ATR)
+    start = max(20, 20, 50, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_4h_aligned[i]) or \
+           np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -86,20 +87,22 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above 12h EMA + volume
-        # Short: break below lower band + below 12h EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
+        # Long: break above upper band + above 4h EMA + above 1d EMA + volume
+        # Short: break below lower band + below 4h EMA + below 1d EMA + volume
+        trend_up = (ema_20_4h_aligned[i] > ema_20_4h_aligned[i-1]) and (ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1])
+        trend_down = (ema_20_4h_aligned[i] < ema_20_4h_aligned[i-1]) and (ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1])
+        breakout_long = (close[i] > highest_high[i-1]) and trend_up and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and trend_down and vol_filter[i]
         
         # Generate signals
         if position == 0:
             if breakout_long:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif breakout_short:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
@@ -111,29 +114,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short on stop or breakout of upper band
             if close[i] >= stop_price or close[i] > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
 
 </think>
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(20) trend filter and volume confirmation.
-# Uses 12h EMA for trend filter (instead of 1d) to align with 4h timeframe and reduce lag.
-# Volume filter ensures institutional participation. Target: 75-200 trades over 4 years.
-name = "exp_14133_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14134_1h_donchian20_4h_ema1d_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -151,17 +150,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA(20) trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    # Calculate EMA(20) on 4h close
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Calculate EMA(20) on 12h close
-    ema_20 = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on 1d close
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align EMA to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20)
-    
-    # 4h data
+    # 1h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -183,15 +186,15 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 20 for volume, 14 for ATR)
-    start = max(20, 20, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for 4h EMA, 50 for 1d EMA, 20 for volume, 14 for ATR)
+    start = max(20, 20, 50, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_4h_aligned[i]) or \
+           np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -212,20 +215,22 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above 12h EMA + volume
-        # Short: break below lower band + below 12h EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
+        # Long: break above upper band + above 4h EMA + above 1d EMA + volume
+        # Short: break below lower band + below 4h EMA + below 1d EMA + volume
+        trend_up = (ema_20_4h_aligned[i] > ema_20_4h_aligned[i-1]) and (ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1])
+        trend_down = (ema_20_4h_aligned[i] < ema_20_4h_aligned[i-1]) and (ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1])
+        breakout_long = (close[i] > highest_high[i-1]) and trend_up and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and trend_down and vol_filter[i]
         
         # Generate signals
         if position == 0:
             if breakout_long:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif breakout_short:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
@@ -237,13 +242,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short on stop or breakout of upper band
             if close[i] >= stop_price or close[i] > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
+
+</think>
