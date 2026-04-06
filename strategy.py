@@ -3,30 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian(20) breakout with volume confirmation and daily volume filter.
-# Goes long when price breaks above weekly Donchian upper band with above-average daily volume,
-# short when breaks below weekly Donchian lower band with volume.
-# Uses ATR-based stop loss to manage risk.
-# Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
-# Weekly Donchian provides strong structure, volume confirms breakout strength.
+# Hypothesis: 6h strategy using 1-day Williams %R for overbought/oversold levels
+# with 6-hour price action confirmation. Goes long when price pulls back from
+# oversold (Williams %R < -80) and closes above prior high, short when price
+# rallies from overbought (Williams %R > -20) and closes below prior low.
+# Uses volume confirmation to filter weak signals. Designed for 50-150 total
+# trades over 4 years (12-37/year) to minimize fee drag. Williams %R identifies
+# exhaustion points, price action confirms reversal, volume validates strength.
 
-name = "exp_13830_1d_weekly_donchian20_daily_vol_v1"
-timeframe = "1d"
+name = "exp_13831_6h_williamsr1d_priceaction_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WEEKLY_DONCHIAN_PERIOD = 20
+WILLIAMS_PERIOD = 14
+OVERSOLD = -80
+OVERBOUGHT = -20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan)
+    return williams_r.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -43,19 +49,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for Donchian channels ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data for Williams %R filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    weekly_upper, weekly_lower = calculate_donchian(high_weekly, low_weekly, WEEKLY_DONCHIAN_PERIOD)
+    # Calculate 1d Williams %R for overbought/oversold
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    williams_r_1d = calculate_williams_r(high_1d, low_1d, close_1d, WILLIAMS_PERIOD)
     
-    # Align weekly Donchian to daily timeframe
-    weekly_upper_aligned = align_htf_to_ltf(prices, df_weekly, weekly_upper)
-    weekly_lower_aligned = align_htf_to_ltf(prices, df_weekly, weekly_lower)
+    # Align 1d Williams %R to 6h timeframe
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
-    # Daily data for ATR and volume
+    # 6h data for price action, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -64,7 +70,7 @@ def generate_signals(prices):
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Volume confirmation (daily)
+    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
@@ -73,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(WILLIAMS_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(weekly_upper_aligned[i]) or np.isnan(weekly_lower_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(williams_r_1d_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,9 +108,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Weekly Donchian breakout signals
-        long_signal = volume_ok and close[i] > weekly_upper_aligned[i]
-        short_signal = volume_ok and close[i] < weekly_lower_aligned[i]
+        # Williams %R conditions from 1d
+        oversold = williams_r_1d_aligned[i] < OVERSOLD
+        overbought = williams_r_1d_aligned[i] > OVERBOUGHT
+        
+        # Price action confirmation: close above/below prior bar
+        # Need at least 2 bars of data
+        if i >= 1:
+            close_above_prior = close[i] > high[i-1]
+            close_below_prior = close[i] < low[i-1]
+        else:
+            close_above_prior = False
+            close_below_prior = False
+        
+        # Signal generation
+        long_signal = volume_ok and oversold and close_above_prior
+        short_signal = volume_ok and overbought and close_below_prior
         
         # Generate signals
         if position == 0:
@@ -121,15 +140,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below weekly Donchian lower band
-            if close[i] < weekly_lower_aligned[i]:
+            # Exit long on close below prior low (failure of bullish momentum)
+            if close[i] < low[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above weekly Donchian upper band
-            if close[i] > weekly_upper_aligned[i]:
+            # Exit short on close above prior high (failure of bearish momentum)
+            if close[i] > high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
