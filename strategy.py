@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian20 + 1d Trend + Volume Confirmation
+4h Donchian20 + 1d Trend + Volume Confirmation (Optimized)
 Breakout strategy: long when price breaks above 20-period high with 1d uptrend,
 short when breaks below 20-period low with 1d downtrend. Uses volume confirmation
-and ATR stoploss. Designed for 4h timeframe to target 75-200 trades over 4 years.
+and ATR stoploss. Optimized for 4h timeframe to target 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -25,18 +25,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR with proper NaN handling
     atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+    if n >= 15:
+        tr0 = np.maximum(high[0] - low[0], np.abs(high[0] - close[0]))
+        atr[0] = tr0
+        for i in range(1, n):
+            tr = np.maximum(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
+            atr[i] = (atr[i-1] * 13 + tr) / 14
     
     # 1d EMA50 for trend bias
     df_1d = get_htf_data(prices, '1d')
@@ -58,9 +54,16 @@ def generate_signals(prices):
     donchian_low = np.full(n, np.nan)
     
     if n >= 20:
+        # Initialize first value
+        donchian_high[19] = np.max(high[0:20])
+        donchian_low[19] = np.min(low[0:20])
         for i in range(20, n):
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
+            donchian_high[i] = max(donchian_high[i-1], high[i-1])
+            donchian_low[i] = min(donchian_low[i-1], low[i-1])
+            # Remove the oldest value from window
+            if i >= 21:
+                donchian_high[i] = max(donchian_high[i], high[i-20]) if donchian_high[i] == high[i-21] else donchian_high[i]
+                donchian_low[i] = min(donchian_low[i], low[i-20]) if donchian_low[i] == low[i-21] else donchian_low[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
