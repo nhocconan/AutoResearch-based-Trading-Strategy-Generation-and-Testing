@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(14) mean reversion with 4-hour ADX(14) trend filter and 1-day volume filter.
-# Uses 4-hour ADX to identify trending vs ranging markets: ADX < 25 = range (mean revert), ADX > 25 = trend (avoid).
-# 1-day volume filter ensures trades occur during high liquidity periods.
-# RSI extremes (<30 for long, >70 for short) provide mean reversion signals in ranging markets.
-# Designed for low trade frequency (target 60-150 over 4 years) to minimize fee drag.
-# Works in bull/bear by avoiding counter-trend trades in strong trends.
+# Hypothesis: 6-hour Camarilla pivot reversal from daily pivots with volume confirmation.
+# Uses daily Camarilla levels (R3/S3 for reversals, R4/S4 for breakouts) to capture mean reversion in ranges
+# and breakout momentum in trends. Volume filter reduces false signals. Designed for 50-150 trades over 4 years.
 
-name = "1h_rsi14_4h_adx14_1d_vol_meanrev_v1"
-timeframe = "1h"
+name = "6h_camarilla1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,146 +22,118 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period RSI
-    rsi = np.full(n, np.nan)
+    # 14-period ATR for stops
+    atr = np.full(n, np.nan)
     if n >= 14:
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
-        if n > 14:
-            avg_gain[14] = np.mean(gain[1:15])
-            avg_loss[14] = np.mean(loss[1:15])
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[14] = np.mean(tr[:14])
             for i in range(15, n):
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        rsi[:14] = np.nan
+                atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # 14-period ADX on 4-hour timeframe
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # True Range and Directional Movement
-    tr_4h = np.maximum(
-        high_4h[1:] - low_4h[1:],
-        np.abs(high_4h[1:] - close_4h[:-1]),
-        np.abs(low_4h[1:] - close_4h[:-1])
-    )
-    dm_plus_4h = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                          np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus_4h = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                           np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    
-    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/14)
-    tr_14_4h = np.full(len(tr_4h), np.nan)
-    dm_plus_14_4h = np.full(len(tr_4h), np.nan)
-    dm_minus_14_4h = np.full(len(tr_4h), np.nan)
-    if len(tr_4h) >= 14:
-        tr_14_4h[13] = np.sum(tr_4h[:14])
-        dm_plus_14_4h[13] = np.sum(dm_plus_4h[:14])
-        dm_minus_14_4h[13] = np.sum(dm_minus_4h[:14])
-        for i in range(14, len(tr_4h)):
-            tr_14_4h[i] = tr_14_4h[i-1] - (tr_14_4h[i-1] / 14) + tr_4h[i]
-            dm_plus_14_4h[i] = dm_plus_14_4h[i-1] - (dm_plus_14_4h[i-1] / 14) + dm_plus_4h[i]
-            dm_minus_14_4h[i] = dm_minus_14_4h[i-1] - (dm_minus_14_4h[i-1] / 14) + dm_minus_4h[i]
-    
-    # Directional Indicators
-    di_plus_4h = np.full(len(tr_4h), np.nan)
-    di_minus_4h = np.full(len(tr_4h), np.nan)
-    dx_4h = np.full(len(tr_4h), np.nan)
-    mask = tr_14_4h != 0
-    di_plus_4h[mask] = 100 * dm_plus_14_4h[mask] / tr_14_4h[mask]
-    di_minus_4h[mask] = 100 * dm_minus_14_4h[mask] / tr_14_4h[mask]
-    dx_4h[mask] = 100 * np.abs(di_plus_4h[mask] - di_minus_4h[mask]) / (di_plus_4h[mask] + di_minus_4h[mask])
-    
-    # ADX: smoothed DX
-    adx_4h = np.full(len(dx_4h), np.nan)
-    if len(dx_4h) >= 14:
-        valid_dx = dx_4h[~np.isnan(dx_4h)]
-        if len(valid_dx) >= 14:
-            start_idx = len(dx_4h) - len(valid_dx)
-            adx_4h[start_idx + 13] = np.mean(valid_dx[:14])
-            for i in range(start_idx + 14, len(dx_4h)):
-                if not np.isnan(dx_4h[i]):
-                    adx_4h[i] = (adx_4h[i-1] * 13 + dx_4h[i]) / 14
-    
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    
-    # 20-period volume moving average on 1-day timeframe
+    # Daily OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_ma_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_ma_1d[i] = (volume_1d[i] + vol_ma_1d[i-1] * 19) / 20
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
+    # Calculate Camarilla levels for previous day
+    camarilla_r4 = np.full(len(close_1d), np.nan)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_s4 = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        # Previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        
+        if not np.isnan(range_val) and range_val > 0:
+            camarilla_r4[i] = prev_close + range_val * 1.1 / 2
+            camarilla_r3[i] = prev_close + range_val * 1.1 / 4
+            camarilla_s3[i] = prev_close - range_val * 1.1 / 4
+            camarilla_s4[i] = prev_close - range_val * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe (shifted by 1 day for lookback)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Volume filter: current volume > 1.3x average over last 20 periods
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(30, 20, 20)
+    start = max(20, 14)
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Session and volume filters
-        hour = hours[i]
-        session_filter = 8 <= hour <= 20
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
-        
-        # Range condition: ADX < 25 (not trending)
-        range_filter = adx_aligned[i] < 25
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: RSI returns to neutral (50) or stoploss hit
-            if (rsi[i] >= 50 or
-                close[i] < entry_price - 2.0 * (high[i] - low[i]).mean()):  # simplified volatility
+            # Exit: price reaches S3 (mean reversion target) or stoploss hit
+            if (close[i] <= s3_aligned[i] or
+                close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI returns to neutral (50) or stoploss hit
-            if (rsi[i] <= 50 or
-                close[i] > entry_price + 2.0 * (high[i] - low[i]).mean()):
+            # Exit: price reaches R3 (mean reversion target) or stoploss hit
+            if (close[i] >= r3_aligned[i] or
+                close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries in ranging markets during session
-            if session_filter and volume_filter and range_filter:
-                # Long: RSI oversold (<30)
-                if rsi[i] < 30:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = close[i]
-                # Short: RSI overbought (>70)
-                elif rsi[i] > 70:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = close[i]
-                else:
-                    signals[i] = 0.0
+            # Look for entries
+            # Long reversal: price touches/below S4 and rebounds with volume (mean reversion in range)
+            if (close[i] <= s4_aligned[i] and volume_filter and 
+                close[i] > open[i]):  # bullish candle
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short reversal: price touches/above R4 and rejects with volume (mean reversion in range)
+            elif (close[i] >= r4_aligned[i] and volume_filter and 
+                  close[i] < open[i]):  # bearish candle
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+            # Long breakout: price breaks above R4 with volume (trend continuation)
+            elif (close[i] > r4_aligned[i] and volume_filter and 
+                  close[i] > open[i]):  # bullish breakout
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short breakout: price breaks below S4 with volume (trend continuation)
+            elif (close[i] < s4_aligned[i] and volume_filter and 
+                  close[i] < open[i]):  # bearish breakout
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
             else:
                 signals[i] = 0.0
     
