@@ -3,23 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and weekly EMA ensures we trade with higher timeframe momentum. Daily timeframe balances
-# opportunity and cost with expected 30-100 trades over 4 years.
+# Hypothesis: 6h Camarilla pivot levels from 1d timeframe with volume confirmation.
+# In both bull and bear markets, price tends to revert from R3/S3 levels and break through R4/S4.
+# Fade at R3/S3 (mean reversion) with volume confirmation, breakout at R4/S4 (trend continuation).
+# Uses 1d Camarilla levels for institutional reference points. Target: 75-150 total trades over 4 years.
 
-name = "exp_13090_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13091_6h_camarilla1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+CAMARILLA_LOOKBACK = 1  # Use previous day's OHLC
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close, close, close, close, close
+    c = close
+    h = high
+    l = low
+    r4 = c + range_val * 1.1 / 2
+    r3 = c + range_val * 1.1 / 4
+    r2 = c + range_val * 1.1 / 6
+    r1 = c + range_val * 1.1 / 12
+    s1 = c - range_val * 1.1 / 12
+    s2 = c - range_val * 1.1 / 6
+    s3 = c - range_val * 1.1 / 4
+    s4 = c - range_val * 1.1 / 2
+    return r4, r3, r2, r1, s1, s2, s3, s4
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -30,32 +47,59 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily indicators
+    # Shift by 1 to use previous day's levels (avoid look-ahead)
+    r4_1d, r3_1d, r2_1d, r1_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla(
+        high_1d, low_1d, close_1d
+    )
+    
+    # Previous day's levels (shifted by 1)
+    r4_1d_prev = np.roll(r4_1d, 1)
+    r3_1d_prev = np.roll(r3_1d, 1)
+    r2_1d_prev = np.roll(r2_1d, 1)
+    r1_1d_prev = np.roll(r1_1d, 1)
+    s1_1d_prev = np.roll(s1_1d, 1)
+    s2_1d_prev = np.roll(s2_1d, 1)
+    s3_1d_prev = np.roll(s3_1d, 1)
+    s4_1d_prev = np.roll(s4_1d, 1)
+    
+    # Set first day's values to NaN (no previous day)
+    r4_1d_prev[0] = np.nan
+    r3_1d_prev[0] = np.nan
+    r2_1d_prev[0] = np.nan
+    r1_1d_prev[0] = np.nan
+    s1_1d_prev[0] = np.nan
+    s2_1d_prev[0] = np.nan
+    s3_1d_prev[0] = np.nan
+    s4_1d_prev[0] = np.nan
+    
+    # Align Camarilla levels to 6h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d_prev)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d_prev)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d_prev)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d_prev)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d_prev)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d_prev)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d_prev)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d_prev)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +113,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,22 +139,32 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Fade at R3/S3 (mean reversion)
+        fade_short = volume_ok and (close[i] >= r3_1d_aligned[i]) and (i == 0 or close[i-1] < r3_1d_aligned[i-1])
+        fade_long = volume_ok and (close[i] <= s3_1d_aligned[i]) and (i == 0 or close[i-1] > s3_1d_aligned[i-1])
         
-        # Breakout signals
-        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
+        # Breakout at R4/S4 (trend continuation)
+        breakout_long = volume_ok and (close[i] >= r4_1d_aligned[i]) and (i == 0 or close[i-1] < r4_1d_aligned[i-1])
+        breakout_short = volume_ok and (close[i] <= s4_1d_aligned[i]) and (i == 0 or close[i-1] > s4_1d_aligned[i-1])
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if fade_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif fade_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
