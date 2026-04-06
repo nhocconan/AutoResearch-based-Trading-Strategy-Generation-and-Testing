@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA Trend + Volume Filter + ATR Stoploss
-Hypothesis: Daily Donchian breakouts capture multi-day momentum, weekly EMA filters trend direction, volume confirms breakout strength, and ATR stoploss manages risk. Designed for low trade frequency (30-100 total over 4 years) to minimize fee decay.
+1d Donchian(20) Breakout + Volume Filter + ATR Stoploss + 1w Trend Filter
+Hypothesis: On daily timeframe, Donchian breakouts with volume confirmation and weekly trend filter capture strong trends while minimizing whipsaw. Weekly trend ensures alignment with higher timeframe momentum, reducing trades during counter-trend moves. Designed for low trade frequency (target 30-100 total over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1wema_volume_atr_v3"
+name = "1d_donchian20_vol_atr_1wtrend_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:  # Need enough data for indicators
         return np.zeros(n)
     
     # Price and volume data
@@ -37,15 +37,21 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly EMA (21-period) for trend filter
+    # Get weekly trend data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    ema_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 21:
+    if len(df_1w) > 0:
+        # Weekly EMA(21) for trend
         close_1w = df_1w['close'].values
-        ema_1w[0] = close_1w[0]
-        for i in range(1, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+        ema_1w = np.full(len(close_1w), np.nan)
+        if len(close_1w) >= 21:
+            ema_multiplier = 2 / (21 + 1)
+            ema_1w[20] = np.mean(close_1w[:21])
+            for i in range(21, len(close_1w)):
+                ema_1w[i] = (close_1w[i] * ema_multiplier) + (ema_1w[i-1] * (1 - ema_multiplier))
+        # Align weekly EMA to daily timeframe
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    else:
+        ema_1w_aligned = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,6 +77,10 @@ def generate_signals(prices):
         vol_ma = np.mean(volume[i-20:i])
         volume_filter = volume[i] > vol_ma * 1.5
         
+        # Weekly trend filter: price above/below weekly EMA
+        price_above_weekly_ema = close[i] > ema_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_1w_aligned[i]
+        
         # Check exits and stoploss
         if position == 1:  # long position
             # Exit: price closes below Donchian lower
@@ -91,19 +101,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly EMA trend filter
+            # Look for entries: Donchian breakout + volume + weekly trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Trend filter: only trade in direction of weekly EMA
-            price_above_ema = close[i] > ema_1w_aligned[i]
-            price_below_ema = close[i] < ema_1w_aligned[i]
-            
-            if bull_breakout and volume_filter and price_above_ema:
+            # Only take longs in uptrend (price above weekly EMA) and shorts in downtrend
+            if bull_breakout and volume_filter and price_above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_below_ema:
+            elif bear_breakout and volume_filter and price_below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
