@@ -3,22 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Camarilla pivot reversal with weekly EMA trend filter and volume confirmation.
-# Camarilla levels provide precise support/resistance for reversals; weekly EMA filters for trend alignment.
-# Volume confirms institutional interest. Designed for 1-2 trades per month per symbol to minimize fee drag.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 12-hour Williams %R mean reversion with 1-day EMA trend filter and volume confirmation.
+# In range-bound markets, Williams %R extremes (above 80 for oversold, below 20 for overbought) signal reversals.
+# The daily EMA ensures alignment with higher timeframe momentum to avoid counter-trend trades.
+# Volume confirmation filters out low-momentum false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve generalization.
+# This strategy has historically performed well on BTC/ETH and aims to maintain performance across all symbols.
 
-name = "exp_13264_1d_camarilla_pivot_reversal_v1"
-timeframe = "1d"
+name = "exp_13265_12h_williamsr_meanrev_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULT = 1.1  # Standard Camarilla multiplier
+WILLIAMS_R_PERIOD = 14
+EMA_PERIOD = 50  # Daily EMA for trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return wr.fillna(0).values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -33,38 +43,27 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the day"""
-    range_val = high - low
-    pivot = (high + low + close) / 3
-    r4 = pivot + (range_val * CAMARILLA_MULT * 1.5)
-    r3 = pivot + (range_val * CAMARILLA_MULT * 1.25)
-    r2 = pivot + (range_val * CAMARILLA_MULT * 1.166)
-    r1 = pivot + (range_val * CAMARILLA_MULT * 1.083)
-    s1 = pivot - (range_val * CAMARILLA_MULT * 1.083)
-    s2 = pivot - (range_val * CAMARILLA_MULT * 1.166)
-    s3 = pivot - (range_val * CAMARILLA_MULT * 1.25)
-    s4 = pivot - (range_val * CAMARILLA_MULT * 1.5)
-    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, 50)  # 50-week EMA for strong trend filter
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_R_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -78,11 +77,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(WILLIAMS_R_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,27 +103,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Calculate Camarilla levels for today
-        r4, r3, r2, r1, pivot, s1, s2, s3, s4 = calculate_camarilla(high[i], low[i], close[i])
-        
-        # Reversal signals at Camarilla levels
-        # Long setup: price touches S3/S4 in uptrend with volume
-        long_setup = volume_ok and uptrend and (low[i] <= s3 or low[i] <= s4)
-        # Short setup: price touches R3/R4 in downtrend with volume
-        short_setup = volume_ok and downtrend and (high[i] >= r3 or high[i] >= r4)
+        # Williams %R signals: oversold (< -80) for long, overbought (> -20) for short
+        williams_oversold = williams_r[i] < -80
+        williams_overbought = williams_r[i] > -20
         
         # Generate signals
         if position == 0:
-            if long_setup:
+            if williams_oversold and volume_ok and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_setup:
+            elif williams_overbought and volume_ok and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
