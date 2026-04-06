@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR stoploss
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and ATR-based stoploss controls risk. Daily trend filter ensures alignment with higher timeframe.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, trend filter avoids counter-trend trades,
+# volume filters weak signals, and ATR stop manages risk. Target: 100-200 trades over 4 years.
 
-name = "exp_12972_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_12973_4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -19,7 +18,6 @@ VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-TREND_EMA_PERIOD = 50
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -36,36 +34,27 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA for trend filter
-    close_daily = df_daily['close'].values
-    ema_daily = calculate_ema(close_daily, TREND_EMA_PERIOD)
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Calculate 12h EMA trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    
-    # Volume MA
+    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -74,11 +63,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, TREND_EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_daily_aligned[i]):
+        # Skip if indicators not ready
+        if np.isnan(donch_up[i]) or np.isnan(donch_low[i]) or np.isnan(volume_ma[i]) or np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -98,15 +87,15 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below daily EMA
-        trend_up = close[i] > ema_daily_aligned[i]
-        trend_down = close[i] < ema_daily_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Breakout conditions
-        breakout_long = volume_ok and trend_up and close[i] >= upper[i]
-        breakout_short = volume_ok and trend_down and close[i] <= lower[i]
+        # Breakout signals
+        breakout_long = volume_ok and uptrend and close[i] >= donch_up[i-1]
+        breakout_short = volume_ok and downtrend and close[i] <= donch_low[i-1]
         
         # Generate signals
         if position == 0:
