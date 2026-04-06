@@ -1,149 +1,135 @@
+# 1. STATEMENT OF HYPOTHESIS
+# ============================================================
+# Strategy: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
+# Rationale:
+#   - Donchian breakouts capture momentum in trending markets (bull or bear).
+#   - 12-hour EMA ensures trades align with the higher timeframe trend, reducing whipsaws.
+#   - Volume confirmation filters out low-momentum breakouts.
+#   - ATR-based stop-loss limits downside.
+#   - Target: 75-200 total trades over 4 years (19-50/year) to balance signal quality and fee drag.
+#   - Works in bull markets (catching uptrends) and bear markets (catching downtrends).
+#   - Tested successfully on SOLUSDT in prior experiments; aims to generalize to BTC/ETH.
+# ============================================================
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Ichimoku Cloud breakout with weekly ADX filter and volume confirmation.
-# The Ichimoku Cloud provides dynamic support/resistance; breaks above/below cloud with strong volume and trending conditions capture momentum moves.
-# Weekly ADX ensures we only trade in trending markets, avoiding choppy periods. Designed for 12h timeframe to target 50-150 total trades over 4 years.
-# Works in bull markets (breakouts above cloud) and bear markets (breakouts below cloud).
-
-name = "exp_13252_12h_ichimoku_adx_vol_v1"
-timeframe = "12h"
+name = "exp_13253_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-TENKAN_PERIOD = 9
-KIJUN_PERIOD = 26
-SENKOU_B_PERIOD = 52
-ADX_PERIOD = 14
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 20      # 12-hour EMA for trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-ADX_THRESHOLD = 25
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.25   # 25% of capital per trade
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ichimoku(high, low):
-    """Calculate Ichimoku Cloud components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b = (pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
-                     pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing (EWM with alpha=1/period)."""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # Use pandas EWM for Wilder's smoothing: alpha = 1/period
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    plus_dm = pd.Series(high).diff()
-    minus_dm = pd.Series(low).diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    
-    tr1 = pd.Series(high) - pd.Series(low)
-    tr2 = abs(pd.Series(high) - pd.Series(close).shift(1))
-    tr3 = abs(pd.Series(low) - pd.Series(close).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    atr = tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr)
-    minus_di = 100 * (abs(minus_dm.ewm(alpha=1/period, adjust=False, min_periods=period).mean()) / atr)
-    
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    return adx.values
+def calculate_ema(close, period):
+    """Calculate EMA."""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12-hour data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly ADX for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, ADX_PERIOD)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate 12-hour EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 12h Ichimoku
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b = calculate_ichimoku(high, low)
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a, senkou_span_b)
-    cloud_bottom = np.minimum(senkou_span_a, senkou_span_b)
-    
-    # Volume MA
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
+    # ATR
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Start from warmup period
-    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD) + 1
+    signals = np.zeros(n)
+    position = 0          # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    
+    # Start from warmup period (max of all lookbacks)
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly ADX not available
-        if np.isnan(adx_1w_aligned[i]):
+        # Skip if 12h EMA not yet available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check for trend strength
-        strong_trend = adx_1w_aligned[i] > ADX_THRESHOLD
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
+        # Volume confirmation: current volume > threshold * average volume
+        volume_ok = (not np.isnan(volume_ma[i])) and (volume[i] > volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
+        
+        # Breakout signals: price breaks Donchian channel with volume and trend alignment
+        # Note: Use previous bar's Donchian levels to avoid look-ahead
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if strong_trend and price_above_cloud and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif strong_trend and price_below_cloud and volume_ok:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long when price falls below cloud bottom
-            if close[i] < cloud_bottom[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE  # Maintain long position
         elif position == -1:
-            # Exit short when price rises above cloud top
-            if close[i] > cloud_top[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE  # Maintain short position
     
     return signals
