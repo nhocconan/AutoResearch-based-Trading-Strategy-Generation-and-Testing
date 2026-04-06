@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""
-Experiment #13982: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture strong trends, while 1d EMA filter avoids counter-trend trades.
-Volume confirmation ensures breakouts have conviction. Works in both bull/bear markets by
-only trading in direction of higher timeframe trend. Target: 50-150 trades over 4 years.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13982_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13983_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -36,19 +29,19 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for daily context (trend filter)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA(50) for trend bias
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate 12h EMA(20) for trend bias
+    ema_12h = calculate_ema(df_12h['close'].values, 20)
     
-    # Align 1d EMA to 12h timeframe (use previous daily bar for trend)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 12h EMA to 4h timeframe (use previous 12h bar for trend)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -96,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend bias from 1d EMA (50)
-        bullish_trend = close[i] > ema_1d_aligned[i]  # price above 1d EMA50 = bullish
-        bearish_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA50 = bearish
+        # Determine trend bias from 12h EMA (20)
+        bullish_trend = close[i] > ema_12h_aligned[i]  # price above 12h EMA20 = bullish
+        bearish_trend = close[i] < ema_12h_aligned[i]  # price below 12h EMA20 = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
@@ -107,7 +100,7 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of 1d trend
+        # Entry signals - only in direction of 12h trend
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
