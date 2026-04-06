@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 4h, filtered by 1d trend direction (EMA crossover),
+12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 12h, filtered by 1d trend direction (EMA crossover),
 and confirmed by volume spikes, capture momentum across market regimes. Using 1d trend
 avoids whipsaws in sideways markets while capturing trends in both bull and bear phases.
-Volume ensures breakout legitimacy. Target: 75-200 total trades over 4 years.
+Volume ensures breakout legitimacy. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -76,6 +76,10 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -87,6 +91,14 @@ def generate_signals(prices):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Apply session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -141,19 +153,19 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 4h, filtered by 1d trend direction (EMA crossover),
+12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 12h, filtered by 1d trend direction (EMA crossover),
 and confirmed by volume spikes, capture momentum across market regimes. Using 1d trend
 avoids whipsaws in sideways markets while capturing trends in both bull and bear phases.
-Volume ensures breakout legitimacy. Target: 75-200 total trades over 4 years.
+Volume ensures breakout legitimacy. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -217,6 +229,10 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -228,6 +244,14 @@ def generate_signals(prices):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Apply session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -282,19 +306,19 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 4h, filtered by 1d trend direction (EMA crossover),
+12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 12h, filtered by 1d trend direction (EMA crossover),
 and confirmed by volume spikes, capture momentum across market regimes. Using 1d trend
 avoids whipsaws in sideways markets while capturing trends in both bull and bear phases.
-Volume ensures breakout legitimacy. Target: 75-200 total trades over 4 years.
+Volume ensures breakout legitimacy. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -358,6 +382,10 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -369,6 +397,14 @@ def generate_signals(prices):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Apply session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -420,4 +456,4 @@ def generate_signals(prices):
     
     return signals
 
---- END OF FILE ---
+--- End of file ---
