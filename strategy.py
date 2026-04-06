@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily strategy using 1-week Donchian(20) breakouts with 1-day EMA(50) trend filter and volume confirmation.
-# Uses 1-week trend for direction, 1-day Donchian breakouts for entries, volume for confirmation.
-# Designed for ~80-120 total trades over 4 years (20-30/year) to avoid excessive fees.
-# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 100 total trades, 0.25 position size, max DD < -50%.
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Uses 1w trend direction (above/below EMA50) for signal bias, daily Donchian breakouts for entries,
+# and volume surge for confirmation. Designed for 30-80 total trades over 4 years (7-20/year)
+# to minimize fee decay. Works in bull (breakouts with volume) and bear (breakdowns with volume)
+# by following the weekly trend. Target: 50-100 total trades, 0.25 position size, max DD < -50%.
 
 name = "exp_13750_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters - tuned for moderate trade frequency
+# Parameters - tuned for low trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 8
-VOLUME_THRESHOLD = 1.5
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -41,35 +41,29 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load 1w and 1d data for filters ONCE before loop
+    # Load weekly data for trend filter ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend filter
+    # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1d indicators for entries
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # ATR for stop loss (using 1d data)
+    # Calculate daily indicators for entries
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # 1d Donchian channels
-    donchian_high = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Daily Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume MA for 1d
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Volume MA for daily
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,7 +75,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma_1d[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,12 +97,12 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using 1d volume)
-        volume_ok = volume_1d[i] > (volume_ma_1d[i] * VOLUME_THRESHOLD)
+        # Volume confirmation (using daily volume)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA
-        above_ema = close_1d[i] > ema_1w_aligned[i]
-        below_ema = close_1d[i] < ema_1w_aligned[i]
+        # Trend direction from weekly EMA
+        above_ema = close > ema_1w_aligned[i]
+        below_ema = close < ema_1w_aligned[i]
         
         # Donchian breakout signals
         if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
@@ -116,10 +110,10 @@ def generate_signals(prices):
             low_prev = donchian_low[i-1]
             
             # Long signal: price breaks above Donchian high in uptrend
-            long_signal = volume_ok and above_ema and close_1d[i] > high_prev and close_1d[i-1] <= high_prev
+            long_signal = volume_ok and above_ema and close[i] > high_prev and close[i-1] <= high_prev
             
             # Short signal: price breaks below Donchian low in downtrend
-            short_signal = volume_ok and below_ema and close_1d[i] < low_prev and close_1d[i-1] >= low_prev
+            short_signal = volume_ok and below_ema and close[i] < low_prev and close[i-1] >= low_prev
         else:
             long_signal = False
             short_signal = False
@@ -142,7 +136,7 @@ def generate_signals(prices):
             # Exit long on opposite Donchian break
             if i > 0 and not np.isnan(donchian_low[i-1]) and not np.isnan(donchian_low[i]):
                 low_prev = donchian_low[i-1]
-                if close_1d[i] < low_prev and close_1d[i-1] >= low_prev:
+                if close[i] < low_prev and close[i-1] >= low_prev:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -153,7 +147,7 @@ def generate_signals(prices):
             # Exit short on opposite Donchian break
             if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_high[i]):
                 high_prev = donchian_high[i-1]
-                if close_1d[i] > high_prev and close_1d[i-1] <= high_prev:
+                if close[i] > high_prev and close[i-1] <= high_prev:
                     signals[i] = 0.0
                     position = 0
                 else:
