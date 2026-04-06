@@ -6,9 +6,9 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: Daily Donchian(20) breakout with weekly EMA(21) trend filter and volume confirmation.
 # Uses daily price channel breakouts aligned with weekly momentum to capture trending moves.
 # Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years (19-50/year).
+# and bear markets (breakdowns below lower band). Target: 30-100 total trades over 4 years (7-25/year).
 
-name = "exp_13478_1d_donchian20_1w_ema_vol_v1"
+name = "exp_13478_1d_donchian20_21w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -40,12 +40,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_weekly = get_htf_data(prices, '1w')
     
     # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, WEEKLY_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    close_weekly = df_weekly['close'].values
+    ema_weekly = calculate_ema(close_weekly, WEEKLY_EMA_PERIOD)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -73,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema_weekly_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,8 +96,8 @@ def generate_signals(prices):
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        uptrend = close[i] > ema_weekly_aligned[i]
+        downtrend = close[i] < ema_weekly_aligned[i]
         
         # Breakout signals using Donchian channels
         breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
