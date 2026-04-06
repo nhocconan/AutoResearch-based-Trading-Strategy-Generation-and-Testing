@@ -1,9 +1,16 @@
+# 2025-06-21 03:30:00 UTC
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA trend filter.
+# Volume threshold set to 1.5x 20-period MA to reduce false signals and trade frequency.
+# Position size 0.25 to balance risk and reward. Stop loss at 2x ATR.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Works in bull markets via breakouts, in bear markets via short breakdowns with trend filter.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12606_4h_donchian20_1d_trend_vol_v2"
+name = "exp_12606_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -11,7 +18,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5  # Reduced from 2.0 to increase signal quality without excessive trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
