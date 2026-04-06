@@ -4,11 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation
-# Long when price breaks above 20-period high AND above 1d EMA200 with volume > 1.5x average
-# Short when price breaks below 20-period low AND below 1d EMA200 with volume > 1.5x average
-# Uses 1d EMA200 for strong trend filter to avoid counter-trend trades
-# ATR-based stoploss (2x ATR) to limit drawdown
+# Long when price breaks above 20-period high + EMA200 uptrend + volume > 1.5x average
+# Short when price breaks below 20-period low + EMA200 downtrend + volume > 1.5x average
+# Uses 1d EMA200 for strong trend filter to avoid counter-trend trades in bear markets
+# ATR-based stoploss to limit drawdown (2x ATR)
 # Target: 50-150 total trades over 4 years with controlled risk
+# Works in both bull (trend following) and bear (avoids counter-trend, waits for strong breaks)
 
 name = "12h_donchian20_1d_ema200_vol_v1"
 timeframe = "12h"
@@ -38,9 +39,9 @@ def generate_signals(prices):
     # Align 1d EMA200 to 12h timeframe
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Donchian channel (20-period)
-    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period high/low)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after Donchian warmup
         # Skip if required data not available
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(period20_high[i]) or 
-            np.isnan(period20_low[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -65,8 +66,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price falls below Donchian low or trend changes
-            elif close[i] < period20_low[i] or close[i] < ema200_1d_aligned[i]:
+            # Exit: price breaks below 20-period low or trend changes
+            elif close[i] < low_20[i] or close[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -78,8 +79,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price rises above Donchian high or trend changes
-            elif close[i] > period20_high[i] or close[i] > ema200_1d_aligned[i]:
+            # Exit: price breaks above 20-period high or trend changes
+            elif close[i] > high_20[i] or close[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -87,15 +88,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation
-            # Long: price above Donchian high, uptrend, volume spike
-            if (close[i] > period20_high[i] and 
+            # Long: price breaks above 20-period high, uptrend, volume spike
+            if (close[i] > high_20[i] and 
                 close[i] > ema200_1d_aligned[i] and
                 volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price below Donchian low, downtrend, volume spike
-            elif (close[i] < period20_low[i] and 
+            # Short: price breaks below 20-period low, downtrend, volume spike
+            elif (close[i] < low_20[i] and 
                   close[i] < ema200_1d_aligned[i] and
                   volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
