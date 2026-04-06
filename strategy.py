@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d/1w trend filter and volume confirmation
-Hypothesis: 4h breakouts capture medium-term momentum with lower transaction costs.
-Filter by 1d EMA50 and 1w EMA200 for trend bias and volume confirmation for conviction.
-Works in bull (buy breakouts above 1d EMA50 and 1w EMA200) and bear (sell breakdowns below 1d EMA50 and 1w EMA200).
-Uses 1d/1w to reduce noise vs pure 4h. Target: 75-200 total trades over 4 years.
+4h Donchian(20) breakout with 1d/1w trend filter and volume concentration
+Hypothesis: 4h breakouts aligned with daily/weekly trends capture momentum. 
+Volume concentration (current volume > 2x average of scaled 1d/1w volume) filters for conviction.
+Trend filters require both 1d EMA50 and 1w EMA200 agreement to reduce false signals.
+Works in bull (buy breakouts above both EMAs) and bear (sell breakdowns below both EMAs).
+Target: 80-180 total trades over 4 years (20-45/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_1w_trend_vol_v1"
+name = "4h_donchian20_1d_1w_vol_conc_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -70,7 +71,7 @@ def generate_signals(prices):
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Get volume data for confirmation
+    # Get volume data for concentration filter
     volume_1d = df_1d['volume'].values
     volume_1w = df_1w['volume'].values
     
@@ -116,11 +117,11 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 4h volume > 1.3x average of 1d and 1w volume (scaled)
-        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
-        # Scale 1w volume to 4h: approx 1/42 of 1w volume (since 42x 4h in 1w)
-        vol_threshold = (vol_ma_1d_aligned[i] / 6.0 + vol_ma_1w_aligned[i] / 42.0) / 2.0 * 1.3
-        volume_filter = volume[i] > vol_threshold
+        # Volume concentration: current volume > 2x average of scaled 1d/1w volume
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (6x 4h in 1d)
+        # Scale 1w volume to 4h: approx 1/42 of 1w volume (42x 4h in 1w)
+        vol_scaled = (vol_ma_1d_aligned[i] / 6.0 + vol_ma_1w_aligned[i] / 42.0) / 2.0
+        volume_concentration = volume[i] > (2.0 * vol_scaled)
         
         # Session filter: 08-20 UTC
         hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
@@ -161,14 +162,14 @@ def generate_signals(prices):
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
                 
-                # Long: breakout above upper with bullish trend + volume + session
-                if bull_breakout and trend_1d_aligned[i] == 1 and trend_1w_aligned[i] == 1 and volume_filter and session_filter:
+                # Long: breakout above upper with bullish trend + volume concentration + session
+                if bull_breakout and trend_1d_aligned[i] == 1 and trend_1w_aligned[i] == 1 and volume_concentration and session_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish trend + volume + session
-                elif bear_breakout and trend_1d_aligned[i] == -1 and trend_1w_aligned[i] == -1 and volume_filter and session_filter:
+                # Short: breakdown below lower with bearish trend + volume concentration + session
+                elif bear_breakout and trend_1d_aligned[i] == -1 and trend_1w_aligned[i] == -1 and volume_concentration and session_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
