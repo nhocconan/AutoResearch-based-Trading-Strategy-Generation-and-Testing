@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high, price > 12h EMA(50), and volume > average.
-# Short when price breaks below Donchian(20) low, price < 12h EMA(50), and volume > average.
-# Uses ATR-based stoploss to limit drawdown. Designed to work in both bull (breakouts) and bear (breakdowns).
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
+# Goes long when price breaks above 20-period high with 12h EMA uptrend and volume > average.
+# Goes short when price breaks below 20-period low with 12h EMA downtrend and volume > average.
+# Uses ATR-based stoploss to limit downside. Designed to work in both bull and bear markets
+# by following the trend on higher timeframe while capturing breakouts on lower timeframe.
 # Target: 100-200 total trades over 4 years (25-50/year) with controlled risk.
 
-name = "4h_donchian20_12h_ema50_vol_v1"
+name = "4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,15 +27,15 @@ def generate_signals(prices):
     
     # 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # Calculate EMA(50) on 12h close
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Donchian channels (20-period) on 4h data
+    # Donchian channels (20-period) on 4h
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -69,28 +70,40 @@ def generate_signals(prices):
         vol_filter = volume[i] > vol_ma[i]
         
         if position == 1:  # long position
-            # Stoploss: 2 * ATR below entry price
+            # Stoploss: 2 * ATR below entry
             if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+            # Exit: price breaks below Donchian low or 12h EMA turns down
+            elif close[i] < low_min[i] or close[i] < ema_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2 * ATR above entry price
+            # Stoploss: 2 * ATR above entry
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+            # Exit: price breaks above Donchian high or 12h EMA turns up
+            elif close[i] > high_max[i] or close[i] > ema_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with volume filter
             if vol_filter:
-                # Long breakout: price breaks above Donchian high
+                # Long entry: price breaks above Donchian high with 12h EMA uptrend
                 if close[i] > high_max[i] and close[i] > ema_12h_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short breakdown: price breaks below Donchian low
+                # Short entry: price breaks below Donchian low with 12h EMA downtrend
                 elif close[i] < low_min[i] and close[i] < ema_12h_aligned[i]:
                     signals[i] = -0.25
                     position = -1
