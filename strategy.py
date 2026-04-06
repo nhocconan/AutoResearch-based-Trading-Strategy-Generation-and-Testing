@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume + ADX Filter (Optimized v16)
+4h Donchian(20) Breakout + Volume + ADX Filter (Optimized v18)
 Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
 Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
 Optimized for 4h timeframe with proper position sizing to achieve target trade count of 75-200 total over 4 years.
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_adx_v16"
+name = "4h_donchian20_volume_adx_v18"
 timeframe = "4h"
 leverage = 1.0
 
