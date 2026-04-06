@@ -7,8 +7,8 @@ name = "exp_13952_12h_donchian20_1d_pivot_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d pivot direction filter and volume confirmation.
-# Uses daily pivot points (PP, R1, R2, R3, S1, S2, S3) to determine bias:
+# Hypothesis: 12h Donchian(20) breakout with daily pivot bias filter and volume confirmation.
+# Uses daily pivot points (PP) to determine bias:
 # - Price above daily PP = bullish bias (only long entries)
 # - Price below daily PP = bearish bias (only short entries)
 # - Entry on 12h Donchian breakout in direction of daily bias with volume > 1.5x average
