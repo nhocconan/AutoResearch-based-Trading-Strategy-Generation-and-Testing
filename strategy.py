@@ -1,81 +1,94 @@
-# Hypothesis: 4h Camarilla pivot reversals with volume confirmation and volatility filter.
-# Uses daily pivots for institutional levels, volume spike for institutional participation,
-# and ATR-based volatility filter to avoid choppy markets. Designed for mean-reversion
-# at S3/R3 and breakout at S4/R4, which works in both trending and ranging markets.
-# Target: 100-150 total trades over 4 years (25-38/year) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12743_4h_camarilla_pivot_volume_volatility_v1"
-timeframe = "4h"
+name = "exp_12744_1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-VOLATILITY_LOOKBACK = 20
-VOLATILITY_THRESHOLD = 0.5  # ATR ratio threshold
+KAMA_EFFICIENCY_PERIOD = 10
+KAMA_FAST_EMA = 2
+KAMA_SLOW_EMA = 30
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 65
+RSI_OVERSOLD = 35
+CHOPPINESS_PERIOD = 14
+CHOPPINESS_THRESHOLD = 61.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_kama(close, eff_period, fast, slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(close - np.roll(close, eff_period))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[eff_period:], axis=0) if eff_period > 0 else np.zeros_like(close)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_choppiness(high, low, close, period):
+    """Calculate Choppiness Index"""
+    atr = calculate_atr(high, low, close, 1)
+    sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    range_hl = highest_high - lowest_low
+    cpi = 100 * np.log10(sum_atr / range_hl) / np.log10(period)
+    return cpi
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR with proper handling"""
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_atr_ma(high, low, close, period, ma_period):
-    """Calculate ATR and its moving average"""
-    atr = calculate_atr(high, low, close, period)
-    atr_ma = pd.Series(atr).rolling(window=ma_period, min_periods=ma_period).mean().values
-    return atr, atr_ma
-
-def calculate_camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r3 = pivot + (range_val * 1.1 / 2)
-    s3 = pivot - (range_val * 1.1 / 2)
-    r4 = pivot + (range_val * 1.1)
-    s4 = pivot - (range_val * 1.1)
-    return r3, s3, r4, s4
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    r3_1d, s3_1d, r4_1d, s4_1d = calculate_camarilla_pivot(high_1d, low_1d, close_1d)
+    # Calculate weekly KAMA for trend direction
+    close_1w = df_1w['close'].values
+    kama_1w = calculate_kama(close_1w, KAMA_EFFICIENCY_PERIOD, KAMA_FAST_EMA, KAMA_SLOW_EMA)
+    kama_1w_prev = np.roll(kama_1w, 1)
+    kama_1w_prev[0] = kama_1w[0]
+    kama_trend = kama_1w > kama_1w_prev  # 1 for up, 0 for down
     
-    # Align pivot levels to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align weekly KAMA trend to daily timeframe
+    kama_trend_aligned = align_htf_to_ltf(prices, df_1w, kama_trend.astype(float))
     
-    # Calculate 4h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr, atr_ma = calculate_atr_ma(high, low, close, ATR_PERIOD, VOLATILITY_LOOKBACK)
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    chop = calculate_choppiness(high, low, close, CHOPPINESS_PERIOD)
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,11 +96,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, VOLATILITY_LOOKBACK, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, CHOPPINESS_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily pivot levels not available
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
+        # Skip if weekly trend not available
+        if np.isnan(kama_trend_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,22 +119,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = (not np.isnan(volume_ma[i])) and (volume[i] > (volume_ma[i] * VOLUME_THRESHOLD))
+        # Conditions
+        kama_up = kama_trend_aligned[i] > 0.5
+        rsi_not_overbought = rsi[i] < RSI_OVERBOUGHT
+        rsi_not_oversold = rsi[i] > RSI_OVERSOLD
+        chop_high = chop[i] > CHOPPINESS_THRESHOLD  # choppy market
         
-        # Volatility filter: avoid extremely low volatility (chop) and extremely high volatility (chaos)
-        vol_ratio = atr[i] / atr_ma[i] if not np.isnan(atr_ma[i]) and atr_ma[i] > 0 else 1.0
-        volatility_ok = vol_ratio > VOLATILITY_THRESHOLD
-        
-        # Fade at R3/S3, breakout at R4/S4
-        fade_long = volume_ok and volatility_ok and close[i] <= s3_1d_aligned[i]  # fade at S3 (support)
-        fade_short = volume_ok and volatility_ok and close[i] >= r3_1d_aligned[i]  # fade at R3 (resistance)
-        breakout_long = volume_ok and volatility_ok and close[i] >= r4_1d_aligned[i]  # breakout above R4
-        breakout_short = volume_ok and volatility_ok and close[i] <= s4_1d_aligned[i]  # breakdown below S4
-        
-        # Entry conditions
-        long_entry = fade_long or breakout_long
-        short_entry = fade_short or breakout_short
+        # Long: KAMA up + RSI not overbought + choppy (mean reversion in chop)
+        long_entry = kama_up and rsi_not_overbought and chop_high
+        # Short: KAMA down + RSI not oversold + choppy (mean reversion in chop)
+        short_entry = not kama_up and rsi_not_oversold and chop_high
         
         # Generate signals
         if position == 0:
