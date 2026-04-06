@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1-week EMA trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high AND price > 1w EMA(20) AND volume > 1.5x average
-# Enter short when: price breaks below Donchian(20) low AND price < 1w EMA(20) AND volume > 1.5x average
-# Exit when: price crosses opposite Donchian band OR RSI(14) reaches extreme (70/30) for mean reversion
-# Target: 50-150 total trades over 4 years (12-37/year) with focus on major trend moves
-# Works in bull markets via breakouts, in bear via short breakdowns, avoids chop via volume filter
+# Hypothesis: 4h Camarilla pivot reversal with volume spike and 1w trend filter
+# Enter long at L3 support when: price crosses above L3, volume > 2x average, price > 1w EMA(50)
+# Enter short at H3 resistance when: price crosses below H3, volume > 2x average, price < 1w EMA(50)
+# Exit when price reaches opposite H3/L3 level or opposite Camarilla level (H4/L4)
+# Targets 80-150 trades over 4 years by combining intraday reversals with weekly trend filter
 
-name = "12h_donchian20_1wema_vol_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1w_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +24,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 12h
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 1-week EMA(20) for trend filter
+    # 1w EMA(50) for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Previous day's OHLC for Camarilla calculation (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels: H4, H3, L3, L4
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_calc = lambda c, h, l: (
+        c + 1.5 * (h - l),  # H4
+        c + 1.1 * (h - l),  # H3
+        c - 1.1 * (h - l),  # L3
+        c - 1.5 * (h - l)   # L4
+    )
+    
+    # Calculate Camarilla levels for each 1d bar
+    h4_1d, h3_1d, l3_1d, l4_1d = camarilla_calc(close_1d, high_1d, low_1d)
+    
+    # Align to 4h timeframe
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * volume_ma
-    
-    # RSI(14) for mean reversion exit
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    volume_threshold = 2.0 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(volume_threshold[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
+            np.isnan(l3_1d_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -64,28 +75,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price < Donchian low OR RSI > 70 (overbought)
-            if close[i] < low_min[i] or rsi[i] > 70:
+            # Exit: price reaches H3 (profit target) or breaks below L4 (stop)
+            if close[i] >= h3_1d_aligned[i] or close[i] <= l4_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price > Donchian high OR RSI < 30 (oversold)
-            if close[i] > high_max[i] or rsi[i] < 30:
+            # Exit: price reaches L3 (profit target) or breaks above H4 (stop)
+            if close[i] <= l3_1d_aligned[i] or close[i] >= h4_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend filter + volume
+            # Look for entries: price crosses Camarilla levels with volume and trend filter
             if volume[i] > volume_threshold[i]:
-                if close[i] > high_max[i] and close[i] > ema_20_aligned[i]:
-                    # Breakout above upper band with weekly uptrend
+                # Long: price crosses above L3 from below AND above weekly EMA
+                if close[i] > l3_1d_aligned[i] and close[i-1] <= l3_1d_aligned[i-1] and close[i] > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < low_min[i] and close[i] < ema_20_aligned[i]:
-                    # Breakdown below lower band with weekly downtrend
+                # Short: price crosses below H3 from above AND below weekly EMA
+                elif close[i] < h3_1d_aligned[i] and close[i-1] >= h3_1d_aligned[i-1] and close[i] < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
     
