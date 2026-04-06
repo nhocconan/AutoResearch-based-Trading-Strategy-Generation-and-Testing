@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h timeframe capture multi-day momentum with low trade frequency.
-Volume confirms breakout strength, ATR stoploss limits drawdown. Designed for 50-150 total trades over 4 years.
-Works in bull (breakouts) and bear (breakdowns) markets by trading both directions.
+12h Donchian(20) Breakout + Daily EMA Trend + Volume Filter + ATR Stoploss (v1)
+Hypothesis: Donchian breakouts capture momentum, EMA trend filter aligns with higher timeframe direction,
+volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency
+(target 50-150 total over 4 years) to minimize fee decay in ranging/bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_vol_atr_v1"
+name = "12h_donchian20_ema_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -24,6 +24,18 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Daily EMA trend (21-period) - using 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 21:
+        ema_1d[20] = np.mean(close_1d[:21])
+        for i in range(21, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 19) / 21
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 14-period ATR
     atr = np.full(n, np.nan)
@@ -33,22 +45,23 @@ def generate_signals(prices):
             np.abs(high[1:] - close[:-1]),
             np.abs(low[1:] - close[:-1])
         )
-        atr[0] = np.nan
         if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+            atr[0] = np.nan
+            if len(tr) > 1:
+                atr[1] = tr[0]
+                for i in range(2, n):
+                    atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = max(20, 21)  # For Donchian and EMA
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -83,19 +96,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + price direction filter
+            # Look for entries: Donchian breakout + volume + EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Price direction filter: only trade in direction of recent momentum
-            price_up = close[i] > close[i-1]
-            price_down = close[i] < close[i-1]
+            # EMA trend filter: only trade in direction of daily trend
+            price_above_ema = close[i] > ema_1d_aligned[i]
+            price_below_ema = close[i] < ema_1d_aligned[i]
             
-            if bull_breakout and volume_filter and price_up:
+            if bull_breakout and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_down:
+            elif bear_breakout and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
