@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA(20) trend + volume confirmation + ATR stoploss
-# Long when price breaks above 20-day high AND price > 1w EMA(20) AND volume > 2x average
-# Short when price breaks below 20-day low AND price < 1w EMA(20) AND volume > 2x average
-# Exit when price returns to 10-day moving average or ATR-based stoploss hit
-# Uses daily timeframe to minimize trades (target: 75-200 total over 4 years)
-# Works in bull/bear markets by requiring trend alignment (1w EMA) and volume confirmation
+# Hypothesis: 6h Williams %R with 1-day EMA trend filter and volume confirmation
+# Williams %R < -80 = oversold, > -20 = overbought
+# Trade only in direction of 1-day EMA(50) to avoid counter-trend whipsaws
+# Volume > 1.5x 20-period average confirms momentum
+# Target: 50-150 total trades over 4 years (12-37/year)
+# Works in bull/bear by aligning with higher timeframe trend
 
-name = "1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "6h_williamsr_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,83 +25,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period) on daily timeframe
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    willr = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    willr = willr.values
+    
+    # 1-day EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
+    ema_50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean()
+    ema_50 = ema_50.values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Donchian levels
-    highest_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min()
-    
-    # Align to 1d timeframe (already aligned since we're using 1d data)
-    donchian_high = highest_high.values
-    donchian_low = lowest_low.values
-    
-    # 1-week EMA(20) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    ema_20 = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean()
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20.values)
-    
-    # Volume confirmation: volume > 2x 20-day average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 2.0 * volume_ma.values
-    
-    # ATR for stoploss (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_20_aligned[i]) or np.isnan(volume_threshold[i]) or np.isnan(atr[i]):
+        if np.isnan(willr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
-                # Hold position until exit conditions
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Exit conditions
         if position == 1:  # long position
-            # Exit: price returns to 10-day moving average OR stoploss hit
-            ma_10 = pd.Series(daily_close).rolling(window=10, min_periods=10).mean()
-            ma_10_aligned = align_htf_to_ltf(prices, df_1d, ma_10.values)
-            if daily_close[i] <= ma_10_aligned[i] or close[i] < entry_price - 2.5 * atr[i]:
+            if willr[i] > -20 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price returns to 10-day moving average OR stoploss hit
-            ma_10 = pd.Series(daily_close).rolling(window=10, min_periods=10).mean()
-            ma_10_aligned = align_htf_to_ltf(prices, df_1d, ma_10.values)
-            if daily_close[i] >= ma_10_aligned[i] or close[i] > entry_price + 2.5 * atr[i]:
+            if willr[i] < -80 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend alignment + volume confirmation
-            # Long: price breaks above 20-day high AND price > 1w EMA(20) AND volume confirmation
-            if daily_close[i] > donchian_high[i] and daily_close[i] > ema_20_aligned[i] and volume[i] > volume_threshold[i]:
+            # Look for entries: Williams %R extremes in direction of 1d EMA trend
+            # Long: Oversold (-80) and price above 1d EMA (uptrend) + volume
+            if (willr[i] < -80 and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-                entry_price = close[i]
-            # Short: price breaks below 20-day low AND price < 1w EMA(20) AND volume confirmation
-            elif daily_close[i] < donchian_low[i] and daily_close[i] < ema_20_aligned[i] and volume[i] > volume_threshold[i]:
+            # Short: Overbought (-20) and price below 1d EMA (downtrend) + volume
+            elif (willr[i] > -20 and close[i] < ema_50_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
-                entry_price = close[i]
     
     return signals
