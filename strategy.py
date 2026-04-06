@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-# Captures strong trending moves aligned with daily momentum. Volume ensures institutional participation.
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
+# Captures strong trending moves aligned with intermediate-term momentum. Volume ensures institutional participation.
 # Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13572_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13573_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -39,15 +39,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
         # Breakout signals using Donchian channels
         breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
