@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
 # Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 1.5x avg
 # Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 1.5x avg
 # Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
-# Uses daily trend filter to avoid counter-trend trades, targeting 50-150 trades over 4 years
+# Uses daily trend filter to avoid counter-trend trades, targeting 75-200 trades over 4 years
 # This structure has proven effective on SOLUSDT (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
 
-name = "12h_donchian20_1dema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 12h
+    # Donchian channel (20-period) on 4h
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_20 + low_20) / 2
