@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly EMA trend filter and volume confirmation.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
 # Donchian(20) breakout captures momentum in trending markets.
-# EMA50 on weekly provides trend bias: only long when price > EMA50, short when price < EMA50.
+# EMA50 on 1-day provides trend bias: only long when price > EMA50, short when price < EMA50.
 # Volume confirmation (current volume > 1.5x 20-period average) ensures institutional participation.
-# Designed for 1d timeframe to target 30-100 trades over 4 years.
+# Designed for 12h timeframe to target 50-150 trades over 4 years.
 # Works in bull/bear markets via EMA-based directional bias and breakout entries.
 
-name = "1d_donchian20_weekly_ema50_vol_v1"
-timeframe = "1d"
+name = "12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +25,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA50 for trend bias
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # 1-day EMA50 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on weekly closes
-    ema_50_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 50:
-        ema_50_weekly[49] = np.mean(close_weekly[:50])
-        for i in range(50, len(close_weekly)):
-            ema_50_weekly[i] = (close_weekly[i] * 2 / 51) + (ema_50_weekly[i-1] * 49 / 51)
+    # Calculate EMA50 on 1d closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to daily timeframe (shifted by 1 weekly bar for no look-ahead)
-    ema_50_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # Align EMA50 to 12h timeframe (shifted by 1 1d bar for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period) on daily data
+    # Donchian Channel (20-period) on 12h data
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
