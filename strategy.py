@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 1-day trend filter and volume confirmation.
-# Donchian(20) breakouts capture momentum in trending markets. 1-day EMA(50) ensures alignment
-# with higher timeframe trend direction. Volume confirmation filters out weak breakouts.
-# Works in bull markets (breakout above upper band) and bear markets (breakdown below lower band).
-# Entry conditions are strict to limit trades to 75-200 over 4 years.
+# Hypothesis: 12h Donchian channel breakout with 1d trend filter and volume confirmation.
+# Donchian(20) provides clear breakout levels. Trade only in direction of 1d EMA(50) trend.
+# Volume confirmation ensures institutional participation. Works in bull markets (buy strength) and bear markets (sell weakness).
+# Target: 50-150 total trades over 4 years (12-37/year) with low turnover to minimize fee drag.
 
-name = "exp_13606_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13605_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -55,14 +54,14 @@ def generate_signals(prices):
     ema_1d_slope = np.diff(ema_1d, prepend=ema_1d[0])  # slope approximation
     ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channel
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -80,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,17 +106,17 @@ def generate_signals(prices):
         downtrend = ema_1d_slope_aligned[i] < 0
         
         # Donchian breakout signals
-        breakout_up = close[i] > upper[i-1]  # break above previous upper band
-        breakdown_down = close[i] < lower[i-1]  # break below previous lower band
+        long_signal = volume_ok and uptrend and close[i] > donchian_upper[i]
+        short_signal = volume_ok and downtrend and close[i] < donchian_lower[i]
         
         # Generate signals
         if position == 0:
-            if volume_ok and uptrend and breakout_up:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and downtrend and breakdown_down:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -125,15 +124,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on breakdown or stop loss
-            if close[i] < lower[i-1]:  # breakdown below lower band
+            # Exit long on opposite Donchian break or stop loss
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on breakout or stop loss
-            if close[i] > upper[i-1]:  # breakout above upper band
+            # Exit short on opposite Donchian break or stop loss
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
