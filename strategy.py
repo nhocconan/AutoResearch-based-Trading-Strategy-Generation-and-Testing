@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI + 4h MACD + volume confirmation with session filter
-# Enter long when: RSI(14) > 60, MACD(12,26,9) bullish crossover on 4h, volume > 1.5x average, during active session (08-20 UTC)
-# Enter short when: RSI(14) < 40, MACD bearish crossover on 4h, volume > 1.5x average, during active session
-# Uses momentum confirmation from higher timeframe to filter false signals on 1h
-# Exit when RSI returns to neutral zone (40-60) or opposite MACD crossover occurs
-# Target: 60-150 trades over 4 years by combining multiple filters
+# Hypothesis: 6h Camarilla pivot levels from 1d + RSI(14) + volume confirmation
+# Enter long when: price > S3 (support) and RSI < 40 (oversold) and volume > 1.5x avg
+# Enter short when: price < R3 (resistance) and RSI > 60 (overbought) and volume > 1.5x avg
+# Camarilla levels provide institutional support/resistance; RSI avoids false breakouts
+# Volume confirms institutional participation. Target: 50-150 trades over 4 years.
 
-name = "1h_rsi_macd_vol_session_v1"
-timeframe = "1h"
+name = "6h_camarilla_rsi_vol_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) on 1h
+    # 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for 1d
+    # Range = high - low
+    # Resistance levels: R3 = close + (high - low) * 1.1/2, R4 = close + (high - low) * 1.1
+    # Support levels: S3 = close - (high - low) * 1.1/2, S4 = close - (high - low) * 1.1
+    range_1d = high_1d - low_1d
+    r3 = close_1d + range_1d * 1.1 / 2
+    r4 = close_1d + range_1d * 1.1
+    s3 = close_1d - range_1d * 1.1 / 2
+    s4 = close_1d - range_1d * 1.1
+    
+    # Align Camarilla levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # RSI(14) on 6h
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -35,63 +56,47 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.values
     
-    # MACD on 4h
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_12 = pd.Series(close_4h).ewm(span=12, adjust=False).mean().values
-    ema_26 = pd.Series(close_4h).ewm(span=26, adjust=False).mean().values
-    macd = ema_12 - ema_26
-    signal_line = pd.Series(macd).ewm(span=9, adjust=False).mean().values
-    macd_hist = macd - signal_line
-    macd_hist_aligned = align_htf_to_ltf(prices, df_4h, macd_hist)
-    
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_threshold = 1.5 * volume_ma
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Wait for MACD to stabilize
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(macd_hist_aligned[i]) or 
-            np.isnan(volume_threshold[i])):
+        if (np.isnan(rsi[i]) or np.isnan(volume_threshold[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         if position == 1:  # long position
-            # Exit: RSI < 40 OR MACD histogram turns negative
-            if rsi[i] < 40 or macd_hist_aligned[i] < 0:
+            # Exit: price < S4 OR RSI > 60 (overbought)
+            if close[i] < s4_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI > 60 OR MACD histogram turns positive
-            if rsi[i] > 60 or macd_hist_aligned[i] > 0:
+            # Exit: price > R4 OR RSI < 40 (oversold)
+            if close[i] > r4_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: RSI extreme + MACD confirmation + volume + session
-            if in_session and volume[i] > volume_threshold[i]:
-                if rsi[i] > 60 and macd_hist_aligned[i] > 0 and macd_hist_aligned[i-1] <= 0:
-                    # RSI overbought with fresh bullish MACD crossover
-                    signals[i] = 0.20
+            # Look for entries: price at S3/R3 with RSI extreme + volume
+            if volume[i] > volume_threshold[i]:
+                # Long: price > S3 and RSI < 40 (oversold bounce)
+                if close[i] > s3_aligned[i] and rsi[i] < 40:
+                    signals[i] = 0.25
                     position = 1
-                elif rsi[i] < 40 and macd_hist_aligned[i] < 0 and macd_hist_aligned[i-1] >= 0:
-                    # RSI oversold with fresh bearish MACD crossover
-                    signals[i] = -0.20
+                # Short: price < R3 and RSI > 60 (overbought rejection)
+                elif close[i] < r3_aligned[i] and rsi[i] > 60:
+                    signals[i] = -0.25
                     position = -1
     
     return signals
