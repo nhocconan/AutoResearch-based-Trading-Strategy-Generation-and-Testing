@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Combines price channel breakouts with daily timeframe trend bias
-and volume confirmation to capture momentum while avoiding chop.
-Works in bull (breakouts with trend) and bear (short breakdowns with trend).
-Designed for low trade frequency (~15-25/year) to minimize fee drag.
+4h Donchian(20) Breakout + 1d EMA200 Trend + Volume Spike + ATR Stop
+Hypothesis: Uses longer-term EMA200 on 1d for robust trend bias (works in bull/bear),
+combined with Donchian breakouts and volume confirmation to capture strong moves.
+Designed for moderate trade frequency (~15-25/year) to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema200_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -39,19 +37,19 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA20 for trend bias
+    # 1d EMA200 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    if len(close_1d) >= 200:
+        ema_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 98) / 100
     
-    # Trend bias: above EMA = bullish, below = bearish
+    # Trend bias: above EMA200 = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
@@ -60,7 +58,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 200  # For EMA200
     
     for i in range(start, n):
         # Skip if required data not available
@@ -107,8 +105,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + 1d trend + volume spike
-            # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15:
+            # Minimum holding period: only allow new entry after 25 bars flat
+            if bars_since_entry >= 25:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
