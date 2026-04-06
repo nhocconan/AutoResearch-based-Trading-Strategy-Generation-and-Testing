@@ -3,28 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray with 1w trend filter
-# Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND 1w EMA(21) rising
-# Short when: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND 1w EMA(21) falling
-# Exit when: Alligator lines cross in opposite direction OR power signals reverse
-# Uses weekly trend to filter trades, targeting 80-150 trades over 4 years
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Enter long when: price breaks above Donchian upper(20) AND price > 1d EMA(50) AND volume > 1.5x avg
+# Enter short when: price breaks below Donchian lower(20) AND price < 1d EMA(50) AND volume > 1.5x avg
+# Exit when price returns to Donchian midpoint OR opposite breakout occurs
+# Uses daily trend to filter breakouts in strong moves, targeting 50-150 trades over 4 years
 
-name = "6h_alligator_elder_1wtrend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1dema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(data) < period:
-        return np.full(len(data), np.nan)
-    result = np.full(len(data), np.nan)
-    sma = np.mean(data[:period])
-    result[period-1] = sma
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,42 +19,35 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator on 6h (periods: Jaw=13, Teeth=8, Lips=5)
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    # Donchian channels (20-period) on 12h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = high_roll.values
+    donchian_lower = low_roll.values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # 1w EMA(21) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Trend direction: rising/falling EMA
-    ema_rising = np.full(n, False)
-    ema_falling = np.full(n, False)
-    for i in range(1, n):
-        if not np.isnan(ema_21_1w_aligned[i]) and not np.isnan(ema_21_1w_aligned[i-1]):
-            ema_rising[i] = ema_21_1w_aligned[i] > ema_21_1w_aligned[i-1]
-            ema_falling[i] = ema_21_1w_aligned[i] < ema_21_1w_aligned[i-1]
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Wait for indicators to stabilize
+    for i in range(20, n):  # Wait for Donchian to stabilize
         # Skip if required data not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -75,132 +55,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: Bearish Alligator alignment OR Bear Power negative
-            if (lips[i] < teeth[i] and teeth[i] < jaw[i]) or bear_power[i] < 0:
+            # Exit: price returns to midpoint OR opposite breakout occurs
+            if close[i] <= donchian_mid[i] or low[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Bullish Alligator alignment OR Bull Power positive
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i]) or bull_power[i] > 0:
+            # Exit: price returns to midpoint OR opposite breakout occurs
+            if close[i] >= donchian_mid[i] or high[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Alligator alignment + Power signals + Weekly trend
-            bullish_align = lips[i] > teeth[i] and teeth[i] > jaw[i]
-            bearish_align = lips[i] < teeth[i] and teeth[i] < jaw[i]
-            
-            if bullish_align and bull_power[i] > 0 and ema_rising[i]:
+            # Look for breakouts: price breaks Donchian + trend filter + volume
+            if close[i] > donchian_upper[i] and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]:
+                # Bullish breakout above upper band with uptrend bias
                 signals[i] = 0.25
                 position = 1
-            elif bearish_align and bear_power[i] < 0 and ema_falling[i]:
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams Alligator + Elder Ray with 1w trend filter
-# Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND 1w EMA(21) rising
-# Short when: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND 1w EMA(21) falling
-# Exit when: Alligator lines cross in opposite direction OR power signals reverse
-# Uses weekly trend to filter trades, targeting 80-150 trades over 4 years
-
-name = "6h_alligator_elder_1wtrend_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(data) < period:
-        return np.full(len(data), np.nan)
-    result = np.full(len(data), np.nan)
-    sma = np.mean(data[:period])
-    result[period-1] = sma
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    
-    # Williams Alligator on 6h (periods: Jaw=13, Teeth=8, Lips=5)
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # 1w EMA(21) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Trend direction: rising/falling EMA
-    ema_rising = np.full(n, False)
-    ema_falling = np.full(n, False)
-    for i in range(1, n):
-        if not np.isnan(ema_21_1w_aligned[i]) and not np.isnan(ema_21_1w_aligned[i-1]):
-            ema_rising[i] = ema_21_1w_aligned[i] > ema_21_1w_aligned[i-1]
-            ema_falling[i] = ema_21_1w_aligned[i] < ema_21_1w_aligned[i-1]
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(20, n):  # Wait for indicators to stabilize
-        # Skip if required data not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_21_1w_aligned[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if position == 1:  # long position
-            # Exit: Bearish Alligator alignment OR Bear Power negative
-            if (lips[i] < teeth[i] and teeth[i] < jaw[i]) or bear_power[i] < 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Bullish Alligator alignment OR Bull Power positive
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i]) or bull_power[i] > 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries: Alligator alignment + Power signals + Weekly trend
-            bullish_align = lips[i] > teeth[i] and teeth[i] > jaw[i]
-            bearish_align = lips[i] < teeth[i] and teeth[i] < jaw[i]
-            
-            if bullish_align and bull_power[i] > 0 and ema_rising[i]:
-                signals[i] = 0.25
-                position = 1
-            elif bearish_align and bear_power[i] < 0 and ema_falling[i]:
+            elif close[i] < donchian_lower[i] and close[i] < ema_50_aligned[i] and volume[i] > volume_threshold[i]:
+                # Bearish breakout below lower band with downtrend bias
                 signals[i] = -0.25
                 position = -1
     
