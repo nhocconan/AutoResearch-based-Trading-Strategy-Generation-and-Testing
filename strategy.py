@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish 12h period with volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish 12h period with volume confirmation.
-# Uses 12h trend filter to avoid counter-trend trades. Volume filter ensures breakouts have conviction.
-# Target: 80-180 total trades over 4 years (20-45/year) to stay within optimal range.
+# Hypothesis: 4h Donchian(20) breakout with volume and ADX trend filter.
+# Long when price breaks above upper Donchian channel during strong uptrend (ADX>25) with volume > 1.5x 20-period average.
+# Short when price breaks below lower Donchian channel during strong downtrend (ADX>25) with volume confirmation.
+# Uses ADX to filter for trending markets only, reducing whipsaws in ranging conditions.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "4h_donchian20_12h_trend_vol_v1"
+name = "4h_donchian20_adx_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,14 +30,17 @@ def generate_signals(prices):
     upper = high_series.rolling(window=20, min_periods=20).max().values
     lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 12-hour trend filter: bullish/bearish based on close vs open
-    df_12h = get_htf_data(prices, '12h')
-    open_12h = df_12h['open'].values
-    close_12h = df_12h['close'].values
-    bullish_12h = close_12h > open_12h  # True for bullish 12h period
-    bearish_12h = close_12h < open_12h   # True for bearish 12h period
-    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h)
-    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h)
+    # ADX calculation (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])  # align with original index
+    
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(np.concatenate([[0], plus_dm])).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(np.concatenate([[0], minus_dm])).ewm(alpha=1/14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -47,8 +50,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if 12h trend data not available
-        if np.isnan(bullish_12h_aligned[i]) or np.isnan(bearish_12h_aligned[i]):
+        # Skip if ADX data not available
+        if np.isnan(adx[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -60,32 +63,28 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or 12h turns bearish
-            if (low[i] <= lower[i] or 
-                bearish_12h_aligned[i]):
+            # Exit: price drops below lower Donchian or ADX weakens (<20)
+            if (low[i] <= lower[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or 12h turns bullish
-            if (high[i] >= upper[i] or 
-                bullish_12h_aligned[i]):
+            # Exit: price rises above upper Donchian or ADX weakens (<20)
+            if (high[i] >= upper[i] or adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and 12h trend filter
-            if volume_filter:
-                # Long: break above upper Donchian during bullish 12h period
-                if (high[i] > upper[i] and 
-                    bullish_12h_aligned[i]):
+            # Look for entries with volume confirmation and ADX trend filter
+            if volume_filter and adx[i] > 25:
+                # Long: break above upper Donchian during strong uptrend
+                if high[i] > upper[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish 12h period
-                elif (low[i] < lower[i] and 
-                      bearish_12h_aligned[i]):
+                # Short: break below lower Donchian during strong downtrend
+                elif low[i] < lower[i]:
                     signals[i] = -0.25
                     position = -1
     
