@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout + 1w SMA trend + volume confirmation
-Hypothesis: Donchian breakout captures trend continuation, confirmed by weekly trend and volume.
-Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
-Target: 50-150 total trades over 4 years (12-37/year).
+4h Supertrend + Volume Confirmation
+Hypothesis: Supertrend captures trend direction effectively. Combined with volume confirmation and ATR stoploss, it provides robust signals in both bull and bear markets. Uses 1d trend filter for higher timeframe context. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14388_12h_donchian20_1w_sma_vol_v1"
-timeframe = "12h"
+name = "14389_4h_supertrend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,48 +17,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly SMA(50) for trend filter
-    sma_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 12h
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
     
-    # Volume filter: avoid low volume periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
-    
-    # ATR for stoploss
+    # Calculate ATR
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Calculate Supertrend
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Initialize Supertrend arrays
+    supertrend = np.full(n, np.nan)
+    uptrend = np.full(n, True)
+    
+    # Calculate Supertrend
+    for i in range(atr_period, n):
+        # Upper band
+        if i == atr_period:
+            upper_band[i] = hl2[i] + multiplier * atr[i]
+            lower_band[i] = hl2[i] - multiplier * atr[i]
+        else:
+            upper_band[i] = hl2[i] + multiplier * atr[i]
+            lower_band[i] = hl2[i] - multiplier * atr[i]
+            
+            # Adjust bands
+            if upper_band[i] > upper_band[i-1] or close[i-1] < upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+            if lower_band[i] < lower_band[i-1] or close[i-1] > lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+        
+        # Trend direction
+        if i == atr_period:
+            uptrend[i] = close[i] > upper_band[i]
+        else:
+            if close[i] > upper_band[i-1]:
+                uptrend[i] = True
+            elif close[i] < lower_band[i-1]:
+                uptrend[i] = False
+            else:
+                uptrend[i] = uptrend[i-1]
+                if uptrend[i] and lower_band[i] < lower_band[i-1]:
+                    lower_band[i] = lower_band[i-1]
+                if not uptrend[i] and upper_band[i] > upper_band[i-1]:
+                    upper_band[i] = upper_band[i-1]
+        
+        # Supertrend value
+        supertrend[i] = lower_band[i] if uptrend[i] else upper_band[i]
+    
+    # Volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(donchian_window, 50) + 1
+    start = max(atr_period, 200) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(sma_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(supertrend[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -69,34 +109,23 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR trend turns bearish OR stoploss
-            if (close[i] <= donchian_low[i] or
-                close[i] < sma_1w_aligned[i] or
-                close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: Supertrend turns bearish OR stoploss
+            if (not uptrend[i] or close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR trend turns bullish OR stoploss
-            if (close[i] >= donchian_high[i] or
-                close[i] > sma_1w_aligned[i] or
-                close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: Supertrend turns bullish OR stoploss
+            if (uptrend[i] or close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend filter + volume
-            long_breakout = close[i] > donchian_high[i]
-            short_breakout = close[i] < donchian_low[i]
-            
-            # Trend filter: only long in uptrend, short in downtrend
-            trend_up = close[i] > sma_1w_aligned[i]
-            trend_down = close[i] < sma_1w_aligned[i]
-            
-            long_setup = long_breakout and trend_up and vol_filter[i]
-            short_setup = short_breakout and trend_down and vol_filter[i]
+            # Look for entries: Supertrend direction + 1d trend filter + volume
+            long_setup = uptrend[i] and (close[i] > ema200_1d_aligned[i]) and vol_filter[i]
+            short_setup = (not uptrend[i]) and (close[i] < ema200_1d_aligned[i]) and vol_filter[i]
             
             if long_setup:
                 signals[i] = 0.25
