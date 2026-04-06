@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-Hypothesis: 12h Donchian breakouts capture momentum on longer timeframe, reducing trade frequency. 
-Filter by 1w EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1w EMA50) 
-and bear (sell breakdowns below 1w EMA50). Target: 50-150 total trades over 4 years.
+12h Donchian(20) breakout with 1w EMA100 trend filter and volume confirmation
+Hypothesis: 12h Donchian breakouts capture momentum with lower trade frequency. 
+Filter by 1w EMA100 for trend bias and volume confirmation for conviction. 
+Works in bull (buy breakouts above 1w EMA100) and bear (sell breakdowns below 1w EMA100).
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -38,18 +39,18 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1w data for trend filter (EMA50)
+    # Get 1w data for trend filter (EMA100)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # EMA50 on 1w close
+    # EMA100 on 1w close
     ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 48) / 50
+    if len(close_1w) >= 100:
+        ema_1w[99] = np.mean(close_1w[:100])
+        for i in range(100, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 98) / 100
     
-    # 1w trend: above EMA50 = bullish, below = bearish
+    # 1w trend: above EMA100 = bullish, below = bearish
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     
     # Align 1w trend to 12h timeframe
