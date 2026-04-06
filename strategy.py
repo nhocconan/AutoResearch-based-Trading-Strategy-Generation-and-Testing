@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with volume confirmation and 12-hour EMA trend filter
-# Uses 12-hour EMA to capture intermediate trend while avoiding overtrading from shorter timeframes
-# Volume confirmation ensures breakouts have conviction, reducing false signals
-# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost
+# Hypothesis: 4-hour Donchian channel breakout with volume confirmation and 12-hour EMA trend filter.
+# Works in bull/bear because breakouts capture strong directional moves, volume filters out weak signals,
+# and 12-hour EMA ensures alignment with higher timeframe momentum. Target: 80-180 trades over 4 years (20-45/year)
+# to balance opportunity and cost, minimizing fee drag while maintaining statistical significance.
 
 name = "exp_13083_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
@@ -14,9 +14,9 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20
+EMA_PERIOD = 34
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -39,15 +39,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12-hour data ONCE before loop
+    # Load 12h data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12-hour EMA for trend filter
+    # Calculate 12h EMA for trend filter
     close_12h = df_12h['close'].values
     ema_12h = calculate_ema(close_12h, EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 4-hour indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -95,13 +95,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 12-hour EMA
+        # Trend filter: price above/below 12h EMA
         uptrend = close[i] > ema_12h_aligned[i]
         downtrend = close[i] < ema_12h_aligned[i]
         
         # Breakout signals
-        breakout_up = volume_ok and uptrend and (i > 0 and high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (i > 0 and low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
