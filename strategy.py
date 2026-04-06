@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Goes long when price breaks above 20-period high with 1d EMA uptrend and volume > average.
-# Goes short when price breaks below 20-period low with 1d EMA downtrend and volume > average.
+# Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+# Goes long when price breaks above 20-period high with daily EMA uptrend and volume > average.
+# Goes short when price breaks below 20-period low with daily EMA downtrend and volume > average.
 # Uses ATR-based stoploss to limit downside. Designed to work in both bull and bear markets
 # by following the trend on higher timeframe while capturing breakouts on lower timeframe.
 # Target: 75-200 total trades over 4 years (19-50/year) with controlled risk.
