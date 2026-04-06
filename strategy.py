@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13957_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13958_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Uses 1d EMA(50) for trend direction: price above EMA = bullish bias (long only),
-# price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
-# direction of 1d trend with volume > 1.5x average. Exit on Donchian reversal or
-# trend change. Designed for 75-200 total trades over 4 years (19-50/year) to
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+# Uses 1w EMA for trend direction: price above EMA = bullish bias (long only),
+# price below EMA = bearish bias (short only). Entry on 1d Donchian breakout in
+# direction of 1w trend with volume > 1.5x average. Exit on Donchian reversal or
+# trend change. Designed for 30-100 total trades over 4 years (7-25/year) to
 # minimize fee drag. Works in bull (breaks above with trend) and bear (breaks
 # below with trend) with EMA filter.
 
@@ -40,16 +40,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for EMA trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA(50) for trend
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate 1w EMA(50) for trend
+    ema_1w = calculate_ema(df_1w['close'].values, 50)
     
-    # Align EMA to 4h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align EMA to 1d timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h data for Donchian, ATR, and volume
+    # 1d data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -97,9 +97,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend from 1d EMA
-        bullish_trend = close[i] > ema_aligned[i]  # price above 1d EMA = bullish
-        bearish_trend = close[i] < ema_aligned[i]  # price below 1d EMA = bearish
+        # Determine trend from 1w EMA
+        bullish_trend = close[i] > ema_aligned[i]  # price above 1w EMA = bullish
+        bearish_trend = close[i] < ema_aligned[i]  # price below 1w EMA = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
@@ -108,7 +108,7 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of 1d trend
+        # Entry signals - only in direction of 1w trend
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
