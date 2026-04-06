@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
-Hypothesis: 1d Donchian breakouts capture primary trends. Filter by 1w EMA200 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1w EMA200) and bear (sell breakdowns below 1w EMA200). Target: 30-100 total trades over 4 years.
+1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+Hypothesis: 1d Donchian breakouts capture long-term momentum. Filter by 1w EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1w EMA50) and bear (sell breakdowns below 1w EMA50). Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_ema_vol_v1"
+name = "1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -36,18 +36,18 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1w data for trend filter (EMA200)
+    # Get 1w data for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # EMA200 on 1w close
+    # EMA50 on 1w close
     ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        ema_1w[199] = np.mean(close_1w[:200])
-        for i in range(200, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 198) / 200
+    if len(close_1w) >= 50:
+        ema_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 48) / 50
     
-    # 1w trend: above EMA200 = bullish, below = bearish
+    # 1w trend: above EMA50 = bullish, below = bearish
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     
     # Align 1w trend to 1d timeframe
@@ -93,8 +93,8 @@ def generate_signals(prices):
             continue
         
         # Volume filter: current 1d volume > 1.5x 1w average volume (scaled)
-        # Scale 1w volume to 1d: approx 1/7 of 1w volume (since 7x 1d in 1w)
-        vol_threshold = vol_ma_1w_aligned[i] / 7.0 * 1.5
+        # Scale 1w volume to 1d: approx 1/5 of 1w volume (since 5x 1d in 1w)
+        vol_threshold = vol_ma_1w_aligned[i] / 5.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
