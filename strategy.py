@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Donchian breakouts on 12h capture medium-term trends. 1w EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 50-150 total trades over 4 years.
+12h Donchian Breakout with 1w Trend Filter and Volume Confirmation v1
+Hypothesis: 12h Donchian(20) breakouts capture strong multi-day trends. 1w EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load 1w data for trend filter (once before loop)
@@ -52,7 +52,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA25 and Donchian
+    start = 100  # For EMA25 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
