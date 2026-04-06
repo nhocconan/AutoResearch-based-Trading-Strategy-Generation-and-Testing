@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Power (Bull/Bear) with 1-week volume confirmation.
-# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to detect trend strength.
-# Volume confirmation ensures institutional participation in the move.
-# Designed for 6h timeframe to target 50-150 trades over 4 years with low frequency.
-# Works in both bull and bear markets by adapting to trend direction via EMA.
+# Hypothesis: 6-hour Donchian channel breakout with 12-hour ADX trend filter and 1-day volume confirmation.
+# Donchian breakouts capture momentum in trending markets.
+# ADX ensures we only trade in trending conditions (ADX > 25) to avoid whipsaws.
+# Volume confirmation ensures institutional participation in breakouts.
+# Designed for 6h timeframe to target 50-150 trades over 4 years with medium frequency.
 
-name = "6h_elderray1w_vol_v1"
+name = "6h_donchian20_12h_adx1d_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,201 +24,136 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week EMA(13) for Elder Ray calculation
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 20-period Donchian channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # EMA calculation
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 13:
-        ema_1w[12] = np.mean(close_1w[:13])
-        for i in range(13, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 / (13 + 1)) + (ema_1w[i-1] * (11 / (13 + 1)))
+    for i in range(19, n):
+        donchian_high[i] = np.max(high[i-19:i+1])
+        donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Bull Power = High - EMA, Bear Power = Low - EMA
-    bull_power = np.full(len(close_1w), np.nan)
-    bear_power = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
-        if not np.isnan(ema_1w[i]):
-            bull_power[i] = df_1w['high'].iloc[i] - ema_1w[i]
-            bear_power[i] = df_1w['low'].iloc[i] - ema_1w[i]
+    # 12-hour ADX(14) for trend strength filtering
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1w, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1w, bear_power)
+    # True Range and Directional Movement
+    tr_12h = np.full(len(close_12h), np.nan)
+    dm_plus_12h = np.full(len(close_12h), np.nan)
+    dm_minus_12h = np.full(len(close_12h), np.nan)
     
-    # 1-week volume average for confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = np.full(len(vol_1w), np.nan)
-    if len(vol_1w) >= 5:
-        for i in range(4, len(vol_1w)):
-            vol_ma_1w[i] = np.mean(vol_1w[i-4:i+1])
+    if len(close_12h) > 1:
+        tr_12h[0] = high_12h[0] - low_12h[0]
+        dm_plus_12h[0] = 0
+        dm_minus_12h[0] = 0
+        for i in range(1, len(close_12h)):
+            tr_12h[i] = max(high_12h[i] - low_12h[i],
+                           abs(high_12h[i] - close_12h[i-1]),
+                           abs(low_12h[i] - close_12h[i-1]))
+            dm_plus_12h[i] = max(high_12h[i] - high_12h[i-1], 0)
+            dm_minus_12h[i] = max(low_12h[i-1] - low_12h[i], 0)
+            if dm_plus_12h[i] > dm_minus_12h[i]:
+                dm_minus_12h[i] = 0
+            else:
+                dm_plus_12h[i] = 0
     
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Smoothed TR, DM+, DM-
+    atr_12h = np.full(len(close_12h), np.nan)
+    s_dm_plus_12h = np.full(len(close_12h), np.nan)
+    s_dm_minus_12h = np.full(len(close_12h), np.nan)
+    
+    if len(close_12h) >= 14:
+        atr_12h[13] = np.nansum(tr_12h[1:14])
+        s_dm_plus_12h[13] = np.nansum(dm_plus_12h[1:14])
+        s_dm_minus_12h[13] = np.nansum(dm_minus_12h[1:14])
+        for i in range(14, len(close_12h)):
+            atr_12h[i] = atr_12h[i-1] - (atr_12h[i-1]/14) + tr_12h[i]
+            s_dm_plus_12h[i] = s_dm_plus_12h[i-1] - (s_dm_plus_12h[i-1]/14) + dm_plus_12h[i]
+            s_dm_minus_12h[i] = s_dm_minus_12h[i-1] - (s_dm_minus_12h[i-1]/14) + dm_minus_12h[i]
+    
+    # DI+ and DI-
+    di_plus_12h = np.full(len(close_12h), np.nan)
+    di_minus_12h = np.full(len(close_12h), np.nan)
+    dx_12h = np.full(len(close_12h), np.nan)
+    
+    for i in range(14, len(close_12h)):
+        if atr_12h[i] != 0:
+            di_plus_12h[i] = 100 * s_dm_plus_12h[i] / atr_12h[i]
+            di_minus_12h[i] = 100 * s_dm_minus_12h[i] / atr_12h[i]
+            if di_plus_12h[i] + di_minus_12h[i] != 0:
+                dx_12h[i] = 100 * abs(di_plus_12h[i] - di_minus_12h[i]) / (di_plus_12h[i] + di_minus_12h[i])
+    
+    # ADX calculation
+    adx_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 28:  # Need 14 for DX + 14 for smoothing
+        dx_valid = dx_12h[14:]  # Skip first 14 where DX is NaN
+        if len(dx_valid) >= 14:
+            adx_12h[27] = np.nanmean(dx_valid[:14])  # First ADX at index 27
+            for i in range(28, len(close_12h)):
+                adx_12h[i] = (adx_12h[i-1] * 13 + dx_12h[i]) / 14
+    
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # 1-day volume average for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    for i in range(19, len(vol_1d)):  # 20-period average
+        vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
+    
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(13, 4)  # EMA needs 13, volume needs 4
+    start = max(28, 20, 19)  # ADX needs 28, Donchian needs 20, volume needs 19
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.3
+        # Volume condition: current volume > 1.5x daily average
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        
+        # ADX filter: only trade when strongly trending (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Bear power turns positive (trend weakening) or stoploss
-            if (bear_power_aligned[i] > 0 or 
+            # Exit: Donchian breakdown or stoploss
+            if (close[i] < donchian_low[i-1] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Bull power turns negative (trend weakening) or stoploss
-            if (bull_power_aligned[i] < 0 or 
+            # Exit: Donchian breakout or stoploss
+            if (close[i] > donchian_high[i-1] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation
-            if volume_filter:
-                # Long: Bull power positive and increasing
-                if (bull_power_aligned[i] > 0 and 
-                    i > start and bull_power_aligned[i] > bull_power_aligned[i-1]):
+            # Look for entries: Donchian breakout with volume and trend
+            if volume_filter and strong_trend:
+                # Long: breakout above Donchian high
+                if close[i] > donchian_high[i-1]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: Bear power negative and decreasing
-                elif (bear_power_aligned[i] < 0 and 
-                      i > start and bear_power_aligned[i] < bear_power_aligned[i-1]):
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-            else:
-                signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6-hour Elder Ray Power (Bull/Bear) with 1-week volume confirmation.
-# Elder Ray measures bull power (high - EMA) and bear power (low - EMA) to detect trend strength.
-# Volume confirmation ensures institutional participation in the move.
-# Designed for 6h timeframe to target 50-150 trades over 4 years with low frequency.
-# Works in both bull and bear markets by adapting to trend direction via EMA.
-
-name = "6h_elderray1w_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # 1-week EMA(13) for Elder Ray calculation
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # EMA calculation
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 13:
-        ema_1w[12] = np.mean(close_1w[:13])
-        for i in range(13, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 / (13 + 1)) + (ema_1w[i-1] * (11 / (13 + 1)))
-    
-    # Bull Power = High - EMA, Bear Power = Low - EMA
-    bull_power = np.full(len(close_1w), np.nan)
-    bear_power = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
-        if not np.isnan(ema_1w[i]):
-            bull_power[i] = df_1w['high'].iloc[i] - ema_1w[i]
-            bear_power[i] = df_1w['low'].iloc[i] - ema_1w[i]
-    
-    bull_power_aligned = align_htf_to_ltf(prices, df_1w, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1w, bear_power)
-    
-    # 1-week volume average for confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = np.full(len(vol_1w), np.nan)
-    if len(vol_1w) >= 5:
-        for i in range(4, len(vol_1w)):
-            vol_ma_1w[i] = np.mean(vol_1w[i-4:i+1])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    # Start from warmup period
-    start = max(13, 4)  # EMA needs 13, volume needs 4
-    
-    for i in range(start, n):
-        # Skip if required data not available
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition: current volume > 1.3x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.3
-        
-        # Check exits and stoploss
-        if position == 1:  # long position
-            # Exit: Bear power turns positive (trend weakening) or stoploss
-            if (bear_power_aligned[i] > 0 or 
-                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Bull power turns negative (trend weakening) or stoploss
-            if (bull_power_aligned[i] < 0 or 
-                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation
-            if volume_filter:
-                # Long: Bull power positive and increasing
-                if (bull_power_aligned[i] > 0 and 
-                    i > start and bull_power_aligned[i] > bull_power_aligned[i-1]):
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: Bear power negative and decreasing
-                elif (bear_power_aligned[i] < 0 and 
-                      i > start and bear_power_aligned[i] < bear_power_aligned[i-1]):
+                # Short: breakdown below Donchian low
+                elif close[i] < donchian_low[i-1]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
