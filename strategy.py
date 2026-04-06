@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12832_12h_donchian20_1d_vol_v1"
+name = "exp_12832_12h_daily_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 24
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 24  # Max 12 days (24 * 12h)
+VOLUME_MA_PERIOD = 30
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+MAX_HOLD_BARS = 30  # Max 15 days (30 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -43,11 +43,12 @@ def generate_signals(prices):
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
     close_d = df_daily['close'].values
-    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
+    
+    donchian_upper, donchian_lower = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
     # Align to 12h timeframe
-    upper_d_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
-    lower_d_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -70,8 +71,8 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if daily levels not available
-        if np.isnan(upper_d_aligned[i]) or np.isnan(lower_d_aligned[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,9 +103,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_d_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_d_aligned[i]
+        # Breakout above upper Donchian or breakdown below lower Donchian
+        breakout_long = volume_ok and close[i] >= donchian_upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
