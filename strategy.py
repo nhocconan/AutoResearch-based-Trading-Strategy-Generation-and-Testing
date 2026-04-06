@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA100 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high + close > EMA100 + volume > 2.0x average
-# Short when price breaks below Donchian(20) low + close < EMA100 + volume > 2.0x average
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA100 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + close > EMA100 + volume > 1.8x average
+# Short when price breaks below Donchian(20) low + close < EMA100 + volume > 1.8x average
 # Uses 1d EMA100 for trend filter to avoid counter-trend trades in bear markets
-# Target: 100-180 total trades over 4 years with controlled risk
+# Target: 50-150 total trades over 4 years with controlled risk
 # ATR-based stoploss to limit drawdown
 
-name = "4h_donchian20_1d_ema100_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema100_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     # EMA100 calculation
     ema100_1d = pd.Series(close_1d).ewm(span=100, min_periods=100, adjust=False).mean().values
     
-    # Align 1d EMA100 to 4h timeframe
+    # Align 1d EMA100 to 12h timeframe
     ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
     # Donchian channels (20-period)
@@ -94,14 +94,14 @@ def generate_signals(prices):
             # Long: break above Donchian upper + uptrend + volume spike
             if (close[i] > donchian_upper[i] and 
                 close[i] > ema100_1d_aligned[i] and
-                volume[i] > 2.0 * volume_ma[i]):
+                volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: break below Donchian lower + downtrend + volume spike
             elif (close[i] < donchian_lower[i] and 
                   close[i] < ema100_1d_aligned[i] and
-                  volume[i] > 2.0 * volume_ma[i]):
+                  volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
