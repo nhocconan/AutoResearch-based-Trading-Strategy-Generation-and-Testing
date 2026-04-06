@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13940_4h_donchian20_1d_ema_vol_v2"
+name = "exp_13940_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (1.8x)
-# Tighter volume filter (1.8x vs 2.0x) and optimized entry/exit to increase trade frequency
-# while maintaining selectivity. Target: 100-250 trades over 4 years (25-60/year).
-# Uses ATR-based trailing stop (2.0x) and exits on Donchian reversal or trend change.
-# Designed to work in both bull (breakouts to new highs) and bear (breakdowns to new lows).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
+# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
+# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
+# requiring alignment with daily trend to avoid counter-trend whipsaws
+# Added: ATR-based trailing stop (2.5x) and exit on Donchian reversal or trend change
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -93,8 +93,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - optimized threshold
-        volume_ok = volume[i] > (volume_ma[i] * 1.8)
+        # Volume confirmation - higher threshold to reduce trades
+        volume_ok = volume[i] > (volume_ma[i] * 2.0)
         
         # Trend filter from 1d EMA
         trend_up = close[i] > ema_1d_aligned[i]
@@ -114,12 +114,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
+                stop_price = entry_price - (2.5 * atr[i])
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
+                stop_price = entry_price + (2.5 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
