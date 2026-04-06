@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with 12h trend filter and volume confirmation.
-- Long: price breaks above 6h Donchian(20) + price > 12h EMA(50) + volume > 1.5x average
-- Short: price breaks below 6h Donchian(20) + price < 12h EMA(50) + volume > 1.5x average
+6h Donchian breakout with 12h pivot direction and volume confirmation.
+- Long: price breaks above 6h Donchian(20) + price above 12h pivot + volume > 1.5x average
+- Short: price breaks below 6h Donchian(20) + price below 12h pivot + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
-- Target: 75-200 trades over 4 years (19-50/year)
+- Target: 100-200 trades over 4 years (25-50/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14219_6h_donchian20_12h_ema_vol_v1"
+name = "exp_14219_6h_donchian20_12h_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -35,13 +35,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA filter (once before loop)
+    # Load 12h data for pivot calculation (once before loop)
     df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(50)
-    ema_12h = calculate_ema(close_12h, 50)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 12h pivot points (standard)
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    r1_12h = 2 * pivot_12h - low_12h
+    s1_12h = 2 * pivot_12h - high_12h
+    r2_12h = pivot_12h + (high_12h - low_12h)
+    s2_12h = pivot_12h - (high_12h - low_12h)
+    r3_12h = high_12h + 2 * (pivot_12h - low_12h)
+    s3_12h = low_12h - 2 * (high_12h - pivot_12h)
+    
+    # Align 12h pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
     
     # 6h data
     high = prices['high'].values
@@ -65,13 +77,14 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
-    start = max(20, 20, 14, 50) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR)
+    start = max(20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_12h_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(pivot_12h_aligned[i]) or \
+           np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or np.isnan(atr[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -93,11 +106,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with 12h EMA filter and volume
-        # Long: break above upper band + price > 12h EMA + volume
-        # Short: break below lower band + price < 12h EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_12h_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_12h_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with 12h pivot filter and volume
+        # Long: break above upper band + price above S3 pivot + volume
+        # Short: break below lower band + price below R3 pivot + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > s3_12h_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < r3_12h_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
