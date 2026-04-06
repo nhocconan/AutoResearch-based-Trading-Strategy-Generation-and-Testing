@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x average
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x average
-# Exit when Williams %R returns to -50 level or trend changes
-# Williams %R identifies overextended moves, EMA filter ensures trend alignment, volume confirms conviction
-# Targets 50-150 total trades over 4 years by requiring confluence of oversold/overbought + trend + volume
+# Hypothesis: 1d Donchian breakout with 1w trend filter + volume confirmation
+# Long when price breaks above Donchian(20) high AND 1w close > 1w open (bullish weekly candle) AND volume > 1.5x average
+# Short when price breaks below Donchian(20) low AND 1w close < 1w open (bearish weekly candle) AND volume > 1.5x average
+# Exit when price touches opposite Donchian band or weekly trend reverses
+# Targets 30-100 trades over 4 years by requiring multiple confluence factors
 
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
+name = "1d_donchian_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,18 +24,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period) - momentum oscillator
-    # Values: -100 to 0, where <-80 is oversold, >-20 is overbought
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_low - lowest_low + 1e-10)
-    williams_r = williams_r.values
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = highest_high.values
+    donchian_low = lowest_low.values
     
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Weekly trend filter (bullish/bearish candle)
+    df_1w = get_htf_data(prices, '1w')
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open  # True for bullish weekly candle
+    weekly_bearish = weekly_close < weekly_open  # True for bearish weekly candle
+    
+    # Align weekly trend to daily timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -45,36 +48,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or \
+           np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: Williams %R returns to -50 OR trend changes
+        # Exit conditions
         if position == 1:  # long position
-            if williams_r[i] > -50 or close[i] < ema_12h_aligned[i]:
+            if close[i] <= donchian_low[i] or weekly_bearish_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if williams_r[i] < -50 or close[i] > ema_12h_aligned[i]:
+            if close[i] >= donchian_high[i] or weekly_bullish_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with trend alignment and volume confirmation
-            # Long: oversold + uptrend + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
+            # Look for entries with confluence: Donchian breakout + weekly trend + volume
+            # Long: break above Donchian high + bullish weekly candle + volume confirmation
+            if (close[i] > donchian_high[i] and 
+                weekly_bullish_aligned[i] > 0.5 and 
+                volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought + downtrend + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
+            # Short: break below Donchian low + bearish weekly candle + volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  weekly_bearish_aligned[i] > 0.5 and 
+                  volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
