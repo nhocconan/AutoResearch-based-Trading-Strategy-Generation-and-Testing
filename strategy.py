@@ -1,89 +1,118 @@
 #!/usr/bin/env python3
 """
-1d Volume-Weighted Price Action + Weekly Trend Filter
-Hypothesis: On daily timeframe, price respects weekly trend when accompanied by volume confirmation.
-Long when price > VWAP(20) AND weekly EMA(8) rising AND volume > 1.5x average.
-Short when price < VWAP(20) AND weekly EMA(8) falling AND volume > 1.5x average.
-Uses VWAP for intraday value area and weekly EMA for trend filter to avoid counter-trend trades.
-Targets 50-100 trades over 4 years (12-25/year) to minimize fee drag.
-Works in bull markets (follow weekly uptrend) and bear markets (short weekly downtrend).
+6h Ichimoku Cloud + Volume Confirmation + 1d Trend Filter
+Hypothesis: Ichimoku provides strong support/resistance and trend direction via cloud.
+In 6h timeframe, we use 1d Ichimoku for primary trend direction and 6h for entry timing.
+Volume confirmation reduces false breakouts. Works in bull (buy above cloud) and bear (sell below cloud).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14330_1d_vwap_weekly_trend_v1"
-timeframe = "1d"
+name = "exp_14331_6h_ichimoku_vol_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # Load 1d data for Ichimoku trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 8-period EMA for weekly trend
-    ema_weekly = pd.Series(close_weekly).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_weekly_rising = ema_weekly > np.roll(ema_weekly, 1)
-    ema_weekly_falling = ema_weekly < np.roll(ema_weekly, 1)
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
-    ema_weekly_rising_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly_rising.astype(float))
-    ema_weekly_falling_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly_falling.astype(float))
+    # Ichimoku components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Daily data
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Chikou Span (Lagging Span): current close plotted 26 periods behind
+    # For trend filter, we'll use the cloud relationship
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # VWAP (20-period)
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_numerator_sum = pd.Series(vwap_numerator).rolling(window=20, min_periods=20).sum().values
-    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = vwap_numerator_sum / (volume_sum + 1e-10)
-    
-    # Volume filter: require volume > 1.5x 20-period average
+    # Volume filter: require above average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
+    
+    # ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = 20
+    # Start from warmup period (max of Ichimoku periods)
+    start = max(9, 26, 52) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(vwap[i]) or np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: reverse signal or price crosses VWAP
+        # Determine cloud top and bottom (Senkou Span A and B)
+        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
+        
+        # Check exits
         if position == 1:  # long position
-            if (ema_weekly_falling_aligned[i] == 1.0) or (close[i] < vwap[i]):
+            # Exit: price falls below cloud OR stoploss
+            if close[i] < cloud_bottom or close[i] <= entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if (ema_weekly_rising_aligned[i] == 1.0) or (close[i] > vwap[i]):
+            # Exit: price rises above cloud OR stoploss
+            if close[i] > cloud_top or close[i] >= entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price vs VWAP + weekly trend + volume filter
-            long_setup = (close[i] > vwap[i]) and (ema_weekly_rising_aligned[i] == 1.0) and vol_filter[i]
-            short_setup = (close[i] < vwap[i]) and (ema_weekly_falling_aligned[i] == 1.0) and vol_filter[i]
+            # Look for entries: price relative to cloud + volume
+            long_setup = (close[i] > cloud_top) and vol_filter[i]
+            short_setup = (close[i] < cloud_bottom) and vol_filter[i]
             
             if long_setup:
                 signals[i] = 0.25
