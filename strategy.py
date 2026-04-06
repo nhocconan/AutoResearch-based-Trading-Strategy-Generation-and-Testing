@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly pivot direction and volume confirmation.
-# Uses weekly pivot levels (from weekly data) to determine bias: long above weekly pivot, short below.
-# Breakouts are taken only in direction of weekly pivot bias, with volume filter to avoid false breakouts.
-# Weekly pivot provides structural bias that works in both bull and bear markets by identifying key support/resistance.
-# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and cost.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+# Weekly pivot provides structural support/resistance from higher timeframe.
+# Breakouts in direction of weekly pivot bias capture strong moves with reduced false signals.
+# Volume confirmation ensures breakouts have participation. Works in bull/bear as pivot adapts.
+# Target: 75-150 total trades over 4 years (19-38/year) to balance opportunity and cost.
 
 name = "exp_13087_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
@@ -31,7 +31,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_pivot(high, low, close):
-    """Calculate weekly pivot point: (H + L + C) / 3"""
+    """Calculate standard pivot point: (H + L + C) / 3"""
     return (high + low + close) / 3.0
 
 def generate_signals(prices):
@@ -42,7 +42,7 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot
+    # Calculate weekly pivot for trend filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -97,13 +97,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Weekly pivot bias: price above pivot = bullish bias, below = bearish bias
-        bullish_bias = close[i] > pivot_1w_aligned[i]
-        bearish_bias = close[i] < pivot_1w_aligned[i]
+        # Trend filter: price above/below weekly pivot
+        uptrend_bias = close[i] > pivot_1w_aligned[i]
+        downtrend_bias = close[i] < pivot_1w_aligned[i]
         
         # Breakout signals
-        breakout_up = volume_ok and bullish_bias and (i > 0 and high[i] > highest_high[i-1])
-        breakout_down = volume_ok and bearish_bias and (i > 0 and low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and uptrend_bias and (i == 0 or high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend_bias and (i == 0 or low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
