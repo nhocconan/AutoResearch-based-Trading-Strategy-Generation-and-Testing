@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1-hour strategy using 4-hour Donchian breakouts with 1-day EMA(50) trend filter and volume confirmation.
+# 1h strategy using 4h Donchian breakouts with 1d EMA trend filter and volume confirmation.
 # Uses 1d trend for direction, 4h Donchian breakouts for entries, volume for confirmation.
 # Designed for ~100-150 total trades over 4 years (25-38/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
