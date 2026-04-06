@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 1d Donchian(20) Breakout + Volume + Weekly ADX Filter
-Hypothesis: Daily Donchian breakouts capture major trends with fewer trades than lower timeframes.
-Weekly ADX filter ensures we only trade in strong trending markets, reducing whipsaws.
-Volume confirmation adds institutional validation. Designed for 30-100 trades over 4 years.
+Hypothesis: Daily Donchian breakouts capture multi-week trends in BTC/ETH/SOL.
+Volume confirms institutional participation. Weekly ADX filter ensures we only trade in strong trends.
+Designed for low trade frequency (target: 30-100 over 4 years) to minimize fee drag.
+Works in bull markets (trend continuation) and bear markets (avoids false breakouts via ADX filter).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_volume_weekly_adx_v1"
+name = "1d_donchian20_volume_weeklyadx_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -20,25 +21,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load weekly data for ADX (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    df_1w = get_htf_data(prices, '1w')
     
     # ADX calculation on weekly
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_weekly[1:] - low_weekly[1:])
-    tr2 = np.abs(high_weekly[1:] - close_weekly[:-1])
-    tr3 = np.abs(low_weekly[1:] - close_weekly[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_weekly[1:] - high_weekly[:-1]) > (low_weekly[:-1] - low_weekly[1:]), 
-                       np.maximum(high_weekly[1:] - high_weekly[:-1], 0), 0)
-    dm_minus = np.where((low_weekly[:-1] - low_weekly[1:]) > (high_weekly[1:] - high_weekly[:-1]), 
-                        np.maximum(low_weekly[:-1] - low_weekly[1:], 0), 0)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -64,8 +65,8 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align weekly ADX to daily timeframe
-    adx_aligned = align_ltf_to_htf(prices, df_weekly, adx)
+    # Align ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Price and volume data
     high = prices['high'].values
@@ -99,30 +100,30 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5  # Moderate volume filter
+            volume_filter = volume[i] > vol_ma * 1.5
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR weekly ADX < 25
+            # Exit: price closes below Donchian lower OR ADX < 25
             if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR weekly ADX < 25
+            # Exit: price closes above Donchian upper OR ADX < 25
             if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly ADX trend
+            # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Weekly ADX threshold
+            trend_filter = adx_aligned[i] > 30  # Strong trend filter for weekly
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
