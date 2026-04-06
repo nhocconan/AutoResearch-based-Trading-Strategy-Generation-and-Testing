@@ -3,28 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour trend following using 12h EMA for direction and 6h price action for entry.
-# Uses 12h EMA (50) as primary trend filter, enters on 6h pullbacks to EMA with volume confirmation.
-# Works in bull/bear by trading with higher timeframe momentum while using lower timeframe for precise entries.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee impact while capturing meaningful moves.
+# Hypothesis: 4-hour Donchian channel breakout with daily EMA filter and volume confirmation.
+# This strategy targets strong momentum moves in both bull and bear markets by:
+# 1) Using Donchian breakouts to catch significant price moves
+# 2) Filtering with daily EMA to trade with higher timeframe trend
+# 3) Requiring volume confirmation to avoid false breakouts
+# 4) Using ATR-based stops for risk management
+# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
 
-name = "exp_13039_6h_ema50_pullback_vol_v1"
-timeframe = "6h"
+name = "exp_13040_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-EMA_PERIOD_12H = 50
-EMA_PERIOD_6H = 20
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-PULLBACK_THRESHOLD = 0.5  # Pullback strength as fraction of ATR
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -35,32 +33,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_PERIOD_12H)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h EMA for dynamic support/resistance
-    ema_6h = calculate_ema(close, EMA_PERIOD_6H)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stop loss and pullback measurement
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -69,11 +72,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD_12H, EMA_PERIOD_6H, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,33 +98,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: 12h EMA direction
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Pullback to 6h EMA with volume confirmation
-        pullback_to_ema_long = (
-            uptrend_12h and 
-            volume_ok and 
-            close[i] <= ema_6h[i] and 
-            close[i] >= (ema_6h[i] - PULLBACK_THRESHOLD * atr[i])
-        )
-        
-        pullback_to_ema_short = (
-            downtrend_12h and 
-            volume_ok and 
-            close[i] >= ema_6h[i] and 
-            close[i] <= (ema_6h[i] + PULLBACK_THRESHOLD * atr[i])
-        )
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (i > 0 and high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i > 0 and low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if pullback_to_ema_long:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif pullback_to_ema_short:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
