@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian channel breakout with daily EMA trend filter and volume confirmation.
-# Uses 12h timeframe to reduce trade frequency and avoid fee drag, with daily EMA for trend direction.
-# Breakouts capture strong moves in both bull and bear markets, volume filters weak signals,
-# and daily EMA ensures we trade with higher timeframe momentum. Target: 50-150 trades over 4 years.
+# Hypothesis: 4-hour Donchian breakout with daily EMA trend filter and volume confirmation.
+# Focuses on capturing strong directional moves in both bull and bear markets.
+# Uses volume to filter weak breakouts and EMA to align with higher timeframe trend.
+# Targets 75-200 trades over 4 years (19-50/year) to balance opportunity and cost.
 
-name = "exp_13045_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13046_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -47,7 +47,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
