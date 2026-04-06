@@ -1,4 +1,3 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -25,6 +24,12 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -36,14 +41,11 @@ def generate_signals(prices):
     # Calculate weekly Donchian channels
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    
-    upper_w = pd.Series(high_w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_w = pd.Series(low_w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    upper_w, lower_w = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
     
     # Align to daily timeframe
-    upper_w_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
-    lower_w_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
+    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
+    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -64,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if weekly levels not available
-        if np.isnan(upper_w_aligned[i]) or np.isnan(lower_w_aligned[i]):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -86,9 +88,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above weekly upper or below weekly lower
-        breakout_long = volume_ok and close[i] >= upper_w_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_w_aligned[i]
+        # Breakout above weekly upper or breakdown below weekly lower
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -110,7 +112,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-# %%
-# %%
-# %%
