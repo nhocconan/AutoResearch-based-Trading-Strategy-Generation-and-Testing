@@ -1,79 +1,52 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume Confirmation + ADX Trend Filter
-Hypothesis: Donchian breakouts capture momentum bursts, volume confirms institutional participation,
-ADX filters for trending markets. Works in bull (buy breakouts above upper band)
-and bear (sell breakdowns below lower band). Target: 75-200 total trades over 4 years (19-50/year).
+1h RSI(2) Pullback + 4h Trend + Volume Confirmation
+Hypothesis: In strong 4h trends, buy pullbacks to RSI(2) oversold in uptrends and sell rallies to RSI(2) overbought in downtrends.
+Uses 4h EMA(50) for trend filter and RSI(2) on 1h for precise entry timing. Volume filter avoids low-activity periods.
+Designed for 60-120 trades over 4 years (15-30/year) with 0.20 position sizing to manage drawdowns.
+Works in bull (buy uptrend pullbacks) and bear (sell downtrend rallies) by following 4h trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14353_4h_donchian_vol_adx_v1"
-timeframe = "4h"
+name = "14354_1h_rsi2_pullback_4h_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for ADX (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        up_move[0] = 0
-        down_move[0] = 0
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smoothed values
-        tr_rolled = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-        plus_dm_rolled = pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values
-        minus_dm_rolled = pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_rolled / tr_rolled
-        minus_di = 100 * minus_dm_rolled / tr_rolled
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-        
-        return adx
+    # 4h EMA(50) for trend direction
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # 4h data
+    # 1h data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1h RSI(2) for entry timing
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
     # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
+    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -88,49 +61,50 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20 + 14  # Donchian(20) + ADX(14)
+    start = max(50, 2, 20, 14)  # EMA50, RSI2, volMA20, ATR14
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # ADX trend filter: only trade when trending (ADX > 25)
-        trending = adx_12h_aligned[i] > 25
+        # Determine 4h trend
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian band OR trend weakens OR stoploss
-            if (close[i] <= donchian_low[i] or not trending or
+            # Exit: RSI(2) overbought OR trend reversal OR stoploss
+            if (rsi[i] >= 80 or not uptrend or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian band OR trend weakens OR stoploss
-            if (close[i] >= donchian_high[i] or not trending or
+            # Exit: RSI(2) oversold OR trend reversal OR stoploss
+            if (rsi[i] <= 20 or not downtrend or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries: Donchian breakout + volume + trend
-            long_setup = (close[i] > donchian_high[i] and vol_filter[i] and trending)
-            short_setup = (close[i] < donchian_low[i] and vol_filter[i] and trending)
+            # Look for entries: pullback to RSI(2) extreme in direction of 4h trend
+            long_setup = (rsi[i] <= 15 and uptrend and vol_filter[i])
+            short_setup = (rsi[i] >= 85 and downtrend and vol_filter[i])
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
             else:
