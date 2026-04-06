@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume + ADX Filter
-Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with lower trade frequency.
+4h Donchian(20) Breakout + Volume + ADX Filter v20
+Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
 Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
-Designed for 12h timeframe to achieve target trade count of 50-150 total over 4 years.
+Optimized for 4h timeframe with proper position sizing to achieve target trade count of 75-200 total over 4 years.
+Key improvements: further tightened volume filter to 2.5x average, increased ADX threshold to 30, and added volatility filter using ATR to reduce false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_volume_adx_v20"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -64,7 +65,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Price and volume data
@@ -72,6 +73,17 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # ATR for volatility filter (14-period)
+    tr_l = np.abs(high[1:] - low[1:])
+    tr_h = np.abs(high[1:] - close[:-1])
+    tr_lc = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr_l, np.maximum(tr_h, tr_lc))
+    tr = np.concatenate([[np.nan], tr])
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,9 +93,9 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(adx_aligned[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -99,38 +111,46 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
+            volume_filter = volume[i] > vol_ma * 2.5  # Further tightened
         else:
             volume_filter = False
         
+        # Volatility filter: current ATR > 0.5 * 20-period ATR average
+        if i >= 20:
+            atr_ma = np.mean(atr[i-20:i])
+            volatility_filter = atr[i] > atr_ma * 0.5
+        else:
+            volatility_filter = False
+        
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20
-            if close[i] < lowest_low or adx_aligned[i] < 20:
+            # Exit: price closes below Donchian lower OR ADX < 30
+            if close[i] < lowest_low or adx_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20
-            if close[i] > highest_high or adx_aligned[i] < 20:
+            # Exit: price closes above Donchian upper OR ADX < 30
+            if close[i] > highest_high or adx_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend
+            # Look for entries: Donchian breakout + volume + ADX trend + volatility
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25
+            trend_filter = adx_aligned[i] > 30  # Increased threshold
             
-            if i >= 20 and bull_breakout and volume_filter and trend_filter:
-                signals[i] = 0.25
+            if i >= 20 and bull_breakout and volume_filter and trend_filter and volatility_filter:
+                signals[i] = 0.20
                 position = 1
-            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
-                signals[i] = -0.25
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter and volatility_filter:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
     
     return signals
+</response>
