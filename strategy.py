@@ -3,39 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-day Camarilla pivot levels for breakout and fade signals.
-# Long when price breaks above R4 with volume confirmation and price > 1w EMA200.
-# Short when price breaks below S4 with volume confirmation and price < 1w EMA200.
-# Fade longs at R3 and shorts at S3 with reduced position size.
-# Uses 1-week EMA200 as trend filter to align with higher timeframe trend.
+# Hypothesis: 12h strategy using 1w Donchian breakout with volume confirmation and ATR stoploss.
+# Goes long when price breaks above 1w Donchian upper channel with above-average volume,
+# short when breaks below lower channel with volume.
+# Uses 1w EMA50 as trend filter to avoid counter-trend trades.
 # Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull (R4 breakouts) and bear (S4 breakdowns) markets.
-# Camarilla levels provide mathematically derived support/resistance that adapt to volatility.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Donchian channels provide clear breakout levels that work across market regimes.
 
-name = "exp_13787_6h_camarilla1d_ema200w_vol_v1"
-timeframe = "6h"
+name = "exp_13788_12h_donchian1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1  # Use previous day's OHLC
-EMA_TREND_PERIOD = 200
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 10
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-FADE_SIZE = 0.125  # Half position for fade trades
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    # Camarilla formula based on previous period's range
-    range_ = high - low
-    # Calculate levels
-    r4 = close + range_ * 1.1 / 2
-    r3 = close + range_ * 1.1 / 4
-    s3 = close - range_ * 1.1 / 4
-    s4 = close - range_ * 1.1 / 2
-    return r4, r3, s3, s4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -53,43 +46,27 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivot levels (from previous day) ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Camarilla levels using previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Shift by 1 to use previous day's levels (avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    # Set first value to NaN as there's no previous day
-    high_1d_prev[0] = np.nan
-    low_1d_prev[0] = np.nan
-    close_1d_prev[0] = np.nan
-    
-    camarilla_r4, camarilla_r3, camarilla_s3, camarilla_s4 = calculate_camarilla(
-        high_1d_prev, low_1d_prev, close_1d_prev
-    )
-    
-    # Load 1w data for EMA200 trend filter ONCE before loop
+    # Load 1w data for Donchian channels and EMA trend filter ONCE before loop
     df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1w Donchian channels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_upper, donchian_lower = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
+    
+    # Calculate 1w EMA for trend filter
     close_1w = df_1w['close'].values
-    ema_200w = calculate_ema(close_1w, EMA_TREND_PERIOD)
+    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
     
-    # Align indicators to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema_200w_aligned = align_htf_to_ltf(prices, df_1w, ema_200w)
+    # Align 1w indicators to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 6h data for entry timing and ATR
+    # 12h data for entry timing and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -107,13 +84,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_TREND_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(ema_200w_aligned[i]) or np.isnan(volume_ma[i])):
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -138,55 +113,41 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA200
-        above_ema = close[i] > ema_200w_aligned[i]
-        below_ema = close[i] < ema_200w_aligned[i]
+        # Trend direction from 1w EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
         
-        # Breakout signals
-        long_breakout = volume_ok and above_ema and close[i] > camarilla_r4_aligned[i]
-        short_breakout = volume_ok and below_ema and close[i] < camarilla_s4_aligned[i]
-        
-        # Fade signals (counter-trend at R3/S3)
-        long_fade = volume_ok and below_ema and close[i] < camarilla_r3_aligned[i] and close[i] > camarilla_s3_aligned[i]
-        short_fade = volume_ok and above_ema and close[i] > camarilla_s3_aligned[i] and close[i] < camarilla_r3_aligned[i]
+        # Donchian breakout signals
+        long_signal = volume_ok and above_ema and close[i] > donchian_upper_aligned[i]
+        short_signal = volume_ok and below_ema and close[i] < donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_breakout:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_breakout:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            elif long_fade:
-                signals[i] = FADE_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_fade:
-                signals[i] = -FADE_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below S3 (support break) or above R4 with weakening momentum
-            if close[i] < camarilla_s3_aligned[i]:
+            # Exit long on close below Donchian lower (trend reversal)
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = SIGNAL_SIZE if position == 1 else 0.0
+                signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above R3 (resistance break) or below S4 with weakening momentum
-            if close[i] > camarilla_r3_aligned[i]:
+            # Exit short on close above Donchian upper (trend reversal)
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -SIGNAL_SIZE if position == -1 else 0.0
+                signals[i] = -SIGNAL_SIZE
     
     return signals
