@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by weekly trend (from 1w EMA) for bias and daily volume for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 100-200 total trades over 4 years (25-50/year).
+6h Williams %R reversal with 1d volume confirmation and trend filter
+Hypothesis: Williams %R captures short-term overbought/oversold conditions. In 6h timeframe,
+extreme readings (< -80 or > -20) combined with 1d volume surge and 1d trend filter
+provide high-probability reversals. Works in bull (buy oversold in uptrend) and bear
+(sell overbought in downtrend). Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1w_trend_vol_v1"
-timeframe = "4h"
+name = "6h_williamsr_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,13 +20,13 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price and volume data
+    # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR for stoploss
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -36,42 +39,41 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1w data for trend filter (EMA21)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Williams %R (14-period) on 6h data
+    willr = np.full(n, np.nan)
+    for i in range(13, n):
+        highest_high = np.max(high[i-13:i+1])
+        lowest_low = np.min(low[i-13:i+1])
+        if highest_high != lowest_low:
+            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        else:
+            willr[i] = -50  # neutral when no range
     
-    # EMA21 on weekly close
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 21:
-        ema_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
+    # Get 1d data for trend filter (close vs SMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly trend: above EMA21 = bullish, below = bearish
-    weekly_trend = np.where(close_1w > ema_1w, 1, -1)
+    # SMA50 on daily close
+    sma_1d = np.full(len(close_1d), np.nan)
+    for i in range(49, len(close_1d)):
+        sma_1d[i] = np.mean(close_1d[i-49:i+1])
     
-    # Align weekly trend to 4h timeframe
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # Daily trend: above SMA50 = bullish, below = bearish
+    daily_trend = np.where(close_1d > sma_1d, 1, -1)
+    
+    # Align daily trend to 6h timeframe
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
     
     # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
     
     # 20-period average volume on daily
     vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    for i in range(19, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Align volume MA to 4h timeframe
+    # Align volume MA to 6h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Donchian channels (20-period) from 4h data
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,12 +81,12 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 50  # Need enough data for Williams %R and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(weekly_trend_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
+        if (np.isnan(atr[i]) or np.isnan(willr[i]) or 
+            np.isnan(daily_trend_aligned[i]) or
             np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -93,17 +95,17 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 4h volume > 1.5x daily average volume (scaled)
-        # Scale daily volume to 4h: approx 1/6 of daily volume (since 6x 4h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.5
+        # Volume filter: current 6h volume > 1.5x daily average volume (scaled)
+        # Scale daily volume to 6h: approx 1/4 of daily volume (since 4x 6h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against weekly trend
+            # Exit: Williams %R returns from oversold OR against daily trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower[i] or
-                weekly_trend_aligned[i] == -1 or
+            if (willr[i] > -50 or  # exited oversold
+                daily_trend_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -112,10 +114,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against weekly trend
+            # Exit: Williams %R returns from overbought OR against daily trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper[i] or
-                weekly_trend_aligned[i] == 1 or
+            if (willr[i] < -50 or  # exited overbought
+                daily_trend_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -125,20 +127,20 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
-                # Breakout entries: upper/lower with weekly trend
-                bull_breakout = close[i] > upper[i]
-                bear_breakout = close[i] < lower[i]
+            # Minimum holding period: only allow new entry after 8 bars flat
+            if bars_since_entry >= 8:
+                # Reversal entries: extreme Williams %R with trend and volume
+                oversold = willr[i] < -80
+                overbought = willr[i] > -20
                 
-                # Long: breakout above upper with bullish weekly trend + volume
-                if bull_breakout and weekly_trend_aligned[i] == 1 and volume_filter:
+                # Long: oversold in uptrend with volume surge
+                if oversold and daily_trend_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish weekly trend + volume
-                elif bear_breakout and weekly_trend_aligned[i] == -1 and volume_filter:
+                # Short: overbought in downtrend with volume surge
+                elif overbought and daily_trend_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
