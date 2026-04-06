@@ -1,25 +1,20 @@
+# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12688_12h_donchian20_1w_volume_v1"
+name = "exp_12688_12h_donchian20_1w_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -30,6 +25,12 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -38,14 +39,19 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Donchian channel
+    # Calculate weekly ATR for trend filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    upper_1w, lower_1w = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
+    close_1w = df_1w['close'].values
+    atr_1w = calculate_atr(high_1w, low_1w, close_1w, ATR_PERIOD)
+    # Weekly trend: price above/below EMA20
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_uptrend = close_1w > ema20_1w
+    weekly_downtrend = close_1w < ema20_1w
     
-    # Align weekly Donchian to 12h timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Align weekly trend to 12h timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -55,6 +61,7 @@ def generate_signals(prices):
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly Donchian not available
-        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]):
+        # Skip if weekly trend not available
+        if np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -88,22 +95,18 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above weekly upper channel or breakdown below lower channel
-        breakout_long = volume_ok and close[i] > upper_1w_aligned[i]
-        breakout_short = volume_ok and close[i] < lower_1w_aligned[i]
-        
-        # Entry conditions
-        long_entry = breakout_long
-        short_entry = breakout_short
+        # Donchian breakout with weekly trend filter
+        breakout_long = volume_ok and close[i] > donchian_upper[i] and weekly_uptrend_aligned[i] > 0.5
+        breakout_short = volume_ok and close[i] < donchian_lower[i] and weekly_downtrend_aligned[i] > 0.5
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -116,3 +119,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+# %%
