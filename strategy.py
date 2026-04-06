@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish day with volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
-# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
+# Hypothesis: 4-hour price reversal at 12-hour volume-weighted VWAP extremes.
+# Long when price crosses above VWAP with rising volume and bullish 12h momentum.
+# Short when price crosses below VWAP with rising volume and bearish 12h momentum.
+# Uses VWAP as dynamic support/resistance and volume confirmation to filter false breaks.
+# Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost.
 
-name = "12h_donchian20_1d_vol_trend_v1"
-timeframe = "12h"
+name = "4h_vwap_reversal_12h_mom_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +24,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # VWAP calculation (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.nancumsum(tpv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_tpv, cum_vol, out=np.zeros_like(cum_tpv), where=cum_vol!=0)
     
-    # Daily trend filter: bullish/bearish day based on close vs open
-    df_1d = get_htf_data(prices, '1d')
-    daily_open = df_1d['open'].values
-    daily_close = df_1d['close'].values
-    daily_bullish = daily_close > daily_open  # True for bullish day
-    daily_bearish = daily_close < daily_open   # True for bearish day
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
+    # 12h momentum: close vs close 3 periods ago (12h = 3 * 4h)
+    close_series = pd.Series(close)
+    mom_12h = close_series.diff(3).values  # positive = bullish momentum
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.2x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -47,8 +43,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if daily trend data not available
-        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
+        # Skip if momentum data not available
+        if np.isnan(mom_12h[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -56,36 +52,42 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.2
+        
+        # VWAP crossover conditions
+        # Price above VWAP and rising
+        above_vwap = close[i] > vwap[i]
+        below_vwap = close[i] < vwap[i]
+        
+        # Previous close relative to VWAP (for crossover detection)
+        prev_close = close[i-1] if i > 0 else close[i]
+        prev_above_vwap = prev_close > vwap[i-1] if i > 0 else above_vwap
+        prev_below_vwap = prev_close < vwap[i-1] if i > 0 else below_vwap
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or daily turn bearish
-            if (low[i] <= lower[i] or 
-                daily_bearish_aligned[i]):
+            # Exit: price crosses below VWAP or momentum turns bearish
+            if (prev_above_vwap and below_vwap) or (mom_12h[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or daily turn bullish
-            if (high[i] >= upper[i] or 
-                daily_bullish_aligned[i]):
+            # Exit: price crosses above VWAP or momentum turns bullish
+            if (prev_below_vwap and above_vwap) or (mom_12h[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and daily trend filter
+            # Look for entries with volume confirmation
             if volume_filter:
-                # Long: break above upper Donchian during bullish day
-                if (high[i] > upper[i] and 
-                    daily_bullish_aligned[i]):
+                # Long: cross above VWAP with bullish 12h momentum
+                if (prev_below_vwap and above_vwap and mom_12h[i] > 0):
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish day
-                elif (low[i] < lower[i] and 
-                      daily_bearish_aligned[i]):
+                # Short: cross below VWAP with bearish 12h momentum
+                elif (prev_above_vwap and below_vwap and mom_12h[i] < 0):
                     signals[i] = -0.25
                     position = -1
     
