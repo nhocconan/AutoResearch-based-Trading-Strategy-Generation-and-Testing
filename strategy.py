@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Target: 75-200 total trades, 0.25 position size, max DD < -50%.
 
-name = "exp_13717_4h_donchian20_1d_ema_vol_v1"
+name = "exp_13720_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
