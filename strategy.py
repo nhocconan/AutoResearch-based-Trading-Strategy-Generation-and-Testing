@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #12230: 1d Donchian Breakout with 1w Trend and Volume Confirmation
-Hypothesis: 1d Donchian(20) breakouts capture major trends. 1w EMA provides trend bias,
+Hypothesis: Daily Donchian(20) breakouts capture longer-term trends. Weekly EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
 bear (breakouts reverse quickly) by using 1w trend filter. Target: 30-100 trades over 4 years.
 """
@@ -43,7 +43,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 50:
         return np.zeros(n)
     
@@ -128,3 +128,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
