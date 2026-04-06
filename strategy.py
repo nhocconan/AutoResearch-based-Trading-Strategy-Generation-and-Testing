@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with weekly trend filter (1-week EMA) and volume confirmation.
-# Uses 12h price channel breakouts aligned with weekly momentum to capture strong trending moves.
-# Volume confirmation ensures institutional participation. Weekly trend filter avoids counter-trend trades.
-# Works in bull markets (breakouts above upper band in uptrend) and bear markets (breakdowns below lower band in downtrend).
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Uses 4h price channel breakouts aligned with 1d momentum to capture trending moves.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
+# and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13448_12h_donchian20_weekly_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13449_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_EMA_PERIOD = 21
+EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -40,15 +39,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_weekly = calculate_ema(close_weekly, WEEKLY_EMA_PERIOD)
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_weekly_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_weekly_aligned[i]
-        downtrend = close[i] < ema_weekly_aligned[i]
+        # Trend filter: price above/below 1d EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
         # Breakout signals using Donchian channels
         breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
