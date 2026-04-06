@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Stoploss at 2 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Works in bull/bear by following 1d trend direction
-# Target: 50-150 trades over 4 years (12-37/year)
+# Target: 75-200 trades over 4 years (19-50/year) - optimized for 12h timeframe
 
 name = "12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
