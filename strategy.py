@@ -92,7 +92,7 @@ def generate_signals(prices):
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -100,7 +100,7 @@ def generate_signals(prices):
         # Apply session filter
         if not session_filter[i]:
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -118,7 +118,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
             # Exit: price breaks above Donchian high OR trend turns bullish
             # Stoploss: price rises 2.0*ATR above entry
@@ -128,21 +128,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
             # Look for breakout entries
             # Long: price breaks above Donchian high in bullish 1w trend with volume
             if (close[i] > donch_high[i] and
                 trend_1w_aligned[i] == 1 and
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low in bearish 1w trend with volume
             elif (close[i] < donch_low[i] and
                   trend_1w_aligned[i] == -1 and
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
             else:
@@ -245,7 +245,7 @@ def generate_signals(prices):
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -253,7 +253,7 @@ def generate_signals(prices):
         # Apply session filter
         if not session_filter[i]:
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -271,7 +271,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
             # Exit: price breaks above Donchian high OR trend turns bullish
             # Stoploss: price rises 2.0*ATR above entry
@@ -281,21 +281,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
             # Look for breakout entries
             # Long: price breaks above Donchian high in bullish 1w trend with volume
             if (close[i] > donch_high[i] and
                 trend_1w_aligned[i] == 1 and
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low in bearish 1w trend with volume
             elif (close[i] < donch_low[i] and
                   trend_1w_aligned[i] == -1 and
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
             else:
@@ -398,7 +398,7 @@ def generate_signals(prices):
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -406,7 +406,7 @@ def generate_signals(prices):
         # Apply session filter
         if not session_filter[i]:
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -424,7 +424,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
             # Exit: price breaks above Donchian high OR trend turns bullish
             # Stoploss: price rises 2.0*ATR above entry
@@ -434,21 +434,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
             # Look for breakout entries
             # Long: price breaks above Donchian high in bullish 1w trend with volume
             if (close[i] > donch_high[i] and
                 trend_1w_aligned[i] == 1 and
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low in bearish 1w trend with volume
             elif (close[i] < donch_low[i] and
                   trend_1w_aligned[i] == -1 and
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
             else:
@@ -456,4 +456,4 @@ def generate_signals(prices):
     
     return signals
 
---- END OF FILE ---
+--- End of code ---
