@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Williams %R Reversal with 1d Trend Filter
-Hypothesis: Williams %R identifies overbought/oversold conditions for mean reversion entries.
-In ranging markets, reversals at extremes work well. In trending markets, we filter by 1d EMA50
-to only take reversals in the direction of the higher timeframe trend. Works in both bull and bear
-markets by adapting to the 1d trend. Target: 80-150 total trades over 4 years (20-38/year).
+4h Donchian(20) breakout with 1d volume confirmation and 1d trend filter
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 1d volume for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_williamsr_1d_trend_filter_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,94 +17,136 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    williams_r = np.full(n, np.nan)
+    # 14-period ATR
+    atr = np.full(n, np.nan)
     if n >= 14:
-        for i in range(14, n):
-            highest_high = np.max(high[i-13:i+1])
-            lowest_low = np.min(low[i-13:i+1])
-            if highest_high != lowest_low:
-                williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-            else:
-                williams_r[i] = -50  # neutral when no range
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[1] = tr[0]
+            for i in range(2, n):
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for trend filter (EMA21)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # EMA50 on 1d close
+    # EMA21 on 1d close
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
+    if len(close_1d) >= 21:
+        ema_1d[20] = np.mean(close_1d[:21])
+        for i in range(21, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 19) / 21
     
-    # 1d trend: above EMA50 = bullish, below = bearish
+    # 1d trend: above EMA21 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d trend to 6h timeframe
+    # Align 1d trend to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 4h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Donchian channels (20-period) from 4h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_exit = 0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = 50  # Need enough data for Williams %R and EMA
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(trend_1d_aligned[i]):
+        if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_exit += 1
+            bars_since_entry += 1
             continue
         
-        # Check exits
+        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.5
+        volume_filter = volume[i] > vol_threshold
+        
+        # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Williams %R rises above -20 (overbought) OR against 1d trend
-            if williams_r[i] > -20 or trend_1d_aligned[i] == -1:
+            # Exit: price breaks below lower Donchian OR against 1d trend
+            # Stoploss: price drops 2*ATR below entry
+            if (close[i] < lower[i] or
+                trend_1d_aligned[i] == -1 or
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.25
-            bars_since_exit += 1
+            bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: Williams %R falls below -80 (oversold) OR against 1d trend
-            if williams_r[i] < -80 or trend_1d_aligned[i] == 1:
+            # Exit: price breaks above upper Donchian OR against 1d trend
+            # Stoploss: price rises 2*ATR above entry
+            if (close[i] > upper[i] or
+                trend_1d_aligned[i] == 1 or
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = -0.25
-            bars_since_exit += 1
+            bars_since_entry += 1
         else:
-            # Look for entries with minimum bars since exit
-            if bars_since_exit >= 6:  # minimum 6 bars (1 day) between trades
-                # Long: Williams %R crosses below -80 (oversold) with bullish 1d trend
-                if i > 1 and williams_r[i] <= -80 and williams_r[i-1] > -80 and trend_1d_aligned[i] == 1:
+            # Look for entries
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
+                # Breakout entries: upper/lower with 1d trend
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
+                
+                # Long: breakout above upper with bullish 1d trend + volume
+                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_exit = 0
-                # Short: Williams %R crosses above -20 (overbought) with bearish 1d trend
-                elif i > 1 and williams_r[i] >= -20 and williams_r[i-1] < -20 and trend_1d_aligned[i] == -1:
+                    bars_since_entry = 0
+                # Short: breakdown below lower with bearish 1d trend + volume
+                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_exit = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_exit += 1
+                    bars_since_entry += 1
             else:
                 signals[i] = 0.0
-                bars_since_exit += 1
+                bars_since_entry += 1
     
     return signals
