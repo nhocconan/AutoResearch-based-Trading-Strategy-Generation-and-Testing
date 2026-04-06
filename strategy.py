@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 1.5x avg
-# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 1.5x avg
-# Exit when price returns to opposite Donchian level or trend reverses
-# Designed to capture breakouts with trend alignment, targeting 100-150 trades over 4 years
-# Works in bull (breakouts continue) and bear (failed breaks reverse quickly) markets
+# Hypothesis: 12h Donchian(20) breakout with daily trend filter and volume confirmation
+# Enter long when price breaks above Donchian(20) high, price > daily EMA(50), volume > 1.5x avg
+# Enter short when price breaks below Donchian(20) low, price < daily EMA(50), volume > 1.5x avg
+# Exit on opposite breakout or when price crosses daily EMA(50)
+# Uses daily trend to filter counter-trend trades in strong moves, targeting 100-150 trades over 4 years
+# Designed to work in both bull and bear markets by following higher timeframe trend
 
-name = "12h_donchian20_1dema_vol_v1"
+name = "12h_donchian20_1dema_vol_filter_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -26,8 +26,8 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -42,9 +42,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(20, n):  # Wait for indicators to stabilize
         # Skip if required data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -53,31 +53,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price < Donchian low OR price < 1d EMA(50) (trend failed)
-            if close[i] < low_min[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price breaks below Donchian low OR price crosses below daily EMA(50)
+            if close[i] < low_roll[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price > Donchian high OR price > 1d EMA(50) (trend failed)
-            if close[i] > high_max[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price breaks above Donchian high OR price crosses above daily EMA(50)
+            if close[i] > high_roll[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend filter + volume
+            # Look for entries: Donchian breakout + trend filter + volume confirmation
             if volume[i] > volume_threshold[i]:
-                if close[i] > high_max[i] and close[i] > ema_50_aligned[i]:
-                    # Bullish breakout above trend
+                if close[i] > high_roll[i] and close[i] > ema_50_aligned[i]:
+                    # Bullish breakout above daily EMA - strong uptrend continuation
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < low_min[i] and close[i] < ema_50_aligned[i]:
-                    # Bearish breakout below trend
+                elif close[i] < low_roll[i] and close[i] < ema_50_aligned[i]:
+                    # Bearish breakout below daily EMA - strong downtrend continuation
                     signals[i] = -0.25
                     position = -1
     
     return signals
-
-</think>
