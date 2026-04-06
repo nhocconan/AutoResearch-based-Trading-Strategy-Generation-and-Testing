@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Daily Trend Filter + Volume Confirmation + ATR Stoploss
-Hypothesis: On 12h timeframe, Donchian breakouts in direction of daily trend with volume confirmation capture strong moves while avoiding whipsaws. Daily trend filter reduces false signals, keeping trade frequency low (target 50-150 total over 4 years) to minimize fee decay in ranging/bear markets.
+4h Donchian(20) Breakout + Volume Spike + ADX Trend Filter
+Hypothesis: Donchian breakouts capture momentum; volume spikes confirm institutional participation;
+ADX > 25 ensures trending markets to avoid whipsaw in ranges. Designed for low trade frequency
+(target 75-200 total over 4 years) to minimize fee decay. Works in bull (breakouts) and bear
+(trend continuation) regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,28 +40,53 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get daily trend data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    # Daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 49) / 50
-    # Align to 12h timeframe (with shift(1) for no look-ahead)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 14-period ADX
+    adx = np.full(n, np.nan)
+    if n >= 14:
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        for i in range(1, n):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
+            minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
+        
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr_14 = atr  # already calculated
+        plus_di = np.full(n, np.nan)
+        minus_di = np.full(n, np.nan)
+        if n >= 14:
+            plus_sm = np.full(n, np.nan)
+            minus_sm = np.full(n, np.nan)
+            # Initial smoothed values
+            plus_sm[13] = np.sum(plus_dm[1:14])
+            minus_sm[13] = np.sum(minus_dm[1:14])
+            for i in range(14, n):
+                plus_sm[i] = plus_sm[i-1] - (plus_sm[i-1] / 14) + plus_dm[i]
+                minus_sm[i] = minus_sm[i-1] - (minus_sm[i-1] / 14) + minus_dm[i]
+            
+            # Avoid division by zero
+            plus_di[13:] = (plus_sm[13:] / atr_14[13:]) * 100
+            minus_di[13:] = (minus_sm[13:] / atr_14[13:]) * 100
+            
+            # DX and ADX
+            dx = np.full(n, np.nan)
+            dx[13:] = np.abs(plus_di[13:] - minus_di[13:]) / (plus_di[13:] + minus_di[13:]) * 100
+            # Wilder smoothing for ADX
+            adx[27] = np.mean(dx[14:28])  # first ADX value
+            for i in range(28, n):
+                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 28  # For ADX
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(adx[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -69,9 +97,12 @@ def generate_signals(prices):
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter (20-period average)
+        # Volume filter: current volume > 1.5 * 20-period average
         vol_ma = np.mean(volume[i-20:i])
         volume_filter = volume[i] > vol_ma * 1.5
+        
+        # ADX trend filter: only trade when trending (ADX > 25)
+        trend_filter = adx[i] > 25
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -93,19 +124,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + daily trend filter
+            # Look for entries: Donchian breakout + volume + trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Daily trend filter: only go long if price above daily EMA50, short if below
-            trend_up = close[i] > ema_50_1d_aligned[i]
-            trend_down = close[i] < ema_50_1d_aligned[i]
-            
-            if bull_breakout and volume_filter and trend_up:
+            if bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and trend_down:
+            elif bear_breakout and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
