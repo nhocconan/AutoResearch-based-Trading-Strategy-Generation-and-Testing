@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
-# Goes long when price breaks above 4h Donchian upper band with above-average volume and price above 12h EMA50,
-# short when breaks below 4h Donchian lower band with volume and price below 12h EMA50.
-# Uses ATR-based stop loss to manage risk. Designed for 75-200 total trades over 4 years (19-50/year).
-# Donchian provides clear structure, EMA50 filters trend direction, volume confirms breakout strength.
+# Hypothesis: 1d strategy using Donchian(20) breakout with weekly trend filter (EMA50) and volume confirmation.
+# Goes long when price breaks above daily Donchian upper band with above-average weekly volume and price above weekly EMA50,
+# short when breaks below daily Donchian lower band with volume and price below weekly EMA50.
+# Uses ATR-based stop loss to manage risk.
+# Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drift.
+# Daily timeframe reduces trade frequency, weekly EMA filters long-term trend, volume confirms breakout strength.
 
-name = "exp_13843_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13844_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+WEEKLY_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -47,23 +48,23 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data for EMA trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, WEEKLY_EMA_PERIOD)
     
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h data for Donchian channels, ATR, and volume
+    # Daily data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 4h data
+    # Donchian channels on daily data
     upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
@@ -78,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,9 +108,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 12h EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        # Trend direction from weekly EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
         
         # Donchian breakout signals
         long_signal = volume_ok and above_ema and close[i] > upper[i]
