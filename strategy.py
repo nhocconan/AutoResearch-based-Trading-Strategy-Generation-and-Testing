@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12505_12h_donchian20_1d_trend_vol_v1"
+name = "exp_12505_12h_donchian20_1d_vol_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for 12h timeframe to achieve 50-150 trades over 4 years
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
