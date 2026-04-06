@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13962_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13963_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Goes long when price breaks above Donchian upper band during 1d uptrend with volume > 1.5x average.
-# Goes short when price breaks below Donchian lower band during 1d downtrend with volume > 1.5x average.
-# Uses 2x ATR stop loss. Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull (breaks above with trend) and bear (breaks below with trend) with EMA filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(20) trend filter and volume confirmation.
+# Uses 12h EMA(20) for trend direction: price above EMA = bullish bias (long only),
+# price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
+# direction of 12h trend with volume > 1.5x average. Exit on Donchian reversal or
+# trend change. Designed for 75-200 total trades over 4 years (19-50/year) to
+# minimize fee drag. Works in bull (breaks above with trend) and bear (breaks
+# below with trend) with EMA filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -38,16 +40,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for EMA trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA(50) for trend
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate 12h EMA(20) for trend
+    ema_12h = calculate_ema(df_12h['close'].values, 20)
     
-    # Align EMA to 12h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align EMA to 4h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -95,9 +97,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend from 1d EMA
-        bullish_trend = close[i] > ema_aligned[i]  # price above 1d EMA = bullish
-        bearish_trend = close[i] < ema_aligned[i]  # price below 1d EMA = bearish
+        # Determine trend from 12h EMA
+        bullish_trend = close[i] > ema_aligned[i]  # price above 12h EMA = bullish
+        bearish_trend = close[i] < ema_aligned[i]  # price below 12h EMA = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
@@ -106,7 +108,7 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of 1d trend
+        # Entry signals - only in direction of 12h trend
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
