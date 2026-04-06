@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
-Hypothesis: Donchian breakouts on 4h capture momentum. Volume confirms institutional participation.
-1d trend filter ensures we only trade in the direction of higher timeframe trend, reducing whipsaws.
-Works in bull (breakouts above upper band with uptrend) and bear (breakdowns below lower band with downtrend).
-Target: 75-200 total trades over 4 years (19-50/year).
+Hypothesis: Donchian breakouts capture strong momentum moves. Volume confirms institutional participation.
+1d trend filter (price vs SMA50) ensures we trade in the direction of the daily trend.
+Works in bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend).
+Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
@@ -22,13 +22,11 @@ def generate_signals(prices):
     
     # Load 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA50 for trend direction
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d SMA50 for trend filter
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
     # 4h data
     high = prices['high'].values
@@ -43,7 +41,7 @@ def generate_signals(prices):
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)  # Require 1.5x average volume
+    vol_filter = volume > (1.5 * vol_ma)  # Require above average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -58,21 +56,21 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(donchian_period, 14) + 10
+    start = max(donchian_period, 50) + 14
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(ema50_1d_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(sma50_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend filter: only long in uptrend, short in downtrend
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Trend filter: 1d price vs SMA50
+        uptrend = close[i] > sma50_1d_aligned[i]
+        downtrend = close[i] < sma50_1d_aligned[i]
         
         # Check exits
         if position == 1:  # long position
