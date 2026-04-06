@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Daily Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 6h capture momentum, daily volume confirms breakout strength,
-and ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years)
-to minimize fee decay. Works in both bull and bear by filtering breakouts with volume and
-ATR-based risk management.
+6h Donchian(20) Breakout + 1D Weekly Pivot Direction + Volume Confirmation + ATR Stoploss
+Hypothesis: Combines daily trend via weekly pivot (from 1D) with 6H momentum via Donchian breakout.
+Weekly pivot provides directional bias from higher timeframe, reducing whipsaw in ranging markets.
+Volume confirmation ensures breakout strength. ATR stop limits downside. Designed for 6H timeframe
+to target 75-200 total trades over 4 years (~19-50/year) to balance opportunity with fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_vol_atr_v1"
+name = "6h_donchian20_1dweeklypivot_volume_atr_v2"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -40,21 +40,63 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 20-period volume MA on daily timeframe
+    # Get 1D data once before loop (as required by rules)
     df_1d = get_htf_data(prices, '1d')
-    vol_20d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_20d)
+    
+    # Calculate weekly pivot points from daily data
+    # Weekly pivot: (Prior week's High + Low + Close) / 3
+    # We'll use prior week's data by shifting the weekly aggregation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate weekly high, low, close from daily data
+    # Group into weeks (7 days) and aggregate
+    weeks_high = []
+    weeks_low = []
+    weeks_close = []
+    
+    for i in range(0, len(high_1d), 7):
+        week_high = np.max(high_1d[i:i+7]) if len(high_1d[i:i+7]) > 0 else np.nan
+        week_low = np.min(low_1d[i:i+7]) if len(low_1d[i:i+7]) > 0 else np.nan
+        week_close = close_1d[i+6] if i+6 < len(close_1d) else close_1d[-1]
+        weeks_high.append(week_high)
+        weeks_low.append(week_low)
+        weeks_close.append(week_close)
+    
+    # Calculate weekly pivot for each week
+    weeks_pivot = []
+    for wh, wl, wc in zip(weeks_high, weeks_low, weeks_close):
+        if not (np.isnan(wh) or np.isnan(wl) or np.isnan(wc)):
+            pivot = (wh + wl + wc) / 3.0
+        else:
+            pivot = np.nan
+        weeks_pivot.append(pivot)
+    
+    # Create daily array of weekly pivot (each day gets the prior week's pivot)
+    daily_pivot = np.full(len(high_1d), np.nan)
+    for wi in range(len(weeks_pivot)):
+        start_idx = wi * 7
+        end_idx = min((wi + 1) * 7, len(high_1d))
+        if wi > 0:  # Use prior week's pivot
+            pivot_val = weeks_pivot[wi-1]
+            for di in range(start_idx, end_idx):
+                if di < len(daily_pivot):
+                    daily_pivot[di] = pivot_val
+    
+    # Align weekly pivot to 6H timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = max(20, 14)  # For Donchian and ATR
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(vol_20d_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -65,8 +107,9 @@ def generate_signals(prices):
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter: current volume > 1.5x 20-day average volume
-        volume_filter = volume[i] > vol_20d_aligned[i] * 1.5
+        # Volume filter (20-period average)
+        vol_ma = np.mean(volume[i-20:i])
+        volume_filter = volume[i] > vol_ma * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -88,15 +131,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume filter
+            # Look for entries: Donchian breakout + volume + pivot direction filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            if bull_breakout and volume_filter:
+            # Pivot direction: only long if price above weekly pivot, short if below
+            price_above_pivot = close[i] > pivot_aligned[i]
+            price_below_pivot = close[i] < pivot_aligned[i]
+            
+            if bull_breakout and volume_filter and price_above_pivot:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter:
+            elif bear_breakout and volume_filter and price_below_pivot:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
