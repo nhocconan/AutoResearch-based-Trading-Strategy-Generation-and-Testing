@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
-Hypothesis: Donchian breakouts on 6h timeframe capture momentum with directional bias from 1d weekly pivots (R4/S4 for breakouts, R3/S3 for mean reversion). Volume confirms conviction. Works in bull/bear via pivot structure. Target: 75-200 total trades over 4 years.
+12h Donchian(20) breakout with 1d EMA100 trend filter and volume confirmation
+Hypothesis: Donchian breakouts on 12h timeframe capture momentum with lower frequency. Filter by 1d EMA100 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA100) and bear (sell breakdowns below 1d EMA100). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,44 +36,24 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for weekly pivots and volume
+    # Get 1d data for trend filter (EMA100)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate weekly pivots from prior week (using 1d data)
-    # Need at least 7 days for weekly calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Weekly high/low/close (using last 7 days)
-    weekly_high = np.full(len(high_1d), np.nan)
-    weekly_low = np.full(len(high_1d), np.nan)
-    weekly_close = np.full(len(high_1d), np.nan)
+    # EMA100 on 1d close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 100:
+        ema_1d[99] = np.mean(close_1d[:100])
+        for i in range(100, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 98) / 100
     
-    for i in range(6, len(high_1d)):  # Start from 7th day (index 6)
-        weekly_high[i] = np.max(high_1d[i-6:i+1])  # Last 7 days including current
-        weekly_low[i] = np.min(low_1d[i-6:i+1])
-        weekly_close[i] = close_1d[i]  # Current day close
+    # 1d trend: above EMA100 = bullish, below = bearish
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Calculate pivot points and levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
-    r4 = weekly_high + 3 * (weekly_high - weekly_low)
-    s4 = weekly_low - 3 * (weekly_high - weekly_low)
+    # Align 1d trend to 12h timeframe
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Get 1d volume for confirmation
+    # Get 1d data for volume confirmation
     volume_1d = df_1d['volume'].values
     
     # 20-period average volume on 1d
@@ -81,10 +61,10 @@ def generate_signals(prices):
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 6h timeframe
+    # Align volume MA to 12h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (20-period) from 6h data
+    # Donchian channels (20-period) from 12h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -98,13 +78,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(30, 20)  # Need enough data for Donchian and alignments
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+        if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
             np.isnan(upper[i]) or np.isnan(lower[i]) or
             np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
@@ -114,17 +92,17 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
+        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 12h: approx 1/2 of 1d volume (since 2x 12h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below S3 OR against pivot structure (below PP)
+            # Exit: price breaks below lower Donchian OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < s3_aligned[i] or
-                close[i] < pp_aligned[i] or
+            if (close[i] < lower[i] or
+                trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -133,10 +111,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above R3 OR against pivot structure (above PP)
+            # Exit: price breaks above upper Donchian OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > r3_aligned[i] or
-                close[i] > pp_aligned[i] or
+            if (close[i] > upper[i] or
+                trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -146,24 +124,20 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
-                # Breakout entries: R4/S4 with volume (continuation)
-                bull_breakout = close[i] > r4_aligned[i]
-                bear_breakout = close[i] < s4_aligned[i]
+            # Minimum holding period: only allow new entry after 24 bars flat (2 days)
+            if bars_since_entry >= 24:
+                # Breakout entries: upper/lower with 1d trend
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
                 
-                # Mean reversion entries: R3/S3 with volume (fade)
-                bull_reversion = close[i] < r3_aligned[i] and close[i] > pp_aligned[i]
-                bear_reversion = close[i] > s3_aligned[i] and close[i] < pp_aligned[i]
-                
-                # Long: breakout above R4 with volume OR mean reversion from R3 with volume
-                if (bull_breakout and volume_filter) or (bull_reversion and volume_filter):
+                # Long: breakout above upper with bullish 1d trend + volume
+                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below S4 with volume OR mean reversion from S3 with volume
-                elif (bear_breakout and volume_filter) or (bear_reversion and volume_filter):
+                # Short: breakdown below lower with bearish 1d trend + volume
+                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
@@ -176,3 +150,5 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+
+</lymphoma>
