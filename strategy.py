@@ -3,23 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
-# Weekly pivot sets the directional bias (long above pivot, short below), while 6h Donchian breakouts
-# capture momentum in that direction. Volume ensures only strong breakouts trigger entries.
-# Works in bull/bear because pivot adapts to longer-term trend, and breakouts catch strong moves.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid overtrading.
+# Hypothesis: 6h Ichimoku cloud filter with 10-period TK cross and 1d cloud color filter.
+# Uses Ichimoku as a trend filter (price above/below cloud) and TK cross for entry timing.
+# Weekly trend filter ensures we trade with higher timeframe momentum.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
 
-name = "exp_13095_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_13095_6h_ichimoku10_1w_cloud_tk_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+TK_PERIOD = 9
+KJ_PERIOD = 26
+SENB_B_PERIOD = 52
+WEEKLY_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 over TK_PERIOD
+    tenkan_sen = (pd.Series(high).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).max() + 
+                  pd.Series(low).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).min()) / 2
+    # Kijun-sen (Base Line): (highest high + lowest low)/2 over KJ_PERIOD
+    kijun_sen = (pd.Series(high).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).max() + 
+                 pd.Series(low).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted forward KJ_PERIOD
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(KJ_PERIOD)
+    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 over SENB_B_PERIOD shifted forward KJ_PERIOD
+    senkou_span_b = ((pd.Series(high).rolling(window=SENB_B_PERIOD, min_periods=SENB_B_PERIOD).max() + 
+                      pd.Series(low).rolling(window=SENB_B_PERIOD, min_periods=SENB_B_PERIOD).min()) / 2).shift(KJ_PERIOD)
+    # Chikou Span (Lagging Span): Close shifted back KJ_PERIOD
+    chikou_span = pd.Series(close).shift(-KJ_PERIOD)
+    
+    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values, chikou_span.values
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -30,47 +54,42 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot(high, low, close):
-    """Calculate weekly pivot point and support/resistance levels"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
-    pivot_1w, r1_1w, r2_1w, r3_1w, s1_1w, s2_1w, s3_1w = calculate_pivot(high_1w, low_1w, close_1w)
+    ema_1w = calculate_ema(close_1w, WEEKLY_TREND_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Use pivot as trend filter: above pivot = long bias, below = short bias
-    pivot_bias = pivot_1w  # positive bias = long, negative = short
-    pivot_bias_aligned = align_htf_to_ltf(prices, df_1w, pivot_bias)
-    
-    # Calculate 6h indicators
+    # Calculate 6h Ichimoku
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    tenkan, kijun, senkou_a, senkou_b, chikou = calculate_ichimoku(high, low, close)
     
-    # Volume MA
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Price above/below cloud
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
+    
+    # TK cross signals
+    tk_cross_up = (tenkan > kijun) & (np.roll(tenkan, 1) <= np.roll(kijun, 1))
+    tk_cross_down = (tenkan < kijun) & (np.roll(tenkan, 1) >= np.roll(kijun, 1))
+    
+    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ok = volume > (volume_ma * VOLUME_THRESHOLD)
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -81,11 +100,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TK_PERIOD, KJ_PERIOD, SENB_B_PERIOD, WEEKLY_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + KJ_PERIOD + 1
     
     for i in range(start, n):
-        # Skip if pivot bias not available
-        if np.isnan(pivot_bias_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,25 +123,19 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (strict to reduce trades)
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Determine bias from weekly pivot
-        bullish_bias = close[i] > pivot_bias_aligned[i]
-        bearish_bias = close[i] < pivot_bias_aligned[i]
-        
-        # Breakout signals with volume and bias confirmation
-        breakout_up = volume_ok and bullish_bias and (i > 0 and high[i] > highest_high[i-1])
-        breakout_down = volume_ok and bearish_bias and (i > 0 and low[i] < lowest_low[i-1])
-        
-        # Generate signals
+        # Entry conditions
         if position == 0:
-            if breakout_up:
+            # Long: price above cloud, TK cross up, weekly uptrend, volume
+            long_signal = price_above_cloud[i] and tk_cross_up[i] and close[i] > ema_1w_aligned[i] and volume_ok[i]
+            # Short: price below cloud, TK cross down, weekly downtrend, volume
+            short_signal = price_below_cloud[i] and tk_cross_down[i] and close[i] < ema_1w_aligned[i] and volume_ok[i]
+            
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
