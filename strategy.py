@@ -3,22 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h Donchian(20) breakout + volume confirmation + session filter (08-20 UTC)
-# Uses 4h price channel breakouts for directional bias, 1h for precise entry timing.
-# Volume confirmation ensures institutional participation. Session filter reduces noise.
-# Target: 60-150 total trades over 4 years (15-37/year).
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
+# Uses RSI(14) extremes (overbought/oversold) for mean reversion entries,
+# filtered by 4h EMA trend to avoid counter-trend trades in strong moves.
+# Volume confirmation ensures institutional participation. Works in both bull and bear markets
+# by fading extremes within the prevailing trend. Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "exp_13474_1h_4h_donchian20_volume_session_v1"
+name = "exp_13474_1h_rsi_meanrev_4h_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,30 +56,25 @@ def generate_signals(prices):
     # Load 4h data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 4h ATR for stop loss
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 4h EMA for trend filter
     close_4h = df_4h['close'].values
-    atr_4h = calculate_atr(high_4h, low_4h, close_4h, ATR_PERIOD)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    ema_4h = calculate_ema(close_4h, EMA_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 4h Donchian channels
-    highest_high_4h = pd.Series(high_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
-    
-    # 1h data
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h volume MA
+    # RSI
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    
+    # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # ATR
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,20 +82,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(atr_4h_aligned[i]) or np.isnan(highest_high_4h_aligned[i]) or np.isnan(lowest_low_4h_aligned[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if not (8 <= hour <= 20):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -101,24 +106,28 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Breakout signals using 4h Donchian channels (aligned to 1h)
-        breakout_up = volume_ok and (high[i] > highest_high_4h_aligned[i-1])
-        breakout_down = volume_ok and (low[i] < lowest_low_4h_aligned[i-1])
+        # Trend filter: price above/below 4h EMA
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
+        
+        # Mean reversion signals using RSI extremes
+        rsi_oversold = rsi[i] < RSI_OVERSOLD
+        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if volume_ok and uptrend and rsi_oversold:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_4h_aligned[i])
-            elif breakout_down:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif volume_ok and downtrend and rsi_overbought:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_4h_aligned[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
