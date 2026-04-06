@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1d trend filter and volume confirmation
-Hypothesis: Ichimoku provides comprehensive support/resistance and momentum signals.
-Using 1d Tenkan/Kijun cross as trend filter and cloud as dynamic S/R reduces whipsaws.
-Volume confirmation ensures institutional participation. Works in bull/bear via cloud twist.
-Target: 80-150 total trades over 4 years (20-38/year).
+12h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+Hypothesis: Donchian breakouts on 12h capture institutional momentum, filtered by weekly trend for bias and daily volume for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_1d_trend_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -26,68 +23,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 21-period ATR for stops
+    # 14-period ATR
     atr = np.full(n, np.nan)
-    if n >= 21:
+    if n >= 14:
         tr = np.maximum(
             high[1:] - low[1:],
             np.abs(high[1:] - close[:-1]),
             np.abs(low[1:] - close[:-1])
         )
         if len(tr) > 0:
-            atr[0] = tr[0] if len(tr) > 0 else 0
-            for i in range(1, min(len(tr)+1, n)):
-                if i-1 < len(tr):
-                    atr[i] = (tr[i-1] * 20 + atr[i-1]) / 21 if not np.isnan(atr[i-1]) else tr[i-1]
+            atr[1] = tr[0]
+            for i in range(2, n):
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for Ichimoku components
+    # Get 1w data for trend filter (EMA21)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # EMA21 on weekly close
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 21:
+        ema_1w[20] = np.mean(close_1w[:21])
+        for i in range(21, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
+    
+    # Weekly trend: above EMA21 = bullish, below = bearish
+    weekly_trend = np.where(close_1w > ema_1w, 1, -1)
+    
+    # Align weekly trend to 12h timeframe
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    tenkan = np.full(len(high_1d), np.nan)
-    for i in range(period_tenkan-1, len(high_1d)):
-        tenkan[i] = (np.max(high_1d[i-(period_tenkan-1):i+1]) + np.min(low_1d[i-(period_tenkan-1):i+1])) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    kijun = np.full(len(high_1d), np.nan)
-    for i in range(period_kijun-1, len(high_1d)):
-        kijun[i] = (np.max(high_1d[i-(period_kijun-1):i+1]) + np.min(low_1d[i-(period_kijun-1):i+1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = np.full(len(high_1d), np.nan)
-    for i in range(len(high_1d)):
-        if i+26 < len(high_1d) and not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-            senkou_a[i+26] = (tenkan[i] + kijun[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    senkou_b = np.full(len(high_1d), np.nan)
-    for i in range(period_senkou_b-1, len(high_1d)):
-        senkou_b[i+26] = (np.max(high_1d[i-(period_senkou_b-1):i+1]) + np.min(low_1d[i-(period_senkou_b-1):i+1])) / 2
-    
-    # Chikou Span (Lagging Span): current close shifted 26 periods back
-    chikou = np.full(len(high_1d), np.nan)
-    for i in range(26, len(high_1d)):
-        chikou[i] = close_1d[i-26]
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    chikou_6h = align_htf_to_ltf(prices, df_1d, chikou)
-    
-    # Get 1d volume for confirmation
     volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on daily
     vol_ma_1d = np.full(len(volume_1d), np.nan)
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
-    vol_ma_1d_6h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Align volume MA to 12h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Donchian channels (20-period) from 12h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -95,13 +79,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 60  # Need enough data for Ichimoku calculations
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(chikou_6h[i]) or np.isnan(vol_ma_1d_6h[i])):
+        if (np.isnan(atr[i]) or np.isnan(weekly_trend_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -109,33 +93,18 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 6h volume > 1.3x daily average volume (scaled)
-        vol_threshold = vol_ma_1d_6h[i] / 4.0 * 1.3  # 4x 6h bars in 1d
+        # Volume filter: current 12h volume > 1.5x daily average volume (scaled)
+        # Scale daily volume to 12h: approx 1/2 of daily volume (since 2x 12h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
         volume_filter = volume[i] > vol_threshold
-        
-        # Cloud calculations
-        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
-        
-        # Trend filter: Tenkan/Kijun cross
-        bullish_cross = tenkan_6h[i] > kijun_6h[i]
-        bearish_cross = tenkan_6h[i] < kijun_6h[i]
-        
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        price_in_cloud = close[i] >= cloud_bottom and close[i] <= cloud_top
-        
-        # Chikou confirmation: Chikou vs price 26 periods ago
-        chikou_confirmed = not np.isnan(chikou_6h[i]) and chikou_6h[i] > close[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below cloud OR Tenkan/Kijun cross turns bearish
-            # Stoploss: price drops 2.5*ATR below entry
-            if (close[i] < cloud_bottom or
-                bearish_cross or
-                close[i] < entry_price - 2.5 * atr[i]):
+            # Exit: price breaks below lower Donchian OR against weekly trend
+            # Stoploss: price drops 2*ATR below entry
+            if (close[i] < lower[i] or
+                weekly_trend_aligned[i] == -1 or
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -143,11 +112,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above cloud OR Tenkan/Kijun cross turns bullish
-            # Stoploss: price rises 2.5*ATR above entry
-            if (close[i] > cloud_top or
-                bullish_cross or
-                close[i] > entry_price + 2.5 * atr[i]):
+            # Exit: price breaks above upper Donchian OR against weekly trend
+            # Stoploss: price rises 2*ATR above entry
+            if (close[i] > upper[i] or
+                weekly_trend_aligned[i] == 1 or
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -155,26 +124,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries with minimum holding period
-            if bars_since_entry >= 24:  # At least 4 bars (24h) between entries
-                # Long: price above cloud + bullish TK cross + Chikou confirmation + volume
-                long_condition = (price_above_cloud and 
-                                bullish_cross and 
-                                chikou_confirmed and 
-                                volume_filter)
+            # Look for entries
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
+                # Breakout entries: upper/lower with weekly trend
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
                 
-                # Short: price below cloud + bearish TK cross + Chikou confirmation + volume
-                short_condition = (price_below_cloud and 
-                                 bearish_cross and 
-                                 not chikou_confirmed and  # Chikou below price for bearish
-                                 volume_filter)
-                
-                if long_condition:
+                # Long: breakout above upper with bullish weekly trend + volume
+                if bull_breakout and weekly_trend_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                elif short_condition:
+                # Short: breakdown below lower with bearish weekly trend + volume
+                elif bear_breakout and weekly_trend_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
