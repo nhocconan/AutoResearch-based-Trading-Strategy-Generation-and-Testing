@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d EMA filter and volume confirmation
-Hypothesis: Breakouts in direction of daily trend with volume confirmation work in both bull and bear markets.
-Target: 75-150 total trades over 4 years (19-38/year).
+4h Donchian Breakout + 1d EMA Trend + Volume Spike + ATR Stoploss
+Hypothesis: Breakouts of Donchian(20) channel in direction of 1d EMA(50) trend,
+confirmed by volume spikes, work in both bull and bear markets by capturing
+strong momentum moves. Volume ensures breakout validity, ATR stoploss manages risk.
+Target: 80-150 total trades over 4 years (20-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema_volume_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter (once before loop)
+    # Load 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
@@ -26,19 +28,19 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data
-    close = prices['close'].values
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels (20-period)
-    def donchian_channels(high, low, period=20):
+    def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
         return upper, lower
     
-    donch_upper, donch_lower = donchian_channels(high, low, 20)
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
     # Volume spike filter
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -75,7 +77,7 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price below Donchian lower OR stoploss
+            # Exit: close below Donchian lower OR stoploss
             if (close[i] <= donch_lower[i] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
@@ -83,7 +85,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above Donchian upper OR stoploss
+            # Exit: close above Donchian upper OR stoploss
             if (close[i] >= donch_upper[i] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
@@ -92,17 +94,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout in trend direction + volume spike
-            long_breakout = close[i] > donch_upper[i]
-            short_breakout = close[i] < donch_lower[i]
+            long_breakout = (close[i] > donch_upper[i] and uptrend and vol_spike[i])
+            short_breakout = (close[i] < donch_lower[i] and downtrend and vol_spike[i])
             
-            long_setup = long_breakout and uptrend and vol_spike[i]
-            short_setup = short_breakout and downtrend and vol_spike[i]
-            
-            if long_setup:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_setup:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
