@@ -2,8 +2,8 @@
 """
 12h Donchian Breakout with 1w Trend Filter and Volume Confirmation
 Hypothesis: Donchian(20) breakouts on 12h timeframe capture major momentum moves.
-Weekly EMA200 filters trend direction to avoid counter-trend trades.
-Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drift.
+Weekly EMA100 filters trend direction to avoid counter-trend trades.
+Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drag.
 Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
@@ -20,19 +20,19 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
+    # Load weekly data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Weekly EMA200 for trend filter
+    # Weekly EMA100 for trend filter
     close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_prev = np.roll(ema200_1w, 1)
-    ema200_1w_prev[0] = ema200_1w[0]
-    ema200_rising = ema200_1w > ema200_1w_prev
-    ema200_falling = ema200_1w < ema200_1w_prev
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    ema200_rising_aligned = align_htf_to_ltf(prices, df_1w, ema200_rising)
-    ema200_falling_aligned = align_htf_to_ltf(prices, df_1w, ema200_falling)
+    ema100_1w = pd.Series(close_1w).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1w_prev = np.roll(ema100_1w, 1)
+    ema100_1w_prev[0] = ema100_1w[0]
+    ema100_rising = ema100_1w > ema100_1w_prev
+    ema100_falling = ema100_1w < ema100_1w_prev
+    ema100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema100_1w)
+    ema100_rising_aligned = align_htf_to_ltf(prices, df_1w, ema100_rising)
+    ema100_falling_aligned = align_htf_to_ltf(prices, df_1w, ema100_falling)
     
     # 12h data
     high = prices['high'].values
@@ -55,13 +55,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 200  # For weekly EMA200
+    start = 200  # For weekly EMA100
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(ema200_rising_aligned[i]) or np.isnan(ema200_falling_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(ema100_1w_aligned[i]) or 
+            np.isnan(ema100_rising_aligned[i]) or np.isnan(ema100_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -90,8 +90,8 @@ def generate_signals(prices):
             bull_breakout = close[i] > highest_high[i]
             bear_breakout = close[i] < lowest_low[i]
             
-            bull_entry = bull_breakout and ema200_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and ema200_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and ema100_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema100_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
