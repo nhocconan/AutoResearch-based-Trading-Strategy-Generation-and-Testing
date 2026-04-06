@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d EMA100 trend filter and volume confirmation
-Hypothesis: Donchian breakouts on 12h capture medium-term momentum with low frequency.
-Daily EMA100 filters trend direction to avoid counter-trend trades.
-Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drag.
-Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
+4h Donchian(40) breakout with 1d EMA100 trend filter and volume confirmation
+Hypothesis: Longer Donchian period reduces trade frequency while capturing major trends.
+100-day EMA filters trend direction to avoid counter-trend trades in bear markets.
+Volume confirmation ensures breakout strength. Designed for 75-200 trades over 4 years.
+Works in bull (breakouts above in uptrend) and bear (breakouts below in downtrend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian40_1d_ema100_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 200:
         return np.zeros(n)
     
     # Load 1d data for trend filter (once before loop)
@@ -34,18 +34,18 @@ def generate_signals(prices):
     ema100_rising_aligned = align_htf_to_ltf(prices, df_1d, ema100_rising)
     ema100_falling_aligned = align_htf_to_ltf(prices, df_1d, ema100_falling)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
+    # Donchian channel (40-period for fewer trades)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    for i in range(40, n):
+        highest_high[i] = np.max(high[i-40:i])
+        lowest_low[i] = np.min(low[i-40:i])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -55,7 +55,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 150  # For daily EMA100 and Donchian
+    start = 200  # For daily EMA100
     
     for i in range(start, n):
         # Skip if required data not available
