@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume Spike + Weekly RSI Filter + ATR Stoploss
-Hypothesis: Daily timeframe captures major trends with low trade frequency.
-Donchian breakouts with volume confirmation and weekly RSI filter work in both bull/bear markets.
-ATR-based stoploss limits drawdown. Target: 30-100 total trades over 4 years.
+6h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike
+Hypothesis: 6h timeframe with Donchian breakouts aligned to daily pivot direction 
+and volume confirmation captures institutional flow while avoiding chop. 
+Daily pivot provides structural bias (above/below pivot = bull/bear bias). 
+Volume spike (>2x average) confirms institutional participation. 
+Works in bull/bear by following pivot-defined trend with momentum confirmation.
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_volume_weeklyrsi_v1"
-timeframe = "1d"
+name = "6h_donchian20_dailypivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,32 +41,26 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly RSI for trend filter (using mtf_data)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    rsi_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 14:
-        # Calculate RSI for weekly
-        delta = np.diff(close_1w)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full(len(close_1w), np.nan)
-        avg_loss = np.full(len(close_1w), np.nan)
-        
-        if len(gain) >= 14:
-            avg_gain[13] = np.mean(gain[:14])
-            avg_loss[13] = np.mean(loss[:14])
-            
-            for i in range(14, len(close_1w)):
-                avg_gain[i] = (gain[i-1] * 13 + avg_gain[i-1]) / 14
-                avg_loss[i] = (loss[i-1] * 13 + avg_loss[i-1]) / 14
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_1w = 100 - (100 / (1 + rs))
-        rsi_1w[:13] = np.nan
+    # Daily pivot points (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate pivot: P = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Support 1: S1 = 2*P - H
+    s1_1d = 2 * pivot_1d - high_1d
+    # Resistance 1: R1 = 2*P - L
+    r1_1d = 2 * pivot_1d - low_1d
+    
+    # Pivot bias: above pivot = bullish bias, below = bearish bias
+    pivot_bias_1d = np.where(close_1d > pivot_1d, 1, -1)
+    
+    # Align to 6h timeframe
+    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,7 +72,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(rsi_1w_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(pivot_bias_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -89,16 +86,14 @@ def generate_signals(prices):
         
         # Volume filter (20-period average)
         vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 1.5
-        
-        # Weekly RSI filter (avoid overbought/oversold extremes)
-        rsi_filter = (rsi_1w_aligned[i] > 30) & (rsi_1w_aligned[i] < 70)
+        volume_filter = volume[i] > vol_ma * 2.0
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower
+            # Exit: price closes below Donchian lower OR breaks S1
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
+                close[i] < s1_aligned[i] or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -107,9 +102,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper
+            # Exit: price closes above Donchian upper OR breaks R1
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
+                close[i] > r1_aligned[i] or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -118,18 +114,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + volume + RSI filter
-            # Minimum holding period: only allow new entry after 10 bars flat
-            if bars_since_entry >= 10:
+            # Look for entries: Donchian breakout + pivot bias + volume spike
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                if bull_breakout and volume_filter and rsi_filter:
+                # Long: bullish breakout with bullish pivot bias and volume
+                if bull_breakout and pivot_bias_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                elif bear_breakout and volume_filter and rsi_filter:
+                # Short: bearish breakout with bearish pivot bias and volume
+                elif bear_breakout and pivot_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
