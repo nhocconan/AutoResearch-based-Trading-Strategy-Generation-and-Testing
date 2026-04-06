@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12526_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12525_12h_donchian20_1d_vol_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for 12h timeframe with 1d HTF
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
@@ -17,20 +17,21 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
+    """Calculate EMA with proper min_periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR with proper min_periods"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channels with proper min_periods"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -40,14 +41,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop - CRITICAL for performance
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
+    # Calculate daily EMA for trend filter
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -62,11 +63,11 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
+    # Start from warmup period - ensure all indicators are valid
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
+        # Skip if daily EMA not available yet
         if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -74,7 +75,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
+        # Check stoploss - exit when price moves against position by 2*ATR
         if position == 1:  # long position
             if close[i] <= stop_price:
                 signals[i] = 0.0
@@ -86,18 +87,18 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation - require 2x average volume
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (daily)
+        # Trend filter from daily EMA
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
+        # Donchian breakout conditions - break of previous period's channel
+        long_breakout = close[i] > upper[i-1]
+        short_breakout = close[i] < lower[i-1]
         
-        # Entry conditions
+        # Entry conditions - require ALL three: volume, trend, and breakout
         long_entry = volume_ok and uptrend_1d and long_breakout
         short_entry = volume_ok and downtrend_1d and short_breakout
         
@@ -116,8 +117,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE  # Maintain long position
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE  # Maintain short position
     
     return signals
