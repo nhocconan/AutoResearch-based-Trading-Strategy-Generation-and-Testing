@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h capture intermediate-term momentum, filtered by 1d EMA trend to avoid counter-trend trades. Volume confirms breakout strength. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
+4h Donchian(20) Breakout + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown.
+Trades only in direction of price relative to prior 4h bar's close to avoid whipsaw. Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema_volume_atr_v1"
-timeframe = "12h"
+name = "4h_donchian20_vol_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,18 +38,6 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate 50-period EMA on 1d close
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 0.037735849 + ema_1d[i-1] * 0.962264151)
-    # Align 1d EMA to 12h timeframe (already shifted by 1 inside)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -58,7 +47,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -93,19 +82,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
+            # Look for entries: Donchian breakout + volume + price direction filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Only trade in direction of 1d EMA trend
-            price_above_ema = close[i] > ema_1d_aligned[i]
-            price_below_ema = close[i] < ema_1d_aligned[i]
+            # Price direction filter: only trade in direction of recent momentum
+            price_up = close[i] > close[i-1]
+            price_down = close[i] < close[i-1]
             
-            if bull_breakout and volume_filter and price_above_ema:
+            if bull_breakout and volume_filter and price_up:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_below_ema:
+            elif bear_breakout and volume_filter and price_down:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
