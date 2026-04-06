@@ -7,7 +7,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
 # The daily EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
-# Adjusted for higher trade frequency by tightening volume and breakout conditions.
 
 name = "exp_13166_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
@@ -17,10 +16,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased from 1.5 to reduce false signals
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Increased from 2.0 to reduce premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -100,9 +99,9 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals - require both high/low break for robustness
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1]) and (close[i] > close[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1]) and (close[i] < close[i-1])
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
