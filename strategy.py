@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 12h Trend Filter + Volume Confirmation
-Hypothesis: Donchian breakouts on 6h capture momentum aligned with 12h trend (via close vs SMA50), volume confirms breakout strength, and a minimum hold period prevents whipsaws. Designed for 60-120 total trades over 4 years (~15-30/year) with discrete sizing to limit fee drag. Works in both bull and bear via trend filter.
+4h Donchian(20) Breakout + 1d EMA(20) Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 4h capture momentum aligned with 1d EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Targeting 75-200 total trades over 4 years with strict entry criteria.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_12h_trend_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1dema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR (for stoploss)
+    # 14-period ATR
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -36,32 +36,32 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Load 12h close once before loop for SMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    sma_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        sma_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            sma_12h[i] = (close_12h[i] + sma_12h[i-1] * 49) / 50
-    sma_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_12h)
+    # Load 1d EMA(20) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        ema_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_exit = 0  # tracks bars since last exit to enforce min hold
+    bars_since_entry = 0
     
-    # Start from warmup period (max of 20 for Donchian, 50 for SMA)
-    start = 50
+    # Start from warmup period
+    start = 20  # For Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(sma_12h_aligned[i]):
+        if np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_exit += 1
+            bars_since_entry += 1
             continue
         
         # Donchian channel (20-period)
@@ -74,50 +74,53 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower or stoploss hit
+            # Exit: price closes below Donchian lower
+            # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
-                close[i] < entry_price - 2.5 * atr[i]):
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.25
-            bars_since_exit += 1
+            bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper or stoploss hit
+            # Exit: price closes above Donchian upper
+            # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
-                close[i] > entry_price + 2.5 * atr[i]):
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
+                bars_since_entry = 0
             else:
                 signals[i] = -0.25
-            bars_since_exit += 1
+            bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + volume + trend filter + min hold
-            if bars_since_exit >= 20:  # minimum 20 bars (5 days) between trades
+            # Look for entries: Donchian breakout + volume + trend filter
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Trend filter: long if close > 12h SMA50, short if close < 12h SMA50
-                trend_filter_long = close[i] > sma_12h_aligned[i]
-                trend_filter_short = close[i] < sma_12h_aligned[i]
+                # Trend filter: only trade long if close > 1d EMA, short if close < 1d EMA
+                trend_filter_long = close[i] > ema_1d_aligned[i]
+                trend_filter_short = close[i] < ema_1d_aligned[i]
                 
                 if bull_breakout and volume_filter and trend_filter_long:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_exit = 0
+                    bars_since_entry = 0
                 elif bear_breakout and volume_filter and trend_filter_short:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_exit = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_exit += 1
+                    bars_since_entry += 1
             else:
                 signals[i] = 0.0
-                bars_since_exit += 1
+                bars_since_entry += 1
     
     return signals
