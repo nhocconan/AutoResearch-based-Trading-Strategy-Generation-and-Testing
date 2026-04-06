@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA(50) Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h capture multi-day momentum aligned with daily EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Targets 50-150 total trades over 4 years with position size 0.25.
+12h Donchian(20) Breakout + 1d EMA(50) Trend + Volume Filter + ATR Stoploss (v1)
+Hypothesis: Donchian breakouts on 12h capture intermediate-term momentum aligned with daily EMA trend. Volume confirms breakout strength, ATR stoploss limits drawdown. Designed for 50-150 trades over 4 years with position size 0.25 to balance return and risk.
 """
 
 import numpy as np
@@ -97,8 +97,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + volume + trend filter
-            # Minimum holding period: only allow new entry after 10 bars flat
-            if bars_since_entry >= 10:
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
