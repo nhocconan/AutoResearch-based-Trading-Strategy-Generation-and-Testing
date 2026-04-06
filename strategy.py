@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Daily Trend + Volume Confirmation (v2)
-Hypothesis: The previous version failed due to insufficient trades (only ~9/symbol).
-This version loosens entry conditions slightly to increase trade frequency while
-maintaining edge: removes volume confirmation requirement (too strict) and uses
-price action + trend filter only. Still uses Donchian breakouts with daily EMA
-filter to avoid counter-trend trades. Target: 50-150 total trades over 4 years.
+4h Donchian Breakout + Daily Trend + Volume Confirmation
+Hypothesis: Daily trend filters 4h Donchian breakouts to reduce false signals.
+Volume confirmation ensures momentum behind breakouts.
+Works in bull via breakouts, bear via breakdowns with trend filter.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12485_12h_donchian20_1d_trend_v2"
-timeframe = "12h"
+name = "exp_12486_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -54,12 +55,14 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -68,7 +71,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
@@ -91,6 +94,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
         # Trend filter (daily)
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
@@ -99,9 +105,9 @@ def generate_signals(prices):
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Entry conditions - REMOVED volume confirmation to increase trade frequency
-        long_entry = uptrend_1d and long_breakout
-        short_entry = downtrend_1d and short_breakout
+        # Entry conditions
+        long_entry = volume_ok and uptrend_1d and long_breakout
+        short_entry = volume_ok and downtrend_1d and short_breakout
         
         # Generate signals
         if position == 0:
