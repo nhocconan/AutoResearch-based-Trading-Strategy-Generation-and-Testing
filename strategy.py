@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation v5
-Hypothesis: Donchian(20) breakouts capture strong trends. 1d EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
+12h Donchian Breakout with 1d Trend Filter and Volume Confirmation v1
+Hypothesis: Donchian(20) breakouts capture strong trends on 12h timeframe. 1d EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_volume_v5"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema25_rising_aligned = align_htf_to_ltf(prices, df_1d, ema25_rising)
     ema25_falling_aligned = align_htf_to_ltf(prices, df_1d, ema25_falling)
     
-    # 4h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
