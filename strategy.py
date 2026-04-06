@@ -15,6 +15,14 @@ SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
+def calculate_donchian_high(high, period):
+    """Calculate Donchian high"""
+    return pd.Series(high).rolling(window=period, min_periods=period).max().values
+
+def calculate_donchian_low(low, period):
+    """Calculate Donchian low"""
+    return pd.Series(low).rolling(window=period, min_periods=period).min().values
+
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
     tr1 = high - low
@@ -24,12 +32,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -38,14 +40,15 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Donchian channels
+    # Calculate weekly Donchian levels
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    upper_1w, lower_1w = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
+    dc_high_1w = calculate_donchian_high(high_1w, DONCHIAN_PERIOD)
+    dc_low_1w = calculate_donchian_low(low_1w, DONCHIAN_PERIOD)
     
-    # Align weekly Donchian to daily timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Align weekly Donchian levels to daily timeframe
+    dc_high_1w_aligned = align_htf_to_ltf(prices, df_1w, dc_high_1w)
+    dc_low_1w_aligned = align_htf_to_ltf(prices, df_1w, dc_low_1w)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -65,8 +68,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly Donchian not available
-        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]):
+        # Skip if weekly Donchian levels not available
+        if np.isnan(dc_high_1w_aligned[i]) or np.isnan(dc_low_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -88,9 +91,10 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above weekly upper or breakdown below weekly lower
-        breakout_long = volume_ok and close[i] >= upper_1w_aligned[i]
-        breakdown_short = volume_ok and close[i] <= lower_1w_aligned[i]
+        # Breakout above weekly Donchian high = long
+        # Breakdown below weekly Donchian low = short
+        breakout_long = volume_ok and close[i] >= dc_high_1w_aligned[i]
+        breakdown_short = volume_ok and close[i] <= dc_low_1w_aligned[i]
         
         # Entry conditions
         long_entry = breakout_long
