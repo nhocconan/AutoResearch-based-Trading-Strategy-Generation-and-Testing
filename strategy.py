@@ -4,8 +4,8 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and volume confirmation.
-# Uses 12h trend to filter counter-trend trades, volume to reduce false breakouts.
-# Designed for fewer trades (target 75-200 over 4 years) to minimize fee drag.
+# Uses 12-hour trend to filter counter-trend trades, volume to reduce false breakouts.
+# Designed for fewer trades (target 75-150 over 4 years) to minimize fee drag.
 # Works in bull/bear by only trading with higher timeframe trend.
 
 name = "4h_donchian20_12h_ema50_vol_v1"
