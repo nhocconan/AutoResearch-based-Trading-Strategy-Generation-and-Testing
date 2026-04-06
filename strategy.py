@@ -1,21 +1,21 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR stoploss.
-# Works in bull/bear because breakouts capture strong directional moves,
-# volume filters weak/noisy breakouts, and ATR stoploss manages risk.
-# Target: 80-160 total trades over 4 years (20-40/year) to minimize fee drag.
+# Hypothesis: Daily Donchian channel breakout with volume confirmation on 12h timeframe
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and Donchian channels provide structural support/resistance that works across regimes.
+# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
 
-name = "exp_12961_4h_donchian20_vol_atr_v1"
-timeframe = "4h"
+name = "exp_12962_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -30,7 +30,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
+    """Calculate Donchian channel"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -48,11 +48,11 @@ def generate_signals(prices):
     low_d = df_daily['low'].values
     upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Align to 4h timeframe
-    upper_d_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
-    lower_d_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -71,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if Donchian levels not available
-        if np.isnan(upper_d_aligned[i]) or np.isnan(lower_d_aligned[i]):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,9 +93,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_d_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_d_aligned[i]
+        # Breakout above upper or breakdown below lower
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
