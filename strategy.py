@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-1h Donchian(20) Breakout + 4h Trend + Volume Spike + Session Filter (08-20 UTC)
-Hypothesis: 1h breakouts aligned with 4h trend direction, filtered by volume and session time,
-reduces whipsaw and overtrading. Works in bull/bear via trend filter. Targets 15-37 trades/year.
+1h Donchian(20) Breakout + 4h/1d Trend + Volume Spike + Session Filter
+Hypothesis: Uses higher timeframe (4h/1d) trend bias with 1h entry timing to avoid false breakouts.
+Volume filter ensures momentum confirmation. Session filter (08-20 UTC) reduces noise.
+Designed for 15-30 trades/year to minimize fee drag while capturing trending moves.
+Works in bull (long breakouts with uptrend) and bear (short breakdowns with downtrend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_donchian20_4htrend_vol_session_v1"
+name = "1h_donchian20_4h1dtrend_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -46,15 +48,26 @@ def generate_signals(prices):
         for i in range(20, len(close_4h)):
             ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 18) / 20
     
+    # 1d EMA20 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        ema_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_4h = np.where(close_4h > ema_4h, 1, -1)
+    trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
     # Align to 1h timeframe
-    trend_bias_aligned = align_htf_to_ltf(prices, df_4h, trend_bias_4h)
+    trend_bias_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_bias_4h)
+    trend_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,8 +78,8 @@ def generate_signals(prices):
     start = 20  # For Donchian
     
     for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]):
+        # Skip if required data not available or outside session
+        if np.isnan(atr[i]) or np.isnan(trend_bias_4h_aligned[i]) or np.isnan(trend_bias_1d_aligned[i]) or not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.20
             else:
@@ -84,11 +97,11 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR against 4h trend OR outside session
+            # Exit: price closes below Donchian lower OR against 4h/1d trend
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
-                trend_bias_aligned[i] == -1 or
-                not in_session[i] or
+                trend_bias_4h_aligned[i] == -1 or
+                trend_bias_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -97,11 +110,11 @@ def generate_signals(prices):
                 signals[i] = 0.20
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR against 4h trend OR outside session
+            # Exit: price closes above Donchian upper OR against 4h/1d trend
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
-                trend_bias_aligned[i] == 1 or
-                not in_session[i] or
+                trend_bias_4h_aligned[i] == 1 or
+                trend_bias_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -110,20 +123,20 @@ def generate_signals(prices):
                 signals[i] = -0.20
             bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + 4h trend + volume spike + session
+            # Look for entries: Donchian breakout + 4h/1d trend + volume + session
             # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15 and in_session[i]:
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Long: bullish breakout with bullish 4h trend and volume
-                if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
+                # Long: bullish breakout with bullish 4h/1d trend and volume
+                if bull_breakout and trend_bias_4h_aligned[i] == 1 and trend_bias_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.20
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: bearish breakout with bearish 4h trend and volume
-                elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
+                # Short: bearish breakout with bearish 4h/1d trend and volume
+                elif bear_breakout and trend_bias_4h_aligned[i] == -1 and trend_bias_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.20
                     position = -1
                     entry_price = close[i]
@@ -133,9 +146,6 @@ def generate_signals(prices):
                     bars_since_entry += 1
             else:
                 signals[i] = 0.0
-                if in_session[i]:
-                    bars_since_entry += 1
-                else:
-                    bars_since_entry = 0  # Reset counter outside session
+                bars_since_entry += 1
     
     return signals
