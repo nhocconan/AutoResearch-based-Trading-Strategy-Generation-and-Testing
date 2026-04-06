@@ -1,49 +1,82 @@
 #!/usr/bin/env python3
 """
-6h/1d Time-of-Day Momentum with Volume Filter
-Hypothesis: Price momentum during specific UTC hours (08:00-16:00) shows persistent edge due to institutional activity. 
-Uses 15-minute momentum within 6h bars, filtered by 1d trend and volume. Works in bull/bear by capturing intraday momentum bursts.
-Target: 100-200 total trades over 4 years (25-50/year).
+12h Donchian Breakout with Volume Confirmation and Weekly ADX Trend Filter
+Hypothesis: Donchian breakouts on 12h timeframe capture significant momentum moves.
+Weekly ADX filter ensures we only trade in trending markets, avoiding whipsaws.
+Volume confirmation adds confirmation of institutional participation.
+Designed to work in both bull (breakouts above upper band) and bear (breakdowns below lower band).
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_tod_momentum_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for ADX trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly ADX calculation (14 period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = 0
+        down_move[0] = 0
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed values
+        tr_rounded = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+        plus_dm_rounded = pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values
+        minus_dm_rounded = pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_rounded / tr_rounded
+        minus_di = 100 * minus_dm_rounded / tr_rounded
+        
+        # DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+        
+        return adx
     
-    # 6h data
-    close = prices['close'].values
+    adx_weekly = calculate_adx(high_weekly, low_weekly, close_weekly, 14)
+    adx_weekly_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
+    
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-calculate hour for session filter
-    hours = pd.DatetimeIndex(open_time).hour
+    # Donchian channels (20 period)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # 15-minute momentum proxy: price change over last 4 periods (1h) within 6h bar
-    mom_period = 4
-    price_change = pd.Series(close).diff(mom_period).values
-    
-    # Volume filter: volume above 20-period average
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.2 * vol_ma)  # Require above average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -58,47 +91,42 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, mom_period, 20, 14) + 1
+    start = max(donchian_period, 14) + 14
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(price_change[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_weekly_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Session filter: trade only during active hours (08:00-16:00 UTC)
-        hour = hours[i]
-        in_session = 8 <= hour <= 16
-        
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # ADX filter: only trade when trending (ADX > 20)
+        trending = adx_weekly_aligned[i] > 20
         
         # Check exits
         if position == 1:  # long position
-            # Exit: momentum reverses OR stoploss
-            if (price_change[i] < 0 or
+            # Exit: price breaks below lower Donchian band OR stoploss
+            if (close[i] <= donchian_low[i] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: momentum reverses OR stoploss
-            if (price_change[i] > 0 or
+            # Exit: price breaks above upper Donchian band OR stoploss
+            if (close[i] >= donchian_high[i] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: momentum + session + trend + volume
-            long_setup = (price_change[i] > 0 and in_session and uptrend and vol_filter[i])
-            short_setup = (price_change[i] < 0 and in_session and downtrend and vol_filter[i])
+            # Look for entries: Donchian breakout + volume + trend filter
+            long_setup = (close[i] > donchian_high[i] and vol_filter[i] and trending)
+            short_setup = (close[i] < donchian_low[i] and vol_filter[i] and trending)
             
             if long_setup:
                 signals[i] = 0.25
