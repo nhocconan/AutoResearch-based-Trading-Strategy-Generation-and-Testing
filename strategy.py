@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA trend and volume confirmation.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend and volume confirmation.
 # Uses 1-day EMA50 to establish trend bias (long above EMA50, short below EMA50).
 # Breakouts in direction of EMA trend with volume capture institutional moves.
-# Designed for 4h timeframe to target 75-200 trades over 4 years with proven structure.
+# Designed for 12h timeframe to target 50-150 trades over 4 years with proven structure.
 # Works in bull/bear markets via EMA-based directional bias and volume confirmation.
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,10 +35,10 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to 4h timeframe (shifted by 1 day for no look-ahead)
+    # Align EMA50 to 12h timeframe (shifted by 1 day for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4-hour Donchian channel (20-period)
+    # 12-hour Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
@@ -46,7 +46,7 @@ def generate_signals(prices):
         highest_high[i] = np.max(high[i-19:i+1])
         lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 4h volume > 1.5x 20-period average
+    # Volume confirmation: 12h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
