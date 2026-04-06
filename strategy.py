@@ -1,8 +1,9 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d Donchian breakout with 1w EMA filter and volume confirmation.
-- Long: price breaks above 1d Donchian(20) + price > 1w EMA(50) + volume > 1.5x average
-- Short: price breaks below 1d Donchian(20) + price < 1w EMA(50) + volume > 1.5x average
+6h Donchian breakout with 12h pivot direction and volume confirmation.
+- Long: price breaks above 6h Donchian(20) + price > 12h pivot point + volume > 2x average
+- Short: price breaks below 6h Donchian(20) + price < 12h pivot point + volume > 2x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
 - Target: 75-200 trades over 4 years (19-50/year)
@@ -12,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14198_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_14199_6h_donchian20_12h_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -26,24 +27,33 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_pivot(high, low, close):
+    """Calculate pivot point and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 12h data for pivot calculation (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w EMA(50)
-    ema_1w = calculate_ema(close_1w, 50)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 12h pivot point
+    pivot_12h, r1_12h, r2_12h, r3_12h, s1_12h, s2_12h, s3_12h = calculate_pivot(high_12h, low_12h, close_12h)
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
     
-    # 1d data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -53,9 +63,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (2.0 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -65,12 +75,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
-    start = max(20, 20, 14, 50) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR)
+    start = max(20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_1w_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(pivot_12h_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -93,11 +103,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with 1w EMA filter and volume
-        # Long: break above upper band + price > 1w EMA + volume
-        # Short: break below lower band + price < 1w EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1w_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1w_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with 12h pivot filter and volume
+        # Long: break above upper band + price > 12h pivot + volume
+        # Short: break below lower band + price < 12h pivot + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > pivot_12h_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < pivot_12h_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
