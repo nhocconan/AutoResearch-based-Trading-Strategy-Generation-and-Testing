@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with volume confirmation and volatility filter
-Hypothesis: Medium-term breakouts on 12h timeframe with volume confirmation
-capture momentum while avoiding whipsaws. Volatility filter avoids range-bound periods.
-Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
-Target: 100-200 total trades over 4 years (25-50/year).
+4h Donchian Breakout with 12h Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 4h, filtered by 12h trend and volume spikes, 
+capture momentum in both bull and bear markets. The 12h trend filter avoids counter-trend 
+trades, while volume ensures breakout legitimacy. ATR-based stops limit drawdown.
+Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_vol_filter_v2"
-timeframe = "12h"
+name = "4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -26,108 +26,105 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for volatility and stoploss
+    # 20-period ATR for stops and filters
     atr = np.full(n, np.nan)
-    if n >= 14:
+    if n >= 20:
         tr = np.maximum(
             high[1:] - low[1:],
             np.abs(high[1:] - close[:-1]),
             np.abs(low[1:] - close[:-1])
         )
         if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+            atr[20] = np.mean(tr[:20])
+            for i in range(21, n):
+                atr[i] = (atr[i-1] * 19 + tr[i-1]) / 20
     
-    # Volatility filter: current ATR > 1.5x average ATR over last 20 periods
-    # Ensures we trade only in volatile (trending) periods
-    vol_filter = np.zeros(n, dtype=bool)
-    if n >= 34:  # Need 20 + 14 for calculations
-        atr_ma = np.full(n, np.nan)
-        for i in range(20, n):
-            atr_ma[i] = np.mean(atr[i-20:i])
-        vol_filter[20:] = (atr[20:] > atr_ma[20:] * 1.5)
-    
-    # Donchian channels (20-period)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Donchian channels (20-period high/low)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     
     for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # 50-period EMA on 12h for trend
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 49) / 51
+    
+    # Trend: 1 if close > EMA (uptrend), -1 if close < EMA (downtrend)
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    
+    # Volume filter: current volume > 1.5x average over last 20 periods
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
     
     # Start from warmup period
-    start = 30  # Need enough data for Donchian and volatility filter
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
+           np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
             continue
         
-        # Session filter: 08-20 UTC (avoid low-volume Asian session)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        session_filter = 8 <= hour <= 20
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR volatility drops
+            # Exit: price breaks below Donchian low OR trend turns down
             # Stoploss: price drops 2.5*ATR below entry
-            if (close[i] < lower[i] or
-                not vol_filter[i] or
+            if (close[i] <= donch_low[i] or
+                trend_12h_aligned[i] == -1 or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR volatility drops
+            # Exit: price breaks above Donchian high OR trend turns up
             # Stoploss: price rises 2.5*ATR above entry
-            if (close[i] > upper[i] or
-                not vol_filter[i] or
+            if (close[i] >= donch_high[i] or
+                trend_12h_aligned[i] == 1 or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
         else:
-            # Look for entries
-            # Minimum holding period: only allow new entry after 8 bars flat
-            if bars_since_entry >= 8:
-                # Breakout entries: upper/lower with volatility and session
-                bull_breakout = close[i] > upper[i]
-                bear_breakout = close[i] < lower[i]
-                
-                # Long: breakout above upper with volatility + session
-                if bull_breakout and vol_filter[i] and session_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                # Short: breakdown below lower with volatility + session
-                elif bear_breakout and vol_filter[i] and session_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-                    bars_since_entry += 1
+            # Look for breakout entries
+            # Long: price breaks above Donchian high in uptrend with volume
+            if (close[i] > donch_high[i] and
+                trend_12h_aligned[i] == 1 and
+                volume_filter):
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short: price breaks below Donchian low in downtrend with volume
+            elif (close[i] < donch_low[i] and
+                  trend_12h_aligned[i] == -1 and
+                  volume_filter):
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
     
     return signals
