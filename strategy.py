@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
 # Uses daily price channel breakouts aligned with weekly momentum to capture strong trending moves.
 # Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 75-125 total trades over 4 years (19-31/year).
+# and bear markets (breakdowns below lower band). Target: 50-150 total trades over 4 years (12-37/year).
 
 name = "exp_13504_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
