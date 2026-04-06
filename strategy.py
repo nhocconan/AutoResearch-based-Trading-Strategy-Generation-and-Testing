@@ -7,13 +7,11 @@ name = "exp_13963_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA(20) trend filter and volume confirmation.
-# Uses 12h EMA(20) for trend direction: price above EMA = bullish bias (long only),
-# price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
-# direction of 12h trend with volume > 1.5x average. Exit on Donchian reversal or
-# trend change. Designed for 75-200 total trades over 4 years (19-50/year) to
-# minimize fee drag. Works in bull (breaks above with trend) and bear (breaks
-# below with trend) with EMA filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
+# Goes long when price breaks above Donchian upper band during 12h uptrend with volume > 1.5x average.
+# Goes short when price breaks below Donchian lower band during 12h downtrend with volume > 1.5x average.
+# Uses 2x ATR stop loss. Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Works in bull (breaks above with trend) and bear (breaks below with trend) with EMA filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -43,8 +41,8 @@ def generate_signals(prices):
     # Load 12h data for EMA trend filter ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA(20) for trend
-    ema_12h = calculate_ema(df_12h['close'].values, 20)
+    # Calculate 12h EMA(50) for trend
+    ema_12h = calculate_ema(df_12h['close'].values, 50)
     
     # Align EMA to 4h timeframe
     ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
