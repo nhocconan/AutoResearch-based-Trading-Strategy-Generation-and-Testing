@@ -3,13 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_trend_ema200_4h_trend_1d_trend_v1"
-timeframe = "1h"
+# Hypothesis: 6h Bollinger Band squeeze breakout with weekly trend filter.
+# Uses 20-period BB with 2 std dev and Bollinger Width percentile to detect low volatility squeezes.
+# Breakout occurs when price closes outside BB after a squeeze (BW < 20th percentile).
+# Weekly trend filter (price > weekly EMA50) ensures trades align with higher timeframe momentum.
+# Works in bull markets (breakouts with trend) and bear markets (mean reversion fails, trend filter avoids false breakouts).
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
+
+name = "6h_bb_squeeze_weekly_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -17,302 +24,68 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Multi-timeframe trend alignment
-    # 4h trend (EMA200)
-    df_4h = get_htf_data(prices, '4h')
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper = ma + bb_std * std
+    lower = ma - bb_std * std
     
-    # 1d trend (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Bollinger Width (normalized by middle band)
+    bw = (upper - lower) / ma
     
-    # 1h EMA200 for entry timing
-    ema200_1h = pd.Series(close).ewm(span=200, min_periods=200).mean().values
+    # Bollinger Width percentile (20-period lookback) to detect squeeze
+    bw_percentile = pd.Series(bw).rolling(window=20, min_periods=20).rank(pct=True) * 100
     
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
-    
-    signals = np.zeros(n)
-    
-    for i in range(200, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
-        # Multi-timeframe trend filter: all timeframes must align
-        trend_4h = close[i] > ema200_4h_aligned[i]
-        trend_1d = close[i] > ema200_1d_aligned[i]
-        trend_1h = close[i] > ema200_1h[i]
-        
-        # Long when all timeframes bullish, short when all bearish
-        if trend_4h and trend_1d and trend_1h:
-            signals[i] = 0.20
-        elif not trend_4h and not trend_1d and not trend_1h:
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1h_trend_ema200_4h_trend_1d_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
+    # Weekly trend filter: price > weekly EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Multi-timeframe trend alignment
-    # 4h trend (EMA200)
-    df_4h = get_htf_data(prices, '4h')
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # 1d trend (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 1h EMA200 for entry timing
-    ema200_1h = pd.Series(close).ewm(span=200, min_periods=200).mean().values
-    
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
+    weekly_ema = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema.values)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
+    for i in range(50, n):
+        # Skip if required data not available
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(bw_percentile[i]) or np.isnan(weekly_ema_aligned[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
             continue
         
-        # Multi-timeframe trend filter: all timeframes must align
-        trend_4h = close[i] > ema200_4h_aligned[i]
-        trend_1d = close[i] > ema200_1d_aligned[i]
-        trend_1h = close[i] > ema200_1h[i]
+        # Squeeze condition: Bollinger Width below 20th percentile (low volatility)
+        squeeze = bw_percentile[i] < 20
         
-        # Long when all timeframes bullish, short when all bearish
-        if trend_4h and trend_1d and trend_1h:
-            signals[i] = 0.20
-        elif not trend_4h and not trend_1d and not trend_1h:
-            signals[i] = -0.20
+        if position == 1:  # long position
+            # Exit: price reaches middle band (mean reversion) or weekly trend fails
+            if close[i] <= ma[i] or close[i] < weekly_ema_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price reaches middle band or weekly trend fails
+            if close[i] >= ma[i] or close[i] > weekly_ema_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
         else:
-            signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1h_trend_ema200_4h_trend_1d_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Multi-timeframe trend alignment
-    # 4h trend (EMA200)
-    df_4h = get_htf_data(prices, '4h')
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # 1d trend (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 1h EMA200 for entry timing
-    ema200_1h = pd.Series(close).ewm(span=200, min_periods=200).mean().values
-    
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
-    
-    signals = np.zeros(n)
-    
-    for i in range(200, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
-        # Multi-timeframe trend filter: all timeframes must align
-        trend_4h = close[i] > ema200_4h_aligned[i]
-        trend_1d = close[i] > ema200_1d_aligned[i]
-        trend_1h = close[i] > ema200_1h[i]
-        
-        # Long when all timeframes bullish, short when all bearish
-        if trend_4h and trend_1d and trend_1h:
-            signals[i] = 0.20
-        elif not trend_4h and not trend_1d and not trend_1h:
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1h_trend_ema200_4h_trend_1d_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Multi-timeframe trend alignment
-    # 4h trend (EMA200)
-    df_4h = get_htf_data(prices, '4h')
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # 1d trend (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 1h EMA200 for entry timing
-    ema200_1h = pd.Series(close).ewm(span=200, min_periods=200).mean().values
-    
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
-    
-    signals = np.zeros(n)
-    
-    for i in range(200, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
-        # Multi-timeframe trend filter: all timeframes must align
-        trend_4h = close[i] > ema200_4h_aligned[i]
-        trend_1d = close[i] > ema200_1d_aligned[i]
-        trend_1h = close[i] > ema200_1h[i]
-        
-        # Long when all timeframes bullish, short when all bearish
-        if trend_4h and trend_1d and trend_1h:
-            signals[i] = 0.20
-        elif not trend_4h and not trend_1d and not trend_1h:
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
-    
-    return signals
-
-Hmm, I notice that the assistant's response is identical across multiple attempts. This suggests there might be an issue with the generation process. Let me provide a different approach that adheres to the constraints while trying to optimize for the 1h timeframe with proper multi-timeframe alignment.
-
-Let me think about what would work well:
-1. Using 1h as primary timeframe
-2. Using 4h and 1d for trend direction (as instructed)
-3. Using EMA200 as a trend filter (commonly used)
-4. Adding session filter (08-20 UTC) to reduce noise
-5. Position size of 0.20 as suggested
-6. Ensuring we don't overtrade by having strict entry conditions
-
-The strategy should:
-- Go long when 1h, 4h, and 1d are all bullish (price above EMA200)
-- Go short when 1h, 4h, and 1d are all bearish (price below EMA200)
-- Otherwise stay flat
-- Only trade during 08-20 UTC session
-- Use proper MTF data loading with get_htf_data called once before the loop
-
-Let me write the final version:
-
-</think>
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1h_trend_ema200_4h_trend_1d_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Multi-timeframe trend alignment
-    # 4h trend (EMA200)
-    df_4h = get_htf_data(prices, '4h')
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # 1d trend (EMA200)
-    df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 1h EMA200 for entry timing
-    ema200_1h = pd.Series(close).ewm(span=200, min_periods=200).mean().values
-    
-    # Session filter (08-20 UTC)
-    hours = prices.index.hour
-    
-    signals = np.zeros(n)
-    
-    for i in range(200, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
-        # Multi-timeframe trend filter: all timeframes must align
-        trend_4h = close[i] > ema200_4h_aligned[i]
-        trend_1d = close[i] > ema200_1d_aligned[i]
-        trend_1h = close[i] > ema200_1h[i]
-        
-        # Long when all timeframes bullish, short when all bearish
-        if trend_4h and trend_1d and trend_1h:
-            signals[i] = 0.20
-        elif not trend_4h and not trend_1d and not trend_1h:
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
+            # Look for breakout entries after squeeze
+            if squeeze:
+                # Bullish breakout: close above upper band with weekly uptrend
+                if close[i] > upper[i] and close[i] > weekly_ema_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Bearish breakout: close below lower band with weekly downtrend
+                elif close[i] < lower[i] and close[i] < weekly_ema_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
