@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Donchian(20) breakouts capture momentum. Only take breakouts in direction of 1d EMA(50) to avoid counter-trend.
-# Volume confirmation ensures breakout has institutional participation.
-# ATR-based stop loss limits downside. Works in bull (buy breakouts) and bear (sell breakdowns).
-# Target: 20-50 trades/year by using strict Donchian breakouts + trend + volume.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+# Donchian breakouts capture momentum in trending markets. 1w EMA(50) filters for primary trend direction.
+# Volume confirmation ensures institutional participation. Works in bull markets (buy breakouts in uptrend)
+# and bear markets (sell breakdowns in downtrend). Target: 10-25 trades/year by using strict breakouts
+# with volume and trend filter. Uses daily timeframe to minimize trade frequency and fee drag.
 
-name = "exp_13629_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13630_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -47,23 +47,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_slope = np.diff(ema_1d, prepend=ema_1d[0])  # slope approximation
-    ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
+    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # slope approximation
+    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
     
-    # Calculate 4h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -81,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1w_slope_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,15 +103,24 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1d EMA slope
-        uptrend = ema_1d_slope_aligned[i] > 0
-        downtrend = ema_1d_slope_aligned[i] < 0
+        # Trend direction from 1w EMA slope
+        uptrend = ema_1w_slope_aligned[i] > 0
+        downtrend = ema_1w_slope_aligned[i] < 0
         
         # Donchian breakout signals
-        # Breakout above upper channel
-        long_signal = volume_ok and uptrend and close[i] > upper[i-1]  # breakout above previous upper
-        # Breakdown below lower channel
-        short_signal = volume_ok and downtrend and close[i] < lower[i-1]  # breakdown below previous lower
+        # Avoid lookback by checking current and previous values
+        if i > 0:
+            close_prev = close[i-1]
+            close_curr = close[i]
+            
+            # Long signal: price breaks above Donchian upper in uptrend
+            long_signal = volume_ok and uptrend and close_prev <= donchian_upper[i-1] and close_curr > donchian_upper[i]
+            
+            # Short signal: price breaks below Donchian lower in downtrend
+            short_signal = volume_ok and downtrend and close_prev >= donchian_lower[i-1] and close_curr < donchian_lower[i]
+        else:
+            long_signal = False
+            short_signal = False
         
         # Generate signals
         if position == 0:
@@ -128,17 +137,29 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite Donchian signal (breakdown) or stop loss
-            if close[i] < lower[i]:  # breakdown below lower channel
-                signals[i] = 0.0
-                position = 0
+            # Exit long on opposite Donchian break or stop loss
+            if i > 0:
+                close_prev = close[i-1]
+                close_curr = close[i]
+                # Exit if price breaks below Donchian lower (trend reversal)
+                if close_prev >= donchian_lower[i-1] and close_curr < donchian_lower[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = SIGNAL_SIZE
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite Donchian signal (breakout) or stop loss
-            if close[i] > upper[i]:  # breakout above upper channel
-                signals[i] = 0.0
-                position = 0
+            # Exit short on opposite Donchian break or stop loss
+            if i > 0:
+                close_prev = close[i-1]
+                close_curr = close[i]
+                # Exit if price breaks above Donchian upper (trend reversal)
+                if close_prev <= donchian_upper[i-1] and close_curr > donchian_upper[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -SIGNAL_SIZE
             else:
                 signals[i] = -SIGNAL_SIZE
     
