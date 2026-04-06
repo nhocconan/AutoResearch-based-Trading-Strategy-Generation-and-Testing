@@ -3,33 +3,59 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator with 12-hour volume confirmation.
-# The Alligator (Jaws/Teeth/Lips) identifies trend presence and direction.
-# During strong trends, lines are separated and aligned; during consolidation, they intertwine.
-# Using 12h volume filter ensures we only trade when institutional participation confirms the trend.
-# Works in both bull/bear markets by capturing directional moves with volume validation.
-# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost.
+# Hypothesis: 6-hour Williams %R with 12-hour trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In trending markets (ADX > 25),
+# we trade pullbacks in the direction of the 12h trend. Volume confirms momentum.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
 
-name = "alligator_6h_12h_vol_v1"
+name = "exp_13179_6h_williamsr_12h_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-JAWS_PERIOD = 13   # Blue line
-TEETH_PERIOD = 8   # Red line
-LIPS_PERIOD = 5    # Green line
-JAWS_OFFSET = 8
-TEETH_OFFSET = 5
-LIPS_OFFSET = 3
+WILLIAMS_PERIOD = 14
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_smma(data, period):
-    """Calculate Smoothed Moving Average (SMMA)"""
-    return pd.Series(data).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return williams_r.values
+
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+, DM-
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    return adx.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -48,32 +74,21 @@ def generate_signals(prices):
     # Load 12h data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Alligator components (SMMA with offsets)
+    # Calculate 12h ADX for trend filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    jaws_raw = calculate_smma(close_12h, JAWS_PERIOD)
-    teeth_raw = calculate_smma(close_12h, TEETH_PERIOD)
-    lips_raw = calculate_smma(close_12h, LIPS_PERIOD)
-    
-    # Apply offsets (shift right by offset periods)
-    jaws = np.roll(jaws_raw, JAWS_OFFSET)
-    teeth = np.roll(teeth_raw, TEETH_OFFSET)
-    lips = np.roll(lips_raw, LIPS_OFFSET)
-    
-    # Set NaN for invalid periods due to offset and calculation
-    jaws[:JAWS_OFFSET + JAWS_PERIOD - 1] = np.nan
-    teeth[:TEETH_OFFSET + TEETH_PERIOD - 1] = np.nan
-    lips[:LIPS_OFFSET + LIPS_PERIOD - 1] = np.nan
-    
-    # Align to 6h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, ADX_PERIOD)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -87,17 +102,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(
-        JAWS_OFFSET + JAWS_PERIOD,
-        TEETH_OFFSET + TEETH_PERIOD,
-        LIPS_OFFSET + LIPS_PERIOD,
-        VOLUME_MA_PERIOD,
-        ATR_PERIOD
-    ) + 1
+    start = max(WILLIAMS_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Alligator not ready
-        if np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -119,20 +128,23 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Alligator signals: aligned separation indicates trend
-        # Lips > Teeth > Jaws = uptrend (green > red > blue)
-        # Lips < Teeth < Jaws = downtrend (green < red < blue)
-        uptrend = lips_aligned[i] > teeth_aligned[i] > jaws_aligned[i]
-        downtrend = lips_aligned[i] < teeth_aligned[i] < jaws_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_12h_aligned[i] > ADX_THRESHOLD
         
-        # Generate signals
+        # Williams %R signals: oversold < -80, overbought > -20
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        
+        # Generate signals: trade pullbacks in trending market
         if position == 0:
-            if volume_ok and uptrend:
+            if trending and volume_ok and oversold:
+                # Long on pullback in uptrend
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and downtrend:
+            elif trending and volume_ok and overbought:
+                # Short on pullback in downtrend
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
