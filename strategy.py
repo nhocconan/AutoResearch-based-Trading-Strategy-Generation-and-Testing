@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-12h Donchian Breakout + Daily Trend + Volume Confirmation v2
-Hypothesis: Increase trade frequency by lowering volume threshold and 
-adding momentum confirmation. Target: 100-200 trades over 4 years.
-Works in bull via breakouts, bear via breakdowns with trend filter.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -14,14 +7,15 @@ name = "exp_12482_12h_donchian20_1d_trend_vol_v2"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - tightened to reduce trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # Lowered from 2.0 to increase trades
+VOLUME_THRESHOLD = 3.0  # Increased for stricter volume filter
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5  # Increased stop distance to reduce premature exits
+MIN_HOLD_BARS = 3  # Minimum holding period to prevent whipsaw
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -44,7 +38,7 @@ def calculate_donchian(high, low, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
@@ -68,6 +62,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    bars_held = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
@@ -81,16 +76,22 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
-        if position == 1:  # long position
+        # Update bars held
+        if position != 0:
+            bars_held += 1
+        
+        # Check stoploss (only after minimum hold period)
+        if position == 1 and bars_held >= MIN_HOLD_BARS:  # long position
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
+                bars_held = 0
                 continue
-        elif position == -1:  # short position
+        elif position == -1 and bars_held >= MIN_HOLD_BARS:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
+                bars_held = 0
                 continue
         
         # Volume confirmation
@@ -104,7 +105,7 @@ def generate_signals(prices):
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Entry conditions
+        # Entry conditions - require volume AND trend AND breakout
         long_entry = volume_ok and uptrend_1d and long_breakout
         short_entry = volume_ok and downtrend_1d and short_breakout
         
@@ -115,11 +116,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                bars_held = 0
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                bars_held = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
