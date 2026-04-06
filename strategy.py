@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13998_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13999_6d_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -29,19 +29,19 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA(50) for trend bias
-    ema_1w = calculate_ema(df_1w['close'].values, 50)
+    # Calculate 1d EMA(50) for trend bias
+    ema_1d = calculate_ema(df_1d['close'].values, 50)
     
-    # Align weekly EMA to daily timeframe (use previous weekly bar for trend)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1d EMA to 6h timeframe (use previous 1d bar for trend)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Daily data for Donchian, ATR, and volume
+    # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -66,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -89,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend bias from weekly EMA (50)
-        bullish_trend = close[i] > ema_1w_aligned[i]  # price above weekly EMA50 = bullish
-        bearish_trend = close[i] < ema_1w_aligned[i]  # price below weekly EMA50 = bearish
+        # Determine trend bias from 1d EMA (50)
+        bullish_trend = close[i] > ema_1d_aligned[i]  # price above 1d EMA50 = bullish
+        bearish_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA50 = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
@@ -100,7 +100,7 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of weekly trend
+        # Entry signals - only in direction of 1d trend
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
