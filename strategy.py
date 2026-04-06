@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume + ADX Filter with 1d Trend Filter
-Hypothesis: Donchian breakouts on 4h capture medium-term momentum. 1d EMA filter ensures alignment with daily trend.
-Volume confirms institutional participation. ADX filter ensures trending markets.
-Designed for 100-200 trades over 4 years (25-50/year) to balance opportunity and fee cost.
+4h Donchian(20) Breakout + Volume + ADX Filter (Optimized)
+Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
+Volume confirms institutional participation. ADX filter from 4h ensures we only trade in trending markets.
+Reduced position size and optimized filters to achieve 75-200 trades over 4 years (19-50/year).
 Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_adx_v11"
+name = "4h_donchian20_volume_adx_v12"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,20 +20,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate EMA200 on 1d
-    ema200_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema200_1d[i] = (close_1d[i] * 2/201) + (ema200_1d[i-1] * (1 - 2/201))
-    # Align EMA200 to 4h
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
     # Load 4h data for ADX (once before loop)
     df_4h = get_htf_data(prices, '4h')
+    
+    # ADX calculation on 4h
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
@@ -92,9 +82,9 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(adx_aligned[i]) or np.isnan(ema200_1d_aligned[i]):
+        if np.isnan(adx_aligned[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -110,38 +100,36 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
+            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold to reduce trades
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20
-            if close[i] < lowest_low or adx_aligned[i] < 20:
+            # Exit: price closes below Donchian lower OR ADX < 25
+            if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20
-            if close[i] > highest_high or adx_aligned[i] < 20:
+            # Exit: price closes above Donchian upper OR ADX < 25
+            if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend + 1d EMA filter
+            # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Strong trend
-            daily_uptrend = close[i] > ema200_1d_aligned[i]
-            daily_downtrend = close[i] < ema200_1d_aligned[i]
+            trend_filter = adx_aligned[i] > 30  # Increased threshold for stronger trend
             
-            if i >= 20 and bull_breakout and volume_filter and trend_filter and daily_uptrend:
-                signals[i] = 0.25
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
+                signals[i] = 0.20
                 position = 1
-            elif i >= 20 and bear_breakout and volume_filter and trend_filter and daily_downtrend:
-                signals[i] = -0.25
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
