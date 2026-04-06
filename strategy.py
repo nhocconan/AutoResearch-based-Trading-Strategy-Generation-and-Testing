@@ -3,43 +3,75 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and 1d volume spike.
-# In 1h timeframe, use RSI extremes for mean reversion entries, but only in direction
-# of 4h trend (EMA50) to avoid counter-trend trades. Require 1d volume > 1.5x 20-day average
-# to ensure institutional participation. Works in both bull/bear markets by aligning with
-# higher timeframe trend. Target: 80-150 total trades over 4 years (20-38/year).
+# Hypothesis: 6h Ichimoku Cloud breakout with weekly ADX filter and volume confirmation.
+# Uses 6h Tenkan/Kijun cross above/below Kumo (cloud) from 1d Ichimoku for trend direction.
+# Weekly ADX > 25 ensures strong trend environment to avoid whipsaws.
+# Volume confirmation (1.5x 20-period MA) ensures institutional participation.
+# Works in bull markets (bullish TK cross above cloud) and bear markets (bearish TK cross below cloud).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13494_1h_rsi14_4h_ema50_1d_vol_v1"
-timeframe = "1h"
+name = "exp_13495_6h_ichimoku_1d_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_PERIOD = 50
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_SPAN_B_PERIOD = 52
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+              pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+             pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2).shift(KIJUN_PERIOD)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_SPAN_B_PERIOD, min_periods=SENKOU_SPAN_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_SPAN_B_PERIOD, min_periods=SENKOU_SPAN_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
+    
+    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -52,31 +84,37 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data for Ichimoku ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
     
-    # Calculate 1d volume MA for volume filter
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Align Ichimoku to 6h timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
     
-    # Calculate 1h indicators
+    # Load weekly data for ADX filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, ADX_PERIOD)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -87,11 +125,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_SPAN_B_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + KIJUN_PERIOD + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]):
+        # Skip if Ichimoku or ADX not available
+        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(adx_1w_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -110,25 +150,40 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation: 1d volume > threshold
-        volume_ok = volume_ma_1d_aligned[i] > 0 and volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price vs 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Trend filter: weekly ADX > 25 for strong trend
+        strong_trend = adx_1w_aligned[i] > ADX_THRESHOLD
         
-        # Mean reversion signals using RSI extremes
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Ichimoku signals
+        # Kumo (cloud) boundaries
+        upper_kumo = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        lower_kumo = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        
+        # TK cross
+        tk_cross_bull = tenkan_1d_aligned[i] > kijun_1d_aligned[i]
+        tk_cross_bear = tenkan_1d_aligned[i] < kijun_1d_aligned[i]
+        
+        # Price relative to cloud
+        price_above_kumo = close[i] > upper_kumo
+        price_below_kumo = close[i] < lower_kumo
+        
+        # Bullish signal: TK cross bull + price above cloud + strong trend + volume
+        bullish_setup = tk_cross_bull and price_above_kumo and strong_trend and volume_ok
+        
+        # Bearish signal: TK cross bear + price below cloud + strong trend + volume
+        bearish_setup = tk_cross_bear and price_below_kumo and strong_trend and volume_ok
         
         # Generate signals
         if position == 0:
-            if rsi_oversold and uptrend and volume_ok:
+            if bullish_setup:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif rsi_overbought and downtrend and volume_ok:
+            elif bearish_setup:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
