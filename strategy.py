@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian channel breakout with weekly trend filter
+# Hypothesis: 1-day Donchian channel breakout with weekly EMA trend filter
 # Long when price breaks above 20-day high AND weekly close above 20-week EMA
 # Short when price breaks below 20-day low AND weekly close below 20-week EMA
 # Uses weekly trend filter to avoid counter-trend trades. Donchian provides clear breakout signals.
