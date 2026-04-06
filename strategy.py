@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-Hypothesis: Donchian breakouts on 12h capture multi-day momentum, filtered by 1d EMA trend for bias and 1d volume for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 1d volume for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
@@ -124,7 +124,7 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 24 bars flat (2 days)
+            # Minimum holding period: only allow new entry after 24 bars flat
             if bars_since_entry >= 24:
                 # Breakout entries: upper/lower with 1d trend
                 bull_breakout = close[i] > upper[i]
