@@ -3,48 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day KAMA trend with RSI(14) filter and weekly volatility regime filter
-# Works in bull/bear because KAMA adapts to market noise, RSI filters extremes,
-# and weekly volatility regime identifies trending vs ranging markets.
-# Target: 50-100 trades over 4 years (12-25/year) to balance opportunity and cost.
+# Hypothesis: 1D timeframe with weekly trend filter using EMA, volume confirmation, and ATR-based stops
+# Uses weekly EMA(21) for trend direction, volume spike (2x 20-period MA) for confirmation,
+# and ATR(14) with 2x multiplier for stops. Designed to capture strong trending moves while avoiding
+# choppy markets. Weekly EMA filter reduces false signals in sideways markets, improving win rate.
+# Target: 40-80 trades over 4 years (10-20/year) to balance opportunity with fee minimization.
 
-name = "exp_12918_1d_kama_rsi_vol_regime_v1"
+name = "exp_12918_1d_weekly_ema_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-KAMA_ER_FAST = 2
-KAMA_ER_SLOW = 30
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-VOLATILITY_PERIOD = 20
-VOLATILITY_THRESHOLD = 0.5  # ATR ratio threshold for trending regime
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
+EMA_WEEKLY_PERIOD = 21
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_kama(close, er_fast, er_slow):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
-    kama = np.copy(close)
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_ema(values, period):
+    """Calculate EMA using pandas ewm with proper min_periods"""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -63,27 +42,18 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly ATR for volatility regime
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
+    # Calculate weekly EMA
     close_w = df_weekly['close'].values
-    atr_w = calculate_atr(high_w, low_w, close_w, ATR_PERIOD)
-    
-    # Calculate weekly volatility ratio (current ATR / average ATR)
-    atr_ma_w = pd.Series(atr_w).rolling(window=VOLATILITY_PERIOD, min_periods=VOLATILITY_PERIOD).mean().values
-    volatility_ratio = atr_w / atr_ma_w
-    volatility_ratio = np.where(atr_ma_w > 0, volatility_ratio, 1.0)
-    
-    # Align volatility ratio to daily timeframe
-    volatility_ratio_aligned = align_htf_to_ltf(prices, df_weekly, volatility_ratio)
+    ema_w = calculate_ema(close_w, EMA_WEEKLY_PERIOD)
+    ema_w_aligned = align_htf_to_ltf(prices, df_weekly, ema_w)
     
     # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    kama = calculate_kama(close, KAMA_ER_FAST, KAMA_ER_SLOW)
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -92,11 +62,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(KAMA_ER_SLOW, RSI_PERIOD, ATR_PERIOD, VOLATILITY_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_WEEKLY_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if volatility ratio not available
-        if np.isnan(volatility_ratio_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -115,25 +85,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Trend regime filter: only trade when volatility ratio > threshold (trending market)
-        is_trending = volatility_ratio_aligned[i] > VOLATILITY_THRESHOLD
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # KAMA direction: price above KAMA = uptrend, below = downtrend
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_not_overbought = rsi[i] < RSI_OVERBOUGHT
-        rsi_not_oversold = rsi[i] > RSI_OVERSOLD
+        # Trend filter: price above/below weekly EMA
+        above_ema = close[i] > ema_w_aligned[i]
+        below_ema = close[i] < ema_w_aligned[i]
         
         # Generate signals
         if position == 0:
-            if is_trending and price_above_kama and rsi_not_overbought:
+            if volume_ok and above_ema:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif is_trending and price_below_kama and rsi_not_oversold:
+            elif volume_ok and below_ema:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
