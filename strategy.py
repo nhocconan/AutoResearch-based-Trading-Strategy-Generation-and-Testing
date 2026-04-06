@@ -3,31 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with daily trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean reversion.
-# Daily trend filter ensures trades align with higher timeframe momentum.
-# Volume confirmation filters out low-conviction moves.
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) with daily pivot breakout
+# and volume confirmation. Alligator lines act as dynamic support/resistance; price crossing
+# all three lines with volume indicates strong trend. Daily pivot adds confluence for
+# institutional interest zones. Works in bull markets (bullish alignment above pivot) and
+# bear markets (bearish alignment below pivot). Target: 50-150 total trades over 4 years.
 
-name = "exp_13291_6h_williamsr_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_13292_12h_alligator_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-TREND_EMA_PERIOD = 50
+JAW_PERIOD = 13   # Alligator Jaw (slowest)
+TEETH_PERIOD = 8  # Alligator Teeth
+LIPS_PERIOD = 5   # Alligator Lips (fastest)
+PIVOT_PERIOD = 1  # Daily pivot
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-OVERSOLD = -80
-OVERBOUGHT = -20
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_sma(arr, period):
+    """Calculate Simple Moving Average"""
+    return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -38,13 +37,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return williams_r.values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -53,19 +45,32 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate Alligator components (12h data)
+    close = prices['close'].values
+    jaw = calculate_sma(close, JAW_PERIOD)
+    teeth = calculate_sma(close, TEETH_PERIOD)
+    lips = calculate_sma(close, LIPS_PERIOD)
     
-    # Calculate 6h indicators
+    # Calculate daily pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Standard pivot point: P = (H + L + C) / 3
+    # Support 1: S1 = 2*P - H
+    # Resistance 1: R1 = 2*P - L
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - high_1d
+    s1 = 2 * pivot - low_1d
+    
+    # Align pivots to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 12h indicators
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -79,11 +84,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(JAW_PERIOD, TEETH_PERIOD, LIPS_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if indicators not ready
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
+           np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,24 +109,24 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Williams %R signals
-        oversold = williams_r[i] < OVERSOLD
-        overbought = williams_r[i] > OVERBOUGHT
+        # Breakout signals with pivot confluence
+        breakout_up = volume_ok and bullish_alignment and (high[i] > r1_aligned[i-1])
+        breakout_down = volume_ok and bearish_alignment and (low[i] < s1_aligned[i-1])
         
         # Generate signals
         if position == 0:
-            if oversold and uptrend and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif overbought and downtrend and volume_ok:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
