@@ -1,48 +1,28 @@
 #!/usr/bin/env python3
 """
 Experiment #12435: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
-Hypothesis: Use weekly pivot levels for trend direction, 6h Donchian(20) breakouts for entry,
-and volume spikes for confirmation. This strategy targets breakouts in trending markets
-while avoiding chop. Weekly pivots provide institutional-level support/resistance.
-Designed to work in both bull (breakout longs) and bear (breakdown shorts) markets.
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: Weekly pivot points (from 1w data) determine directional bias (bullish/bearish),
+while 6h Donchian(20) breakouts provide entry timing and volume spikes confirm momentum.
+This structure works in bull markets (breakouts above R1) and bear markets (breakdowns below S1).
+Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12435_6h_donchian20_weekly_pivot_vol_v1"
+name = "exp_12435_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+PIVOT_LOOKBACK = 1  # use previous week's pivot
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-PIVOT_LOOKBACK = 5  # For swing high/low detection
-
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H, etc."""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, s1, r2, s2, r3, s3
-
-def calculate_swing_high(high, lookback):
-    """Calculate swing high"""
-    return pd.Series(high).rolling(window=2*lookback+1, center=True).max().values
-
-def calculate_swing_low(low, lookback):
-    """Calculate swing low"""
-    return pd.Series(low).rolling(window=2*lookback+1, center=True).min().values
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -63,29 +43,45 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
+def calculate_pivot_points(high, low, close):
+    """
+    Calculate classic pivot points: P = (H+L+C)/3
+    R1 = 2*P - L, S1 = 2*P - H
+    R2 = P + (H-L), S2 = P - (H-L)
+    R3 = H + 2*(P-L), S3 = L - 2*(H-P)
+    """
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1w data ONCE before loop for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points from weekly OHLC
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate weekly pivot points
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values
+    )
     
-    pivot, r1, s1, r2, s2, r3, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
+    # Align pivot levels to 6s timeframe (shifted by 1 week for no look-ahead)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Align weekly pivot levels to 6h timeframe (forward filled, shifted by 1 week)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    # Determine weekly bias: bullish if price above pivot, bearish if below
+    weekly_bullish = pivot_aligned > 0  # placeholder, will update in loop
+    weekly_bearish = pivot_aligned > 0  # placeholder
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -106,13 +102,17 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot data not available
-        if np.isnan(pivot_aligned[i]):
+        # Skip if weekly data not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
+        
+        # Update weekly bias based on current pivot levels
+        weekly_bullish = close[i] > pivot_aligned[i]
+        weekly_bearish = close[i] < pivot_aligned[i]
         
         # Check stoploss
         if position == 1:  # long position
@@ -129,19 +129,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Determine trend based on weekly pivot
-        # Uptrend: price above weekly pivot and holding above S1
-        # Downtrend: price below weekly pivot and holding below R1
-        uptrend = close[i] > pivot_aligned[i] and close[i] > s1_aligned[i]
-        downtrend = close[i] < pivot_aligned[i] and close[i] < r1_aligned[i]
-        
         # Donchian breakout conditions
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Entry conditions
-        long_entry = volume_ok and uptrend and long_breakout
-        short_entry = volume_ok and downtrend and short_breakout
+        # Entry conditions aligned with weekly bias
+        long_entry = volume_ok and weekly_bullish and long_breakout
+        short_entry = volume_ok and weekly_bearish and short_breakout
         
         # Generate signals
         if position == 0:
