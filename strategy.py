@@ -3,31 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with daily trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In trending markets (daily EMA),
-# we take pullbacks: buy when %R crosses above -80 in uptrend, sell when crosses below -20 in downtrend.
-# Volume confirms institutional participation. Works in bull (buy dips) and bear (sell rallies).
-# Target: 75-200 total trades over 4 years.
+# Hypothesis: 4-hour Donchian breakout with daily EMA trend filter and volume confirmation.
+# Breakouts above 20-period high or below 20-period low with volume > 1.5x average
+# and price aligned with daily EMA trend. Works in bull markets (breakouts above resistance)
+# and bear markets (breakdowns below support). Target: 75-200 total trades over 4 years.
 
-name = "exp_13359_6h_williamsr_daily_trend_vol_v1"
-timeframe = "6h"
+name = "exp_13360_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-EMA_PERIOD = 50   # Daily EMA for trend
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return williams_r.values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -55,14 +47,15 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -76,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, WILLIAMS_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(williams_r[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,18 +99,18 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Williams %R signals: buy oversold in uptrend, sell overbought in downtrend
-        buy_signal = volume_ok and uptrend and (williams_r[i-1] <= -80) and (williams_r[i] > -80)
-        sell_signal = volume_ok and downtrend and (williams_r[i-1] >= -20) and (williams_r[i] < -20)
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > donchian_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < donchian_low[i-1])
         
         # Generate signals
         if position == 0:
-            if buy_signal:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif sell_signal:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
