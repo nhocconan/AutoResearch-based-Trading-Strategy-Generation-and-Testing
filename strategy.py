@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Weekly Pivot + Volume Confirmation + ATR Stop
-Hypothesis: Weekly pivot levels (from previous week) act as strong support/resistance.
-In bull markets: buy breakouts above weekly R4 with volume.
-In bear markets: sell breakdowns below weekly S4 with volume.
-In ranging markets: fade touches of weekly R3/S3 with volume confirmation.
-Uses 1d trend filter (EMA50) to align with higher timeframe bias.
-Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
+6h Triple Confluence: 1d Donchian breakout + 1d RSI reversal + Volume spike
+Hypothesis: Combines 1d Donchian breakouts (trend continuation) with 1d RSI overbought/oversold
+reversals (mean reversion) filtered by volume spikes and aligned to 6h timeframe.
+Works in bull markets via breakouts, in bear via reversals at extremes.
+Target: 75-200 trades over 4 years (~19-50/year) to balance opportunity and cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weeklypivot_volume_v1"
-timeframe = "1d"
+name = "6h_tripleconfluence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR for stops
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -41,177 +39,123 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly pivot levels (based on previous week's OHLC)
-    # We need daily data to calculate weekly pivot, but we'll use 1d data
-    # Since we're on 1d timeframe, we can calculate weekly pivot directly
-    # by grouping into weeks, but to avoid look-ahead, we use previous week's data
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot using previous week's Monday-Friday data
-    # We'll track weekly high, low, close as we go
-    weekly_high = np.full(n, np.nan)
-    weekly_low = np.full(n, np.nan)
-    weekly_close = np.full(n, np.nan)
+    # 1d Donchian channels (20-period)
+    donch_high_1d = np.full_like(close_1d, np.nan)
+    donch_low_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        for i in range(20, len(close_1d)):
+            donch_high_1d[i] = np.max(high_1d[i-20:i])
+            donch_low_1d[i] = np.min(low_1d[i-20:i])
     
-    # Week tracking variables
-    week_start_idx = 0
-    current_week_high = -np.inf
-    current_week_low = np.inf
-    current_week_close = 0
+    # 1d RSI (14-period)
+    rsi_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 15:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(close_1d, np.nan)
+        avg_loss = np.full_like(close_1d, np.nan)
+        if len(close_1d) >= 15:
+            avg_gain[14] = np.mean(gain[1:15])
+            avg_loss[14] = np.mean(loss[1:15])
+            for i in range(15, len(close_1d)):
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+                rs = avg_gain[i] / (avg_loss[i] + 1e-10)
+                rsi_1d[i] = 100 - (100 / (1 + rs))
     
-    for i in range(n):
-        # Update current week's high/low
-        if high[i] > current_week_high:
-            current_week_high = high[i]
-        if low[i] < current_week_low:
-            current_week_low = low[i]
-        current_week_close = close[i]
-        
-        # Check if we've reached end of week (Friday)
-        # Assuming 5 trading days per week
-        if i >= 4 and (i - week_start_idx) >= 4:  # 5 days completed
-            # Store previous week's data for current bar
-            weekly_high[i] = current_week_high
-            weekly_low[i] = current_week_low
-            weekly_close[i] = current_week_close
-            
-            # Reset for next week
-            week_start_idx = i + 1
-            current_week_high = -np.inf
-            current_week_low = np.inf
-            current_week_close = 0
-        elif i < 5:  # First 4 days, not enough for weekly pivot yet
-            weekly_high[i] = np.nan
-            weekly_low[i] = np.nan
-            weekly_close[i] = np.nan
+    # 1d Volume spike detection (20-period average)
+    vol_spike_1d = np.full_like(vol_1d, False)
+    if len(vol_1d) >= 20:
+        for i in range(20, len(vol_1d)):
+            vol_ma = np.mean(vol_1d[i-20:i])
+            vol_spike_1d[i] = vol_1d[i] > vol_ma * 2.0
     
-    # Calculate weekly pivot levels from previous week's data
-    # Pivot = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    # R4 = 3*P - 2*L, S4 = 3*H - 2*L
-    
-    pivot = np.full(n, np.nan)
-    r1 = np.full(n, np.nan)
-    s1 = np.full(n, np.nan)
-    r2 = np.full(n, np.nan)
-    s2 = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
-    r4 = np.full(n, np.nan)
-    s4 = np.full(n, np.nan)
-    
-    for i in range(5, n):  # Start from where we have weekly data
-        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
-            wh = weekly_high[i]
-            wl = weekly_low[i]
-            wc = weekly_close[i]
-            
-            p = (wh + wl + wc) / 3.0
-            pivot[i] = p
-            r1[i] = 2*p - wl
-            s1[i] = 2*p - wh
-            r2[i] = p + (wh - wl)
-            s2[i] = p - (wh - wl)
-            r3[i] = wh + 2*(p - wl)
-            s3[i] = wl - 2*(wh - p)
-            r4[i] = 3*p - 2*wl
-            s4[i] = 3*wh - 2*wl
-    
-    # 1d EMA50 for trend bias
-    ema = np.full(n, np.nan)
-    if n >= 50:
-        ema[49] = np.mean(close[:50])
-        for i in range(50, n):
-            ema[i] = (close[i] * 2 + ema[i-1] * 18) / 20
-    
-    # Trend bias: above EMA = bullish, below = bearish
-    trend_bias = np.where(close > ema, 1, -1)
+    # Align 1d indicators to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0
     
     # Start from warmup period
-    start = 30  # Need enough data for weekly pivot
+    start = 50  # Need enough data for all indicators
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(pivot[i]) or 
-            np.isnan(r4[i]) or np.isnan(s4[i]) or
-            np.isnan(r3[i]) or np.isnan(s3[i]) or
-            np.isnan(trend_bias[i])):
+        if (np.isnan(atr[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
-        
-        # Volume filter (20-period average)
-        vol_ma = np.mean(volume[max(0, i-20):i])
-        volume_filter = volume[i] > vol_ma * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price drops below S3 (mean reversion) OR against trend
-            # Stoploss: price drops 2*ATR below entry
-            if (close[i] < s3[i] or
-                trend_bias[i] == -1 or
-                close[i] < entry_price - 2.0 * atr[i]):
+            # Exit: RSI overbought (>70) OR stoploss hit (2*ATR)
+            if rsi_aligned[i] > 70 or close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         elif position == -1:  # short position
-            # Exit: price rises above R3 (mean reversion) OR against trend
-            # Stoploss: price rises 2*ATR above entry
-            if (close[i] > r3[i] or
-                trend_bias[i] == 1 or
-                close[i] > entry_price + 2.0 * atr[i]):
+            # Exit: RSI oversold (<30) OR stoploss hit (2*ATR)
+            if rsi_aligned[i] < 30 or close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         else:
-            # Look for entries
-            # Minimum holding period: only allow new entry after 10 bars flat
-            if bars_since_entry >= 10:
-                # Breakout entries: R4/S4 with trend
-                bull_breakout = close[i] > r4[i]
-                bear_breakout = close[i] < s4[i]
+            # Look for entries with minimum 6 bars flat
+            if bars_since_exit >= 6:
+                # Volume filter on 6x timeframe
+                vol_ma_6x = np.mean(volume[max(0, i-6):i]) if i >= 6 else 0
+                volume_filter = volume[i] > vol_ma_6x * 1.5 if i >= 6 else False
                 
-                # Mean reversion entries: R3/S3 counter-trend (fade)
-                # Only in ranging markets - we'll use proximity to pivot as proxy
-                pivot_range = r1[i] - s1[i]
-                near_pivot = abs(close[i] - pivot[i]) < pivot_range * 0.3
+                # Long: Donchian breakout OR RSI reversal from oversold with volume
+                long_breakout = close[i] > donch_high_aligned[i]
+                long_reversal = (rsi_aligned[i] < 30 and 
+                                close[i] > close[i-1] and  # momentum confirmation
+                                volume_filter)
                 
-                # Long: breakout with trend OR mean reversion at S3 with volume
-                if (bull_breakout and trend_bias[i] == 1 and volume_filter) or \
-                   (close[i] > s3[i] and close[i] < pivot[i] and 
-                    near_pivot and volume_filter and trend_bias[i] == -1):
+                # Short: Donchian breakdown OR RSI reversal from overbought with volume
+                short_breakout = close[i] < donch_low_aligned[i]
+                short_reversal = (rsi_aligned[i] > 70 and 
+                                 close[i] < close[i-1] and  # momentum confirmation
+                                 volume_filter)
+                
+                if (long_breakout or long_reversal) and not (short_breakout or short_reversal):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                # Short: breakdown with trend OR mean reversion at R3 with volume
-                elif (bear_breakout and trend_bias[i] == -1 and volume_filter) or \
-                     (close[i] < r3[i] and close[i] > pivot[i] and 
-                      near_pivot and volume_filter and trend_bias[i] == 1):
+                    bars_since_exit = 0
+                elif (short_breakout or short_reversal) and not (long_breakout or long_reversal):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
