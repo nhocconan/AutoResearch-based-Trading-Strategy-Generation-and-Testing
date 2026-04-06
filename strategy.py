@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
-# Uses 1d trend to capture medium-term trend while using 6h breakouts for entries.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Uses 1d trend to capture medium-term trend while using 12h breakouts for entries.
 # Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years.
 # Works in bull markets (breakouts with volume) and bear markets (shorts on breakdowns with volume).
 
-name = "exp_13691_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_13692_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -48,7 +48,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
