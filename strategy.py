@@ -3,46 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot strategy using 1d pivot levels.
-# Go long when price retraces to S1/S2 support in uptrend (price > 1w EMA200),
-# go short when price retraces to R1/R2 resistance in downtrend (price < 1w EMA200).
-# Uses volume confirmation to avoid false signals.
+# Hypothesis: 12h strategy using KAMA trend direction with volume confirmation and 1d Bollinger Bands squeeze.
+# Goes long when KAMA turns upward with above-average volume and price above 1d BB middle (SMA20) with BB width < 0.05 (squeeze),
+# short when KAMA turns downward with volume and price below 1d BB middle with BB width < 0.05.
+# Uses ATR-based stop loss to manage risk.
 # Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Camarilla levels provide precise reversal points in ranging markets,
-# while weekly EMA filter ensures we trade with the higher timeframe trend.
+# KAMA adapts to market noise, Bollinger squeeze identifies low volatility breakout setups, volume confirms momentum.
 
-name = "exp_13855_6h_camarilla1d_ewma200_v1"
-timeframe = "6h"
+name = "exp_13856_12h_kama_1d_bb_squeeze_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULT = 1.1  # Standard Camarilla multiplier
-EMA_WEEKLY_PERIOD = 200
+KAMA_FAST = 2
+KAMA_SLOW = 30
+BB_PERIOD = 20
+BB_STD = 2.0
+BB_WIDTH_THRESHOLD = 0.05  # 5% width = squeeze condition
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the day"""
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    # Resistance levels
-    R1 = pivot + (range_val * 1.1 / 12)
-    R2 = pivot + (range_val * 1.1 / 6)
-    R3 = pivot + (range_val * 1.1 / 4)
-    R4 = pivot + (range_val * 1.1 / 2)
-    # Support levels
-    S1 = pivot - (range_val * 1.1 / 12)
-    S2 = pivot - (range_val * 1.1 / 6)
-    S3 = pivot - (range_val * 1.1 / 4)
-    S4 = pivot - (range_val * 1.1 / 2)
-    return R1, R2, R3, R4, S1, S2, S3, S4
+def calculate_kama(close, fast, slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    er = np.zeros_like(change)
+    for i in range(len(change)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_bbands(close, period, std_dev):
+    """Calculate Bollinger Bands"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    width = (upper - lower) / sma  # normalized width
+    return upper, lower, width
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -59,37 +67,29 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla calculation ONCE before loop
+    # Load 1d data for Bollinger Bands squeeze filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d Bollinger Bands for squeeze detection
     close_1d = df_1d['close'].values
+    bb_upper, bb_lower, bb_width = calculate_bbands(close_1d, BB_PERIOD, BB_STD)
     
-    R1, R2, R3, R4, S1, S2, S3, S4 = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Align 1d Bollinger Bands to 12h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    bb_middle_aligned = (bb_upper_aligned + bb_lower_aligned) / 2  # SMA20
     
-    # Align Camarilla levels to 6h timeframe
-    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
-    R2_6h = align_htf_to_ltf(prices, df_1d, R2)
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
-    S2_6h = align_htf_to_ltf(prices, df_1d, S2)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Load 1w data for EMA trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_WEEKLY_PERIOD)
-    ema_1w_6h = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # 6h data for price, volume, and ATR
+    # 12h data for KAMA, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # KAMA for trend direction on 12h data
+    kama = calculate_kama(close, KAMA_FAST, KAMA_SLOW)
+    kama_up = kama > np.roll(kama, 1)  # KAMA rising
+    kama_down = kama < np.roll(kama, 1)  # KAMA falling
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -103,12 +103,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_WEEKLY_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(KAMA_SLOW, BB_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_1w_6h[i]) or np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(bb_middle_aligned[i]) or 
+            np.isnan(bb_width_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -133,22 +133,16 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA
-        above_weekly_ema = close[i] > ema_1w_6h[i]
-        below_weekly_ema = close[i] < ema_1w_6h[i]
+        # Bollinger squeeze condition (low volatility breakout setup)
+        squeeze = bb_width_aligned[i] < BB_WIDTH_THRESHOLD
         
-        # Camarilla retracement signals with volume confirmation
-        # Long: price near S1/S2 support in uptrend
-        long_signal = volume_ok and above_weekly_ema and (
-            close[i] <= S1_6h[i] * 1.005 or  # Allow small buffer
-            close[i] <= S2_6h[i] * 1.005
-        )
+        # Price relative to BB middle
+        above_bb_mid = close[i] > bb_middle_aligned[i]
+        below_bb_mid = close[i] < bb_middle_aligned[i]
         
-        # Short: price near R1/R2 resistance in downtrend
-        short_signal = volume_ok and below_weekly_ema and (
-            close[i] >= R1_6h[i] * 0.995 or  # Allow small buffer
-            close[i] >= R2_6h[i] * 0.995
-        )
+        # KAMA direction signals
+        long_signal = kama_up[i] and volume_ok and squeeze and above_bb_mid
+        short_signal = kama_down[i] and volume_ok and squeeze and below_bb_mid
         
         # Generate signals
         if position == 0:
@@ -165,15 +159,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close above R1 (take profit) or below S3 (stop)
-            if close[i] >= R1_6h[i] or close[i] <= S3_6h[i]:
+            # Exit long on KAMA turning down
+            if kama_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close below S1 (take profit) or above R3 (stop)
-            if close[i] <= S1_6h[i] or close[i] >= R3_6h[i]:
+            # Exit short on KAMA turning up
+            if kama_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
