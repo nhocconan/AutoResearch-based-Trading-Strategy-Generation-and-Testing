@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1d volume confirmation and 1w trend filter
-Hypothesis: Daily Donchian breakouts capture multi-day momentum, filtered by weekly trend (1w EMA21) for bias and daily volume >1.5x 20-day average for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 75-200 total trades over 4 years (19-50/year).
+12h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by weekly trend (from 1w EMA) for bias and daily volume for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,10 +50,10 @@ def generate_signals(prices):
     # Weekly trend: above EMA21 = bullish, below = bearish
     weekly_trend = np.where(close_1w > ema_1w, 1, -1)
     
-    # Align weekly trend to 1d timeframe
+    # Align weekly trend to 12h timeframe
     weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
     
-    # Get 1d data for volume confirmation (20-day average volume)
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     volume_1d = df_1d['volume'].values
     
@@ -62,10 +62,10 @@ def generate_signals(prices):
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 1d timeframe (identity since same timeframe)
-    vol_ma_1d_aligned = vol_ma_1d  # No alignment needed for same timeframe
+    # Align volume MA to 12h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (20-period) from 1d data
+    # Donchian channels (20-period) from 12h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -93,8 +93,10 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current daily volume > 1.5x 20-day average volume
-        volume_filter = volume[i] > vol_ma_1d_aligned[i] * 1.5
+        # Volume filter: current 12h volume > 1.5x daily average volume (scaled)
+        # Scale daily volume to 12h: approx 1/2 of daily volume (since 2x 12h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
+        volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -123,8 +125,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 5 days flat
-            if bars_since_entry >= 5:
+            # Minimum holding period: only allow new entry after 24 bars flat
+            if bars_since_entry >= 24:
                 # Breakout entries: upper/lower with weekly trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
