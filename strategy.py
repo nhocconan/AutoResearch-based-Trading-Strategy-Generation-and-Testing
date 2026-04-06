@@ -1,10 +1,22 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+Experiment #13982: 12h Donchian Breakout + Daily Trend + Volume + ATR Stop
+Hypothesis: 
+- Primary timeframe: 12h (target 50-150 trades over 4 years)
+- HTF: 1d for trend bias (EMA50) and regime filtering
+- Entry: Donchian(20) breakout in direction of daily EMA50 with volume confirmation
+- Exit: Opposite Donchian break or trend reversal or ATR stop (2x)
+- Risk: Position size 0.25, max 0.40, stop loss at 2*ATR
+- Edge: Captures medium-term trends with filtered breakouts, works in bull/bear via trend filter
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13981_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13982_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -38,10 +50,10 @@ def generate_signals(prices):
     # Calculate 1d EMA(50) for trend bias
     ema_1d = calculate_ema(df_1d['close'].values, 50)
     
-    # Align 1d EMA to 4h timeframe (use previous daily bar for trend)
+    # Align 1d EMA to 12h timeframe (use previous daily bar for trend)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h data for Donchian, ATR, and volume
+    # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
