@@ -3,35 +3,59 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian channel breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with above-average volume and 1d close > 1d SMA(50).
-# Short when price breaks below Donchian(20) low with above-average volume and 1d close < 1d SMA(50).
+# Hypothesis: 4h strategy using Donchian channel (20) breakout with 1d volume confirmation and ADX filter.
+# Long when price breaks above Donchian upper band with above-average volume and ADX > 25.
+# Short when price breaks below Donchian lower band with above-average volume and ADX > 25.
 # Uses ATR-based stop loss to manage risk.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-# Donchian breakouts provide clear trend entries, volume confirms breakout strength, 1d SMA filters trend direction.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drift.
+# Donchian channels provide clear breakout levels, volume confirms strength, ADX filters for trending markets.
 
-name = "exp_13880_4h_donchian20_1d_sma_vol_v1"
+name = "exp_13881_4h_donchian20_1d_vol_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-SMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_sma(close, period):
-    """Calculate Simple Moving Average"""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -48,30 +72,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for SMA trend filter ONCE before loop
+    # Load 1d data for volume confirmation and ADX filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d SMA(50) for trend filter
+    # Calculate 1d volume moving average
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # Calculate 1d ADX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma_1d = calculate_sma(close_1d, SMA_PERIOD)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
     
-    # Align 1d SMA to 4h timeframe
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # Align 1d volume MA and ADX to 4h timeframe
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 4h data for Donchian, ATR, and volume
+    # 4h data for Donchian channels and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Volume confirmation
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,11 +107,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, SMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ADX_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(sma_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,17 +133,15 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Volume confirmation (1d volume > threshold)
+        volume_ok = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD)
         
-        # Trend filter from 1d SMA
-        trend_bullish = close_1d[-1] > sma_1d[-1] if len(close_1d) > 0 else False  # Not used, using aligned
-        trend_bullish_aligned = close[i] > sma_1d_aligned[i]  # Use aligned for current bar
-        trend_bearish_aligned = close[i] < sma_1d_aligned[i]
+        # ADX filter (trending market)
+        adx_ok = adx_1d_aligned[i] > ADX_THRESHOLD
         
         # Donchian breakout signals
-        long_signal = volume_ok and trend_bullish_aligned and close[i] > donchian_upper[i]
-        short_signal = volume_ok and trend_bearish_aligned and close[i] < donchian_lower[i]
+        long_signal = volume_ok and adx_ok and close[i] > upper[i]
+        short_signal = volume_ok and adx_ok and close[i] < lower[i]
         
         # Generate signals
         if position == 0:
@@ -133,165 +159,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Exit long on close below Donchian lower band
-            if close[i] < donchian_lower[i]:
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
             # Exit short on close above Donchian upper band
-            if close[i] > donchian_upper[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h strategy using Donchian channel breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with above-average volume and 1d close > 1d SMA(50).
-# Short when price breaks below Donchian(20) low with above-average volume and 1d close < 1d SMA(50).
-# Uses ATR-based stop loss to manage risk.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-# Donchian breakouts provide clear trend entries, volume confirms breakout strength, 1d SMA filters trend direction.
-
-name = "exp_13880_4h_donchian20_1d_sma_vol_v1"
-timeframe = "4h"
-leverage = 1.0
-
-# Parameters
-DONCHIAN_PERIOD = 20
-SMA_PERIOD = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_sma(close, period):
-    """Calculate Simple Moving Average"""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Load 1d data for SMA trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d SMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    sma_1d = calculate_sma(close_1d, SMA_PERIOD)
-    
-    # Align 1d SMA to 4h timeframe
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
-    
-    # 4h data for Donchian, ATR, and volume
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian channel
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    
-    # ATR for stop loss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Volume confirmation
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, SMA_PERIOD, VOLUME_MA_PERIOD) + 1
-    
-    for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(sma_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stops
-        if position == 1:  # long position
-            # Check stop loss
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        elif position == -1:  # short position
-            # Check stop loss
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
-        
-        # Trend filter from 1d SMA
-        trend_bullish_aligned = close[i] > sma_1d_aligned[i]  # Use aligned for current bar
-        trend_bearish_aligned = close[i] < sma_1d_aligned[i]
-        
-        # Donchian breakout signals
-        long_signal = volume_ok and trend_bullish_aligned and close[i] > donchian_upper[i]
-        short_signal = volume_ok and trend_bearish_aligned and close[i] < donchian_lower[i]
-        
-        # Generate signals
-        if position == 0:
-            if long_signal:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Exit long on close below Donchian lower band
-            if close[i] < donchian_lower[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            # Exit short on close above Donchian upper band
-            if close[i] > donchian_upper[i]:
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
