@@ -1,10 +1,14 @@
+# 12h Donchian(20) Breakout with 1d EMA(50) Trend Filter and Volume Confirmation
+# Hypothesis: Price breaking out of 20-period Donchian channel on 12h timeframe, aligned with daily EMA trend and volume confirmation, captures significant momentum moves while avoiding whipsaws in both bull and bear markets. The 12h timeframe reduces trade frequency to manageable levels (~20-50/year) minimizing fee drag, while the 1d EMA filter ensures alignment with higher timeframe trend. Volume confirmation adds robustness to breakout signals.
+# Risk management via ATR-based stoploss (2.5x ATR) limits drawdown.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v2"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,7 +53,7 @@ def generate_signals(prices):
     ema_50 = ema(close_1d, 50)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Donchian channels (20-period) on 4h
+    # Donchian channels (20-period) on 12h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
