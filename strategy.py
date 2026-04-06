@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-# Captures strong trending moves aligned with weekly momentum. Volume ensures institutional participation.
+# Hypothesis: 4-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+# Captures strong trending moves aligned with daily momentum. Volume ensures institutional participation.
 # Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13576_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13577_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -47,13 +47,13 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (using daily high/low on 12h data)
+    # Donchian channels
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
