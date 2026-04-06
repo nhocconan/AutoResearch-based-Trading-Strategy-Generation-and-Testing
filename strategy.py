@@ -3,35 +3,39 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly EMA200 trend filter with daily Donchian(20) breakout and volume confirmation.
-# Long when price breaks above Donchian(20) high with above-average volume and weekly EMA200 uptrend.
-# Short when price breaks below Donchian(20) low with above-average volume and weekly EMA200 downtrend.
-# Weekly EMA200 provides strong trend filter to avoid counter-trend trades in both bull and bear markets.
-# Donchian breakouts capture momentum, volume confirms strength, and weekly trend ensures alignment with higher timeframe.
-# Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# Hypothesis: 6s strategy using 6h momentum with 12h trend filter and volume confirmation.
+# Long when 6h RSI > 50, 12h EMA(20) is rising, and volume > 1.5x average.
+# Short when 6h RSI < 50, 12h EMA(20) is falling, and volume > 1.5x average.
+# Trend filter prevents counter-trend trades, reducing whipsaw in choppy markets.
+# Targets 75-150 total trades over 4 years (19-38/year) to balance opportunity and cost.
 
-name = "exp_13878_1d_donchian20_weekly_ema200_vol_v1"
-timeframe = "1d"
+name = "exp_13879_6h_12h_ema_rsi_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 200
+RSI_PERIOD = 14
+EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def calculate_ema(close, period):
     """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,27 +49,32 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:  # Need enough data for 200 EMA
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for EMA200 trend filter ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h data for EMA trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA200
-    weekly_close = df_weekly['close'].values
-    ema200_weekly = calculate_ema(weekly_close, EMA_PERIOD)
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_rising = ema_12h > np.roll(ema_12h, 1)  # Current EMA > previous EMA
+    ema_12h_rising[0] = False  # First value has no previous
+    ema_12h_falling = ema_12h < np.roll(ema_12h, 1)  # Current EMA < previous EMA
+    ema_12h_falling[0] = False
     
-    # Align weekly EMA200 to daily timeframe
-    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
+    # Align 12h EMA trend to 6h timeframe
+    ema_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_rising)
+    ema_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_falling)
     
-    # Daily data for Donchian, ATR, and volume
+    # 6h data for RSI, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # RSI for momentum filter
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -79,11 +88,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(RSI_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema200_weekly_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i]) or \
+           np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,13 +118,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Weekly EMA200 trend filter
-        ema_uptrend = close[i] > ema200_weekly_aligned[i]
-        ema_downtrend = close[i] < ema200_weekly_aligned[i]
+        # Momentum filter from RSI
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
-        # Donchian breakout signals
-        long_signal = volume_ok and ema_uptrend and close[i] > donchian_upper[i]
-        short_signal = volume_ok and ema_downtrend and close[i] < donchian_lower[i]
+        # Trend filter from 12h EMA
+        trend_up = ema_rising_aligned[i]
+        trend_down = ema_falling_aligned[i]
+        
+        # Entry signals
+        long_signal = volume_ok and rsi_bullish and trend_up
+        short_signal = volume_ok and rsi_bearish and trend_down
         
         # Generate signals
         if position == 0:
@@ -131,15 +145,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below Donchian lower
-            if close[i] < donchian_lower[i]:
+            # Exit long when trend turns down or RSI < 40
+            if not trend_up or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above Donchian upper
-            if close[i] > donchian_upper[i]:
+            # Exit short when trend turns up or RSI > 60
+            if not trend_down or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
