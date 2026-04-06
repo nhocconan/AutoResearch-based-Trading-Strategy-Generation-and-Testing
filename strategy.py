@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d EMA(50) trend filter and volume confirmation
-# Enter long when: Williams %R crosses above -20 (oversold reversal), price > 1d EMA(50), volume > 1.5x avg
-# Enter short when: Williams %R crosses below -80 (overbought reversal), price < 1d EMA(50), volume > 1.5x avg
-# Exit when: Williams %R returns to -50 (mean reversion) or opposite signal occurs
-# Williams %R is effective in ranging markets (2025 bearish regime) while trend filter avoids counter-trend trades
-# Target: 50-150 trades over 4 years with disciplined entries
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, price > 12h EMA(50), volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) low, price < 12h EMA(50), volume > 1.5x avg
+# Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
+# Uses 12h trend filter to avoid counter-trend trades, targeting 75-200 trades over 4 years
+# This structure has proven effective on SOLUSDT (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
 
-name = "12h_williamsr_1dema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +25,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period) on 12h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Donchian channel (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Volume confirmation: volume > 1.5x 14-period average
-    volume_ma = pd.Series(volume).rolling(window=14, min_periods=14).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(volume_threshold[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -56,28 +54,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: Williams %R returns to -50 (mean reversion) or bearish reversal
-            if williams_r[i] >= -50 or williams_r[i] < -80:
+            # Exit: price returns to Donchian midpoint OR breaks below lower band
+            if close[i] <= donchian_mid[i] or close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R returns to -50 (mean reversion) or bullish reversal
-            if williams_r[i] <= -50 or williams_r[i] > -20:
+            # Exit: price returns to Donchian midpoint OR breaks above upper band
+            if close[i] >= donchian_mid[i] or close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Williams %R reversal + trend filter + volume
+            # Look for entries: Donchian breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                # Bullish entry: Williams %R crosses above -20 from below
-                if williams_r[i] > -20 and williams_r[i-1] <= -20 and close[i] > ema_50_aligned[i]:
+                if close[i] > high_20[i] and close[i] > ema_50_aligned[i]:
+                    # Bullish breakout above Donchian high with 12h uptrend
                     signals[i] = 0.25
                     position = 1
-                # Bearish entry: Williams %R crosses below -80 from above
-                elif williams_r[i] < -80 and williams_r[i-1] >= -80 and close[i] < ema_50_aligned[i]:
+                elif close[i] < low_20[i] and close[i] < ema_50_aligned[i]:
+                    # Bearish breakdown below Donchian low with 12h downtrend
                     signals[i] = -0.25
                     position = -1
     
