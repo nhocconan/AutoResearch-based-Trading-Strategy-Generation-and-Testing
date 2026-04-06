@@ -1,95 +1,100 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with 1w EMA Filter and Volume Confirmation
-Hypothesis: Donchian breakouts on daily timeframe capture major trends, filtered by 1-week EMA to avoid counter-trend trades, with volume confirmation to ensure breakout strength. Designed for 30-100 trades over 4 years to minimize fee drag while adapting to bull/bear markets via trend filter.
+6h 3-Bar Reversal with Volume and 1d Trend Filter
+Hypothesis: 3-bar reversal patterns (bullish/bearish engulfing-like) capture short-term reversals.
+Combined with 1d EMA trend filter to only take counter-trend reversals in higher timeframe trend,
+and volume confirmation to ensure follow-through. Designed for moderate trade frequency.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_ema_volume_v1"
-timeframe = "1d"
+name = "6h_3bar_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d Donchian channels (20-period)
+    # 6h data
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian upper and lower bands
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 3-bar reversal patterns
+    # Bullish: current bar closes above midpoint of previous bar AND previous bar closed below its open
+    # Bearish: current bar closes below midpoint of previous bar AND previous bar closed above its open
+    bull_engulfing = (close > (open_price + high) / 2) & (close < open_price) & (np.roll(close, 1) < np.roll(open_price, 1))
+    bear_engulfing = (close < (open_price + low) / 2) & (close > open_price) & (np.roll(close, 1) > np.roll(open_price, 1))
+    
+    # Shift to avoid look-ahead (pattern confirmed at close of current bar)
+    bull_engulfing = np.roll(bull_engulfing, 1)
+    bear_engulfing = np.roll(bear_engulfing, 1)
+    bull_engulfing[0] = False
+    bear_engulfing[0] = False
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)  # For EMA and Donchian
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite Donchian breakout or EMA filter violation
+        # Determine 1d trend: above EMA50 = uptrend, below = downtrend
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Check exits: opposite 3-bar pattern
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR price below 1w EMA
-            if close[i] <= donchian_lower[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit: bearish 3-bar reversal
+            if bear_engulfing[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR price above 1w EMA
-            if close[i] >= donchian_upper[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit: bullish 3-bar reversal
+            if bull_engulfing[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + EMA filter + volume
-            bull_breakout = close[i] > donchian_upper[i]
-            bear_breakout = close[i] < donchian_lower[i]
-            
-            # EMA filter: only long above EMA, short below EMA
-            above_ema = close[i] > ema_50_1w_aligned[i]
-            below_ema = close[i] < ema_50_1w_aligned[i]
-            
-            # Volume confirmation
+            # Look for entries: 3-bar reversal AGAINST 1d trend + volume
+            # In uptrend, look for bearish reversal (short)
+            # In downtrend, look for bullish reversal (long)
             vol_filter = volume[i] > vol_ma[i] * 1.5
             
-            if bull_breakout and above_ema and vol_filter:
+            if downtrend and bull_engulfing[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close[i]
-            elif bear_breakout and below_ema and vol_filter:
+            elif uptrend and bear_engulfing[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close[i]
             else:
                 signals[i] = 0.0
     
