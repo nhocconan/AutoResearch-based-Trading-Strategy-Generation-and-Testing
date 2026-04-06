@@ -4,7 +4,7 @@
 Hypothesis: 1d Donchian(20) breakouts capture major trends in BTC/ETH/SOL.
 Volume confirmation reduces false breakouts, ATR stoploss manages risk.
 Works in bull (breakout continuation) and bear (breakdown continuation).
-Target: 30-100 total trades over 4 years.
+Target: 75-250 total trades over 4 years.
 """
 
 import numpy as np
@@ -20,20 +20,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
     # Load 1d data for Donchian channels (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Donchian channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
+    # Calculate rolling max/min for Donchian
     high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
@@ -48,7 +42,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Volume filter: 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -68,7 +62,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donch_high_1d[i]) or np.isnan(donch_low_1d[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -93,13 +87,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakout with volume confirmation and trend filter
+            # Look for entries: breakout with volume confirmation
             breakout_long = (close[i] > donch_high_1d[i] and
-                           volume[i] > vol_ema[i] * 1.5 and
-                           close[i] > ema_50_1w_aligned[i])
+                           volume[i] > vol_ema[i] * 1.5)
             breakout_short = (close[i] < donch_low_1d[i] and
-                            volume[i] > vol_ema[i] * 1.5 and
-                            close[i] < ema_50_1w_aligned[i])
+                            volume[i] > vol_ema[i] * 1.5)
             
             if breakout_long:
                 signals[i] = 0.25
