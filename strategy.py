@@ -3,37 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 1-day RSI filter and volume confirmation.
-# Uses 6h price channel breakouts aligned with daily momentum to capture strong trending moves.
-# RSI filter avoids entries during overextended conditions. Volume confirmation ensures institutional participation.
-# Works in bull markets (breakouts above upper band with RSI<70) and bear markets (breakdowns below lower band with RSI>30).
-# Target: 75-250 total trades over 4 years (19-62/year).
+# Hypothesis: 6-hour Donchian(20) breakout with daily pivot direction and volume confirmation.
+# Uses 6h price channel breakouts aligned with daily pivot levels to capture strong trending moves.
+# Daily pivot direction (based on price vs daily pivot) filters for trend alignment.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band with price > pivot) 
+# and bear markets (breakdowns below lower band with price < pivot). Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13535_6h_donchian20_1d_rsi_vol_v1"
+name = "exp_13535_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-RSI_PERIOD = 14
+PIVOT_LOOKBACK = 1  # Use previous day's pivot
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_pivot(high, low, close):
+    """Calculate standard pivot point: (H + L + C) / 3"""
+    return (high + low + close) / 3.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -41,6 +32,7 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
@@ -52,10 +44,12 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily RSI for momentum filter
+    # Calculate daily pivot for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    rsi_1d = calculate_rsi(close_1d, RSI_PERIOD)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    pivot_1d = calculate_pivot(high_1d, low_1d, close_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -79,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if RSI not available
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if data not available
+        if np.isnan(pivot_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,13 +99,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Momentum filter: RSI not overextended
-        rsi_not_overbought = rsi_1d_aligned[i] < RSI_OVERBOUGHT
-        rsi_not_oversold = rsi_1d_aligned[i] > RSI_OVERSOLD
+        # Trend filter: price above/below daily pivot
+        above_pivot = close[i] > pivot_1d_aligned[i]
+        below_pivot = close[i] < pivot_1d_aligned[i]
         
         # Breakout signals using Donchian channels
-        breakout_up = volume_ok and rsi_not_overbought and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and rsi_not_oversold and (low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and above_pivot and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and below_pivot and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
