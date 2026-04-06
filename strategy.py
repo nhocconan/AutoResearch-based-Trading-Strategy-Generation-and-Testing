@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 12h Donchian channel breakout with volume confirmation and 1d EMA trend filter.
 # Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
 # and EMA trend filter ensures we trade with higher timeframe momentum.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
 
 name = "exp_13082_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
