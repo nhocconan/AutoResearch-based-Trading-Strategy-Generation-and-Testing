@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d trend filter and volume confirmation
-Hypothesis: 12h breakouts capture multi-day momentum with low transaction costs.
+4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+Hypothesis: 4h breakouts capture medium-term momentum with lower transaction costs.
 Filter by 1d EMA50 for trend bias and volume confirmation for conviction.
 Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50).
-Uses 1d to reduce noise vs pure 12h. Target: 50-150 total trades over 4 years.
+Uses 1d to reduce noise vs pure 4h. Target: 100-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,10 +50,8 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
-    # 1d trend: above EMA50 = bullish, below = bearish
+    # Align trend to 4h timeframe: above EMA50 = bullish (1), below = bearish (-1)
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    
-    # Align trend to 12h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Get volume data for confirmation
@@ -64,10 +62,10 @@ def generate_signals(prices):
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 12h timeframe
+    # Align volume MA to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (20-period) from 12h data
+    # Donchian channels (20-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -95,9 +93,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.3x average of 1d volume (scaled)
-        # Scale 1d volume to 12h: approx 1/2 of 1d volume (since 2x 12h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.3
+        # Volume filter: current 4h volume > 1.3x scaled 1d average volume
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.3
         volume_filter = volume[i] > vol_threshold
         
         # Session filter: 08-20 UTC
