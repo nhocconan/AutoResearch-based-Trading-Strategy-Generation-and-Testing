@@ -7,11 +7,11 @@ name = "exp_13922_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2x 20-period MA)
-# Works in bull by catching upward breakouts, in bear by catching downward breakdowns
-# Uses 12h timeframe to limit trades (target: 50-150 total over 4 years) and reduce fee drag
-# Volume threshold of 2.0x ensures only significant breakouts trigger entries
-# EMA filter prevents counter-trend trades during strong trends
+# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
+# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
+# requiring alignment with daily trend to avoid counter-trend whipsaws
+# Using 12h timeframe to reduce trade frequency and avoid fee drag
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
