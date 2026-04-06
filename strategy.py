@@ -3,80 +3,68 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI mean reversion with 4-hour trend filter and volume confirmation.
-# In bear markets (2025+), RSI oversold bounces work well on pullbacks to VWAP or moving averages.
-# Use 4-hour EMA for trend direction to avoid counter-trend trades, and 1-hour RSI(14) for entry timing.
-# Volume confirmation ensures institutional participation. Target: 75-150 total trades over 4 years.
-# Works in bull markets (dips in uptrend) and bear markets (bounces in downtrend).
+# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with daily EMA trend filter and volume confirmation.
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low.
+# Long when Bull Power > 0 and rising, Bear Power < 0 and falling, with price above daily EMA50.
+# Short when Bear Power > 0 and rising, Bull Power < 0 and falling, with price below daily EMA50.
+# Volume confirmation ensures institutional participation. Works in bull markets (strong Bull Power)
+# and bear markets (strong Bear Power). Target: 50-150 total trades over 4 years.
 
-name = "exp_13314_1h_rsi_mean_reversion_4h_trend_vol_v1"
-timeframe = "1h"
+name = "elder_ray_6h_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_TREND_PERIOD = 50  # 4h EMA for trend filter
+ER_EMA_PERIOD = 13    # Elder Ray EMA period
+DAILY_EMA_PERIOD = 50 # Daily trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_ema(close, period):
+def ema(close, period):
     """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_atr(high, low, close, period):
+def atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
+    atr_vals = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr_vals
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    # Load daily data for VWAP reference (optional, but we'll use close for simplicity)
+    # Load daily data ONCE before loop for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, EMA_TREND_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    daily_ema = ema(close_1d, DAILY_EMA_PERIOD)
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Elder Ray components: EMA(13) of close
+    er_ema = ema(close, ER_EMA_PERIOD)
+    bull_power = high - er_ema
+    bear_power = er_ema - low
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    atr_vals = atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,11 +72,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(ER_EMA_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(daily_ema_aligned[i]) or np.isnan(er_ema[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,21 +96,22 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: 4h EMA direction
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Elder Ray signals with slope confirmation
+        bull_rising = bull_power[i] > bull_power[i-1]
+        bull_falling = bull_power[i] < bull_power[i-1]
+        bear_rising = bear_power[i] > bear_power[i-1]
+        bear_falling = bear_power[i] < bear_power[i-1]
         
-        # Mean reversion signals: RSI extremes with volume and trend alignment
-        # In uptrend, buy oversold pullbacks; in downtrend, sell overbought bounces
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Trend filter: price relative to daily EMA
+        price_above_ema = close[i] > daily_ema_aligned[i]
+        price_below_ema = close[i] < daily_ema_aligned[i]
         
-        # Long: oversold in uptrend OR deep oversold in any trend (contrarian bounce)
-        long_signal = volume_ok and ((uptrend and rsi_oversold) or (rsi[i] < 25))
-        # Short: overbought in downtrend OR deep overbought in any trend (contrarian fade)
-        short_signal = volume_ok and ((downtrend and rsi_overbought) or (rsi[i] > 75))
+        # Long: Bull Power positive and rising, price above daily EMA
+        long_signal = volume_ok and bull_power[i] > 0 and bull_rising and price_above_ema
+        # Short: Bear Power positive and rising, price below daily EMA
+        short_signal = volume_ok and bear_power[i] > 0 and bear_rising and price_below_ema
         
         # Generate signals
         if position == 0:
@@ -130,12 +119,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_vals[i])
             elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_vals[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
