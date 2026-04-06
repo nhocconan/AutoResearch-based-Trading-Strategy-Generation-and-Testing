@@ -6,18 +6,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and ATR stoploss.
 # Goes long when price breaks above 1d Donchian upper channel with above-average volume,
 # short when breaks below lower channel with volume.
-# Uses 1d EMA200 as trend filter to avoid counter-trend trades.
+# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
 # Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Donchian channels provide clear breakout levels that work across market regimes.
 
-name = "exp_13796_12h_donchian1d_ema200_vol_v1"
+name = "exp_13796_12h_donchian1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 200
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 10
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
