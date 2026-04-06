@@ -7,10 +7,11 @@ name = "exp_13928_12h_donchian20_1w_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation (2.0x)
-# Uses weekly trend to filter direction, reducing counter-trend trades in ranging markets
-# Target: 50-150 trades over 4 years by requiring weekly trend alignment + volume spike
-# Weekly trend filter provides stronger bias than daily, better for 12h timeframe
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation (2.0x)
+# Weekly trend filter ensures alignment with major market cycles, reducing whipsaws
+# Volume confirmation ensures breakout strength
+# Target: 80-120 trades over 4 years by using strict volume threshold (2.0x) and
+# requiring alignment with weekly trend to avoid counter-trend whipsaws
 # Added: ATR-based trailing stop (2.5x) and exit on Donchian reversal or trend change
 
 def calculate_donchian(high, low, period):
