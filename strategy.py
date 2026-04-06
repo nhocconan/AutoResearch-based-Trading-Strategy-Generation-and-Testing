@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume + Weekly ADX Filter
-Hypothesis: Donchian breakouts on daily timeframe capture primary trends with institutional validation via weekly ADX. 
-Volume confirms breakout strength. Weekly ADX filter ensures trading only in strong trending markets (ADX > 25).
-Designed for low frequency (30-100 trades over 4 years) to minimize fee drag while capturing major trends.
-Works in bull markets (breakouts) and bear markets (breakdowns) by going long on highs, short on lows.
+1d Donchian(20) Breakout + Volume + ADX Filter (Weekly)
+Hypothesis: Daily Donchian breakouts capture medium-term momentum with fewer trades (~30-100/4 years).
+Weekly ADX filter ensures we only trade in strong trending markets, reducing whipsaws.
+Volume confirms institutional participation. Works in both bull and bear markets.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -24,22 +24,22 @@ def generate_signals(prices):
     df_weekly = get_htf_data(prices, '1w')
     
     # ADX calculation on weekly
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
     # True Range
-    tr1 = np.abs(high_w[1:] - low_w[1:])
-    tr2 = np.abs(high_w[1:] - close_w[:-1])
-    tr3 = np.abs(low_w[1:] - close_w[:-1])
+    tr1 = np.abs(high_weekly[1:] - low_weekly[1:])
+    tr2 = np.abs(high_weekly[1:] - close_weekly[:-1])
+    tr3 = np.abs(low_weekly[1:] - close_weekly[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_w[1:] - high_w[:-1]) > (low_w[:-1] - low_w[1:]), 
-                       np.maximum(high_w[1:] - high_w[:-1], 0), 0)
-    dm_minus = np.where((low_w[:-1] - low_w[1:]) > (high_w[1:] - high_w[:-1]), 
-                        np.maximum(low_w[:-1] - low_w[1:], 0), 0)
+    dm_plus = np.where((high_weekly[1:] - high_weekly[:-1]) > (low_weekly[:-1] - low_weekly[1:]), 
+                       np.maximum(high_weekly[1:] - high_weekly[:-1], 0), 0)
+    dm_minus = np.where((low_weekly[:-1] - low_weekly[1:]) > (high_weekly[1:] - high_weekly[:-1]), 
+                        np.maximum(low_weekly[:-1] - low_weekly[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -100,20 +100,20 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5  # Volume 1.5x average
+            volume_filter = volume[i] > vol_ma * 1.5  # Moderate threshold
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 25
+            # Exit: price closes below Donchian lower OR weekly ADX < 25
             if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 25
+            # Exit: price closes above Donchian upper OR weekly ADX < 25
             if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
@@ -123,7 +123,7 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Weekly ADX > 25 for strong trend
+            trend_filter = adx_aligned[i] > 30  # Strong trend filter
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
