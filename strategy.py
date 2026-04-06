@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Weekly EMA ensures alignment with higher timeframe momentum to avoid counter-trend trades.
-# Volume confirmation filters out false breakouts. Target: 50-150 total trades over 4 years.
+# Hypothesis: Daily Donchian(20) breakout with volume confirmation and weekly EMA trend filter.
+# Uses actual daily high/low for channel, weekly EMA for trend alignment, and volume spike for confirmation.
+# Designed to work in both bull (breakouts above resistance) and bear (breakdowns below support) markets.
+# Target: 75-200 total trades over 4 years (20-50/year) to avoid fee drag.
 
-name = "exp_13350_daily_donchian20_weekly_ema_vol_v1"
+name = "exp_13350_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20   # Weekly EMA
+EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -24,12 +24,6 @@ ATR_STOP_MULTIPLIER = 2.0
 def calculate_ema(close, period):
     """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,24 +39,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for Donchian
+    # Load daily data for Donchian channels (from daily timeframe)
     df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate daily Donchian channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian upper/lower: max(high, period), min(low, period)
+    donchian_high = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Align Donchian to daily timeframe (already daily, but using for consistency)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate daily Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    upper, lower = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
-    
-    # Align Donchian to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -82,11 +79,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -113,8 +111,8 @@ def generate_signals(prices):
         downtrend = close[i] < ema_1w_aligned[i]
         
         # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > upper_aligned[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lower_aligned[i-1])
+        breakout_up = volume_ok and uptrend and (high[i] > donchian_high_aligned[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < donchian_low_aligned[i-1])
         
         # Generate signals
         if position == 0:
