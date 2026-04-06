@@ -1,13 +1,33 @@
-# 4H DONCHIAN(20) BREAKOUT + 1D EMA(50) TREND + VOLUME CONFIRMATION v3
-# Hypothesis: Donchian breakouts capture momentum bursts. 1D EMA(50) filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (breakouts with trend) and bear (breakouts against trend filtered out). Target: 75-150 total trades over 4 years.
+#!/usr/bin/env python3
+"""
+6h WEEKLY PIVOT BREAKOUT + VOLUME CONFIRMATION v1
+Hypothesis: Weekly pivot points (calculated from prior week) act as key support/resistance.
+Breakouts above weekly R1 or below weekly S1 with volume confirmation capture institutional interest.
+Works in bull (breakouts with momentum) and bear (breakdowns with volume) by fading mean reversion
+at extreme pivot levels (R3/S3) and continuing trends beyond R4/S4. Weekly timeframe avoids
+noise while providing structural levels. Target: 75-150 total trades over 4 years.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v3"
-timeframe = "4h"
+name = "6h_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_pivots(high, low, close):
+    """Calculate standard pivot points: P = (H+L+C)/3, R1=2P-L, S1=2P-H, etc."""
+    p = (high + low + close) / 3.0
+    r1 = 2 * p - low
+    s1 = 2 * p - high
+    r2 = p + (high - low)
+    s2 = p - (high - low)
+    r3 = high + 2 * (p - low)
+    s3 = low - 2 * (high - p)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return p, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,32 +53,52 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
+        return np.zeros(n)
     
-    # Calculate EMA(50) on 1d
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        alpha = 2.0 / (period + 1)
-        ema_val = np.full_like(arr, np.nan)
-        ema_val[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
-        return ema_val
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    ema_50 = ema(close_1d, 50)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate weekly pivots (using prior week's data)
+    weekly_p = np.full(len(weekly_high), np.nan)
+    weekly_r1 = np.full(len(weekly_high), np.nan)
+    weekly_r2 = np.full(len(weekly_high), np.nan)
+    weekly_r3 = np.full(len(weekly_high), np.nan)
+    weekly_r4 = np.full(len(weekly_high), np.nan)
+    weekly_s1 = np.full(len(weekly_high), np.nan)
+    weekly_s2 = np.full(len(weekly_high), np.nan)
+    weekly_s3 = np.full(len(weekly_high), np.nan)
+    weekly_s4 = np.full(len(weekly_high), np.nan)
     
-    # Donchian channels (20-period) on 4h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    for i in range(1, len(weekly_high)):
+        p, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivots(
+            weekly_high[i-1], weekly_low[i-1], weekly_close[i-1]
+        )
+        weekly_p[i] = p
+        weekly_r1[i] = r1
+        weekly_r2[i] = r2
+        weekly_r3[i] = r3
+        weekly_r4[i] = r4
+        weekly_s1[i] = s1
+        weekly_s2[i] = s2
+        weekly_s3[i] = s3
+        weekly_s4[i] = s4
     
-    # Volume filter: current volume > 1.8x average over last 20 periods (stricter)
+    # Align weekly pivots to 6h timeframe
+    p_aligned = align_htf_to_ltf(prices, df_weekly, weekly_p)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r4)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s4)
+    
+    # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -72,28 +112,30 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(atr[i]) or np.isnan(p_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition (more restrictive)
-        volume_filter = volume[i] > vol_ma[i] * 1.8
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian low or stoploss hit
-            if (close[i] < donchian_low[i] or
+            # Exit: price closes below weekly S1 or stoploss hit
+            if (close[i] < s1_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian high or stoploss hit
-            if (close[i] > donchian_high[i] or
+            # Exit: price closes above weekly R1 or stoploss hit
+            if (close[i] > r1_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -101,17 +143,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high, above 1d EMA50, with volume
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_filter):
+            # Long: price breaks above weekly R1 with volume (momentum continuation)
+            # OR price rejects at weekly S3/S4 with volume (mean reversion fade)
+            long_breakout = (close[i] > r1_aligned[i] and volume_filter)
+            long_fade = (close[i] < s3_aligned[i] and close[i] > s4_aligned[i] and volume_filter)
+            
+            # Short: price breaks below weekly S1 with volume (momentum continuation)
+            # OR price rejects at weekly R3/R4 with volume (mean reversion fade)
+            short_breakout = (close[i] < s1_aligned[i] and volume_filter)
+            short_fade = (close[i] > r3_aligned[i] and close[i] < r4_aligned[i] and volume_filter)
+            
+            if long_breakout or long_fade:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA50, with volume
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_filter):
+            elif short_breakout or short_fade:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
