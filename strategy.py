@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h price action with 4h trend filter and volume confirmation
-# Enter long when price crosses above 1h EMA(20) with volume > 1.3x average and price > 4h EMA(50)
-# Enter short when price crosses below 1h EMA(20) with volume > 1.3x average and price < 4h EMA(50)
-# Use 4h EMA(50) as trend filter to avoid counter-trend trades
-# Exit when price crosses back over 1h EMA(20) or reverses against 4h trend
-# Target: 60-150 trades over 4 years (15-37/year) with session filter (08-20 UTC)
+# Hypothesis: 1h RSI + 4h MACD + volume confirmation with session filter
+# Enter long when: RSI(14) > 60, MACD(12,26,9) bullish crossover on 4h, volume > 1.5x average, during active session (08-20 UTC)
+# Enter short when: RSI(14) < 40, MACD bearish crossover on 4h, volume > 1.5x average, during active session
+# Uses momentum confirmation from higher timeframe to filter false signals on 1h
+# Exit when RSI returns to neutral zone (40-60) or opposite MACD crossover occurs
+# Target: 60-150 trades over 4 years by combining multiple filters
 
-name = "1h_ema20_4h_ema50_vol_session"
+name = "1h_rsi_macd_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -20,64 +20,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h EMA(20) for entry signal
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # RSI(14) on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # 4h EMA(50) for trend filter
+    # MACD on 4h
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_12 = pd.Series(close_4h).ewm(span=12, adjust=False).mean().values
+    ema_26 = pd.Series(close_4h).ewm(span=26, adjust=False).mean().values
+    macd = ema_12 - ema_26
+    signal_line = pd.Series(macd).ewm(span=9, adjust=False).mean().values
+    macd_hist = macd - signal_line
+    macd_hist_aligned = align_htf_to_ltf(prices, df_4h, macd_hist)
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.3 * volume_ma
+    volume_threshold = 1.5 * volume_ma
     
-    # Session filter: 08-20 UTC (pre-market to NY close)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if required data not available or outside session
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(volume_threshold[i]) or not in_session[i]):
+    for i in range(30, n):  # Wait for MACD to stabilize
+        # Skip if required data not available
+        if (np.isnan(rsi[i]) or np.isnan(macd_hist_aligned[i]) or 
+            np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         if position == 1:  # long position
-            # Exit: price crosses below 1h EMA(20) OR closes below 4h EMA(50)
-            if close[i] < ema_20[i] or close[i] < ema_50_4h_aligned[i]:
+            # Exit: RSI < 40 OR MACD histogram turns negative
+            if rsi[i] < 40 or macd_hist_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price crosses above 1h EMA(20) OR closes above 4h EMA(50)
-            if close[i] > ema_20[i] or close[i] > ema_50_4h_aligned[i]:
+            # Exit: RSI > 60 OR MACD histogram turns positive
+            if rsi[i] > 60 or macd_hist_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries: 1h EMA(20) cross with volume and trend filter
-            if close[i] > ema_20[i] and volume[i] > volume_threshold[i] and close[i] > ema_50_4h_aligned[i]:
-                # Long: price above EMA(20) with volume and uptrend
-                signals[i] = 0.20
-                position = 1
-            elif close[i] < ema_20[i] and volume[i] > volume_threshold[i] and close[i] < ema_50_4h_aligned[i]:
-                # Short: price below EMA(20) with volume and downtrend
-                signals[i] = -0.20
-                position = -1
+            # Look for entries: RSI extreme + MACD confirmation + volume + session
+            if in_session and volume[i] > volume_threshold[i]:
+                if rsi[i] > 60 and macd_hist_aligned[i] > 0 and macd_hist_aligned[i-1] <= 0:
+                    # RSI overbought with fresh bullish MACD crossover
+                    signals[i] = 0.20
+                    position = 1
+                elif rsi[i] < 40 and macd_hist_aligned[i] < 0 and macd_hist_aligned[i-1] >= 0:
+                    # RSI oversold with fresh bearish MACD crossover
+                    signals[i] = -0.20
+                    position = -1
     
     return signals
