@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian high + 1d EMA50 up + volume > 1.5x average
-# Short when price breaks below Donchian low + 1d EMA50 down + volume > 1.5x average
-# Exit when price crosses Donchian midline or EMA50 reverses
-# Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# Works in trending markets by following breakouts with trend filter
+# Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation
+# Long when price breaks above Donchian high + price > daily EMA50 + volume > 1.5x average
+# Short when price breaks below Donchian low + price < daily EMA50 + volume > 1.5x average
+# Exit when price crosses back below/above Donchian midpoint
+# Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
+# Works in trending markets by following breakouts with trend filter, avoids chop with volume filter
 
-name = "12h_donchian_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,10 +30,10 @@ def generate_signals(prices):
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donch_mid = (donch_high + donch_low) / 2
     
-    # EMA50 on 1d timeframe
+    # Daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
@@ -52,30 +52,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price crosses Donchian midline or EMA1d
+        # Exit conditions: price crosses Donchian midpoint
         if position == 1:  # long position
-            if close[i] <= donch_mid[i] or close[i] <= ema_1d_aligned[i]:
+            if close[i] <= donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= donch_mid[i] or close[i] >= ema_1d_aligned[i]:
+            if close[i] >= donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for breakouts with trend and volume confirmation
-            # Bullish breakout: price above Donchian high + EMA1d up + volume
+            # Bullish breakout: price above Donchian high + price > daily EMA + volume
             if (close[i] > donch_high[i] and 
-                ema_1d_aligned[i] > ema_1d_aligned[i-1] and 
+                close[i] > ema_1d_aligned[i] and 
                 volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Bearish breakout: price below Donchian low + EMA1d down + volume
+            # Bearish breakout: price below Donchian low + price < daily EMA + volume
             elif (close[i] < donch_low[i] and 
-                  ema_1d_aligned[i] < ema_1d_aligned[i-1] and 
+                  close[i] < ema_1d_aligned[i] and 
                   volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
