@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Weekly Pivot + Volume Confirmation + ATR Stop
-Hypothesis: Combines weekly pivot levels (R4/S4 breakouts for continuation, R3/S3 for mean reversion)
-with volume confirmation to capture institutional flow. Uses 1d trend filter to align with higher timeframe.
-Works in bull (breakouts with trend) and bear (breakdowns with trend).
-Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+4h Bollinger Band Squeeze + Volume Confirmation + ATR Stop
+Hypothesis: Bollinger Band squeeze identifies low volatility periods; breakout with volume
+captures directional moves. Works in bull (breakouts with volume) and bear (breakdowns with volume).
+ATR stop-loss limits drawdown. Target: 100-200 trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_weeklypivot_volume_v1"
-timeframe = "12h"
+name = "4h_bb_squeeze_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,66 +38,47 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA50 for trend bias
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    # Bollinger Bands (20, 2)
+    bb_length = 20
+    bb_mult = 2.0
+    basis = np.full(n, np.nan)
+    dev = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Trend bias: above EMA = bullish, below = bearish
-    trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
+    if n >= bb_length:
+        for i in range(bb_length-1, n):
+            basis[i] = np.mean(close[i-bb_length+1:i+1])
+            dev[i] = bb_mult * np.std(close[i-bb_length+1:i+1])
+            upper[i] = basis[i] + dev[i]
+            lower[i] = basis[i] - dev[i]
     
-    # Align to 12h timeframe
-    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
+    # Bollinger Band Width (normalized)
+    bb_width = np.full(n, np.nan)
+    if n >= bb_length:
+        for i in range(bb_length-1, n):
+            if not np.isnan(basis[i]) and basis[i] != 0:
+                bb_width[i] = (upper[i] - lower[i]) / basis[i]
     
-    # Calculate weekly pivot from 1w data
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Bollinger Band Width percentile (50-period lookback)
+    bb_width_percentile = np.full(n, np.nan)
+    lookback = 50
+    if n >= bb_length + lookback:
+        for i in range(bb_length-1 + lookback, n):
+            start_idx = i - lookback + 1
+            window = bb_width[start_idx:i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                current_val = bb_width[i]
+                if not np.isnan(current_val):
+                    rank = np.sum(valid <= current_val) / len(valid) * 100
+                    bb_width_percentile[i] = rank
     
-    pivot_1w = np.full_like(close_1w, np.nan)
-    r1_1w = np.full_like(close_1w, np.nan)
-    s1_1w = np.full_like(close_1w, np.nan)
-    r2_1w = np.full_like(close_1w, np.nan)
-    s2_1w = np.full_like(close_1w, np.nan)
-    r3_1w = np.full_like(close_1w, np.nan)
-    s3_1w = np.full_like(close_1w, np.nan)
-    r4_1w = np.full_like(close_1w, np.nan)
-    s4_1w = np.full_like(close_1w, np.nan)
-    
-    # Calculate pivots for each 1w bar (using previous week's data to avoid look-ahead)
-    for i in range(1, len(close_1w)):
-        # Use previous week's OHLC to calculate this week's pivot
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
-        
-        if not (np.isnan(ph) or np.isnan(pl) or np.isnan(pc)):
-            p = (ph + pl + pc) / 3.0
-            pivot_1w[i] = p
-            r1_1w[i] = 2*p - pl
-            s1_1w[i] = 2*p - ph
-            r2_1w[i] = p + (ph - pl)
-            s2_1w[i] = p - (ph - pl)
-            r3_1w[i] = ph + 2*(p - pl)
-            s3_1w[i] = pl - 2*(ph - p)
-            r4_1w[i] = 3*p - 2*pl
-            s4_1w[i] = 3*ph - 2*pl
-    
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,13 +86,12 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 20  # Need enough data for calculations
+    start = bb_length + lookback + 20  # BB + percentile + vol MA
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(bb_width_percentile[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -120,16 +99,16 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter (20-period average)
-        vol_ma = np.mean(volume[max(0, i-20):i])
-        volume_filter = volume[i] > vol_ma * 1.5
+        # Volume filter
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
+        # Squeeze condition: low volatility (BB width < 20th percentile)
+        squeeze = bb_width_percentile[i] < 20
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price drops below S3 (mean reversion) OR against 1d trend
-            # Stoploss: price drops 2*ATR below entry
-            if (close[i] < s3_aligned[i] or
-                trend_bias_aligned[i] == -1 or
+            # Exit: price closes below Bollinger basis OR stoploss
+            if (close[i] < basis[i] or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -138,10 +117,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price rises above R3 (mean reversion) OR against 1d trend
-            # Stoploss: price rises 2*ATR above entry
-            if (close[i] > r3_aligned[i] or
-                trend_bias_aligned[i] == 1 or
+            # Exit: price closes above Bollinger basis OR stoploss
+            if (close[i] > basis[i] or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -153,26 +130,18 @@ def generate_signals(prices):
             # Look for entries
             # Minimum holding period: only allow new entry after 12 bars flat
             if bars_since_entry >= 12:
-                # Breakout entries: R4/S4 with trend
-                bull_breakout = close[i] > r4_aligned[i]
-                bear_breakout = close[i] < s4_aligned[i]
+                # Breakout entries: price breaks Bollinger Band with volume during/after squeeze
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
                 
-                # Mean reversion entries: R3/S3 counter-trend (fade)
-                # Only in ranging markets - we'll use proximity to pivot as proxy
-                near_pivot = abs(close[i] - pivot_aligned[i]) < (r1_aligned[i] - s1_aligned[i]) * 0.5
-                
-                # Long: breakout with trend OR mean reversion at S3 with volume
-                if (bull_breakout and trend_bias_aligned[i] == 1 and volume_filter) or \
-                   (close[i] > s3_aligned[i] and close[i] < pivot_aligned[i] and 
-                    near_pivot and volume_filter and trend_bias_aligned[i] == -1):
+                # Long: bullish breakout with volume (can occur during or after squeeze)
+                if bull_breakout and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown with trend OR mean reversion at R3 with volume
-                elif (bear_breakout and trend_bias_aligned[i] == -1 and volume_filter) or \
-                     (close[i] < r3_aligned[i] and close[i] > pivot_aligned[i] and 
-                      near_pivot and volume_filter and trend_bias_aligned[i] == 1):
+                # Short: bearish breakout with volume (can occur during or after squeeze)
+                elif bear_breakout and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
