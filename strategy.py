@@ -1,46 +1,54 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with 1d EMA(50) trend and volume confirmation
-Hypothesis: Price breaking Donchian(20) channels with 1d EMA(50) trend alignment and volume surge captures institutional breakouts. Works in bull (long on upper break) and bear (short on lower break). Target: 75-200 trades over 4 years.
+6h Camarilla pivot from 1d: fade at R3/S3, breakout continuation at R4/S4
+Hypothesis: Camarilla pivot levels derived from previous 1d OHLC provide strong intraday support/resistance.
+In ranging markets (6h), price tends to revert from R3/S3 levels. In trending markets,
+breakouts through R4/S4 with volume confirmation signal continuation. Works in both bull and bear
+by fading extremes and catching breakouts. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1d_ema_vol_v1"
+name = "6h_camarilla_pivot_1d_fade_break_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 210:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA(50) trend (once before loop)
+    # Load 1d data for Camarilla pivots (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA(50) for trend direction
+    # Calculate Camarilla levels from previous 1d bar
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # We calculate for each 1d bar then align to 6h
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    range_1d = high_1d - low_1d
+    r4 = close_1d + range_1d * 1.1 / 2
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
+    s4 = close_1d - range_1d * 1.1 / 2
+    
+    # Align to 6h timeframe (shifted by 1 for previous day's levels)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
     # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 6h volume filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)  # Require strong volume surge
-    
-    # 6h ATR(14) for stoploss
+    # 6h ATR for dynamic thresholds and stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -48,17 +56,20 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Volume filter: above average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = 200  # For EMA50 and Donchian
+    # Start from warmup
+    start = 50
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(s4_6h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -67,34 +78,40 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian lower OR stoploss
-            if (close[i] <= lowest_low[i] or
+            # Exit: price reaches S3 (fade target) OR stoploss
+            if (close[i] <= s3_6h[i] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian upper OR stoploss
-            if (close[i] >= highest_high[i] or
+            # Exit: price reaches R3 (fade target) OR stoploss
+            if (close[i] >= r3_6h[i] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend alignment + volume
-            long_breakout = close[i] > highest_high[i-1]  # Break above previous upper
-            short_breakout = close[i] < lowest_low[i-1]   # Break below previous lower
+            # Look for entries
+            vol_filter = volume[i] > (1.5 * vol_ma[i])
             
-            uptrend = ema_50_1d_aligned[i] > close[i]  # Price above EMA50
-            downtrend = ema_50_1d_aligned[i] < close[i]  # Price below EMA50
+            # Fade at R3/S3: price touches extreme level and reverses
+            # Long fade: price touches or goes below S3 then closes back above it
+            long_fade = (low[i] <= s3_6h[i]) and (close[i] > s3_6h[i]) and vol_filter
+            # Short fade: price touches or goes above R3 then closes back below it
+            short_fade = (high[i] >= r3_6h[i]) and (close[i] < r3_6h[i]) and vol_filter
             
-            if long_breakout and uptrend and vol_filter[i]:
+            # Breakout continuation: price breaks R4/S4 with volume
+            long_break = (close[i] > r4_6h[i]) and vol_filter
+            short_break = (close[i] < s4_6h[i]) and vol_filter
+            
+            if long_fade or long_break:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and downtrend and vol_filter[i]:
+            elif short_fade or short_break:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
