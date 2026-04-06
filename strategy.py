@@ -1,27 +1,34 @@
+# 16125 - 4H DONCHIAN BREAKOUT WITH VOLUME CONFIRMATION AND DAILY TREND FILTER
+# Strategy: Uses 4H Donchian breakout for entry, confirmed by volume spike and daily EMA trend.
+# Designed to work in both bull and bear markets by using daily EMA for trend filter.
+# Volume confirmation ensures entries occur with strong participation.
+# Daily EMA prevents counter-trend trades, improving win rate.
+# Target: 75-200 trades over 4 years (19-50/year) with manageable drawdown.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12592_12h_donchian20_1d_vol_trend_v1"
-timeframe = "12h"
+name = "exp_16125_4h_donchian20_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+TREND_EMA_PERIOD = 50
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
+    """Calculate EMA with proper minimum periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR with proper minimum periods"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -30,7 +37,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channels with proper minimum periods"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -40,14 +47,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
+    # Calculate daily EMA for trend filter
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4H indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,7 +70,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
