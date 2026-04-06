@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with 1-day EMA trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions (below -80 = oversold, above -20 = overbought).
-# Trades in direction of 1-day EMA50 trend: only buy oversold in uptrend, sell overbought in downtrend.
-# Volume confirmation ensures institutional participation. Designed for 6h timeframe to target 50-150 trades over 4 years.
-# Works in bull/bear markets via EMA-based directional bias and mean-reversion entries during pullbacks.
+# Hypothesis: 4-hour Donchian channel breakout with 1-day EMA trend filter and volume confirmation.
+# Buy when price breaks above 20-period Donchian high in uptrend (price > 1-day EMA50) with volume > 1.5x average.
+# Sell when price breaks below 20-period Donchian low in downtrend (price < 1-day EMA50) with volume > 1.5x average.
+# Designed for 4h timeframe to target 75-200 trades over 4 years. Uses tight entry conditions to minimize fee drag.
+# Works in bull/bear markets via EMA-based directional bias and breakout entries aligned with trend.
 
-name = "6h_williamsr_1d_ema50_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,23 +35,18 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to 6h timeframe (shifted by 1 1d bar for no look-ahead)
+    # Align EMA50 to 4h timeframe (shifted by 1 1d bar for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams %R (14-period) on 6h data
-    williams_r = np.full(n, np.nan)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Donchian channel (20-period) on 4h data
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    for i in range(13, n):
-        highest_high[i] = np.max(high[i-13:i+1])
-        lowest_low[i] = np.min(low[i-13:i+1])
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    for i in range(19, n):
+        donchian_high[i] = np.max(high[i-19:i+1])
+        donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 6h volume > 1.3x 20-period average
+    # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -62,49 +57,49 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.3
+        # Volume condition: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Trend bias: long above EMA50, short below EMA50
+        # Trend bias: bullish if price above 1-day EMA50, bearish if below
         bullish_bias = close[i] > ema_50_aligned[i]
         bearish_bias = close[i] < ema_50_aligned[i]
         
-        # Williams %R conditions: oversold (< -80) or overbought (> -20)
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i-1]  # break above previous period's high
+        breakout_down = close[i] < donchian_low[i-1]  # break below previous period's low
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: RSI crosses above -20 (overbought) or stoploss (2x ATR approximation)
+            # Exit: price breaks below Donchian low or stoploss (2x ATR approximation)
             atr_approx = (high[i] - low[i])  # simple range approximation
             if atr_approx > 0:
                 stop_loss_level = entry_price - 2.0 * atr_approx
             else:
                 stop_loss_level = entry_price - 2.0 * 0.001
             
-            if (williams_r[i] > -20 or 
+            if (breakout_down or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI crosses below -80 (oversold) or stoploss
+            # Exit: price breaks above Donchian high or stoploss
             atr_approx = (high[i] - low[i])
             if atr_approx > 0:
                 stop_loss_level = entry_price + 2.0 * atr_approx
             else:
                 stop_loss_level = entry_price + 2.0 * 0.001
             
-            if (williams_r[i] < -80 or 
+            if (breakout_up or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
@@ -113,13 +108,13 @@ def generate_signals(prices):
         else:
             # Look for entries in direction of EMA trend with volume confirmation
             if volume_filter:
-                # Long: oversold in uptrend
-                if oversold and bullish_bias:
+                # Long: breakout above Donchian high in uptrend
+                if breakout_up and bullish_bias:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: overbought in downtrend
-                elif overbought and bearish_bias:
+                # Short: breakout below Donchian low in downtrend
+                elif breakout_down and bearish_bias:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
