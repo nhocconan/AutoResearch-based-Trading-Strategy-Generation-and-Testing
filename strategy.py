@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
-Hypothesis: 6h timeframe with Donchian breakouts aligned to weekly pivot bias 
-and volume confirmation captures momentum while avoiding chop. Weekly pivot 
-provides institutional bias, volume spike confirms participation. 
-Target: 75-200 total trades over 4 years (19-50/year).
+12h Donchian(20) Breakout + 1w Trend + Volume Spike
+Hypothesis: 12h timeframe with Donchian breakouts aligned to 1-week EMA trend 
+and volume confirmation captures momentum while avoiding chop. 
+1w EMA provides strong trend bias, volume spike confirms institutional participation.
+Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_weeklypivot_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1wtrend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,22 +39,20 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # 1-week EMA20 for trend bias
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 18) / 20
     
-    # Calculate weekly pivot: P = (H + L + C) / 3
-    pivot_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 1:
-        pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
+    # Trend bias: above EMA = bullish, below = bearish
+    trend_bias_1w = np.where(close_1w > ema_1w, 1, -1)
     
-    # Bias: above pivot = bullish, below = bearish
-    bias_weekly = np.where(close_weekly > pivot_weekly, 1, -1)
-    
-    # Align to 6h timeframe
-    bias_weekly_aligned = align_htf_to_ltf(prices, df_weekly, bias_weekly)
+    # Align to 12h timeframe
+    trend_bias_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(bias_weekly_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -84,10 +82,10 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR against weekly bias
+            # Exit: price closes below Donchian lower OR against 1w trend
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
-                bias_weekly_aligned[i] == -1 or
+                trend_bias_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -96,10 +94,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR against weekly bias
+            # Exit: price closes above Donchian upper OR against 1w trend
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
-                bias_weekly_aligned[i] == 1 or
+                trend_bias_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -108,20 +106,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + weekly bias + volume spike
-            # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15:
+            # Look for entries: Donchian breakout + 1w trend + volume spike
+            # Minimum holding period: only allow new entry after 20 bars flat
+            if bars_since_entry >= 20:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Long: bullish breakout with bullish weekly bias and volume
-                if bull_breakout and bias_weekly_aligned[i] == 1 and volume_filter:
+                # Long: bullish breakout with bullish 1w trend and volume
+                if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: bearish breakout with bearish weekly bias and volume
-                elif bear_breakout and bias_weekly_aligned[i] == -1 and volume_filter:
+                # Short: bearish breakout with bearish 1w trend and volume
+                elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
