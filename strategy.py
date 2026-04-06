@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
-Hypothesis: 12h timeframe with Donchian breakouts aligned to 1d EMA trend 
+4h Donchian(20) Breakout + 1d Trend + Volume Spike
+Hypothesis: 4h timeframe with Donchian breakouts aligned to 1d EMA trend 
 and volume confirmation captures momentum while avoiding chop. 
 1d EMA provides trend bias, volume spike confirms institutional participation.
-Target: 50-150 total trades over 4 years (12-37/year).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dtrend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,7 +51,7 @@ def generate_signals(prices):
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
