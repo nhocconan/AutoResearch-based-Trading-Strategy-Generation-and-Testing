@@ -3,27 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Donchian(20) breakout with daily EMA(50) filter and volume confirmation.
-# Captures strong weekly trends aligned with daily momentum. Volume ensures institutional participation.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Camarilla pivot reversals with daily trend filter and volume confirmation.
+# Uses daily Camarilla levels (R3/S3 for reversals, R4/S4 for breakouts) and 6h price action.
+# In ranging markets: fade extreme touches of R3/S3 with confirmation.
+# In trending markets: breakout continuation beyond R4/S4 with volume.
+# Works in both bull and bear markets by adapting to regime via price position vs daily VWAP.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13570_1d_weekly_donchian20_daily_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13571_6h_camarilla1d_vwap_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WEEKLY_DONCHIAN_PERIOD = 20
-DAILY_EMA_PERIOD = 50
+CAMARILLA_MULT = 1.1  # Standard Camarilla multiplier
+VWAP_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_vwap(high, low, close, volume, period):
+    """Calculate VWAP using typical price"""
+    typical_price = (high + low + close) / 3.0
+    vwap_num = (typical_price * volume).rolling(window=period, min_periods=period).sum()
+    vwap_den = volume.rolling(window=period, min_periods=period).sum()
+    vwap = vwap_num / vwap_den
+    return vwap.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,23 +45,41 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    weekly_highest_high = pd.Series(high_1w).rolling(window=WEEKLY_DONCHIAN_PERIOD, min_periods=WEEKLY_DONCHIAN_PERIOD).max().values
-    weekly_lowest_low = pd.Series(low_1w).rolling(window=WEEKLY_DONCHIAN_PERIOD, min_periods=WEEKLY_DONCHIAN_PERIOD).min().values
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily indicators
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5 * (high - low) * 1.1/2
+    # R3 = close + 1.0 * (high - low) * 1.1/2
+    # S3 = close - 1.0 * (high - low) * 1.1/2
+    # S4 = close - 1.5 * (high - low) * 1.1/2
+    range_1d = high_1d - low_1d
+    camarilla_multiplier = CAMARILLA_MULT / 2.0  # 1.1/2 = 0.55
+    
+    r4_1d = close_1d + 1.5 * range_1d * camarilla_multiplier
+    r3_1d = close_1d + 1.0 * range_1d * camarilla_multiplier
+    s3_1d = close_1d - 1.0 * range_1d * camarilla_multiplier
+    s4_1d = close_1d - 1.5 * range_1d * camarilla_multiplier
+    
+    # Align Camarilla levels to 6h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA for trend filter
-    daily_ema = calculate_ema(close, DAILY_EMA_PERIOD)
+    # VWAP for trend filter
+    vwap = calculate_vwap(high, low, close, volume, VWAP_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +93,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VWAP_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly Donchian or daily EMA not available
-        if np.isnan(weekly_highest_high[i]) or np.isnan(weekly_lowest_low[i]) or np.isnan(daily_ema[i]):
+        # Skip if Camarilla levels not available
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vwap[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,17 +121,31 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > daily_ema[i]
-        downtrend = close[i] < daily_ema[i]
+        # Trend filter: price above/below VWAP
+        above_vwap = close[i] > vwap[i]
+        below_vwap = close[i] < vwap[i]
         
-        # Breakout signals using weekly Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > weekly_highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < weekly_lowest_low[i-1])
-        
-        # Generate signals
+        # Signal logic
         if position == 0:
-            if breakout_up:
+            # Fade extreme touches of R3/S3 (reversal signals)
+            fade_s3 = volume_ok and below_vwap and (low[i] <= s3_1d_aligned[i]) and (close[i] > s3_1d_aligned[i])
+            fade_r3 = volume_ok and above_vwap and (high[i] >= r3_1d_aligned[i]) and (close[i] < r3_1d_aligned[i])
+            
+            # Breakout continuation signals (break R4/S4)
+            breakout_up = volume_ok and above_vwap and (high[i] > r4_1d_aligned[i])
+            breakout_down = volume_ok and below_vwap and (low[i] < s4_1d_aligned[i])
+            
+            if fade_s3:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif fade_r3:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
