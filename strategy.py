@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (1.5x 20-period average)
-# Long when price breaks above Donchian high, price > 1d EMA(50), and volume > 1.5x average
-# Short when price breaks below Donchian low, price < 1d EMA(50), and volume > 1.5x average
-# Exit on opposite Donchian break or when price crosses below/above EMA(50)
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(20) trend filter and volume confirmation (1.5x 20-period average)
+# Long when price breaks above Donchian high, price > 1d EMA(20), and volume > 1.5x average
+# Short when price breaks below Donchian low, price < 1d EMA(20), and volume > 1.5x average
+# Exit on opposite Donchian break or when price crosses below/above EMA(20)
 # Stoploss at 2 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Works in bull/bear by following 1d trend direction
 # Target: 75-200 trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_ema_vol_v1"
+name = "4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,8 +34,8 @@ def generate_signals(prices):
     
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # 1d EMA(20) for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 4h Donchian channels (20-period)
