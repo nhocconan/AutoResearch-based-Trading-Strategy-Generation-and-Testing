@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA(50) trend filter.
-# Uses volatility-based position sizing to reduce drawdown in volatile markets.
-# Target: 150-250 total trades over 4 years (38-63/year) to balance opportunity and cost.
-# Volatility scaling reduces exposure during high volatility periods, improving risk-adjusted returns.
+# Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and 1-day EMA(50) trend filter.
+# Breakouts capture strong moves in both bull and bear markets; volume filters out weak signals;
+# daily EMA ensures trading with higher timeframe momentum. Designed for 75-200 total trades
+# over 4 years (19-50/year) to minimize fee drag while maintaining edge.
 
-name = "exp_13081_4h_donchian20_1d_ema_vol_scaled_v1"
+name = "exp_13081_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,10 +17,9 @@ DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-BASE_SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-VOLATILITY_LOOKBACK = 50  # for volatility scaling
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -64,25 +63,19 @@ def generate_signals(prices):
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Volatility for position sizing (ATR ratio)
-    atr_ma = pd.Series(atr).rolling(window=VOLATILITY_LOOKBACK, min_periods=VOLATILITY_LOOKBACK).mean().values
-    volatility_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
-    # Scale inversely with volatility: higher vol = smaller position
-    vol_scale = np.clip(1.0 / volatility_ratio, 0.5, 1.5)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, VOLATILITY_LOOKBACK) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
         if np.isnan(ema_1d_aligned[i]):
             if position != 0:
-                signals[i] = position * BASE_SIGNAL_SIZE * vol_scale[i]
+                signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
@@ -113,20 +106,20 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if breakout_up:
-                signals[i] = BASE_SIGNAL_SIZE * vol_scale[i]
+                signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             elif breakout_down:
-                signals[i] = -BASE_SIGNAL_SIZE * vol_scale[i]
+                signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = BASE_SIGNAL_SIZE * vol_scale[i]
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            signals[i] = -BASE_SIGNAL_SIZE * vol_scale[i]
+            signals[i] = -SIGNAL_SIZE
     
     return signals
