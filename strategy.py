@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume + ADX Filter
-Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with lower frequency than 4h. 
-Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets, reducing whipsaws in ranges.
-Designed for 50-150 trades over 4 years (12-37/year) to minimize fee drag. Works in both bull (breakouts) and bear (breakdowns) markets.
+4h Donchian(20) Breakout + Volume + ADX Filter
+Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
+Volume confirms institutional participation. ADX filter from 4h ensures we only trade in trending markets.
+Designed for 100-200 trades over 4 years (25-50/year) to balance opportunity and fee cost.
+Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_volume_adx_v10"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,26 +20,26 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ADX (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 4h data for ADX (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     
-    # ADX calculation on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ADX calculation on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -64,10 +65,10 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 4h timeframe (already aligned since same timeframe)
+    adx_aligned = adx  # No need to align same timeframe
     
-    # 12h data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
