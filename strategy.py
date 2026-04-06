@@ -3,35 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-# Buy when price breaks above 6h Donchian upper band (20-bar high) in 1w uptrend.
-# Sell when price breaks below 6h Donchian lower band (20-bar low) in 1w downtrend.
-# Volume confirmation ensures institutional participation. Uses EMA(50) on weekly for trend.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Target: 15-35 trades/year by using strict breakouts + trend + volume.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Weekly pivot defines market structure (bullish above weekly pivot, bearish below).
+# Breakouts above/below Donchian(20) in direction of weekly trend capture momentum.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts up) and bear markets (breakdowns down).
+# Target: 15-37 trades/year by requiring weekly pivot alignment + Donchian breakout + volume surge.
 
-name = "exp_13655_6h_donchian20_1w_ema_vol_v1"
+name = "exp_13655_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels: upper = rolling max(high), lower = rolling min(low)"""
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -43,19 +37,25 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points: P = (H+L+C)/3"""
+    pivot = (high + low + close) / 3.0
+    return pivot
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
+    # Load weekly data for pivot direction ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA for trend filter
+    # Calculate weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
-    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # slope approximation
-    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
+    pivot_1w = calculate_pivot_points(high_1w, low_1w, close_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -64,7 +64,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -78,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_slope_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,24 +104,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA slope
-        uptrend = ema_1w_slope_aligned[i] > 0
-        downtrend = ema_1w_slope_aligned[i] < 0
+        # Market structure from weekly pivot
+        above_pivot = close[i] > pivot_1w_aligned[i]
+        below_pivot = close[i] < pivot_1w_aligned[i]
         
         # Donchian breakout signals
-        # Long: price breaks above upper band in uptrend
-        long_signal = volume_ok and uptrend and close[i] > donch_upper[i-1]
-        # Short: price breaks below lower band in downtrend
-        short_signal = volume_ok and downtrend and close[i] < donch_lower[i-1]
+        breakout_up = close[i] > upper[i-1] if i > 0 else False
+        breakdown_down = close[i] < lower[i-1] if i > 0 else False
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if volume_ok and above_pivot and breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif volume_ok and below_pivot and breakdown_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -129,15 +127,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite breakout or stop loss
-            if close[i] < donch_lower[i-1]:
+            # Exit long on breakdown or stop loss
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite breakout or stop loss
-            if close[i] > donch_upper[i-1]:
+            # Exit short on breakout or stop loss
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
