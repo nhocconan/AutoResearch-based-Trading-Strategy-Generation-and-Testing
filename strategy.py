@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
 # Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
 
 name = "12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
