@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-# Donchian breakouts capture strong momentum moves. EMA(50) on daily chart ensures trades
-# align with higher timeframe trend. Volume filter confirms institutional participation.
-# This combination works in both bull and bear markets by only taking breakouts in trend direction.
-# ATR-based stop loss manages risk. Target: 20-50 trades/year.
+# Hypothesis: 12h Donchian(20) breakout with daily trend filter and volume confirmation.
+# In strong trends, price breaking out of the 20-period Donchian channel often continues in trend direction.
+# Use daily EMA(50) for trend filter: only take breakouts in trend direction.
+# Volume confirmation ensures institutional participation. No session filter for 12h timeframe.
+# Works in both bull and bear markets by following the trend.
+# Target: 12-37 trades/year by using Donchian breakouts + trend + volume filters.
 
-name = "exp_13641_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13642_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -20,15 +21,13 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_donchian_high(high, period):
-    """Calculate Donchian channel upper band"""
-    return pd.Series(high).rolling(window=period, min_periods=period).max().values
-
-def calculate_donchian_low(low, period):
-    """Calculate Donchian channel lower band"""
-    return pd.Series(low).rolling(window=period, min_periods=period).min().values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -58,15 +57,14 @@ def generate_signals(prices):
     ema_1d_slope = np.diff(ema_1d, prepend=ema_1d[0])  # slope approximation
     ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_high = calculate_donchian_high(high, DONCHIAN_PERIOD)
-    donchian_low = calculate_donchian_low(low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -84,7 +82,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,11 +109,16 @@ def generate_signals(prices):
         downtrend = ema_1d_slope_aligned[i] < 0
         
         # Donchian breakout signals
-        # Long: price breaks above Donchian high in uptrend with volume
-        long_signal = volume_ok and uptrend and close[i] > donchian_high[i]
-        
-        # Short: price breaks below Donchian low in downtrend with volume
-        short_signal = volume_ok and downtrend and close[i] < donchian_low[i]
+        # Avoid lookback by checking current and previous values
+        if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+            # Long signal: price breaks above Donchian upper in uptrend
+            long_signal = volume_ok and uptrend and close[i-1] <= donchian_upper[i-1] and close[i] > donchian_upper[i]
+            
+            # Short signal: price breaks below Donchian lower in downtrend
+            short_signal = volume_ok and downtrend and close[i-1] >= donchian_lower[i-1] and close[i] < donchian_lower[i]
+        else:
+            long_signal = False
+            short_signal = False
         
         # Generate signals
         if position == 0:
@@ -132,17 +135,25 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite breakout or stop loss
-            if close[i] < donchian_low[i]:  # Opposite breakout
-                signals[i] = 0.0
-                position = 0
+            # Exit long on opposite Donchian breakout or stop loss
+            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+                # Exit if price breaks below Donchian lower (trend reversal)
+                if close[i-1] >= donchian_lower[i-1] and close[i] < donchian_lower[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = SIGNAL_SIZE
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite breakout or stop loss
-            if close[i] > donchian_high[i]:  # Opposite breakout
-                signals[i] = 0.0
-                position = 0
+            # Exit short on opposite Donchian breakout or stop loss
+            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+                # Exit if price breaks above Donchian upper (trend reversal)
+                if close[i-1] <= donchian_upper[i-1] and close[i] > donchian_upper[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -SIGNAL_SIZE
             else:
                 signals[i] = -SIGNAL_SIZE
     
