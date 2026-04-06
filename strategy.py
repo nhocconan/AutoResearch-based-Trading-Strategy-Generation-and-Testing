@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12731_6h_obv_ma_crossover_v1"
-timeframe = "6h"
+name = "exp_12732_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-OBV_MA_FAST = 10
-OBV_MA_SLOW = 30
+DONCHIAN_PERIOD = 20
+EMA_FAST_PERIOD = 9
+EMA_SLOW_PERIOD = 21
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_obv(close, volume):
-    """Calculate On-Balance Volume"""
-    return (np.sign(np.diff(close, prepend=close[0])) * volume).cumsum()
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -32,23 +30,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Calculate 6h indicators
-    close = prices['close'].values
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate OBV and its moving averages
-    obv = calculate_obv(close, volume)
-    obv_ma_fast = pd.Series(obv).ewm(span=OBV_MA_FAST, adjust=False, min_periods=OBV_MA_FAST).mean().values
-    obv_ma_slow = pd.Series(obv).ewm(span=OBV_MA_SLOW, adjust=False, min_periods=OBV_MA_SLOW).mean().values
+    # Donchian channels on 12h
+    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
-    # Calculate ATR for stop loss
+    # EMA trend filter on 12h
+    ema_fast = calculate_ema(close, EMA_FAST_PERIOD)
+    ema_slow = calculate_ema(close, EMA_SLOW_PERIOD)
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -57,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(OBV_MA_FAST, OBV_MA_SLOW, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_SLOW_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Check stoploss
@@ -72,22 +84,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation: current volume above average
-        volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()[i]
-        volume_ok = not np.isnan(volume_ma) and volume[i] > (volume_ma * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # OBV crossover signals
-        obv_cross_up = obv_ma_fast[i] > obv_ma_slow[i] and obv_ma_fast[i-1] <= obv_ma_slow[i-1]
-        obv_cross_down = obv_ma_fast[i] < obv_ma_slow[i] and obv_ma_fast[i-1] >= obv_ma_slow[i-1]
+        # Trend filter: EMA fast > EMA slow for long, < for short
+        trend_up = ema_fast[i] > ema_slow[i]
+        trend_down = ema_fast[i] < ema_slow[i]
+        
+        # Entry conditions
+        long_entry = volume_ok and trend_up and close[i] >= donch_up[i]
+        short_entry = volume_ok and trend_down and close[i] <= donch_low[i]
         
         # Generate signals
         if position == 0:
-            if obv_cross_up and volume_ok:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif obv_cross_down and volume_ok:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
