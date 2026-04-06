@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on daily timeframe capture major trend moves.
+1d Donchian Breakout with Weekly Trend and Volume Confirmation v1
+Hypothesis: Daily Donchian(20) breakouts capture strong momentum moves.
 Weekly EMA200 filters trend direction to avoid counter-trend trades.
-Volume confirms breakout strength. Designed for 30-100 trades over 4 years.
+Volume confirms breakout strength. Designed for 30-100 trades over 4 years to minimize fee drag.
 Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
@@ -20,7 +20,7 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
+    # Load weekly data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
     # Weekly EMA200 for trend filter
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema200_rising_aligned = align_htf_to_ltf(prices, df_1w, ema200_rising)
     ema200_falling_aligned = align_htf_to_ltf(prices, df_1w, ema200_falling)
     
-    # 1d data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
