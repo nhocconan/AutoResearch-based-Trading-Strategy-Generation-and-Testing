@@ -7,11 +7,12 @@ name = "exp_13972_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with daily EMA filter and volume confirmation.
-# Uses daily EMA(50) for trend bias: price above EMA50 = bullish bias, price below EMA50 = bearish bias.
-# Entry on 12h Donchian breakout in direction of daily bias with volume > 1.5x average.
-# Exit on Donchian reversal or bias change. Designed for 50-150 total trades over 4 years (12-37/year)
-# to minimize fee drag. Works in bull (breaks above with bullish bias) and bear (breaks below with bearish bias).
+# Hypothesis: 12h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+# Uses daily EMA(50) for trend bias: price above EMA = bullish bias, price below EMA = bearish bias.
+# Entry on 12h Donchian breakout in direction of daily EMA bias with volume > 1.5x average.
+# Exit on Donchian reversal or trend bias change. Designed for 50-150 total trades over 4 years
+# (12-37/year) to minimize fee drag. Works in bull (breaks above with bullish bias) and bear
+# (breaks below with bearish bias) with EMA filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -38,15 +39,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for EMA filter ONCE before loop
+    # Load daily data for EMA calculation ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate daily EMA(50)
-    daily_close = df_1d['close'].values
-    ema_50 = calculate_ema(daily_close, 50)
+    daily_ema = calculate_ema(df_1d['close'].values, 50)
     
-    # Align daily EMA to 12h timeframe (use previous day's EMA for bias)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align daily EMA to 12h timeframe (use prior day's EMA for bias)
+    ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
     # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
@@ -73,8 +73,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_50_aligned[i]) or \
-           np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -88,31 +87,27 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-            continue
+                continue
         
         elif position == -1:  # short position
             # Check stop loss
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
-            continue
+                continue
         
         # Determine bias from daily EMA (price vs EMA level)
-        bullish_bias = close[i] > ema_50_aligned[i]  # price above daily EMA50 = bullish bias
-        bearish_bias = close[i] < ema_50_aligned[i]  # price below daily EMA50 = bearish bias
+        bullish_bias = close[i] > ema_aligned[i]  # price above daily EMA = bullish bias
+        bearish_bias = close[i] < ema_aligned[i]  # price below daily EMA = bearish bias
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Donchian breakout signals (using previous bar's bands)
+        # Donchian breakout signals
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of daily bias
+        # Entry signals - only in direction of EMA bias
         long_signal = bullish_bias and volume_ok and breakout_up
         short_signal = bearish_bias and volume_ok and breakout_down
         
