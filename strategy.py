@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
-# The 1-day EMA provides long-term trend filtering to avoid counter-trend trades.
-# Works in bull markets by capturing momentum breakouts. Works in bear markets by using 1d EMA to avoid false breakdowns.
+# Hypothesis: Daily Donchian(20) breakout with weekly EMA(10) trend filter and volume confirmation.
+# The weekly EMA provides long-term trend filtering to avoid counter-trend trades.
+# Works in bull markets by capturing momentum breakouts. Works in bear markets by using weekly EMA to avoid false breakdowns.
 # Volume filter ensures institutional participation. Target: 75-200 trades over 4 years.
-name = "exp_14157_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14158_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -26,17 +26,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA(50) trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for EMA(10) trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(50) on 1d close
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(10) on weekly close
+    ema_10 = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align EMA to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align EMA to daily timeframe
+    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10)
     
-    # 4h data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -58,12 +58,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 50 for EMA, 20 for volume, 14 for ATR)
-    start = max(20, 50, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 10 for EMA, 20 for volume, 14 for ATR)
+    start = max(20, 10, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_50_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_10_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -87,10 +87,10 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above 1d EMA + volume
-        # Short: break below lower band + below 1d EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_50_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_50_aligned[i]) and vol_filter[i]
+        # Long: break above upper band + above weekly EMA + volume
+        # Short: break below lower band + below weekly EMA + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_10_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_10_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
