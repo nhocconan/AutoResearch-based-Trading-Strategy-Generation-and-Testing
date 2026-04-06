@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R + 12-hour EMA(50) trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold), price > 12h EMA(50), volume > 1.3x 20-period average
-# Short when Williams %R > -20 (overbought), price < 12h EMA(50), volume > 1.3x average
-# Exit on opposite Williams %R signal or when price crosses below/above 12h EMA(50)
+# Hypothesis: 6-hour Williams %R(14) with 12-hour EMA(50) trend filter and volume confirmation (1.5x 20-period average)
+# Long when Williams %R crosses above -80 (oversold), price > 12h EMA(50), and volume > 1.5x average
+# Short when Williams %R crosses below -20 (overbought), price < 12h EMA(50), and volume > 1.5x average
+# Exit when Williams %R crosses above -20 (for long) or below -80 (for short)
 # Stoploss at 2 * ATR(14)
-# Position size: 0.25
-# Works in bull/bear by following 12h trend direction
-# Target: 50-150 trades over 4 years (12-37/year)
+# Position size: 0.25 (25% of capital)
+# Williams %R is effective in ranging markets and can capture reversals in both bull and bear trends
+# Target: 75-150 trades over 4 years (19-38/year)
 
-name = "6h_williamsr_12h_ema50_vol_v1"
+name = "6h_williamsr_12h_ema50_vol_v4"
 timeframe = "6h"
 leverage = 1.0
 
@@ -38,11 +38,12 @@ def generate_signals(prices):
     ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Williams %R (14-period)
+    # Williams %R(14)
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,8 +77,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R > -20 (overbought) or trend turns bearish (below EMA)
-            elif williams_r[i] > -20 or close[i] < ema_12h_aligned[i]:
+            # Exit: Williams %R crosses above -20 (overbought)
+            elif williams_r[i] > -20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -89,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R < -80 (oversold) or trend turns bullish (above EMA)
-            elif williams_r[i] < -80 or close[i] > ema_12h_aligned[i]:
+            # Exit: Williams %R crosses below -80 (oversold)
+            elif williams_r[i] < -80:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -98,17 +99,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: Williams %R < -80 (oversold), price above EMA (bullish trend), volume spike
-            if (williams_r[i] < -80 and
+            # Long: Williams %R crosses above -80 (from oversold), price above EMA (bullish trend), volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and
                 close[i] > ema_12h_aligned[i] and
-                volume[i] > 1.3 * volume_ma[i]):
+                volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R > -20 (overbought), price below EMA (bearish trend), volume spike
-            elif (williams_r[i] > -20 and
+            # Short: Williams %R crosses below -20 (from overbought), price below EMA (bearish trend), volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and
                   close[i] < ema_12h_aligned[i] and
-                  volume[i] > 1.3 * volume_ma[i]):
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -121,16 +122,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R + 12-hour EMA(50) trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold), price > 12h EMA(50), volume > 1.3x 20-period average
-# Short when Williams %R > -20 (overbought), price < 12h EMA(50), volume > 1.3x average
-# Exit on opposite Williams %R signal or when price crosses below/above 12h EMA(50)
+# Hypothesis: 6-hour Williams %R(14) with 12-hour EMA(50) trend filter and volume confirmation (1.5x 20-period average)
+# Long when Williams %R crosses above -80 (oversold), price > 12h EMA(50), and volume > 1.5x average
+# Short when Williams %R crosses below -20 (overbought), price < 12h EMA(50), and volume > 1.5x average
+# Exit when Williams %R crosses above -20 (for long) or below -80 (for short)
 # Stoploss at 2 * ATR(14)
-# Position size: 0.25
-# Works in bull/bear by following 12h trend direction
-# Target: 50-150 trades over 4 years (12-37/year)
+# Position size: 0.25 (25% of capital)
+# Williams %R is effective in ranging markets and can capture reversals in both bull and bear trends
+# Target: 75-150 trades over 4 years (19-38/year)
 
-name = "6h_williamsr_12h_ema50_vol_v1"
+name = "6h_williamsr_12h_ema50_vol_v4"
 timeframe = "6h"
 leverage = 1.0
 
@@ -156,11 +157,12 @@ def generate_signals(prices):
     ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Williams %R (14-period)
+    # Williams %R(14)
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -194,8 +196,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R > -20 (overbought) or trend turns bearish (below EMA)
-            elif williams_r[i] > -20 or close[i] < ema_12h_aligned[i]:
+            # Exit: Williams %R crosses above -20 (overbought)
+            elif williams_r[i] > -20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -207,8 +209,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R < -80 (oversold) or trend turns bullish (above EMA)
-            elif williams_r[i] < -80 or close[i] > ema_12h_aligned[i]:
+            # Exit: Williams %R crosses below -80 (oversold)
+            elif williams_r[i] < -80:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -216,21 +218,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: Williams %R < -80 (oversold), price above EMA (bullish trend), volume spike
-            if (williams_r[i] < -80 and
+            # Long: Williams %R crosses above -80 (from oversold), price above EMA (bullish trend), volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and
                 close[i] > ema_12h_aligned[i] and
-                volume[i] > 1.3 * volume_ma[i]):
+                volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R > -20 (overbought), price below EMA (bearish trend), volume spike
-            elif (williams_r[i] > -20 and
+            # Short: Williams %R crosses below -20 (from overbought), price below EMA (bearish trend), volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and
                   close[i] < ema_12h_aligned[i] and
-                  volume[i] > 1.3 * volume_ma[i]):
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
     return signals
-
-</think>
