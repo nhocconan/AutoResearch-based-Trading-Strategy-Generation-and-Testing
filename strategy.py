@@ -3,49 +3,49 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Williams Alligator + Elder Ray with 12h trend filter
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend presence and direction.
-# Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA.
-# Strategy: Go long when Alligator is bullish (Lips > Teeth > Jaw) AND Bull Power > 0.
-# Go short when Alligator is bearish (Lips < Teeth < Jaw) AND Bear Power < 0.
-# Use 12h EMA(50) as trend filter: only take long when 12h trend up, short when down.
-# This combines trend-following (Alligator) with momentum (Elder Ray) and avoids
-# counter-trend trades. Works in both bull (strong uptrend signals) and bear
-# (strong downtrend signals) markets. Target: 20-40 trades/year.
+# Hypothesis: 6h Camarilla pivot reversal with 12h trend filter and volume confirmation.
+# In ranging markets, price often reverses at Camarilla R3/S3 levels.
+# In trending markets, breakouts at R4/S4 levels with volume continue the trend.
+# Use 12h EMA(50) slope for trend filter: only take R3/S3 reversals in range, R4/S4 breakouts in trend.
+# Works in both bull and bear markets as it adapts to regime.
+# Target: 12-37 trades/year by using strict pivot levels + trend + volume.
 
-name = "exp_13619_6s_alligator_elder_12h_trend_v1"
-timeframe = "6s"
+name = "exp_13619_6h_camarilla_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_JAW_PERIOD = 13   # Smoothed Median (13)
-ALLIGATOR_TEETH_PERIOD = 8  # Smoothed Median (8)
-ALLIGATOR_LIPS_PERIOD = 5   # Smoothed Median (5)
-ELDER_EMA_PERIOD = 13       # EMA for Elder Ray
-TREND_EMA_PERIOD = 50       # 12h EMA for trend filter
-SIGNAL_SIZE = 0.25          # Position size (25%)
+CAMARILLA_PERIOD = 10  # lookback for high/low
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_smma(data, period):
-    """Smoothed Moving Average (SMMA) - used in Alligator"""
-    sma = np.mean(data[:period])
-    smma = np.full_like(data, np.nan, dtype=np.float64)
-    smma[period-1] = sma
-    for i in range(period, len(data)):
-        smma[i] = (smma[i-1] * (period-1) + data[i]) / period
-    return smma
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the period"""
+    # Using typical Camarilla formula based on previous period's range
+    # H = high, L = low, C = close of lookback period
+    H = np.max(high)
+    L = np.min(low)
+    C = close[-1]  # current close as reference
+    RANGE = H - L
+    
+    # Camarilla levels
+    R4 = C + (RANGE * 1.500)
+    R3 = C + (RANGE * 1.250)
+    S3 = C - (RANGE * 1.250)
+    S4 = C - (RANGE * 1.500)
+    
+    return R4, R3, S3, S4
 
 def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_ema_simple(close, period):
-    """Simple EMA calculation for arrays"""
+    """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Average True Range using Wilder's smoothing"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -56,10 +56,10 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter ONCE before loop
+    # Load 12h data for trend filter and Camarilla calculation ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate 12h EMA for trend filter
@@ -68,25 +68,48 @@ def generate_signals(prices):
     ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])  # slope approximation
     ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
     
-    # Calculate 6s indicators
+    # Calculate 12h Camarilla levels for each bar (using lookback window)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    camarilla_R4 = np.full(len(close_12h), np.nan)
+    camarilla_R3 = np.full(len(close_12h), np.nan)
+    camarilla_S3 = np.full(len(close_12h), np.nan)
+    camarilla_S4 = np.full(len(close_12h), np.nan)
+    
+    # Calculate Camarilla for each 12h bar using lookback window
+    for i in range(CAMARILLA_PERIOD, len(close_12h)):
+        H = np.max(high_12h[i-CAMARILLA_PERIOD:i])
+        L = np.min(low_12h[i-CAMARILLA_PERIOD:i])
+        C = close_12h[i-1]  # previous close
+        RANGE = H - L
+        
+        if RANGE > 0:  # avoid division by zero
+            camarilla_R4[i] = C + (RANGE * 1.500)
+            camarilla_R3[i] = C + (RANGE * 1.250)
+            camarilla_S3[i] = C - (RANGE * 1.250)
+            camarilla_S4[i] = C - (RANGE * 1.500)
+        else:
+            camarilla_R4[i] = camarilla_R3[i] = camarilla_S3[i] = camarilla_S4[i] = C
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_R4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R4)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S3)
+    camarilla_S4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S4)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # Williams Alligator: three smoothed moving averages
-    # Jaw (13), Teeth (8), Lips (5) - all SMMA of median price
-    median_price = (high + low) / 2
-    jaw = calculate_smma(median_price, ALLIGATOR_JAW_PERIOD)
-    teeth = calculate_smma(median_price, ALLIGATOR_TEETH_PERIOD)
-    lips = calculate_smma(median_price, ALLIGATOR_LIPS_PERIOD)
-    
-    # Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA
-    ema_elder = calculate_ema(close, ELDER_EMA_PERIOD)
-    bull_power = high - ema_elder
-    bear_power = low - ema_elder
+    volume = prices['volume'].values
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,14 +117,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_JAW_PERIOD, ALLIGATOR_TEETH_PERIOD, ALLIGATOR_LIPS_PERIOD, 
-                ELDER_EMA_PERIOD, TREND_EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(CAMARILLA_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_12h_slope_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_12h_slope_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or 
+            np.isnan(camarilla_S3_aligned[i]) or np.isnan(camarilla_R4_aligned[i]) or 
+            np.isnan(camarilla_S4_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -120,30 +142,52 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator conditions
-        # Bullish: Lips > Teeth > Jaw
-        alligator_bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        # Bearish: Lips < Teeth < Jaw
-        alligator_bearish = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Elder Ray conditions
-        bull_power_positive = bull_power[i] > 0
-        bear_power_negative = bear_power[i] < 0
-        
-        # Trend filter from 12h EMA slope
+        # Trend direction from 12h EMA slope
         uptrend = ema_12h_slope_aligned[i] > 0
         downtrend = ema_12h_slope_aligned[i] < 0
         
+        # Price levels
+        r3 = camarilla_R3_aligned[i]
+        s3 = camarilla_S3_aligned[i]
+        r4 = camarilla_R4_aligned[i]
+        s4 = camarilla_S4_aligned[i]
+        
+        # Trading logic based on regime
+        # In ranging (low trend strength): fade at R3/S3
+        # In trending: breakout at R4/S4 with volume
+        
+        # Ranging condition: weak trend (EMA slope near zero)
+        ranging = np.abs(ema_12h_slope_aligned[i]) < 0.0001  # adjust based on price scale
+        
+        # Long signals
+        long_signal = False
+        if ranging and volume_ok:
+            # Fade at S3 in ranging market
+            long_signal = close[i] > s3 and close[i-1] <= s3  # bounce from S3
+        elif not ranging and volume_ok:
+            # Breakout at R4 in uptrend
+            long_signal = uptrend and close[i] > r4 and close[i-1] <= r4
+        
+        # Short signals
+        short_signal = False
+        if ranging and volume_ok:
+            # Fade at R3 in ranging market
+            short_signal = close[i] < r3 and close[i-1] >= r3  # rejection at R3
+        elif not ranging and volume_ok:
+            # Breakdown at S4 in downtrend
+            short_signal = downtrend and close[i] < s4 and close[i-1] >= s4
+        
         # Generate signals
         if position == 0:
-            # Long: Alligator bullish AND Bull Power positive AND uptrend
-            if alligator_bullish and bull_power_positive and uptrend:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: Alligator bearish AND Bear Power negative AND downtrend
-            elif alligator_bearish and bear_power_negative and downtrend:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -151,15 +195,35 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Bear Power becomes negative
-            if alligator_bearish or bear_power_negative:
+            # Exit conditions
+            exit_signal = False
+            if ranging:
+                # Exit long at R3 (fading target) or S4 breakdown
+                if close[i] >= r3 or (not uptrend and close[i] < s4):
+                    exit_signal = True
+            else:
+                # Exit long on trend reversal or S4 breakdown
+                if not uptrend or close[i] < s4:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Bull Power becomes positive
-            if alligator_bullish or bull_power_positive:
+            # Exit conditions
+            exit_signal = False
+            if ranging:
+                # Exit short at S3 (fading target) or R4 breakout
+                if close[i] <= s3 or (not downtrend and close[i] > r4):
+                    exit_signal = True
+            else:
+                # Exit short on trend reversal or R4 breakout
+                if not downtrend or close[i] > r4:
+                    exit_signal = True
+            
+            if exit_signal:
                 signals[i] = 0.0
                 position = 0
             else:
