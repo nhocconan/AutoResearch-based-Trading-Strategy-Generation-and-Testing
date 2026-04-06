@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and Weekly ADX Trend Filter
-Hypothesis: Donchian breakouts on 12h timeframe capture significant momentum moves.
-Weekly ADX filter ensures we only trade in trending markets, avoiding whipsaws.
-Volume confirmation adds confirmation of institutional participation.
-Designed to work in both bull (breakouts above upper band) and bear (breakdowns below lower band).
-Target: 75-150 total trades over 4 years (19-38/year).
+12h Donchian Breakout with Volume Confirmation and ADX Trend Filter
+Hypothesis: Donchian breakouts capture strong momentum moves. Volume confirms institutional participation.
+ADX ensures we only trade in trending markets, avoiding whipsaws in sideways conditions.
+Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -21,13 +20,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for ADX trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # Load daily data for ADX trend filter (once before loop)
+    df_daily = get_htf_data(prices, '1d')
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Weekly ADX calculation (14 period)
+    # Daily ADX calculation (14 period)
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -60,10 +59,10 @@ def generate_signals(prices):
         
         return adx
     
-    adx_weekly = calculate_adx(high_weekly, low_weekly, close_weekly, 14)
-    adx_weekly_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
+    adx_daily = calculate_adx(high_daily, low_daily, close_daily, 14)
+    adx_daily_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
     
-    # 12h data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -76,7 +75,7 @@ def generate_signals(prices):
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.2 * vol_ma)  # Require above average volume
+    vol_filter = volume > (1.5 * vol_ma)  # Require above average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -96,15 +95,15 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_weekly_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_daily_aligned[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.30
             else:
                 signals[i] = 0.0
             continue
         
-        # ADX filter: only trade when trending (ADX > 20)
-        trending = adx_weekly_aligned[i] > 20
+        # ADX filter: only trade when trending (ADX > 25)
+        trending = adx_daily_aligned[i] > 25
         
         # Check exits
         if position == 1:  # long position
@@ -114,7 +113,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:  # short position
             # Exit: price breaks above upper Donchian band OR stoploss
             if (close[i] >= donchian_high[i] or
@@ -122,18 +121,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:
             # Look for entries: Donchian breakout + volume + trend filter
             long_setup = (close[i] > donchian_high[i] and vol_filter[i] and trending)
             short_setup = (close[i] < donchian_low[i] and vol_filter[i] and trending)
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close[i]
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close[i]
             else:
