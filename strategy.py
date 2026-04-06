@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
-# Uses Donchian channel breakout for trend following, 12-hour EMA to ensure higher timeframe trend alignment,
-# and volume confirmation to avoid false breakouts. Includes ATR-based stoploss.
-# Designed to work in both bull (breakouts above upper band) and bear (breakdowns below lower band) markets.
-# Target: 75-200 total trades over 4 years.
+# Hypothesis: 4-hour Donchian channel breakout with 12-hour EMA trend filter and volume confirmation.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Uses tight entry conditions to limit trades to 75-200 total over 4 years (19-50/year).
+# Includes ATR-based stop loss to manage risk.
 
 name = "exp_13393_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
@@ -15,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -34,12 +33,6 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -60,8 +53,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -79,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,9 +99,9 @@ def generate_signals(prices):
         uptrend = close[i] > ema_12h_aligned[i]
         downtrend = close[i] < ema_12h_aligned[i]
         
-        # Breakout signals using Donchian channel
-        breakout_up = volume_ok and uptrend and (high[i] > upper[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lower[i-1])
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > donchian_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < donchian_low[i-1])
         
         # Generate signals
         if position == 0:
