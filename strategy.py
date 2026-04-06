@@ -3,37 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI mean reversion with 1d trend filter on 1h timeframe
-# Works in bull/bear because RSI identifies overbought/oversold conditions,
-# while 1d EMA filters for trend direction to avoid counter-trend trades.
-# Target: 60-150 total trades over 4 years (15-37/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Donchian breakout with 1d ATR filter and volume confirmation
+# Works in bull/bear because breakouts capture strong directional moves, 
+# ATR filter adapts to volatility regimes, and volume confirms conviction.
+# Target: 80-150 total trades over 4 years (20-38/year) for statistical validity.
 
-name = "exp_12954_1h_rsi_meanrev_1d_trend_v1"
-timeframe = "1h"
+name = "exp_12955_6h_donchian20_1d_atr_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_FAST = 20
-EMA_SLOW = 50
-SIGNAL_SIZE = 0.20
+DONCHIAN_PERIOD = 20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+ATR_MULTIPLIER = 2.5
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.7
+SIGNAL_SIZE = 0.25
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -44,28 +29,38 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for trend filter
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_fast = pd.Series(close_1d).ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
-    ema_slow = pd.Series(close_1d).ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean().values
-    ema_fast_aligned = align_htf_to_ltf(prices, df_1d, ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, df_1d, ema_slow)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # 6h Donchian channels
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
+    # 6h volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_SLOW, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_fast_aligned[i]) or np.isnan(ema_slow_aligned[i]):
+        # Skip if ATR not available
+        if np.isnan(atr_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,26 +91,28 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Trend filter: 1d EMA fast > slow = uptrend, fast < slow = downtrend
-        uptrend = ema_fast_aligned[i] > ema_slow_aligned[i]
-        downtrend = ema_fast_aligned[i] < ema_slow_aligned[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # RSI mean reversion signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Volatility filter: only trade when volatility is elevated
+        vol_filter = atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[max(0, i-50):i+1]) if i >= 50 else False
+        
+        # Breakout signals with filters
+        breakout_long = volume_ok and vol_filter and close[i] >= upper[i]
+        breakout_short = volume_ok and vol_filter and close[i] <= lower[i]
         
         # Generate signals
         if position == 0:
-            if uptrend and rsi_oversold:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif downtrend and rsi_overbought:
+                stop_price = entry_price - (ATR_MULTIPLIER * atr_1d_aligned[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_MULTIPLIER * atr_1d_aligned[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
