@@ -1,59 +1,80 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 12h RSI(2) + Volume Confirmation v1
-Hypothesis: 6h Donchian breakouts capture short-term trends, while 12h RSI(2) identifies oversold/overbought conditions for mean-reversion entries within the trend. Volume confirms breakout strength. Designed for low trade frequency (50-150 total trades over 4 years) with strict entry conditions to minimize fee drag. Works in bull/bear markets via RSI(2) extreme readings.
+6h Ichimoku Kumo Breakout with Volume and Trend Filter
+Hypothesis: Ichimoku system on 1d timeframe provides robust trend direction and support/resistance.
+60-period Tenkan/Kijun cross combined with Kumo (cloud) filter from daily timeframe,
+entered on 6h timeframe with volume confirmation. Works in bull (buy above cloud) and
+bear (sell below cloud) via Kumo color filter. Low frequency due to multi-condition
+requirements.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_12h_rsi2_vol_v1"
+name = "6h_ichimoku_kumo_breakout_v1"
 timeframe = "6h"
 leverage = 1.0
 
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components: Tenkan, Kijun, Senkou A/B, Chikou"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    # Not used for signals but calculated for completeness
+    
+    return tenkan, kijun, senkou_a, senkou_b
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for RSI(2) (once before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data for Ichimoku (once before loop)
+    df_daily = get_htf_data(prices, '1d')
     
-    # 12h RSI(2)
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Ichimoku on daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[1] = gain[1]
-    avg_loss[1] = loss[1]
-    for i in range(2, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high_daily, low_daily, close_daily)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h[0] = 50  # neutral for first value
+    # Kumo (cloud) color: green if Senkou A > Senkou B (bullish), red otherwise
+    kumo_green = senkou_a > senkou_b
     
-    # Align to 6h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # TK cross signals: bullish when Tenkan > Kijun
+    tk_bullish = tenkan > kijun
+    
+    # Align all indicators to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_daily, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_daily, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_daily, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_daily, senkou_b)
+    kumo_green_6h = align_htf_to_ltf(prices, df_daily, kumo_green)
+    tk_bullish_6h = align_htf_to_ltf(prices, df_daily, tk_bullish)
     
     # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channel (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -62,47 +83,49 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = 40  # For Donchian and RSI
+    # Start from warmup period (need 52 periods for Senkou B)
+    start = 60
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(rsi_12h_aligned[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(kumo_green_6h[i]) or np.isnan(tk_bullish_6h[i]) or
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite Donchian breakout or stoploss
+        # Cloud boundaries: top is senkou_a, bottom is senkou_b
+        kumo_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
+        kumo_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
+        
+        # Check exits: price crosses Kumo in opposite direction or TK cross reverses
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian band OR stoploss
-            if (close[i] <= lowest_low[i] or 
-                close[i] <= entry_price - 2.5 * (high[i] - low[i])):
+            # Exit: price falls below cloud OR TK cross turns bearish
+            if (close[i] <= kumo_bottom or not tk_bullish_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian band OR stoploss
-            if (close[i] >= highest_high[i] or 
-                close[i] >= entry_price + 2.5 * (high[i] - low[i])):
+            # Exit: price rises above cloud OR TK cross turns bullish
+            if (close[i] >= kumo_top or tk_bullish_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + RSI(2) extreme + volume
-            bull_breakout = close[i] > highest_high[i]
-            bear_breakout = close[i] < lowest_low[i]
+            # Look for entries: price breaks Kumo with TK alignment and volume
+            # Bullish: price breaks above cloud AND TK bullish AND volume confirmation
+            bull_breakout = close[i] > kumo_top
+            bull_entry = bull_breakout and tk_bullish_6h[i] and volume[i] > vol_ema[i] * 1.5
             
-            # RSI(2) extreme: <10 for long, >90 for short
-            rsi_oversold = rsi_12h_aligned[i] < 10
-            rsi_overbought = rsi_12h_aligned[i] > 90
-            
-            bull_entry = bull_breakout and rsi_oversold and volume[i] > vol_ema[i] * 2.0
-            bear_entry = bear_breakout and rsi_overbought and volume[i] > vol_ema[i] * 2.0
+            # Bearish: price breaks below cloud AND TK bearish AND volume confirmation
+            bear_breakout = close[i] < kumo_bottom
+            bear_entry = bear_breakout and (not tk_bullish_6h[i]) and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
