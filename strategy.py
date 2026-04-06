@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
-Hypothesis: Donchian breakouts on daily chart capture major trends. Weekly EMA200 filters for primary trend direction (bull/bear). Volume surge confirms breakout strength. Works in bull (buy breakouts above EMA200) and bear (sell breakdowns below EMA200). Target: 30-100 trades over 4 years (7-25/year).
+1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
+Hypothesis: Daily Donchian breakouts capture swing momentum, filtered by weekly trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -36,13 +36,13 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1w EMA200 for trend bias
+    # 1w EMA50 for trend bias
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        ema_1w[199] = np.mean(close_1w[:200])
-        for i in range(200, len(close_1w)):
+    if len(close_1w) >= 50:
+        ema_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
             ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 18) / 20
     
     # Trend bias: above EMA = bullish, below = bearish
@@ -51,21 +51,16 @@ def generate_signals(prices):
     # Align to 1d timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
     
-    # Donchian channels (20-period) from 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Donchian channels (20-period) from 1d data (use previous day to avoid look-ahead)
+    high_1d = high
+    low_1d = low
     
-    # Upper and lower bands from previous week to avoid look-ahead
-    upper_1w = np.full_like(high_1w, np.nan)
-    lower_1w = np.full_like(low_1w, np.nan)
+    upper_1d = np.full_like(high_1d, np.nan)
+    lower_1d = np.full_like(low_1d, np.nan)
     
-    for i in range(20, len(high_1w)):
-        upper_1w[i] = np.max(high_1w[i-20:i])
-        lower_1w[i] = np.min(low_1w[i-20:i])
-    
-    # Align to 1d timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    for i in range(20, len(high_1d)):
+        upper_1d[i] = np.max(high_1d[i-20:i])
+        lower_1d[i] = np.min(low_1d[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,7 +73,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i])):
+            np.isnan(upper_1d[i]) or np.isnan(lower_1d[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -94,7 +89,7 @@ def generate_signals(prices):
         if position == 1:  # long position
             # Exit: price breaks below lower Donchian OR against 1w trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower_aligned[i] or
+            if (close[i] < lower_1d[i] or
                 trend_bias_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
@@ -106,7 +101,7 @@ def generate_signals(prices):
         elif position == -1:  # short position
             # Exit: price breaks above upper Donchian OR against 1w trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper_aligned[i] or
+            if (close[i] > upper_1d[i] or
                 trend_bias_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
@@ -120,8 +115,8 @@ def generate_signals(prices):
             # Minimum holding period: only allow new entry after 10 bars flat
             if bars_since_entry >= 10:
                 # Breakout entries: upper/lower with trend
-                bull_breakout = close[i] > upper_aligned[i]
-                bear_breakout = close[i] < lower_aligned[i]
+                bull_breakout = close[i] > upper_1d[i]
+                bear_breakout = close[i] < lower_1d[i]
                 
                 # Long: breakout with uptrend + volume
                 if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
