@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13951_6d_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_13952_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 6h Donchian(20) breakout with 1d pivot direction filter and volume confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d pivot direction filter and volume confirmation.
 # Uses daily pivot points (PP, R1, R2, R3, S1, S2, S3) to determine bias:
 # - Price above daily PP = bullish bias (only long entries)
 # - Price below daily PP = bearish bias (only short entries)
-# - Entry on 6h Donchian breakout in direction of daily bias with volume > 1.5x average
+# - Entry on 12h Donchian breakout in direction of daily bias with volume > 1.5x average
 # - Exit on Donchian reversal or bias change
-# Designed for 60-150 total trades over 4 years (15-38/year) to minimize fee drag.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 # Works in bull (breaks above R3/R4) and bear (breaks below S3/S4) with pivot context.
 
 def calculate_pivot(high, low, close):
@@ -57,12 +57,12 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     pp, r1, r2, r3, s1, s2, s3 = calculate_pivot(high_1d, low_1d, close_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 6h data for Donchian, ATR, and volume
+    # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
