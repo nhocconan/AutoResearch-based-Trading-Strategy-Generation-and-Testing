@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 2x 20-period average
 # Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 2x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 4h timeframe to balance trade frequency, 1d EMA for trend filter, Donchian for breakout signals
+# Uses 4h timeframe to target 75-200 trades over 4 years, 1d EMA for trend filter, Donchian for breakout signals
 # Target: 75-200 total trades over 4 years (19-50/year) for optimal 4h performance
 
 name = "4h_donchian20_1d_ema_vol_v1"
