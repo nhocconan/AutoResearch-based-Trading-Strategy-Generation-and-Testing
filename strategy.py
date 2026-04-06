@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h ADX trend filter + volume confirmation
-# Long when price breaks above Donchian(20) high AND ADX > 25 (trending) AND volume > 1.5x average
-# Short when price breaks below Donchian(20) low AND ADX > 25 AND volume > 1.5x average
-# Exit when price returns to Donchian middle OR ADX < 20 (trend weakening)
-# Uses 12h ADX to filter out false breakouts in ranging markets, targeting 75-200 total trades over 4 years
-# Works in bull markets via long breakouts and bear markets via short breakouts
+# Hypothesis: 1h Donchian breakout with 4h trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper (20) + 4h EMA(50) up + volume > 1.5x avg
+# Short when price breaks below 4h Donchian lower (20) + 4h EMA(50) down + volume > 1.5x avg
+# Exit when price crosses 4h EMA(50) or ATR-based stop (2*ATR)
+# Uses 4h for signal direction to reduce trade frequency, targets 100-150 total trades over 4 years
+# Works in bull (breakouts up) and bear (breakouts down) by following 4h trend
 
-name = "4h_donchian20_12h_adx_vol_v1"
-timeframe = "4h"
+name = "1h_donchian_4h_trend_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,196 +25,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    middle_channel = (highest_high + lowest_low) / 2
+    # 4h data for trend and Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # ADX (14-period) from 12h timeframe for trend strength
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h EMA(50) for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema_50_4h = close_4h_series.ewm(span=50, adjust=False).mean().values
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.append([close_12h[0]], close_12h[:-1]))
-    tr3 = np.abs(low_12h - np.append([close_12h[0]], close_12h[:-1]))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 4h Donchian channels (20-period)
+    high_4h_series = pd.Series(high_4h)
+    low_4h_series = pd.Series(low_4h)
+    donch_high_20 = high_4h_series.rolling(window=20, min_periods=20).max().values
+    donch_low_20 = low_4h_series.rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.append([high_12h[0]], high_12h[:-1])) > 
-                       (np.append([low_12h[0]], low_12h[:-1]) - low_12h), 
-                       np.maximum(high_12h - np.append([high_12h[0]], high_12h[:-1]), 0), 0)
-    dm_minus = np.where((np.append([low_12h[0]], low_12h[:-1]) - low_12h) > 
-                        (high_12h - np.append([high_12h[0]], high_12h[:-1])), 
-                        np.maximum(np.append([low_12h[0]], low_12h[:-1]) - low_12h, 0), 0)
-    
-    # Smoothed values
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr_12h + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr_12h + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    
-    # Align 12h ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align 4h indicators to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
     # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * volume_ma
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean()
+    volume_threshold = 1.5 * volume_ma.values
+    
+    # ATR for dynamic stop (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(adx_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or \
+           np.isnan(donch_low_20_aligned[i]) or np.isnan(volume_threshold[i]) or np.isnan(atr[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price returns to middle OR trend weakens
+        # Exit conditions
         if position == 1:  # long position
-            if close[i] <= middle_channel[i] or adx_aligned[i] < 20:
+            # Exit: price crosses below 4h EMA(50) OR 2*ATR stop loss
+            if close[i] < ema_50_4h_aligned[i] or close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            if close[i] >= middle_channel[i] or adx_aligned[i] < 20:
+            # Exit: price crosses above 4h EMA(50) OR 2*ATR stop loss
+            if close[i] > ema_50_4h_aligned[i] or close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for breakouts in trending market (ADX > 25) with volume confirmation
-            # Long breakout: price above upper Donchian band
-            if (adx_aligned[i] > 25 and close[i] > highest_high[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
+            # Look for entries: Donchian breakout with 4h trend filter and volume confirmation
+            # Long: price breaks above 4h Donchian upper + 4h EMA(50) rising + volume confirmation
+            if (close[i] > donch_high_20_aligned[i] and 
+                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and 
+                volume[i] > volume_threshold[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price below lower Donchian band
-            elif (adx_aligned[i] > 25 and close[i] < lowest_low[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
+                entry_price = close[i]
+            # Short: price breaks below 4h Donchian lower + 4h EMA(50) falling + volume confirmation
+            elif (close[i] < donch_low_20_aligned[i] and 
+                  ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and 
+                  volume[i] > volume_threshold[i]):
+                signals[i] = -0.20
                 position = -1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Donchian(20) breakout + 12h ADX trend filter + volume confirmation
-# Long when price breaks above Donchian(20) high AND ADX > 25 (trending) AND volume > 1.5x average
-# Short when price breaks below Donchian(20) low AND ADX > 25 AND volume > 1.5x average
-# Exit when price returns to Donchian middle OR ADX < 20 (trend weakening)
-# Uses 12h ADX to filter out false breakouts in ranging markets, targeting 75-200 total trades over 4 years
-# Works in bull markets via long breakouts and bear markets via short breakouts
-
-name = "4h_donchian20_12h_adx_vol_v1"
-timeframe = "4h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    middle_channel = (highest_high + lowest_low) / 2
-    
-    # ADX (14-period) from 12h timeframe for trend strength
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.append([close_12h[0]], close_12h[:-1]))
-    tr3 = np.abs(low_12h - np.append([close_12h[0]], close_12h[:-1]))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.append([high_12h[0]], high_12h[:-1])) > 
-                       (np.append([low_12h[0]], low_12h[:-1]) - low_12h), 
-                       np.maximum(high_12h - np.append([high_12h[0]], high_12h[:-1]), 0), 0)
-    dm_minus = np.where((np.append([low_12h[0]], low_12h[:-1]) - low_12h) > 
-                        (high_12h - np.append([high_12h[0]], high_12h[:-1])), 
-                        np.maximum(np.append([low_12h[0]], low_12h[:-1]) - low_12h, 0), 0)
-    
-    # Smoothed values
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr_12h + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr_12h + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    
-    # Align 12h ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * volume_ma
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(20, n):
-        # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(adx_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: price returns to middle OR trend weakens
-        if position == 1:  # long position
-            if close[i] <= middle_channel[i] or adx_aligned[i] < 20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if close[i] >= middle_channel[i] or adx_aligned[i] < 20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for breakouts in trending market (ADX > 25) with volume confirmation
-            # Long breakout: price above upper Donchian band
-            if (adx_aligned[i] > 25 and close[i] > highest_high[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price below lower Donchian band
-            elif (adx_aligned[i] > 25 and close[i] < lowest_low[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
+                entry_price = close[i]
     
     return signals
