@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 4h Donchian breakout with 12h EMA filter and volume concentration.
-Hypothesis: Breakouts aligned with 12h trend (EMA21) and volume concentration
-capture medium-term trends while avoiding false breakouts. Works in bull (breakouts)
-and bear (breakdowns) with proper filtering. Target: 75-150 trades over 4 years.
+Hypothesis: Breakouts aligned with 12h trend and volume concentration capture medium-term trends while avoiding false breakouts.
+Works in bull (breakouts) and bear (breakdowns) with proper filtering. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -37,8 +36,8 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(21)
-    ema_12h = calculate_ema(close_12h, 21)
+    # Calculate 12h EMA(50)
+    ema_12h = calculate_ema(close_12h, 50)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # 4h data
@@ -63,8 +62,8 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 21 for EMA)
-    start = max(20, 20, 14, 21) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
+    start = max(20, 20, 14, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
