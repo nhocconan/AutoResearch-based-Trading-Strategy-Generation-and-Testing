@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12845_12h_donchian20_1d_vol_v1"
-timeframe = "12h"
+name = "exp_12846_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for 4h timeframe
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 10
+EMA_FAST_PERIOD = 16
+EMA_SLOW_PERIOD = 48
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.30
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 20  # Max 10 days (20 * 12h)
+MAX_HOLD_BARS = 100  # Max ~16 days (100 * 4h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -24,6 +26,10 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
@@ -39,23 +45,20 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily Donchian channels
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
+    # Calculate EMA on daily closes for trend filter
     close_d = df_daily['close'].values
+    ema_fast_d = calculate_ema(close_d, EMA_FAST_PERIOD)
+    ema_slow_d = calculate_ema(close_d, EMA_SLOW_PERIOD)
+    ema_fast_aligned = align_htf_to_ltf(prices, df_daily, ema_fast_d)
+    ema_slow_aligned = align_htf_to_ltf(prices, df_daily, ema_slow_d)
     
-    donchian_upper, donchian_lower = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
-    
-    # Align to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper)
-    lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower)
-    
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    upper_donchian, lower_donchian = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -66,13 +69,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_SLOW_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if Donchian levels not available
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_fast_aligned[i]) or np.isnan(ema_slow_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,9 +106,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_aligned[i]
+        # Trend filter: EMA fast > EMA slow for long, EMA fast < EMA slow for short
+        trend_up = ema_fast_aligned[i] > ema_slow_aligned[i]
+        trend_down = ema_fast_aligned[i] < ema_slow_aligned[i]
+        
+        # Donchian breakout conditions
+        breakout_long = volume_ok and trend_up and close[i] >= upper_donchian[i]
+        breakout_short = volume_ok and trend_down and close[i] <= lower_donchian[i]
         
         # Generate signals
         if position == 0:
