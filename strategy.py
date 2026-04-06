@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12611_6d_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_12612_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_PERIOD = 1
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
@@ -35,17 +35,6 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_pivot_points(high, low, close):
-    """Calculate daily pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -54,19 +43,11 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    _, r3, _, s3, _, _, _ = calculate_pivot_points(high_1d, low_1d, close_1d)
-    r3_1d = r3
-    s3_1d = s3
+    # Calculate daily EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate pivot-based levels
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -82,11 +63,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot levels not available
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,13 +89,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Pivot-based conditions
-        long_breakout = close[i] > r3_1d_aligned[i-1]  # break above R3
-        short_breakout = close[i] < s3_1d_aligned[i-1]  # break below S3
+        # Trend filter (daily)
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
+        
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper[i-1]  # break above previous upper band
+        short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and long_breakout
-        short_entry = volume_ok and short_breakout
+        long_entry = volume_ok and uptrend_1d and long_breakout
+        short_entry = volume_ok and downtrend_1d and short_breakout
         
         # Generate signals
         if position == 0:
