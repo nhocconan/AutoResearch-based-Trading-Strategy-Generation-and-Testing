@@ -3,19 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12687_6d_donchian_weeklypivot_volume_v1"
-timezone = "UTC"
-timeframe = "6h"
+name = "exp_12688_12h_donchian20_1w_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_PERIOD = 7  # weekly pivot
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
 DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -26,24 +30,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot levels"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r1 = pivot + (range_val * 1.0)
-    s1 = pivot - (range_val * 1.0)
-    r2 = pivot + (range_val * 2.0)
-    s2 = pivot - (range_val * 2.0)
-    r3 = pivot + (range_val * 3.0)
-    s3 = pivot - (range_val * 3.0)
-    return r1, s1, r2, s2, r3, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -52,21 +38,16 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot levels
+    # Calculate weekly Donchian channel
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    r1_1w, s1_1w, r2_1w, s2_1w, r3_1w, s3_1w = calculate_weekly_pivot(high_1w, low_1w, close_1w)
+    upper_1w, lower_1w = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
     
-    # Align pivot levels to 6h timeframe
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Align weekly Donchian to 12h timeframe
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -74,7 +55,6 @@ def generate_signals(prices):
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,11 +62,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot levels not available
-        if np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]):
+        # Skip if weekly Donchian not available
+        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,16 +88,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout from Donchian with volume confirmation
-        breakout_long = volume_ok and close[i] > donchian_upper[i]
-        breakdown_short = volume_ok and close[i] < donchian_lower[i]
+        # Breakout above weekly upper channel or breakdown below lower channel
+        breakout_long = volume_ok and close[i] > upper_1w_aligned[i]
+        breakout_short = volume_ok and close[i] < lower_1w_aligned[i]
         
-        # Weekly pivot filter: only trade in direction of weekly trend
-        weekly_bullish = close[i] > ((r1_1w_aligned[i] + s1_1w_aligned[i]) / 2)
-        weekly_bearish = close[i] < ((r1_1w_aligned[i] + s1_1w_aligned[i]) / 2)
-        
-        long_entry = breakout_long and weekly_bullish
-        short_entry = breakdown_short and weekly_bearish
+        # Entry conditions
+        long_entry = breakout_long
+        short_entry = breakout_short
         
         # Generate signals
         if position == 0:
