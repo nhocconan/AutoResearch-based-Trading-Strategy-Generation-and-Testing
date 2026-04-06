@@ -3,23 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian breakout with 1-week EMA trend filter and volume confirmation.
-# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
-# The weekly EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
-# Target: 30-100 total trades over 4 years (7-25/year) to balance opportunity and cost.
+# Hypothesis: 6-hour Williams Alligator with 12-hour volume confirmation.
+# The Alligator (Jaws/Teeth/Lips) identifies trend presence and direction.
+# During strong trends, lines are separated and aligned; during consolidation, they intertwine.
+# Using 12h volume filter ensures we only trade when institutional participation confirms the trend.
+# Works in both bull/bear markets by capturing directional moves with volume validation.
+# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost.
 
-name = "exp_13178_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "alligator_6h_12h_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+JAWS_PERIOD = 13   # Blue line
+TEETH_PERIOD = 8   # Red line
+LIPS_PERIOD = 5    # Green line
+JAWS_OFFSET = 8
+TEETH_OFFSET = 5
+LIPS_OFFSET = 3
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_smma(data, period):
+    """Calculate Smoothed Moving Average (SMMA)"""
+    return pd.Series(data).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -30,32 +40,40 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate Alligator components (SMMA with offsets)
+    close_12h = df_12h['close'].values
+    jaws_raw = calculate_smma(close_12h, JAWS_PERIOD)
+    teeth_raw = calculate_smma(close_12h, TEETH_PERIOD)
+    lips_raw = calculate_smma(close_12h, LIPS_PERIOD)
     
-    # Calculate 1d indicators
+    # Apply offsets (shift right by offset periods)
+    jaws = np.roll(jaws_raw, JAWS_OFFSET)
+    teeth = np.roll(teeth_raw, TEETH_OFFSET)
+    lips = np.roll(lips_raw, LIPS_OFFSET)
+    
+    # Set NaN for invalid periods due to offset and calculation
+    jaws[:JAWS_OFFSET + JAWS_PERIOD - 1] = np.nan
+    teeth[:TEETH_OFFSET + TEETH_PERIOD - 1] = np.nan
+    lips[:LIPS_OFFSET + LIPS_PERIOD - 1] = np.nan
+    
+    # Align to 6h timeframe
+    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +87,17 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(
+        JAWS_OFFSET + JAWS_PERIOD,
+        TEETH_OFFSET + TEETH_PERIOD,
+        LIPS_OFFSET + LIPS_PERIOD,
+        VOLUME_MA_PERIOD,
+        ATR_PERIOD
+    ) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if Alligator not ready
+        if np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,22 +119,20 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
-        
-        # Breakout signals
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Alligator signals: aligned separation indicates trend
+        # Lips > Teeth > Jaws = uptrend (green > red > blue)
+        # Lips < Teeth < Jaws = downtrend (green < red < blue)
+        uptrend = lips_aligned[i] > teeth_aligned[i] > jaws_aligned[i]
+        downtrend = lips_aligned[i] < teeth_aligned[i] < jaws_aligned[i]
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if volume_ok and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif volume_ok and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
