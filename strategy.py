@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Hypothesis: 12h Donchian(40) breakout with 1d trend filter and volume confirmation.
 # Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
 # Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range for 12h timeframe.
 
-name = "12h_donchian20_1d_trend_vol_v1"
+name = "12h_donchian40_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,11 +24,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
+    # Donchian channel (40-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    upper = high_series.rolling(window=40, min_periods=40).max().values
+    lower = low_series.rolling(window=40, min_periods=40).min().values
     
     # Daily trend filter: bullish/bearish day based on close vs open
     df_1d = get_htf_data(prices, '1d')
@@ -46,7 +46,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(40, n):
         # Skip if daily trend data not available
         if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
