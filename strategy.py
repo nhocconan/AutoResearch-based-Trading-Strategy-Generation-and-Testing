@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 1d trend filter and volume confirmation
-# Enter long when: RSI(14) < 30, price > 1d EMA(50), volume > 1.5x avg, during active session (08-20 UTC)
-# Enter short when: RSI(14) > 70, price < 1d EMA(50), volume > 1.5x avg, during active session
-# Exit when RSI returns to neutral zone (40-60) or opposite extreme is reached
-# Uses daily trend to filter counter-trend trades in strong moves, targeting 80-150 trades over 4 years
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
+# Enter long when: RSI(14) < 30, price > 4h EMA(20), volume > 1.5x avg, during active session (08-20 UTC)
+# Enter short when: RSI(14) > 70, price < 4h EMA(20), volume > 1.5x avg, during active session
+# Exit when RSI returns to neutral zone (40-60)
+# Uses 4h trend to filter counter-trend trades, targeting 100-200 trades over 4 years
 
-name = "1h_rsi_meanrev_1dema_vol_session_v1"
+name = "1h_rsi_meanrev_4h_ema_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -34,11 +34,11 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 4h EMA(20) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_20 = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,7 +52,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Wait for EMA to stabilize
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_20_aligned[i]) or 
             np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.20
@@ -64,15 +64,15 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         if position == 1:  # long position
-            # Exit: RSI > 60 OR RSI < 30 (deep oversold) OR price < 1d EMA(50)
-            if rsi[i] > 60 or rsi[i] < 30 or close[i] < ema_50_aligned[i]:
+            # Exit: RSI > 60 (return to neutral)
+            if rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: RSI < 40 OR RSI > 70 (deep overbought) OR price > 1d EMA(50)
-            if rsi[i] < 40 or rsi[i] > 70 or close[i] > ema_50_aligned[i]:
+            # Exit: RSI < 40 (return to neutral)
+            if rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,12 +80,12 @@ def generate_signals(prices):
         else:
             # Look for entries: RSI extreme + trend filter + volume + session
             if in_session and volume[i] > volume_threshold[i]:
-                if rsi[i] < 30 and close[i] > ema_50_aligned[i]:
-                    # Oversold but above daily EMA - bullish mean reversion
+                if rsi[i] < 30 and close[i] > ema_20_aligned[i]:
+                    # Oversold but above 4h EMA - bullish mean reversion
                     signals[i] = 0.20
                     position = 1
-                elif rsi[i] > 70 and close[i] < ema_50_aligned[i]:
-                    # Overbought but below daily EMA - bearish mean reversion
+                elif rsi[i] > 70 and close[i] < ema_20_aligned[i]:
+                    # Overbought but below 4h EMA - bearish mean reversion
                     signals[i] = -0.20
                     position = -1
     
