@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal with 12h trend filter.
-# Long when price touches S3 level during bullish 12h trend with rejection candle.
-# Short when price touches R3 level during bearish 12h trend with rejection candle.
-# Uses close > open for bullish candle confirmation. Target: 50-150 total trades over 4 years.
+# Hypothesis: Daily Donchian(20) breakout with 1-week trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 20-day average.
+# Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
+# Uses weekly trend filter to avoid counter-trend trades and reduce trade frequency.
+# Target: 30-100 total trades over 4 years (7-25/year) to stay within optimal range.
 
-name = "6h_camarilla_pivot_12h_trend_rev_v1"
-timeframe = "6h"
+name = "1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,89 +18,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Previous 12h bar's OHLC for pivot calculation
-    ph = df_12h['high'].values
-    pl = df_12h['low'].values
-    pc = df_12h['close'].values
-    po = df_12h['open'].values
+    # Weekly trend filter: bullish/bearish week based on close vs open
+    df_1w = get_htf_data(prices, '1w')
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open  # True for bullish week
+    weekly_bearish = weekly_close < weekly_open   # True for bearish week
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
-    # Camarilla levels: R3/S3
-    pivot = (ph + pl + pc) / 3
-    range_ = ph - pl
-    r3 = pivot + (range_ * 1.1 / 2)
-    s3 = pivot - (range_ * 1.1 / 2)
-    
-    # Align to 6h timeframe (shifted by 1 for completed bars only)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    
-    # 12h trend filter: bullish/bearish based on close vs open
-    trend_bullish = pc > po
-    trend_bearish = pc < po
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish)
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish)
-    
-    # Rejection candle: close near open (small body) after touching level
-    body_size = np.abs(close - open_price)
-    candle_range = high - low
-    # Avoid division by zero
-    candle_range = np.where(candle_range == 0, 1e-10, candle_range)
-    body_ratio = body_size / candle_range  # < 0.3 indicates rejection
+    # Volume filter: current volume > 1.5x 20-day average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous bar for confirmation
-        # Skip if pivot data not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
-           np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]):
+    for i in range(20, n):
+        # Skip if weekly trend data not available
+        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: reverse signal or stop at opposite level
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
+        # Check exits
         if position == 1:  # long position
-            # Exit: price touches R3 or trend turns bearish
-            if (low[i] <= r3_aligned[i] or 
-                trend_bearish_aligned[i]):
+            # Exit: price drops below lower Donchian or weekly turn bearish
+            if (low[i] <= lower[i] or 
+                weekly_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price touches S3 or trend turns bullish
-            if (high[i] >= s3_aligned[i] or 
-                trend_bullish_aligned[i]):
+            # Exit: price rises above upper Donchian or weekly turn bullish
+            if (high[i] >= upper[i] or 
+                weekly_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for reversal entries at S3/R3 with confirmation
-            # Long: price touches S3 during bullish 12h trend with rejection candle
-            if (low[i] <= s3_aligned[i] and 
-                trend_bullish_aligned[i] and
-                body_ratio[i] < 0.3):
-                signals[i] = 0.25
-                position = 1
-            # Short: price touches R3 during bearish 12h trend with rejection candle
-            elif (high[i] >= r3_aligned[i] and 
-                  trend_bearish_aligned[i] and
-                  body_ratio[i] < 0.3):
-                signals[i] = -0.25
-                position = -1
+            # Look for entries with volume confirmation and weekly trend filter
+            if volume_filter:
+                # Long: break above upper Donchian during bullish week
+                if (high[i] > upper[i] and 
+                    weekly_bullish_aligned[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short: break below lower Donchian during bearish week
+                elif (low[i] < lower[i] and 
+                      weekly_bearish_aligned[i]):
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
