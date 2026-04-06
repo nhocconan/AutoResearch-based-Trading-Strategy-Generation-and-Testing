@@ -3,12 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian channel breakout with 12-hour trend filter and 1-day volume confirmation.
-# Donchian breakouts capture momentum in trending markets, while the 12h ADX filter ensures
-# we only trade in trending conditions (avoiding whipsaws in ranges). Volume confirmation
-# ensures institutional participation. Designed for 6h timeframe to target 50-150 trades over 4 years.
-
-name = "6h_donchian20_12h_adx1d_vol_v1"
+name = "6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,75 +12,50 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price and volume data
+    # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour ADX(14) for trend strength filtering
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 1-day data for Donchian and pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range and Directional Movement
-    tr = np.full(len(close_12h), np.nan)
-    dm_plus = np.full(len(close_12h), np.nan)
-    dm_minus = np.full(len(close_12h), np.nan)
+    # 1-day Donchian(20) breakout
+    donch_high = np.full(len(close_1d), np.nan)
+    donch_low = np.full(len(close_1d), np.nan)
     
-    if len(close_12h) > 1:
-        tr[0] = high_12h[0] - low_12h[0]
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        for i in range(1, len(close_12h)):
-            tr[i] = max(high_12h[i] - low_12h[i],
-                       abs(high_12h[i] - close_12h[i-1]),
-                       abs(low_12h[i] - close_12h[i-1]))
-            dm_plus[i] = max(high_12h[i] - high_12h[i-1], 0)
-            dm_minus[i] = max(low_12h[i-1] - low_12h[i], 0)
-            dm_plus[i] = dm_plus[i] if dm_plus[i] > dm_minus[i] else 0
-            dm_minus[i] = dm_minus[i] if dm_minus[i] > dm_plus[i] else 0
+    for i in range(19, len(close_1d)):
+        donch_high[i] = np.max(high_1d[i-19:i+1])
+        donch_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    atr_12h = np.full(len(close_12h), np.nan)
-    s_dm_plus = np.full(len(close_12h), np.nan)
-    s_dm_minus = np.full(len(close_12h), np.nan)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    if len(close_12h) >= 14:
-        atr_12h[13] = np.nansum(tr[1:14])
-        s_dm_plus[13] = np.nansum(dm_plus[1:14])
-        s_dm_minus[13] = np.nansum(dm_minus[1:14])
-        for i in range(14, len(close_12h)):
-            atr_12h[i] = atr_12h[i-1] - (atr_12h[i-1]/14) + tr[i]
-            s_dm_plus[i] = s_dm_plus[i-1] - (s_dm_plus[i-1]/14) + dm_plus[i]
-            s_dm_minus[i] = s_dm_minus[i-1] - (s_dm_minus[i-1]/14) + dm_minus[i]
+    # 1-day pivot points (standard)
+    pivot = np.full(len(close_1d), np.nan)
+    r1 = np.full(len(close_1d), np.nan)
+    s1 = np.full(len(close_1d), np.nan)
+    r2 = np.full(len(close_1d), np.nan)
+    s2 = np.full(len(close_1d), np.nan)
     
-    # DI+ and DI-
-    di_plus = np.full(len(close_12h), np.nan)
-    di_minus = np.full(len(close_12h), np.nan)
-    dx = np.full(len(close_12h), np.nan)
+    for i in range(len(close_1d)):
+        pivot[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        r1[i] = 2 * pivot[i] - low_1d[i]
+        s1[i] = 2 * pivot[i] - high_1d[i]
+        r2[i] = pivot[i] + (high_1d[i] - low_1d[i])
+        s2[i] = pivot[i] - (high_1d[i] - low_1d[i])
     
-    for i in range(13, len(close_12h)):
-        if atr_12h[i] != 0:
-            di_plus[i] = 100 * s_dm_plus[i] / atr_12h[i]
-            di_minus[i] = 100 * s_dm_minus[i] / atr_12h[i]
-            if di_plus[i] + di_minus[i] != 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX calculation (Wilder's smoothing)
-    adx = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 27:  # Need 14 for DX + 14 for smoothing
-        dx_valid = dx[13:]  # Skip first 14 where DX is NaN
-        if len(dx_valid) >= 14:
-            adx[26] = np.nanmean(dx_valid[:14])  # First ADX at index 26
-            for i in range(27, len(close_12h)):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # 1-day volume average for confirmation
-    df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_ma_1d = np.full(len(vol_1d), np.nan)
     for i in range(19, len(vol_1d)):  # 20-period average
@@ -93,25 +63,18 @@ def generate_signals(prices):
     
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channel (20-period) on 6h data
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(19, n):  # 20-period lookback
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(27, 19)  # ADX needs 27, Donchian needs 19
+    start = 20  # Donchian needs 20, volume needs 20
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -121,36 +84,159 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.5x daily average
         volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
         
-        # ADX filter: only trade when trending (ADX > 25)
-        trending_market = adx_aligned[i] > 25
-        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Donchian breakdown or stoploss
-            if (close[i] < lowest_low[i] or 
+            # Exit: price breaks below S1 or stoploss
+            if (close[i] < s1_aligned[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Donchian breakout or stoploss
-            if (close[i] > highest_high[i] or 
+            # Exit: price breaks above R1 or stoploss
+            if (close[i] > r1_aligned[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in trending markets with volume confirmation
-            if trending_market and volume_filter:
-                # Long: Donchian breakout
-                if close[i] > highest_high[i]:
+            # Look for entries: Donchian breakout with pivot filter and volume
+            if volume_filter:
+                # Long: break above Donchian high AND price above pivot (bullish bias)
+                if (close[i] > donch_high_aligned[i] and 
+                    close[i] > pivot_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: Donchian breakdown
-                elif close[i] < lowest_low[i]:
+                # Short: break below Donchian low AND price below pivot (bearish bias)
+                elif (close[i] < donch_low_aligned[i] and 
+                      close[i] < pivot_aligned[i]):
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 1-day data for Donchian and pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # 1-day Donchian(20) breakout
+    donch_high = np.full(len(close_1d), np.nan)
+    donch_low = np.full(len(close_1d), np.nan)
+    
+    for i in range(19, len(close_1d)):
+        donch_high[i] = np.max(high_1d[i-19:i+1])
+        donch_low[i] = np.min(low_1d[i-19:i+1])
+    
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # 1-day pivot points (standard)
+    pivot = np.full(len(close_1d), np.nan)
+    r1 = np.full(len(close_1d), np.nan)
+    s1 = np.full(len(close_1d), np.nan)
+    r2 = np.full(len(close_1d), np.nan)
+    s2 = np.full(len(close_1d), np.nan)
+    
+    for i in range(len(close_1d)):
+        pivot[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        r1[i] = 2 * pivot[i] - low_1d[i]
+        s1[i] = 2 * pivot[i] - high_1d[i]
+        r2[i] = pivot[i] + (high_1d[i] - low_1d[i])
+        s2[i] = pivot[i] - (high_1d[i] - low_1d[i])
+    
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # 1-day volume average for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    for i in range(19, len(vol_1d)):  # 20-period average
+        vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
+    
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Start from warmup period
+    start = 20  # Donchian needs 20, volume needs 20
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume condition: current volume > 1.5x daily average
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price breaks below S1 or stoploss
+            if (close[i] < s1_aligned[i] or 
+                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price breaks above R1 or stoploss
+            if (close[i] > r1_aligned[i] or 
+                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries: Donchian breakout with pivot filter and volume
+            if volume_filter:
+                # Long: break above Donchian high AND price above pivot (bullish bias)
+                if (close[i] > donch_high_aligned[i] and 
+                    close[i] > pivot_aligned[i]):
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short: break below Donchian low AND price below pivot (bearish bias)
+                elif (close[i] < donch_low_aligned[i] and 
+                      close[i] < pivot_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
