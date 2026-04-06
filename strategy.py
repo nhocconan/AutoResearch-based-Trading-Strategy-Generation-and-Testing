@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-# Only enter long when price breaks above 4h Donchian upper band AND price > 1d EMA50 (uptrend).
-# Only enter short when price breaks below 4h Donchian lower band AND price < 1d EMA50 (downtrend).
-# Volume > 1.5x 20-period average confirms institutional participation.
-# Uses ATR-based stoploss (2x ATR) to limit drawdown. Designed for 4h timeframe to target 75-200 trades over 4 years.
-# Works in bull/bear markets via EMA-based directional bias and breakout entries with volume confirmation.
+# Hypothesis: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+# Donchian(20) breakout captures momentum in trending markets.
+# EMA50 on 1-day provides trend bias: only long when price > EMA50, short when price < EMA50.
+# Volume confirmation (current volume > 1.5x 20-period average) ensures institutional participation.
+# Designed for 4h timeframe to target 75-200 trades over 4 years.
+# Works in bull/bear markets via EMA-based directional bias and breakout entries.
 
-name = "4h_donchian20_1d_ema50_vol_v1"
+name = "4h_donchian20_1d_ema50_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,7 +39,7 @@ def generate_signals(prices):
     # Align EMA50 to 4h timeframe (shifted by 1 1d bar for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4-hour Donchian channels (20-period)
+    # Donchian Channel (20-period) on 4h data
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 4h volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -74,39 +74,33 @@ def generate_signals(prices):
         bearish_bias = close[i] < ema_50_aligned[i]
         
         # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i-1]  # break above previous upper band
-        breakout_down = close[i] < donchian_low[i-1]  # break below previous lower band
+        breakout_high = close[i] > donchian_high[i-1]  # break above previous high
+        breakout_low = close[i] < donchian_low[i-1]    # break below previous low
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Calculate ATR approximation for stoploss
-            atr_approx = np.max([high[i] - low[i], 
-                                abs(high[i] - close[i-1]), 
-                                abs(low[i] - close[i-1])])
+            # Exit: Donchian break below or stoploss (2x ATR approximation)
+            atr_approx = (high[i] - low[i])  # simple range approximation
             if atr_approx > 0:
                 stop_loss_level = entry_price - 2.0 * atr_approx
             else:
                 stop_loss_level = entry_price - 2.0 * 0.001
             
-            # Exit: price breaks below Donchian lower band OR stoploss hit
-            if (close[i] < donchian_low[i] or 
+            if (breakout_low or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Calculate ATR approximation for stoploss
-            atr_approx = np.max([high[i] - low[i], 
-                                abs(high[i] - close[i-1]), 
-                                abs(low[i] - close[i-1])])
+            # Exit: Donchian break above or stoploss
+            atr_approx = (high[i] - low[i])
             if atr_approx > 0:
                 stop_loss_level = entry_price + 2.0 * atr_approx
             else:
                 stop_loss_level = entry_price + 2.0 * 0.001
             
-            # Exit: price breaks above Donchian upper band OR stoploss hit
-            if (close[i] > donchian_high[i] or 
+            if (breakout_high or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
@@ -115,13 +109,13 @@ def generate_signals(prices):
         else:
             # Look for entries in direction of EMA trend with volume confirmation
             if volume_filter:
-                # Long: breakout above Donchian upper band in uptrend
-                if breakout_up and bullish_bias:
+                # Long: breakout above Donchian high in uptrend
+                if breakout_high and bullish_bias:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakout below Donchian lower band in downtrend
-                elif breakout_down and bearish_bias:
+                # Short: breakout below Donchian low in downtrend
+                elif breakout_low and bearish_bias:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
