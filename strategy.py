@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA(20) Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h capture momentum aligned with 1d EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Targeting 50-150 total trades over 4 years with strict entry criteria.
+4h Donchian(20) Breakout + 1d EMA(20) Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 4h capture momentum aligned with 1d EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Targeting 75-200 total trades over 4 years with strict entry criteria.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema_vol_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
