@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 1d Donchian(20) Breakout + Volume + Weekly ADX Filter
-Hypothesis: Daily Donchian breakouts capture long-term trends with fewer trades. 
-Weekly ADX filter ensures we only trade in strong trending markets, reducing whipsaws.
-Volume confirmation adds institutional validation. Designed for 30-100 trades over 4 years.
-Works in bull markets (breakouts) and bear markets (breakdowns) via symmetric long/short logic.
+Hypothesis: Daily Donchian breakouts capture multi-week trends with weekly ADX ensuring trend strength.
+Works in bull markets (breakouts) and bear markets (breakdowns) by trading both directions.
+Volume confirms institutional participation. Designed for 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -23,7 +22,7 @@ def generate_signals(prices):
     # Load weekly data for ADX (once before loop)
     df_weekly = get_htf_data(prices, '1w')
     
-    # Weekly ADX calculation
+    # ADX calculation on weekly
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
     close_w = df_weekly['close'].values
@@ -68,7 +67,7 @@ def generate_signals(prices):
     # Align weekly ADX to daily timeframe
     adx_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
     
-    # Daily price and volume data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -78,10 +77,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = max(20, 14)
+    start = max(20, 14)  # For Donchian and ADX
     
     for i in range(start, n):
-        # Skip if weekly ADX not available
+        # Skip if required data not available
         if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -89,7 +88,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Daily Donchian channel (20-period)
+        # Donchian channel (20-period)
         if i >= 20:
             highest_high = np.max(high[i-20:i])
             lowest_low = np.min(low[i-20:i])
@@ -100,30 +99,30 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
+            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold to reduce trades
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR weekly ADX < 20
-            if close[i] < lowest_low or adx_aligned[i] < 20:
+            # Exit: price closes below Donchian lower OR ADX < 25
+            if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR weekly ADX < 20
-            if close[i] > highest_high or adx_aligned[i] < 20:
+            # Exit: price closes above Donchian upper OR ADX < 25
+            if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly ADX trend
+            # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Moderate trend threshold
+            trend_filter = adx_aligned[i] > 30  # Increased threshold for stronger trend
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
