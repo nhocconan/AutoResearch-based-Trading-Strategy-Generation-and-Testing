@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with 1d EMA21 trend filter and volume confirmation
+6h Donchian(20) breakout with 1d trend filter and volume concentration
 Hypothesis: 6h breakouts capture medium-term momentum. Filter by 1d EMA21 for trend bias and volume > 1.5x average for conviction.
 Works in bull (buy breakouts above 1d EMA21) and bear (sell breakdowns below 1d EMA21).
 Target: 50-150 total trades over 4 years.
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1d_trend_vol_v1"
+name = "6h_donchian20_1d_trend_vol_v2"
 timeframe = "6h"
 leverage = 1.0
 
