@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Uses 1d trend to avoid counter-trend trades, volume to filter false breakouts.
-# Targets 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
+# Uses 12h trend to avoid counter-trend trades, volume to filter false breakouts.
+# Targets 20-30 trades/year (80-120 over 4 years) to minimize fee drag.
 # Works in bull/bear by only trading with higher timeframe trend.
 
-name = "12h_donchian20_1d_ema50_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,19 +36,19 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # 50-period EMA on 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # 50-period EMA on 12h timeframe
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 48) / 50
     
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 20-period Donchian channels on 12h
+    # 20-period Donchian channels on 4h
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
