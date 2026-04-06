@@ -7,11 +7,10 @@ name = "exp_13924_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation (1.5x)
+# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation
 # Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 30-100 trades over 4 years by using weekly trend filter to avoid counter-trend whipsaws
-# Volume confirmation (1.5x average) ensures momentum behind breakouts
-# ATR-based stop loss (2.0x) manages risk in volatile markets
+# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
+# requiring alignment with weekly trend to avoid counter-trend whipsaws
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -93,8 +92,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - threshold set to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 1.5)
+        # Volume confirmation - higher threshold to reduce trades
+        volume_ok = volume[i] > (volume_ma[i] * 2.0)
         
         # Trend filter from 1w EMA
         trend_up = close[i] > ema_1w_aligned[i]
@@ -114,12 +113,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
+                stop_price = entry_price - (2.5 * atr[i])
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
+                stop_price = entry_price + (2.5 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
