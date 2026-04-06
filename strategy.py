@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12760_4h_donchian20_1d_vol_v2"
+name = "exp_12761_4h_donchian20_1d_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -11,7 +11,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
