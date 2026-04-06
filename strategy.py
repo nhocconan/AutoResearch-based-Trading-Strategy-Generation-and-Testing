@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-Hypothesis: 4h breakouts capture medium-term momentum with controlled transaction costs.
-Filter by 1d EMA50 for trend bias and volume confirmation for conviction.
+Hypothesis: 4h breakouts capture medium-term momentum. Filter by 1d EMA50 for trend bias and volume > 1.5x average for conviction.
 Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50).
 Target: 75-200 total trades over 4 years.
 """
@@ -11,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v1"
+name = "4h_donchian20_1d_trend_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -50,7 +49,11 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
-    # Get 1d volume data
+    # Align trend to 4h timeframe (1 = bullish, -1 = bearish)
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Get volume data for confirmation
     volume_1d = df_1d['volume'].values
     
     # 20-period average volume on 1d
@@ -58,8 +61,7 @@ def generate_signals(prices):
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align EMA and volume MA to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align volume MA to 4h timeframe (scale to 4h: 1d has 6x 4h bars)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # Donchian channels (20-period) from 4h data
@@ -80,8 +82,9 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -89,9 +92,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 4h volume > 1.3x average 1d volume (scaled)
-        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.3
+        # Volume filter: current 4h volume > 1.5x average daily volume (scaled to 4h)
+        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Session filter: 08-20 UTC
@@ -103,8 +105,7 @@ def generate_signals(prices):
             # Exit: price breaks below lower Donchian OR against trend
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lower[i] or
-                close_1d_search := False,  # placeholder for actual trend check
-                close[i] < ema_1d_aligned[i] or  # price below 1d EMA50
+                trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -116,7 +117,7 @@ def generate_signals(prices):
             # Exit: price breaks above upper Donchian OR against trend
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > upper[i] or
-                close[i] > ema_1d_aligned[i] or  # price above 1d EMA50
+                trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -132,18 +133,14 @@ def generate_signals(prices):
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
                 
-                # Trend filter: price above/below 1d EMA50
-                price_above_ema = close[i] > ema_1d_aligned[i]
-                price_below_ema = close[i] < ema_1d_aligned[i]
-                
-                # Long: breakout above upper with price above EMA50 + volume + session
-                if bull_breakout and price_above_ema and volume_filter and session_filter:
+                # Long: breakout above upper with bullish trend + volume + session
+                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter and session_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with price below EMA50 + volume + session
-                elif bear_breakout and price_below_ema and volume_filter and session_filter:
+                # Short: breakdown below lower with bearish trend + volume + session
+                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter and session_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
