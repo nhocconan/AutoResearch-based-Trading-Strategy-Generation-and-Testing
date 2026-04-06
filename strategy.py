@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) breakout with 1w EMA trend and volume confirmation
-Hypothesis: Price breaking Donchian(20) channels on 12h with 1w EMA(40) trend alignment and volume surge captures institutional breakouts. Works in bull (long on upper break) and bear (short on lower break). Target: 50-150 trades over 4 years.
+Hypothesis: Price breaking Donchian(20) channels with 1w EMA(50) trend alignment and volume surge captures institutional breakouts. Works in bull (long on upper break) and bear (short on lower break). Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -14,22 +14,23 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 210:
         return np.zeros(n)
     
-    # Load 1w data for EMA(40) trend (once before loop)
+    # Load 1w data for EMA(50) trend (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # 1w EMA(40) for trend direction
+    # 1w EMA(50) for trend direction
     close_1w = df_1w['close'].values
-    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
     # Donchian(20) channels
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -37,7 +38,7 @@ def generate_signals(prices):
     
     # 12h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.6 * vol_ma)  # Require strong volume surge
+    vol_filter = volume > (1.8 * vol_ma)  # Require strong volume surge
     
     # 12h ATR(14) for stoploss
     tr1 = high - low
@@ -52,11 +53,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 180  # For EMA40 and Donchian
+    start = 200  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_40_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -86,8 +87,8 @@ def generate_signals(prices):
             long_breakout = close[i] > highest_high[i-1]  # Break above previous upper
             short_breakout = close[i] < lowest_low[i-1]   # Break below previous lower
             
-            uptrend = ema_40_1w_aligned[i] < close[i]  # Price above EMA40 (uptrend)
-            downtrend = ema_40_1w_aligned[i] > close[i]  # Price below EMA40 (downtrend)
+            uptrend = ema_50_1w_aligned[i] > close[i]  # Price above EMA50
+            downtrend = ema_50_1w_aligned[i] < close[i]  # Price below EMA50
             
             if long_breakout and uptrend and vol_filter[i]:
                 signals[i] = 0.25
@@ -101,3 +102,4 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+</s>
