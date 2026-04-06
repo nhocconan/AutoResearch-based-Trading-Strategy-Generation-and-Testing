@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d volume confirmation and 1d trend filter
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 1d volume for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian(15) breakout with 1d EMA21 trend and 1d volume confirmation
+Hypothesis: Donchian breakouts capture momentum, filtered by 1d EMA21 for trend bias and 1d volume for conviction. Works in bull (buy breakouts above EMA21) and bear (sell breakdowns below EMA21). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v2"
+name = "4h_donchian15_1d_trend_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,13 +64,13 @@ def generate_signals(prices):
     # Align volume MA to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (20-period) from 4h data
+    # Donchian channels (15-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    for i in range(15, n):
+        upper[i] = np.max(high[i-15:i])
+        lower[i] = np.min(low[i-15:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,7 +78,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 35  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
