@@ -3,25 +3,38 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour timeframe using daily pivot points (classic floor trader levels)
-# with volume confirmation and 1-week EMA trend filter. Price crossing above/below
-# pivot levels with volume indicates institutional interest. Weekly EMA ensures
-# alignment with higher timeframe momentum to avoid counter-trend trades.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in bull markets
-# (breakouts above pivot) and bear markets (breakdowns below pivot).
+# Hypothesis: 4-hour RSI divergence with volume confirmation and 12-hour EMA trend filter.
+# RSI detects overbought/oversold conditions; divergence with price signals potential reversals.
+# Volume confirmation ensures institutional participation. 12-hour EMA filters counter-trend trades.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Target: 80-180 total trades over 4 years (20-45/year).
 
-name = "exp_13385_12h_pivot_volume_ema_v1"
-timeframe = "12h"
+name = "exp_13383_4h_rsi_divergence_vol_ema_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-PIVOT_PERIOD = 1  # Daily pivot
-EMA_PERIOD = 20   # Weekly EMA
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+EMA_PERIOD = 20  # 12-hour EMA
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+LOOKBACK_DIVERGENCE = 5  # bars to look back for divergence
+
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -41,34 +54,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12-hour data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 12-hour EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate daily pivots (standard: P = (H+L+C)/3, R1 = 2*P-L, S1 = 2*P-H)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Align pivots to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate 12h indicators
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # RSI
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -82,11 +83,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, LOOKBACK_DIVERGENCE) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        # Skip if indicators not available
+        if np.isnan(rsi[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,24 +107,40 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Breakout signals using daily R1/S1
-        breakout_up = volume_ok and uptrend and (high[i] > r1_aligned[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < s1_aligned[i-1])
+        # RSI divergence detection
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        bearish_div = False
         
-        # Generate signals
+        if i >= LOOKBACK_DIVERGENCE:
+            # Look back for divergence
+            price_low = np.min(low[i-LOOKBACK_DIVERGENCE:i+1])
+            price_high = np.max(high[i-LOOKBACK_DIVERGENCE:i+1])
+            rsi_low = np.min(rsi[i-LOOKBACK_DIVERGENCE:i+1])
+            rsi_high = np.max(rsi[i-LOOKBACK_DIVERGENCE:i+1])
+            
+            # Current price vs lookback period
+            if low[i] < price_low and rsi[i] > rsi_low:
+                bullish_div = True
+            if high[i] > price_high and rsi[i] < rsi_high:
+                bearish_div = True
+        
+        # Entry signals
         if position == 0:
-            if breakout_up:
+            # Long: bullish divergence + oversold RSI + uptrend + volume
+            if bullish_div and rsi[i] < RSI_OVERSOLD and uptrend and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            # Short: bearish divergence + overbought RSI + downtrend + volume
+            elif bearish_div and rsi[i] > RSI_OVERBOUGHT and downtrend and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
