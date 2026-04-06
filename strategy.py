@@ -3,25 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day ATR regime filter.
-# Long when price breaks above upper Donchian with ATR(14) > median ATR(100) (high volatility regime).
-# Short when price breaks below lower Donchian with ATR(14) > median ATR(100).
-# Uses volatility regime to avoid choppy markets and focus on trending periods.
-# Target: 80-180 total trades over 4 years (20-45/year) to stay within optimal range.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "4h_donchian20_atr_regime_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Donchian channel (20-period)
     high_series = pd.Series(high)
@@ -29,56 +30,62 @@ def generate_signals(prices):
     upper = high_series.rolling(window=20, min_periods=20).max().values
     lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # ATR(14) for volatility regime
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily trend filter: bullish/bearish day based on close vs open
+    df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Median ATR(100) for regime filter
-    atr_median = pd.Series(atr).rolling(window=100, min_periods=100).median().values
-    
-    # Volatility regime: ATR > median ATR (high volatility/trending regime)
-    vol_regime = atr > atr_median
+    # Volume filter: current volume > 1.3x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after ATR median warmup
-        # Skip if volatility regime data not available
-        if np.isnan(vol_regime[i]):
+    for i in range(20, n):
+        # Skip if daily trend data not available
+        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: price returns to opposite Donchian band
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.3
+        
+        # Check exits
         if position == 1:  # long position
-            if low[i] <= lower[i]:  # Exit long when price touches lower band
+            # Exit: price drops below lower Donchian or daily turn bearish
+            if (low[i] <= lower[i] or 
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if high[i] >= upper[i]:  # Exit short when price touches upper band
+            # Exit: price rises above upper Donchian or daily turn bullish
+            if (high[i] >= upper[i] or 
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volatility regime filter
-            if vol_regime[i]:
-                # Long: break above upper Donchian in high volatility regime
-                if high[i] > upper[i]:
+            # Look for entries with volume confirmation and daily trend filter
+            if volume_filter:
+                # Long: break above upper Donchian during bullish day
+                if (high[i] > upper[i] and 
+                    daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian in high volatility regime
-                elif low[i] < lower[i]:
+                # Short: break below lower Donchian during bearish day
+                elif (low[i] < lower[i] and 
+                      daily_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
     
