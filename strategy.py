@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction with RSI(14) and 1w EMA(20) trend filter
-# Long when KAMA is rising, RSI(14) > 50, and 1w EMA(20) > prior
-# Short when KAMA is falling, RSI(14) < 50, and 1w EMA(20) < prior
-# Uses KAMA for adaptive trend, RSI for momentum filter, 1w EMA for trend alignment
-# Target: 30-100 total trades over 4 years with controlled risk in both bull and bear markets
-# Uses 1d timeframe with 1w trend filter to reduce trade frequency and improve signal quality
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above 20-period 12h Donchian high and 1d EMA(20) is rising
+# Short when price breaks below 20-period 12h Donchian low and 1d EMA(20) is falling
+# Uses volume > 20-period average to confirm breakouts
+# Target: 50-150 total trades over 4 years with controlled risk in both bull and bear markets
+# Uses 12h timeframe with 1d trend filter to reduce trade frequency and improve signal quality
 
-name = "1d_kama_rsi_1w_ema_v1"
-timeframe = "1d"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,43 +21,35 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # KAMA (adaptive moving average)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -66,12 +58,12 @@ def generate_signals(prices):
         
         if position == 1:  # long position
             # Stoploss: 2 * ATR approximation using price range
-            if i > 0 and close[i] < entry_price - 2.0 * (abs(close[i] - close[i-1])):
+            if close[i] < entry_price - 2.0 * (high[i] - low[i]):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: KAMA turns down or RSI < 50 or 1w EMA turns down
-            elif kama[i] < kama[i-1] or rsi[i] < 50 or ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+            # Exit: price breaks below Donchian low or 1d EMA turns down
+            elif close[i] < low_min[i] or ema_1d_aligned[i] < ema_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -79,26 +71,29 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2 * ATR approximation
-            if i > 0 and close[i] > entry_price + 2.0 * (abs(close[i] - close[i-1])):
+            if close[i] > entry_price + 2.0 * (high[i] - low[i]):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: KAMA turns up or RSI > 50 or 1w EMA turns up
-            elif kama[i] > kama[i-1] or rsi[i] > 50 or ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+            # Exit: price breaks above Donchian high or 1d EMA turns up
+            elif close[i] > high_max[i] or ema_1d_aligned[i] > ema_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with trend alignment
-            if kama[i] > kama[i-1] and rsi[i] > 50 and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            elif kama[i] < kama[i-1] and rsi[i] < 50 and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
+            # Look for entries with volume confirmation
+            if vol_filter[i]:
+                # Long when price breaks above Donchian high and 1d EMA rising
+                if close[i] > high_max[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short when price breaks below Donchian low and 1d EMA falling
+                elif close[i] < low_min[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
     
     return signals
