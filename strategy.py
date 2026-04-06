@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume + ADX Filter (Optimized)
-Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with proven performance.
-Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
-Reduced position size and optimized filters to achieve 50-150 trades over 4 years (12-37/year).
+12h Donchian(20) Breakout + Volume + 1d ADX Filter
+Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with lower trade frequency.
+1d ADX filter ensures we only trade in trending markets, reducing whipsaw.
+Volume confirms institutional participation.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
@@ -11,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_adx_v1"
+name = "12h_donchian20_volume_1dadx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -66,7 +67,7 @@ def generate_signals(prices):
     adx = wilder_smooth(dx, period_adx)
     
     # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
     
     # Price and volume data
     high = prices['high'].values
@@ -82,7 +83,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(adx_aligned[i]):
+        if np.isnan(adx_12h[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -100,21 +101,21 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold to reduce trades
+            volume_filter = volume[i] > vol_ma * 1.5
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 25
-            if close[i] < lowest_low or adx_aligned[i] < 25:
+            # Exit: price closes below Donchian lower OR ADX < 20
+            if close[i] < lowest_low or adx_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 25
-            if close[i] > highest_high or adx_aligned[i] < 25:
+            # Exit: price closes above Donchian upper OR ADX < 20
+            if close[i] > highest_high or adx_12h[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -123,7 +124,7 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 30  # Increased threshold for stronger trend
+            trend_filter = adx_12h[i] > 25
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
