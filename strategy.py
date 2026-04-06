@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA trend filter + volume confirmation
-# Long when price breaks above Donchian upper band AND price > weekly EMA20 AND volume > 1.5x average
-# Short when price breaks below Donchian lower band AND price < weekly EMA20 AND volume > 1.5x average
-# Exit when price crosses back through Donchian midline (10-period) or trailing stop hits 2*ATR
-# Uses daily timeframe to reduce trade frequency, targets 30-100 total trades over 4 years
-# Works in bull markets via trend-following breakouts; works in bear markets via short breakdowns
-# Weekly EMA filter ensures we only trade with the higher timeframe trend
+# Hypothesis: 6h Williams %R with 12h EMA filter and volume confirmation
+# Williams %R measures overbought/oversold levels; 12h EMA determines trend direction
+# Long when Williams %R < -80 (oversold) AND price > 12h EMA (uptrend) AND volume > 1.5x average
+# Short when Williams %R > -20 (overbought) AND price < 12h EMA (downtrend) AND volume > 1.5x average
+# Exit when Williams %R returns to -50 level or volume drops below threshold
+# Uses 6h timeframe to target 50-150 trades over 4 years (12-37/year)
+# Williams %R is effective in both bull/bear markets by capturing mean reversion within trends
 
-name = "1d_donchian_1w_ema_vol_v3"
-timeframe = "1d"
+name = "6h_williamsr_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,27 +26,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Williams %R (14-period) - momentum oscillator
+    # Values range from -100 to 0; -80 = oversold, -20 = overbought
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_low - lowest_low + 1e-10)
+    williams_r = williams_r.values
     
-    # ATR for stoploss (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Weekly EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    ema_20 = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # 12h EMA for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -54,49 +44,38 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    atr_at_entry = 0.0
     
-    for i in range(20, n):
+    for i in range(21, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(ema_20_aligned[i]) or np.isnan(volume_threshold[i]) or \
-           np.isnan(atr[i]):
+        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Exit conditions: Williams %R returns to -50 or volume drops
         if position == 1:  # long position
-            # Exit conditions: price crosses below Donchian midline OR trailing stop hit
-            if close[i] < donchian_mid[i] or close[i] < entry_price - 2.0 * atr_at_entry:
+            if williams_r[i] >= -50 or volume[i] < volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit conditions: price crosses above Donchian midline OR trailing stop hit
-            if close[i] > donchian_mid[i] or close[i] > entry_price + 2.0 * atr_at_entry:
+            if williams_r[i] <= -50 or volume[i] < volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts with volume confirmation and weekly trend filter
-            # Long breakout: price above Donchian upper band AND price > weekly EMA20
-            if (close[i] > donchian_upper[i] and close[i] > ema_20_aligned[i] and 
-                volume[i] > volume_threshold[i]):
+            # Look for entries with trend alignment and volume confirmation
+            # Long: Oversold + Uptrend + Volume
+            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-                entry_price = close[i]
-                atr_at_entry = atr[i]
-            # Short breakdown: price below Donchian lower band AND price < weekly EMA20
-            elif (close[i] < donchian_lower[i] and close[i] < ema_20_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
+            # Short: Overbought + Downtrend + Volume
+            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
-                entry_price = close[i]
-                atr_at_entry = atr[i]
     
     return signals
