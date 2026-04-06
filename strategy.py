@@ -3,60 +3,46 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation.
-# Uses Alligator's Jaw/Teeth/Lips to identify trend strength and direction.
-# Works in bull markets (teeth above jaw, lips above teeth) and bear markets (opposite).
-# Volume ensures institutional participation in breakouts.
+# Hypothesis: 6h Camarilla pivot levels from 1d: fade at R3/S3 with volume and ADX filter, breakout continuation at R4/S4.
+# Works in bull markets (breakouts above R4) and bear markets (breakdowns below S4). Fade at R3/S3 captures reversals in ranging markets.
 # Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13559_6h_alligator_1d_trend_vol_v1"
+name = "exp_13559_6h_camarilla1d_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_JAW_PERIOD = 13   # Blue line
-ALLIGATOR_TEETH_PERIOD = 8  # Red line
-ALLIGATOR_LIPS_PERIOD = 5   # Green line
-JAW_SHIFT = 8
-TEETH_SHIFT = 5
-LIPS_SHIFT = 3
+CAMARILLA_PERIOD = 1  # Use previous day's high/low/close
+ADX_PERIOD = 14
+ADX_THRESHOLD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_alligator_lines(data, jaw_period, teeth_period, lips_period, jaw_shift, teeth_shift, lips_shift):
-    """Calculate Williams Alligator lines (SMMA with forward shift)"""
-    # Calculate SMMA (Smoothed Moving Average)
-    def smma(series, period):
-        sma = pd.Series(series).rolling(window=period, min_periods=period).mean()
-        # Wilder's smoothing: SMMA(t) = (SMMA(t-1) * (period-1) + price(t)) / period
-        smma_vals = np.full_like(series, np.nan, dtype=float)
-        if len(series) >= period:
-            smma_vals[period-1] = sma[period-1]
-            for i in range(period, len(series)):
-                if not np.isnan(sma[i]):
-                    smma_vals[i] = (smma_vals[i-1] * (period-1) + sma[i]) / period
-                else:
-                    smma_vals[i] = smma_vals[i-1]
-        return smma_vals
+def calculate_adx(high, low, close, period):
+    """Calculate ADX using Wilder's smoothing"""
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    jaw = smma(data, jaw_period)
-    teeth = smma(data, teeth_period)
-    lips = smma(data, lips_period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
     
-    # Apply forward shift (jaw: 8 bars, teeth: 5 bars, lips: 3 bars)
-    jaw = np.roll(jaw, jaw_shift)
-    teeth = np.roll(teeth, teeth_shift)
-    lips = np.roll(lips, lips_shift)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     
-    # Set shifted values to NaN
-    jaw[:jaw_shift] = np.nan
-    teeth[:teeth_shift] = np.nan
-    lips[:lips_shift] = np.nan
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
     
-    return jaw, teeth, lips
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -72,25 +58,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data for Camarilla pivot ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    camarilla_range = high_1d - low_1d
+    r4 = close_1d + 1.5 * camarilla_range
+    r3 = close_1d + 1.1 * camarilla_range
+    s3 = close_1d - 1.1 * camarilla_range
+    s4 = close_1d - 1.5 * camarilla_range
+    
+    # Align Camarilla levels to 6h timeframe (shifted by 1 day for previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate daily ADX for trend filter
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Williams Alligator lines
-    jaw, teeth, lips = calculate_alligator_lines(
-        close, ALLIGATOR_JAW_PERIOD, ALLIGATOR_TEETH_PERIOD, ALLIGATOR_LIPS_PERIOD,
-        JAW_SHIFT, TEETH_SHIFT, LIPS_SHIFT
-    )
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -104,18 +105,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(
-        ALLIGATOR_JAW_PERIOD + JAW_SHIFT,
-        ALLIGATOR_TEETH_PERIOD + TEETH_SHIFT,
-        ALLIGATOR_LIPS_PERIOD + LIPS_SHIFT,
-        VOLUME_MA_PERIOD,
-        ATR_PERIOD
-    ) + 1
+    start = max(ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if Camarilla or ADX not available
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -135,26 +131,39 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend filter: ADX > threshold indicates trending market
+        trending = adx_1d_aligned[i] > ADX_THRESHOLD
         
-        # Alligator signals: teeth above jaw AND lips above teeth = uptrend
-        # teeth below jaw AND lips below teeth = downtrend
-        alligator_long = (teeth[i] > jaw[i]) and (lips[i] > teeth[i])
-        alligator_short = (teeth[i] < jaw[i]) and (lips[i] < teeth[i])
+        # Camarilla-based signals
+        # Fade at R3/S3 in ranging markets (ADX <= threshold)
+        fade_r3 = not trending and volume_ok and (high[i] >= r3_aligned[i]) and (close[i] < r3_aligned[i])
+        fade_s3 = not trending and volume_ok and (low[i] <= s3_aligned[i]) and (close[i] > s3_aligned[i])
+        
+        # Breakout continuation at R4/S4 in trending markets (ADX > threshold)
+        breakout_r4 = trending and volume_ok and (high[i] >= r4_aligned[i]) and (close[i] > r4_aligned[i])
+        breakout_s4 = trending and volume_ok and (low[i] <= s4_aligned[i]) and (close[i] < s4_aligned[i])
         
         # Generate signals
         if position == 0:
-            if volume_ok and uptrend and alligator_long:
-                signals[i] = SIGNAL_SIZE
+            if fade_r3:
+                signals[i] = -SIGNAL_SIZE  # short at R3 rejection
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif fade_s3:
+                signals[i] = SIGNAL_SIZE   # long at S3 rejection
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and downtrend and alligator_short:
-                signals[i] = -SIGNAL_SIZE
+            elif breakout_r4:
+                signals[i] = SIGNAL_SIZE   # long breakout at R4
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_s4:
+                signals[i] = -SIGNAL_SIZE  # short breakdown at S4
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
