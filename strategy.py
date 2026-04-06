@@ -3,26 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-week pivot point reversal levels with volume confirmation.
-# Buy at S1/S2 support with volume spike, sell at R1/R2 resistance with volume spike.
-# Uses weekly pivot for key institutional levels, works in ranging markets (common in 2025).
-# Target: 60-120 total trades over 4 years (15-30/year) to avoid excessive fees.
+# Hypothesis: 6h weekly pivot point reversal strategy. Uses weekly pivot levels (R3/S3) for reversal entries
+# in ranging markets and (R4/S4) for breakout continuation in trending markets. Combines with volume
+# confirmation to filter false signals. Designed for 60-120 total trades over 4 years (15-30/year).
+# Works in bull markets (breakouts at R4/S4 with volume) and bear markets (reversals at R3/S3 with volume).
 
-name = "exp_13755_6h_weekly_pivot_reversal_vol_v1"
+name = "exp_13755_6h_weekly_pivot_reversal_breakout_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1  # Use previous week's pivot
+PIVOT_LOOKBACK = 5  # Minimum bars to confirm pivot level respect
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -35,13 +31,17 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points: P, R1, R2, S1, S2"""
+    """Calculate standard pivot points: P, R1, R2, R3, R4, S1, S2, S3, S4"""
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
     s1 = 2 * pivot - high
     r2 = pivot + (high - low)
     s2 = pivot - (high - low)
-    return pivot, r1, r2, s1, s2
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -52,33 +52,33 @@ def generate_signals(prices):
     df_weekly = get_htf_data(prices, '1w')
     
     # Calculate weekly pivot points
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    
+    # Initialize pivot arrays
+    r3_weekly = np.full_like(close_weekly, np.nan)
+    s3_weekly = np.full_like(close_weekly, np.nan)
+    r4_weekly = np.full_like(close_weekly, np.nan)
+    s4_weekly = np.full_like(close_weekly, np.nan)
     
     # Calculate pivot points for each week
-    pivot_vals = np.full_like(close_w, np.nan)
-    r1_vals = np.full_like(close_w, np.nan)
-    r2_vals = np.full_like(close_w, np.nan)
-    s1_vals = np.full_like(close_w, np.nan)
-    s2_vals = np.full_like(close_w, np.nan)
+    for i in range(len(close_weekly)):
+        _, _, _, r3, r4, _, _, s3, s4 = calculate_pivot_points(
+            high_weekly[i], low_weekly[i], close_weekly[i]
+        )
+        r3_weekly[i] = r3
+        s3_weekly[i] = s3
+        r4_weekly[i] = r4
+        s4_weekly[i] = s4
     
-    for i in range(len(close_w)):
-        p, r1, r2, s1, s2 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
-        pivot_vals[i] = p
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        s1_vals[i] = s1
-        s2_vals[i] = s2
+    # Align weekly pivots to 6h timeframe (forward fill with shift(1))
+    r3_6h = align_htf_to_ltf(prices, df_weekly, r3_weekly)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, s3_weekly)
+    r4_6h = align_htf_to_ltf(prices, df_weekly, r4_weekly)
+    s4_6h = align_htf_to_ltf(prices, df_weekly, s4_weekly)
     
-    # Align to 6h timeframe (using previous week's pivot - no lookahead)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
-    
-    # 6h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -100,9 +100,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -127,26 +126,36 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Reversal signals at pivot levels
-        # Long at S1/S2 support with volume
-        long_at_s1 = volume_ok and close[i] <= s1_aligned[i] * 1.005 and close[i] >= s1_aligned[i] * 0.995
-        long_at_s2 = volume_ok and close[i] <= s2_aligned[i] * 1.005 and close[i] >= s2_aligned[i] * 0.995
+        # Price action
+        price = close[i]
+        prev_price = close[i-1]
         
-        # Short at R1/R2 resistance with volume
-        short_at_r1 = volume_ok and close[i] >= r1_aligned[i] * 0.995 and close[i] <= r1_aligned[i] * 1.005
-        short_at_r2 = volume_ok and close[i] >= r2_aligned[i] * 0.995 and close[i] <= r2_aligned[i] * 1.005
+        # Reversal signals at R3/S3 (fade extremes)
+        reversal_long = volume_ok and price <= s3_6h[i] and prev_price > s3_6h[i]
+        reversal_short = volume_ok and price >= r3_6h[i] and prev_price < r3_6h[i]
         
-        long_signal = long_at_s1 or long_at_s2
-        short_signal = short_at_r1 or short_at_r2
+        # Breakout signals at R4/S4 (continuation)
+        breakout_long = volume_ok and price >= r4_6h[i] and prev_price < r4_6h[i]
+        breakout_short = volume_ok and price <= s4_6h[i] and prev_price > s4_6h[i]
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if reversal_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif reversal_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -154,15 +163,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long at R1 resistance or stop
-            if close[i] >= r1_aligned[i] * 0.995:
+            # Exit long on reversal at R3 or stop loss
+            if price >= r3_6h[i] and prev_price < r3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short at S1 support or stop
-            if close[i] <= s1_aligned[i] * 1.005:
+            # Exit short on reversal at S3 or stop loss
+            if price <= s3_6h[i] and prev_price > s3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
