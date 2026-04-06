@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14001_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14002_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -38,10 +38,10 @@ def generate_signals(prices):
     # Calculate 1d EMA(50) for trend bias
     ema_1d = calculate_ema(df_1d['close'].values, 50)
     
-    # Align 1d EMA to 4h timeframe (use previous 1d bar for trend)
+    # Align 1d EMA to 12h timeframe (use previous 1d bar for trend)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h data for Donchian, ATR, and volume
+    # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
