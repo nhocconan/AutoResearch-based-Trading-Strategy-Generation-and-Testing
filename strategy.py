@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13916_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13917_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters - optimized for 12h to target 50-150 trades over 4 years
+# Parameters - optimized for 4h to target 75-200 trades over 4 years
 DONCHIAN_PERIOD = 20
 EMA_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
@@ -49,7 +49,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_TREND_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
