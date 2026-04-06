@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
-# Enter long when: RSI(14) < 30, price > 4h EMA(20), volume > 1.5x avg, during active session (08-20 UTC)
-# Enter short when: RSI(14) > 70, price < 4h EMA(20), volume > 1.5x avg, during active session
-# Exit when RSI returns to neutral zone (40-60)
-# Uses 4h trend to filter counter-trend trades, targeting 100-200 trades over 4 years
+# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
+# Enter long when: RSI(14) > 55, price > 4h EMA(50), volume > 1.5x avg, during active session (08-20 UTC)
+# Enter short when: RSI(14) < 45, price < 4h EMA(50), volume > 1.5x avg, during active session
+# Exit when RSI crosses back below 50 (long) or above 50 (short)
+# Uses 4h trend to filter counter-trend trades, targeting 80-150 trades over 4 years
 
-name = "1h_rsi_meanrev_4h_ema_vol_session_v1"
+name = "1h_rsi_momentum_4h_ema_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -34,11 +34,11 @@ def generate_signals(prices):
     rsi = 100 - (100 / (1 + rs))
     rsi = rsi.values
     
-    # 4h EMA(20) for trend filter
+    # 4h EMA(50) for trend filter
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
-    ema_20 = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,9 +50,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Wait for EMA to stabilize
+    for i in range(50, n):  # Wait for EMA to stabilize
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_20_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.20
@@ -64,28 +64,28 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         if position == 1:  # long position
-            # Exit: RSI > 60 (return to neutral)
-            if rsi[i] > 60:
+            # Exit: RSI < 50 (momentum fading)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: RSI < 40 (return to neutral)
-            if rsi[i] < 40:
+            # Exit: RSI > 50 (momentum fading)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries: RSI extreme + trend filter + volume + session
+            # Look for entries: RSI momentum + trend filter + volume + session
             if in_session and volume[i] > volume_threshold[i]:
-                if rsi[i] < 30 and close[i] > ema_20_aligned[i]:
-                    # Oversold but above 4h EMA - bullish mean reversion
+                if rsi[i] > 55 and close[i] > ema_50_aligned[i]:
+                    # Bullish momentum above 4h EMA
                     signals[i] = 0.20
                     position = 1
-                elif rsi[i] > 70 and close[i] < ema_20_aligned[i]:
-                    # Overbought but below 4h EMA - bearish mean reversion
+                elif rsi[i] < 45 and close[i] < ema_50_aligned[i]:
+                    # Bearish momentum below 4h EMA
                     signals[i] = -0.20
                     position = -1
     
