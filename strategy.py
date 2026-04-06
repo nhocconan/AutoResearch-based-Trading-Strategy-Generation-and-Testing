@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 12h EMA50 + Volume Spike
-# Williams %R measures momentum (overbought/oversold). 
-# Long when %R < -80 (oversold) with 12h uptrend and volume spike.
-# Short when %R > -20 (overbought) with 12h downtrend and volume spike.
-# Uses 12h EMA50 for trend filter and volume confirmation to avoid false signals.
+# Hypothesis: 6h Williams %R + 12h Trend + Volume
+# Williams %R identifies overbought/oversold conditions.
+# Go long when %R < -80 (oversold) and 12h EMA50 uptrend with volume confirmation.
+# Go short when %R > -20 (overbought) and 12h EMA50 downtrend with volume confirmation.
+# Uses mean reversion in trends with trend filter to avoid counter-trend trades.
 # Target: 75-200 total trades over 4 years with controlled risk.
 
 name = "6h_williamsr_12h_ema50_vol_v1"
@@ -39,10 +39,11 @@ def generate_signals(prices):
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +61,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after Williams %R warmup
+    for i in range(14, n):  # Start after Williams %R warmup
         # Skip if required data not available
         if (np.isnan(ema50_12h_aligned[i]) or np.isnan(williams_r[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(atr[i])):
@@ -76,8 +77,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R exits oversold or trend changes
-            elif williams_r[i] > -20 or close[i] < ema50_12h_aligned[i]:
+            # Exit: Williams %R returns to neutral or trend changes
+            elif williams_r[i] > -50 or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -89,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R exits overbought or trend changes
-            elif williams_r[i] < -80 or close[i] > ema50_12h_aligned[i]:
+            # Exit: Williams %R returns to neutral or trend changes
+            elif williams_r[i] < -50 or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
