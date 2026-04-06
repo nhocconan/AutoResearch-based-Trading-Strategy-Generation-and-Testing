@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-1d Donchian breakout with 1w EMA filter and volume concentration.
-Hypothesis: Breakouts aligned with weekly trend (EMA50) and volume concentration
-capture longer-term trends while avoiding false breakouts. Works in bull (breakouts)
+1d Donchian(20) breakout with 1w EMA filter and volume concentration.
+Hypothesis: Daily breakouts aligned with weekly trend (EMA50) and volume concentration
+capture multi-week trends while avoiding false breakouts. Works in bull (breakouts)
 and bear (breakdowns) with proper filtering. Target: 30-100 trades over 4 years.
 """
 
@@ -71,7 +71,7 @@ def generate_signals(prices):
         if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_1w_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.30
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -100,12 +100,12 @@ def generate_signals(prices):
         # Generate signals
         if position == 0:
             if breakout_long:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif breakout_short:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
@@ -117,13 +117,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short on stop or breakout of upper band
             if close[i] >= stop_price or close[i] > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
