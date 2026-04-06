@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation
 # Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 2x 20-period average
 # Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 2x 20-period average
-# Exit when price crosses Donchian midline (average of upper/lower)
-# Designed to work in both bull and bear markets via trend filter
+# Exit when price crosses Donchian midline (10-period average of upper/lower)
+# Uses 1d timeframe to reduce trade frequency, 1w EMA for trend filter, Donchian for breakout signals
 # Target: 30-100 total trades over 4 years (7-25/year) for optimal 1d performance
 
 name = "1d_donchian20_1w_ema_vol_v5"
