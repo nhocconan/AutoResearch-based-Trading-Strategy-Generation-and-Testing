@@ -3,37 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot reversal with daily volume confirmation and ADX trend filter.
-# Captures mean-reversion at institutional pivot levels during ranging markets while avoiding strong trends.
-# Works in bull markets (reversions from overbought pivots) and bear markets (reversions from oversold pivots).
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + ADX filter.
+# Uses Camarilla levels (support/resistance) for mean reversion in range-bound markets.
+# Volume spike confirms institutional interest at key levels.
+# ADX > 20 ensures we only trade when there's sufficient momentum.
+# Designed to work in both bull and bear markets by fading extremes at pivot levels.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13563_4h_camarilla1d_adx_vol_v1"
-timeframe = "4h"
+name = "exp_13565_12h_camarilla1d_volume_adx_v2"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+CAMARILLA_MULT = 1.1
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+ADX_PERIOD = 14
+ADX_THRESHOLD = 20
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
+    """Calculate ADX"""
     plus_dm = np.zeros_like(high)
     minus_dm = np.zeros_like(high)
     
     for i in range(1, len(high)):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        if up > down and up > 0:
-            plus_dm[i] = up
-        elif down > up and down > 0:
-            minus_dm[i] = down
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        elif low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -45,7 +48,10 @@ def calculate_adx(high, low, close, period):
     plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
     minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
     
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.zeros_like(close)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    
     adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return adx
 
@@ -66,37 +72,21 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels
+    # Calculate Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day)
-    range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + 1.1 * range_1d / 2
-    camarilla_l4 = close_1d - 1.1 * range_1d / 2
-    camarilla_h3 = close_1d + 1.1 * range_1d / 4
-    camarilla_l3 = close_1d - 1.1 * range_1d / 4
+    # Camarilla levels: H4, L4 (most important for intraday)
+    # H4 = close + 1.1 * (high - low) / 2
+    # L4 = close - 1.1 * (high - low) / 2
+    camarilla_h4 = close_1d + CAMARILLA_MULT * (high_1d - low_1d) / 2
+    camarilla_l4 = close_1d - CAMARILLA_MULT * (high_1d - low_1d) / 2
     
-    camarilla_h4_prev = np.roll(camarilla_h4, 1)
-    camarilla_l4_prev = np.roll(camarilla_l4, 1)
-    camarilla_h3_prev = np.roll(camarilla_h3, 1)
-    camarilla_l3_prev = np.roll(camarilla_l3, 1)
-    camarilla_h4_prev[0] = np.nan
-    camarilla_l4_prev[0] = np.nan
-    camarilla_h3_prev[0] = np.nan
-    camarilla_l3_prev[0] = np.nan
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_prev)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_prev)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_prev)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_prev)
-    
-    # Calculate daily ADX for trend filter
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 4-hour indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -105,7 +95,10 @@ def generate_signals(prices):
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR
+    # ADX
+    adx = calculate_adx(high, low, close, ADX_PERIOD)
+    
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -114,13 +107,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not available
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or \
-           np.isnan(camarilla_l4_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or \
-           np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -142,12 +133,14 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: only trade when ADX < threshold (ranging market)
-        ranging = adx_1d_aligned[i] < ADX_THRESHOLD
+        # ADX filter: only trade when there's sufficient momentum
+        adx_ok = adx[i] > ADX_THRESHOLD if not np.isnan(adx[i]) else False
         
         # Mean reversion signals at Camarilla levels
-        long_signal = volume_ok and ranging and (low[i] <= camarilla_l3_aligned[i]) and (close[i] > camarilla_l3_aligned[i])
-        short_signal = volume_ok and ranging and (high[i] >= camarilla_h3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
+        # Long when price touches L4 support with volume and momentum
+        long_signal = volume_ok and adx_ok and (low[i] <= camarilla_l4_aligned[i])
+        # Short when price touches H4 resistance with volume and momentum
+        short_signal = volume_ok and adx_ok and (high[i] >= camarilla_h4_aligned[i])
         
         # Generate signals
         if position == 0:
