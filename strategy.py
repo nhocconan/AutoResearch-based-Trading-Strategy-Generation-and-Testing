@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian channel breakout with volume confirmation and daily EMA trend filter.
-# Designed for weekly/monthly timeframes to capture strong momentum moves while minimizing trades.
-# Uses daily EMA to filter trend direction and volume to confirm breakout strength.
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and 1d EMA trend filter.
+# Designed for 12h timeframe to capture medium-term trends while minimizing trade frequency.
+# Breakouts capture strong moves, volume filters weak signals, and EMA trend filter ensures alignment with higher timeframe momentum.
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
-# Works in bull/bear markets by trading with trend and using volatility-based stops.
 
 name = "exp_13152_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
