@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12810_1d_1w_donchian_volume_v1"
-timeframe = "1d"
+name = "exp_12811_6d_camarilla_pivot_volume"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+CAMARILLA_PERIOD = 1
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_DAYS = 15  # Max 15 days to prevent overtrading
+MAX_HOLD_BARS = 20  # Max 5 days (20 * 6h) to prevent overtrading
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -30,24 +30,41 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Upper band: highest high over period
-    upper_band = pd.Series(high_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    # Lower band: lowest low over period
-    lower_band = pd.Series(low_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3
     
-    # Align to 1d timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    # Range
+    range_1d = high_1d - low_1d
     
-    # Calculate 1d indicators
+    # Camarilla levels (based on previous day's data)
+    # R4 = close + range * 1.1/2
+    # R3 = close + range * 1.1/4
+    # R2 = close + range * 1.1/6
+    # R1 = close + range * 1.1/12
+    # S1 = close - range * 1.1/12
+    # S2 = close - range * 1.1/6
+    # S3 = close - range * 1.1/4
+    # S4 = close - range * 1.1/2
+    r4 = close_1d + range_1d * 1.1 / 2
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
+    s4 = close_1d - range_1d * 1.1 / 2
+    
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -60,16 +77,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    days_since_entry = 0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        days_since_entry += 1
+        bars_since_entry += 1
         
-        # Skip if weekly bands not available
-        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -81,43 +98,57 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                days_since_entry = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                days_since_entry = 0
+                bars_since_entry = 0
                 continue
         
         # Time-based exit to prevent overtrading
-        if days_since_entry >= MAX_HOLD_DAYS:
+        if bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
-            days_since_entry = 0
+            bars_since_entry = 0
             continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_band_aligned[i]
+        # Fade at S3/R3, breakout at S4/R4
+        fade_long = volume_ok and close[i] <= s3_aligned[i]
+        fade_short = volume_ok and close[i] >= r3_aligned[i]
+        breakout_long = volume_ok and close[i] >= r4_aligned[i]
+        breakout_short = volume_ok and close[i] <= s4_aligned[i]
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if fade_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                days_since_entry = 0
+                bars_since_entry = 0
+            elif fade_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
+            elif breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                days_since_entry = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
