@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #11834: 1h Donchian Breakout with 4h/1d Trend and Volume Confirmation
-Hypothesis: 1h Donchian(20) breakouts with 4h/1d EMA trend filter and volume confirmation
-capture momentum moves while avoiding false breakouts. 4h/1d filters provide direction,
-1h provides timing. Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades.
+Experiment #11835: 6h Trix Momentum with Weekly Trend Filter and Volume Confirmation
+Hypothesis: Trix (triple-smoothed EMA) captures momentum with reduced noise. Weekly trend filter ensures 
+alignment with higher timeframe direction, while volume confirmation filters false breakouts. 
+Works in bull markets via momentum continuation and in bear via mean-reversion at extremes.
+Target: 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11834_1h_donchian20_4h_1d_vol_session_v1"
-timeframe = "1h"
+name = "exp_11835_6h_trix_weekly_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
+TRIX_PERIOD = 12
+TRIX_SIGNAL = 9
+WEEKLY_EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_trix(close, period):
+    """Calculate TRIX: triple EMA of percent change"""
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    # Calculate percent change of triple EMA
+    pct_change = ema3.pct_change()
+    # Signal line is EMA of TRIX
+    trix = pct_change * 100  # Scale for readability
+    trix_signal = trix.ewm(span=TRIX_SIGNAL, adjust=False, min_periods=TRIX_SIGNAL).mean()
+    return trix.values, trix_signal.values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,23 +55,20 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h and 1d EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly EMA for trend filter
+    ema_weekly = calculate_ema(df_weekly['close'].values, WEEKLY_EMA_PERIOD)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    trix, trix_signal = calculate_trix(close, TRIX_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -73,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(TRIX_PERIOD + TRIX_SIGNAL, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h or 1d EMA not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_weekly_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,22 +101,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
-        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
+        # Trix momentum signals
+        trix_cross_up = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] if i > 0 and not np.isnan(trix[i]) and not np.isnan(trix_signal[i]) else False
+        trix_cross_down = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] if i > 0 and not np.isnan(trix[i]) and not np.isnan(trix_signal[i]) else False
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h and 1d must agree)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_weekly_aligned[i]
+        weekly_downtrend = close[i] < ema_weekly_aligned[i]
         
-        # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_4h and uptrend_1d
-        short_entry = breakout_down and volume_ok and downtrend_4h and downtrend_1d
+        # Entry conditions: momentum + volume + trend alignment
+        long_entry = trix_cross_up and volume_ok and weekly_uptrend
+        short_entry = trix_cross_down and volume_ok and weekly_downtrend
         
         # Generate signals
         if position == 0:
