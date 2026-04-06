@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with 12h volume confirmation and 1d trend filter
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 12h volume for conviction. 
-Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). 
-Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian(20) breakout with 1d EMA trend and volume confirmation
+Hypothesis: Donchian breakouts capture institutional momentum. Filter by 1d EMA trend for market bias and 4h volume > 1.5x 1d average volume (scaled) for confirmation. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_12h_vol_1d_trend_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,18 +36,6 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
-    
-    # 20-period average volume on 12h
-    vol_ma_12h = np.full(len(volume_12h), np.nan)
-    for i in range(20, len(volume_12h)):
-        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
-    
-    # Align volume MA to 6h timeframe
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    
     # Get 1d data for trend filter (EMA21)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
@@ -64,10 +50,21 @@ def generate_signals(prices):
     # 1d trend: above EMA21 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d trend to 6h timeframe
+    # Align 1d trend to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Donchian channels (20-period) from 6h data
+    # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 4h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Donchian channels (20-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -87,7 +84,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
             np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_12h_aligned[i])):
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -95,9 +92,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 6h volume > 1.5x 12h average volume (scaled)
-        # Scale 12h volume to 6h: approx 1/2 of 12h volume (since 2x 6h in 12h)
-        vol_threshold = vol_ma_12h_aligned[i] / 2.0 * 1.5
+        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
