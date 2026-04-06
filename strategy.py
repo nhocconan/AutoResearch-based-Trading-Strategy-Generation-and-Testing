@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Donchian breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and weekly Donchian channels provide structural support/resistance that works across regimes.
-# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
+# Hypothesis: 4h Donchian breakout with daily EMA filter and volume confirmation.
+# Works in bull/bear because breakouts capture strong momentum moves, EMA filter ensures
+# alignment with higher timeframe trend, and volume filters out false breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
 
-name = "exp_12938_1d_weekly_donchian_breakout_v1"
-timeframe = "1d"
+name = "exp_12940_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -35,29 +36,29 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    upper_w, lower_w = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
+    # Calculate daily EMA
+    ema_daily = calculate_ema(df_daily['close'].values, EMA_PERIOD)
+    ema_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Align to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
-    
-    # Calculate daily indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -67,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Donchian levels not available
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,9 +94,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_aligned[i]
+        # Donchian breakout with EMA filter
+        breakout_long = volume_ok and (not np.isnan(donch_up[i])) and (close[i] > donch_up[i]) and (close[i] > ema_aligned[i])
+        breakout_short = volume_ok and (not np.isnan(donch_low[i])) and (close[i] < donch_low[i]) and (close[i] < ema_aligned[i])
         
         # Generate signals
         if position == 0:
