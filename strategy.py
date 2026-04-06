@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams %R combined with 1-day ADX trend filter and 1-week volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean-reversion entries.
-# ADX filters for trending vs ranging markets to avoid false signals.
-# Volume confirmation ensures institutional participation.
-# Designed for 12h timeframe to target 50-150 trades over 4 years with low frequency.
+# Hypothesis: 12-hour Donchian channel breakout with 1-day ADX trend filter and 1-week volume confirmation.
+# Donchian breakouts capture momentum in trending markets. ADX ensures we only trade in strong trends.
+# Volume confirmation filters for institutional participation. Designed for 12h timeframe to target
+# 50-150 trades over 4 years with low frequency and high win rate.
 
-name = "12h_willr1d_adx1w_vol_v1"
+name = "12h_donchian20_1d_adx1w_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,24 +23,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day Williams %R(14) for mean-reversion signals
+    # 1-day Donchian channel (20-period) for breakout signals
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R calculation
-    highest_high = np.full(len(close_1d), np.nan)
-    lowest_low = np.full(len(close_1d), np.nan)
-    willr = np.full(len(close_1d), np.nan)
+    # Donchian upper and lower bands
+    donch_high = np.full(len(close_1d), np.nan)
+    donch_low = np.full(len(close_1d), np.nan)
     
-    for i in range(13, len(close_1d)):  # 14-period lookback
-        highest_high[i] = np.max(high_1d[i-13:i+1])
-        lowest_low[i] = np.min(low_1d[i-13:i+1])
-        if highest_high[i] != lowest_low[i]:
-            willr[i] = -100 * (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i])
+    for i in range(19, len(close_1d)):
+        donch_high[i] = np.max(high_1d[i-19:i+1])
+        donch_low[i] = np.min(low_1d[i-19:i+1])
     
-    willr_aligned = align_htf_to_ltf(prices, df_1d, willr)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
     # 1-week ADX(14) for trend strength filtering
     df_1w = get_htf_data(prices, '1w')
@@ -117,12 +114,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(27, 13, 4)  # ADX needs 27, Williams %R needs 13, volume needs 4
+    start = max(27, 19, 4)  # ADX needs 27, Donchian needs 19, volume needs 4
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(willr_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -132,44 +129,39 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.3x weekly average
         volume_filter = volume[i] > vol_ma_aligned[i] * 1.3
         
-        # ADX filter: only trade when trending (ADX > 20) or extreme oversold/overbought
-        trending_market = adx_aligned[i] > 20
-        extreme_oversold = willr_aligned[i] < -80
-        extreme_overbought = willr_aligned[i] > -20
+        # ADX filter: only trade when trending (ADX > 25)
+        trending_market = adx_aligned[i] > 25
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Williams %R overbought or stoploss
-            if (willr_aligned[i] > -20 or 
+            # Exit: Donchian lower band break or stoploss
+            if (close[i] < donch_low_aligned[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R oversold or stoploss
-            if (willr_aligned[i] < -80 or 
+            # Exit: Donchian upper band break or stoploss
+            if (close[i] > donch_high_aligned[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in trending markets or extreme conditions
-            if trending_market or extreme_oversold or extreme_overbought:
-                if volume_filter:
-                    # Long: oversold in uptrend or extreme oversold
-                    if (willr_aligned[i] < -80 and 
-                        (trending_market and close[i] > close[i-1]) or extreme_oversold):
-                        signals[i] = 0.25
-                        position = 1
-                        entry_price = close[i]
-                    # Short: overbought in downtrend or extreme overbought
-                    elif (willr_aligned[i] > -20 and 
-                          (trending_market and close[i] < close[i-1]) or extreme_overbought):
-                        signals[i] = -0.25
-                        position = -1
-                        entry_price = close[i]
+            # Look for entries in trending markets with volume confirmation
+            if trending_market and volume_filter:
+                # Long: break above Donchian upper band
+                if close[i] > donch_high_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short: break below Donchian lower band
+                elif close[i] < donch_low_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
             else:
                 signals[i] = 0.0
     
