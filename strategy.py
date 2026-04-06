@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band in uptrend (1d EMA50 rising).
-# Enter short when price breaks below Donchian(20) lower band in downtrend (1d EMA50 falling).
+# Hypothesis: 6h Donchian(20) breakout with daily EMA(50) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band in uptrend (daily EMA50 rising).
+# Enter short when price breaks below Donchian(20) lower band in downtrend (daily EMA50 falling).
 # Volume > 1.5x 20-period average confirms breakout strength.
-# Exit on opposite Donchian breakout or when price crosses 1d EMA50.
-# Target: 80-160 total trades over 4 years (20-40/year) to balance signal quality and fee drag.
-# Works in both bull and bear: EMA50 trend filter prevents counter-trend trades,
-# volume confirmation ensures breakout strength, and Donchian channels adapt to volatility.
+# Exit on opposite Donchian breakout or when price crosses daily EMA50.
+# Target: 75-250 total trades over 4 years (19-63/year) to balance signal quality and fee drag.
 
-name = "4h_donchian20_1dema50_vol_v1"
-timeframe = "4h"
+name = "6h_donchian20_1dema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
+    # Daily EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
