@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation
 # Enter long when: price breaks above Donchian(20) high, price > 1w EMA(50), volume > 1.5x avg
 # Enter short when: price breaks below Donchian(20) low, price < 1w EMA(50), volume > 1.5x avg
-# Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
+# Exit when: price retraces to midpoint of Donchian channel
 # Uses weekly trend filter to avoid counter-trend trades, targeting 30-100 trades over 4 years
-# This structure has proven effective on SOLUSDT (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
+# This structure works in both bull and bear markets by filtering with higher timeframe trend
 
-name = "1d_weekly_donchian20_1wema_vol_v1"
+name = "1d_donchian20_1wema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -54,15 +54,15 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price returns to Donchian midpoint OR breaks below lower band
-            if close[i] <= donchian_mid[i] or close[i] < low_20[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] <= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price returns to Donchian midpoint OR breaks above upper band
-            if close[i] >= donchian_mid[i] or close[i] > high_20[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] >= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
