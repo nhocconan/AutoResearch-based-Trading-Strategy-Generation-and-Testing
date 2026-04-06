@@ -1,119 +1,106 @@
 #!/usr/bin/env python3
 """
-1h Donchian Breakout with 4h Trend Filter and Volume Confirmation
-Hypothesis: Uses 1h for precise entry/exit timing while relying on 4h trend direction (via Donchian breakout) and volume confirmation to filter false signals. Designed for 60-150 total trades over 4 years (15-37/year) on 1h timeframe. Works in bull markets via long breakouts and bear markets via short breakdowns. Includes session filter (08-20 UTC) to reduce noise.
+6h Bollinger Band Squeeze + Volume Breakout
+Hypothesis: Bollinger Band width contraction (squeeze) followed by expansion with volume confirms volatility breakouts.
+Works in both bull and bear markets by capturing explosive moves after low volatility periods.
+Uses Bollinger Bands (20,2) on 6h with volume confirmation to filter false breakouts.
+Target: 60-120 trades over 4 years (15-30/year) to minimize fee drag while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_donchian20_4htrend_volume_v1"
-timeframe = "1h"
+name = "6h_bb_squeeze_volume_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # 4h Donchian channels (20-period)
-    highest_high_4h = np.full_like(high_4h, np.nan)
-    lowest_low_4h = np.full_like(low_4h, np.nan)
-    for i in range(20, len(high_4h)):
-        highest_high_4h[i] = np.max(high_4h[i-20:i])
-        lowest_low_4h[i] = np.min(low_4h[i-20:i])
-    
-    # 4h trend: 1 if price > upper band, -1 if price < lower band, 0 otherwise
-    trend_4h = np.zeros_like(close_4h)
-    for i in range(20, len(close_4h)):
-        if close_4h[i] > highest_high_4h[i]:
-            trend_4h[i] = 1
-        elif close_4h[i] < lowest_low_4h[i]:
-            trend_4h[i] = -1
-    
-    # Align 4h trend to 1h (shifted by 1 bar inside align_htf_to_ltf)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    
-    # 1h data
+    # Price and volume data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter (20-period average)
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
     
-    # Session filter: 08-20 UTC (pre-compute)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate rolling mean and std
+    bb_mean = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    
+    upper_band = bb_mean + (bb_std_dev * bb_std)
+    lower_band = bb_mean - (bb_std_dev * bb_std)
+    bb_width = upper_band - lower_band
+    
+    # Bollinger Band width percentile (50-period) for squeeze detection
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=1).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from warmup
-    start = 20
+    # Start from warmup period
+    start = max(bb_period, 50)  # For BB and percentile
     
     for i in range(start, n):
-        # Skip if 4h trend not ready
-        if np.isnan(trend_4h_aligned[i]):
+        # Skip if required data not available
+        if np.isnan(bb_mean[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition
-        vol_condition = not np.isnan(vol_ma[i]) and volume[i] > vol_ma[i] * 1.5
+        # Squeeze condition: BB width in lowest 10% percentile (tight consolidation)
+        squeeze_condition = bb_width_percentile[i] <= 10
         
-        # Session condition
-        sess_condition = session_filter[i]
+        # Expansion condition: BB width expanding from squeeze
+        if i >= 1:
+            width_expanding = bb_width[i] > bb_width[i-1]
+        else:
+            width_expanding = False
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmation = volume[i] > vol_ma[i] * 1.5
+        
+        # Breakout direction: price outside Bollinger Bands
+        breakout_up = close[i] > upper_band[i]
+        breakout_down = close[i] < lower_band[i]
         
         # Check exits
-        if position == 1:  # long
-            # Exit: 1h close below 20-period low OR trend flips to bear
-            if i >= 20:
-                lowest_low_1h = np.min(low[i-20:i])
-                if close[i] < lowest_low_1h or trend_4h_aligned[i] == -1:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
+        if position == 1:  # long position
+            # Exit: price returns to middle band OR volatility contraction returns
+            if close[i] <= bb_mean[i] or bb_width_percentile[i] <= 5:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = 0.20
-        elif position == -1:  # short
-            # Exit: 1h close above 20-period high OR trend flips to bull
-            if i >= 20:
-                highest_high_1h = np.max(high[i-20:i])
-                if close[i] > highest_high_1h or trend_4h_aligned[i] == 1:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price returns to middle band OR volatility contraction returns
+            if close[i] >= bb_mean[i] or bb_width_percentile[i] <= 5:
+                signals[i] = 0.0
+                position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: 1h breakout in direction of 4h trend + volume + session
-            if i >= 20:
-                highest_high_1h = np.max(high[i-20:i])
-                lowest_low_1h = np.min(low[i-20:i)]
-                
-                bull_breakout = close[i] > highest_high_1h
-                bear_breakout = close[i] < lowest_low_1h
-                
-                if bull_breakout and trend_4h_aligned[i] == 1 and vol_condition and sess_condition:
-                    signals[i] = 0.20
+            # Look for entries: squeeze + expansion + volume + breakout
+            if squeeze_condition and width_expanding and volume_confirmation:
+                if breakout_up:
+                    signals[i] = 0.25
                     position = 1
-                elif bear_breakout and trend_4h_aligned[i] == -1 and vol_condition and sess_condition:
-                    signals[i] = -0.20
+                elif breakout_down:
+                    signals[i] = -0.25
                     position = -1
                 else:
                     signals[i] = 0.0
