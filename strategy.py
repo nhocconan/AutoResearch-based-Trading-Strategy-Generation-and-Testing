@@ -3,22 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12687_6d_donchian20_1w_pivot_vol_v1"
+name = "exp_12687_6d_donchian_weeklypivot_volume_v1"
+timezone = "UTC"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-PIVOT_PERIOD = 1  # weekly
+PIVOT_PERIOD = 7  # weekly pivot
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
+DONCHIAN_PERIOD = 20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -35,7 +32,7 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_pivot(high, low, close):
+def calculate_weekly_pivot(high, low, close):
     """Calculate weekly pivot levels"""
     pivot = (high + low + close) / 3
     range_val = high - low
@@ -43,7 +40,9 @@ def calculate_pivot(high, low, close):
     s1 = pivot - (range_val * 1.0)
     r2 = pivot + (range_val * 2.0)
     s2 = pivot - (range_val * 2.0)
-    return pivot, r1, s1, r2, s2
+    r3 = pivot + (range_val * 3.0)
+    s3 = pivot - (range_val * 3.0)
+    return r1, s1, r2, s2, r3, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -57,13 +56,15 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    _, r1_1w, s1_1w, r2_1w, s2_1w = calculate_pivot(high_1w, low_1w, close_1w)
+    r1_1w, s1_1w, r2_1w, s2_1w, r3_1w, s3_1w = calculate_weekly_pivot(high_1w, low_1w, close_1w)
     
     # Align pivot levels to 6h timeframe
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
     s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -71,9 +72,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,7 +82,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if weekly pivot levels not available
@@ -107,22 +108,25 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Determine market bias from weekly pivot
-        bullish = close[i] > r1_1w_aligned[i]  # above weekly R1
-        bearish = close[i] < s1_1w_aligned[i]  # below weekly S1
+        # Breakout from Donchian with volume confirmation
+        breakout_long = volume_ok and close[i] > donchian_upper[i]
+        breakdown_short = volume_ok and close[i] < donchian_lower[i]
         
-        # Donchian breakout with weekly bias
-        long_signal = volume_ok and (close[i] >= upper[i]) and bullish
-        short_signal = volume_ok and (close[i] <= lower[i]) and bearish
+        # Weekly pivot filter: only trade in direction of weekly trend
+        weekly_bullish = close[i] > ((r1_1w_aligned[i] + s1_1w_aligned[i]) / 2)
+        weekly_bearish = close[i] < ((r1_1w_aligned[i] + s1_1w_aligned[i]) / 2)
+        
+        long_entry = breakout_long and weekly_bullish
+        short_entry = breakdown_short and weekly_bearish
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
