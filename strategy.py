@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12807_6d_donchian20_1w_trend_vol_v1"
-timeframe = "6h"
+name = "exp_12808_12h_donchian20_1w_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -42,11 +42,11 @@ def generate_signals(prices):
     # Lower band: lowest low over period
     lower_band = pd.Series(low_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
     lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
