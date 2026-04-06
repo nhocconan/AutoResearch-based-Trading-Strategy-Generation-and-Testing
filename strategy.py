@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout with Weekly Trend and Volume Confirmation
-Hypothesis: Donchian breakouts on daily timeframe filtered by weekly trend direction
-and volume confirmation capture momentum while avoiding whipsaws. Weekly trend provides
-robust trend filter that works in both bull and bear markets. Volume confirms breakout
-strength. Target: 30-100 total trades over 4 years.
+6h Donchian(20) Breakout with Weekly Pivot Direction and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 6h, filtered by weekly pivot direction (trend),
+and confirmed by volume spikes, capture momentum across market regimes. Weekly pivots
+provide robust support/resistance that works in both bull and bear markets, while volume
+confirms breakout legitimacy. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_weekly_trend_vol_v1"
-timeframe = "1d"
+name = "6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 20-period ATR for stops
+    # 20-period ATR for stops and filters
     atr = np.full(n, np.nan)
     if n >= 20:
         tr = np.maximum(
@@ -47,19 +47,23 @@ def generate_signals(prices):
         donch_high[i] = np.max(high[i-20:i])
         donch_low[i] = np.min(low[i-20:i])
     
-    # Get weekly data for trend filter
+    # Get weekly data for pivot calculation
     df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     weekly_close = df_weekly['close'].values
     
-    # Weekly EMA(21) for trend
-    weekly_ema = np.full(len(weekly_close), np.nan)
-    if len(weekly_close) >= 21:
-        weekly_ema[20] = np.mean(weekly_close[:21])
-        for i in range(21, len(weekly_close)):
-            weekly_ema[i] = (weekly_close[i] * 2 + weekly_ema[i-1] * 19) / 21
+    # Calculate weekly pivot points (Standard formula)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
     
-    # Trend: 1 if close > EMA (bullish), -1 if close < EMA (bearish)
-    trend_weekly = np.where(weekly_close > weekly_ema, 1, -1)
+    # Trend determination: 1 if close > pivot (bullish bias), -1 if close < pivot (bearish bias)
+    trend_weekly = np.where(weekly_close > pivot, 1, -1)
     trend_weekly_aligned = align_htf_to_ltf(prices, df_weekly, trend_weekly)
     
     # Volume filter: current volume > 1.8x average over last 20 periods
