@@ -1,33 +1,47 @@
 #!/usr/bin/env python3
 """
-Experiment #12212: 12h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 12h Donchian(20) breakouts capture longer-term trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
+Experiment #12214: 1h Momentum with 4h Trend and Session Filter
+Hypothesis: 1h momentum (RSI + MACD) filters by 4h EMA trend and UTC 8-20 session.
+Momentum captures short-term swings, trend filter ensures directional bias,
+session filter reduces noise outside active hours. Target: 60-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12212_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_12214_1h_momentum_4h_trend_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+RSI_PERIOD = 14
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_macd(close, fast, slow, signal):
+    """Calculate MACD line and signal line"""
+    ema_fast = pd.Series(close).ewm(span=fast, adjust=False, min_periods=fast).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow, adjust=False, min_periods=slow).mean().values
+    macd_line = ema_fast - ema_slow
+    macd_signal = pd.Series(macd_line).ewm(span=signal, adjust=False, min_periods=signal).mean().values
+    return macd_line, macd_signal
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,22 +61,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 4h EMA for trend
+    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 12h indicators
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    macd_line, macd_signal = calculate_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Pre-compute session filter (UTC 8-20)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,11 +87,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(RSI_PERIOD, MACD_SLOW, TREND_EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if 4h EMA not available
+        if np.isnan(ema_4h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,20 +110,19 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
-        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
+        # Momentum conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        macd_bullish = macd_line[i] > macd_signal[i]
+        macd_bearish = macd_line[i] < macd_signal[i]
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend filter (1d)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Trend filter (4h)
+        uptrend_4h = close[i] > ema_4h_aligned[i]
+        downtrend_4h = close[i] < ema_4h_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_1d
-        short_entry = breakout_down and volume_ok and downtrend_1d
+        long_entry = rsi_oversold and macd_bullish and uptrend_4h and in_session[i]
+        short_entry = rsi_overbought and macd_bearish and downtrend_4h and in_session[i]
         
         # Generate signals
         if position == 0:
@@ -128,4 +144,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</</>
+</EOF>
