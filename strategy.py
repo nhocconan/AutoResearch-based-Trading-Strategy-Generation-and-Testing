@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema200_vol_v1"
+name = "12h_camarilla_pivot_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 120:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -18,7 +18,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stops
+    # ATR(14) for stop loss
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -31,85 +31,87 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1d data for trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(200) on 1d
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        alpha = 2.0 / (period + 1)
-        ema_val = np.full_like(arr, np.nan)
-        ema_val[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
-        return ema_val
+    # Calculate Camarilla pivot levels (R4, R3, S3, S4)
+    # R4 = Close + ((High - Low) * 1.1/2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
+    camarilla_r4 = np.full(len(close_1d), np.nan)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_s4 = np.full(len(close_1d), np.nan)
     
-    ema_200 = ema(close_1d, 200)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    for i in range(len(close_1d)):
+        if i >= 1:  # Need previous day's data
+            hl = high_1d[i-1] - low_1d[i-1]
+            camarilla_r4[i] = close_1d[i-1] + hl * 1.1 / 2
+            camarilla_r3[i] = close_1d[i-1] + hl * 1.1 / 4
+            camarilla_s3[i] = close_1d[i-1] - hl * 1.1 / 4
+            camarilla_s4[i] = close_1d[i-1] - hl * 1.1 / 2
     
-    # Donchian channels (20-period) on 12h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Volume filter: current volume > 1.8x average over last 20 periods
+    # Volume filter: current volume > 1.5x average over last 24 periods (2 days)
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(200, 20)
+    start = max(30, 24)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_200_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or \
+           np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition (stricter)
-        volume_filter = volume[i] > vol_ma[i] * 1.8
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian low or stoploss hit
-            if (close[i] < donchian_low[i] or
+            # Exit: price closes below S3 or stoploss hit
+            if (close[i] < s3_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian high or stoploss hit
-            if (close[i] > donchian_high[i] or
+            # Exit: price closes above R3 or stoploss hit
+            if (close[i] > r3_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries - only long in bull, only short in bear based on daily trend
-            # Long: price breaks above Donchian high, above 1d EMA200, with volume (only in bull market)
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_200_aligned[i] and 
-                volume_filter):
+            # Look for entries
+            # Long: price breaks above R4 with volume
+            if (close[i] > r4_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA200, with volume (only in bear market)
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_200_aligned[i] and 
-                  volume_filter):
+            # Short: price breaks below S4 with volume
+            elif (close[i] < s4_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
