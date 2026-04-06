@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with 1d pivot direction and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price above 1d pivot AND volume > 2x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price below 1d pivot AND volume > 2x 20-period average
-# Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 6h timeframe to reduce trade frequency, 1d pivot for directional bias, Donchian for breakout signals
+# Hypothesis: 6h Elder Ray Index with 12h EMA trend filter and volume confirmation
+# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Long when Bull Power > 0 AND Bear Power < 0 AND price > 12h EMA(50) AND volume > 1.5x average
+# Short when Bear Power > 0 AND Bull Power < 0 AND price < 12h EMA(50) AND volume > 1.5x average
+# Exit when Elder Ray signals weaken (Bull Power <= 0 for long, Bear Power <= 0 for short)
+# Uses 6h timeframe to balance trade frequency, Elder Ray for momentum, 12h EMA for trend filter
 # Target: 50-150 total trades over 4 years (12-37/year) for optimal 6h performance
 
-name = "6h_donchian20_1d_pivot_vol_v1"
+name = "6h_elder_ray_12h_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,64 +26,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Elder Ray Index (13-period EMA)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # 1-day Pivot Points (daily high/low/close)
-    df_1d = get_htf_data(prices, '1d')
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # 12-hour EMA(50) trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate pivot points: P = (H+L+C)/3
-    pivot = (daily_high + daily_low + daily_close) / 3
+    # Calculate 50-period EMA on 12h close
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align pivot to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align 12h EMA to 6h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 2.0 * volume_ma.values
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(pivot_aligned[i]) or np.isnan(volume_threshold[i]):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: price crosses Donchian midline
+        # Check exits: Elder Ray signal weakening
         if position == 1:  # long position
-            if close[i] < donchian_mid[i]:
+            if bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] > donchian_mid[i]:
+            if bear_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with pivot direction and volume confirmation
-            # Long: price breaks above Donchian upper AND price > pivot AND volume confirmation
-            if (close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and 
-                close[i] > pivot_aligned[i] and volume[i] > volume_threshold[i]):
+            # Look for entries with trend filter and volume confirmation
+            # Long: Bull Power > 0 AND Bear Power < 0 AND price > 12h EMA(50) AND volume confirmation
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                close[i] > ema50_12h_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND price < pivot AND volume confirmation
-            elif (close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and 
-                  close[i] < pivot_aligned[i] and volume[i] > volume_threshold[i]):
+            # Short: Bear Power > 0 AND Bull Power < 0 AND price < 12h EMA(50) AND volume confirmation
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  close[i] < ema50_12h_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
