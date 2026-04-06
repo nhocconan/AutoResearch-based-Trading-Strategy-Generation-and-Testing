@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13960_4h_donchian20_1d_ema_vol_v2"
+name = "exp_13960_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Tightened entry conditions to reduce trade count: require volume > 2.0x average (was 1.5x)
-# and only enter on breakouts when price is >1% beyond Donchian bands to avoid whipsaws.
-# Exit on opposite Donchian touch or trend change. Designed for 75-200 total trades over 4 years.
-# Works in bull (breaks above with trend) and bear (breaks below with trend) with EMA filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Uses 1d EMA(50) for trend direction: price above EMA = bullish bias (long only),
+# price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
+# direction of 1d trend with volume > 1.5x average. Exit on Donchian reversal or
+# trend change. Designed for 75-200 total trades over 4 years (19-50/year) to
+# minimize fee drag. Works in bull (breaks above with trend) and bear (breaks
+# below with trend) with EMA filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -99,12 +101,12 @@ def generate_signals(prices):
         bullish_trend = close[i] > ema_aligned[i]  # price above 1d EMA = bullish
         bearish_trend = close[i] < ema_aligned[i]  # price below 1d EMA = bearish
         
-        # Volume confirmation - increased threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.0)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Donchian breakout signals with buffer to avoid whipsaws
-        breakout_up = close[i] > (donchian_upper[i-1] * 1.01)  # break above with 1% buffer
-        breakout_down = close[i] < (donchian_lower[i-1] * 0.99)  # break below with 1% buffer
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
         # Entry signals - only in direction of 1d trend
         long_signal = bullish_trend and volume_ok and breakout_up
