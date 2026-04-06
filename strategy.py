@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Uses 1d trend to avoid counter-trend trades, volume to filter false breakouts.
-# Targets 20-30 trades/year (80-120 over 4 years) to minimize fee drag.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Uses daily trend to avoid counter-trend trades, volume to filter false breakouts.
+# Targets 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
 # Works in bull/bear by only trading with higher timeframe trend.
 
 name = "4h_donchian20_1d_ema50_vol_v1"
@@ -36,7 +36,7 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # 50-period EMA on 1d timeframe
+    # 50-period EMA on 1-day timeframe
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
