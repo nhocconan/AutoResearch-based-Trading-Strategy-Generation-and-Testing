@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian high and 1d EMA(50) is rising
-# Short when price breaks below 20-period Donchian low and 1d EMA(50) is falling
-# Uses volume > 20-period average to confirm breakouts
-# Target: 50-150 total trades over 4 years with controlled risk in both bull and bear markets
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when price breaks above 20-period high with 1d EMA(50) uptrend and volume > 20-period average
+# Short when price breaks below 20-period low with 1d EMA(50) downtrend and volume > 20-period average
+# ATR-based stoploss to limit drawdown
+# Target: 75-200 total trades over 4 years with controlled risk
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,13 +33,22 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Donchian channels (20-period)
+    # Donchian channels: 20-period high/low
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter
+    # Volume filter: volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > vol_ma
+    
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,7 +57,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -56,8 +65,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2 * ATR approximation using price range
-            if close[i] < entry_price - 2.0 * (high[i] - low[i]):
+            # Stoploss: 2 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -69,8 +78,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2 * ATR approximation
-            if close[i] > entry_price + 2.0 * (high[i] - low[i]):
+            # Stoploss: 2 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -84,12 +93,12 @@ def generate_signals(prices):
         else:
             # Look for entries with volume confirmation
             if vol_filter[i]:
-                # Long when price breaks above Donchian high and 1d EMA rising
+                # Long when price breaks above Donchian high with uptrend
                 if close[i] > high_max[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short when price breaks below Donchian low and 1d EMA falling
+                # Short when price breaks below Donchian low with downtrend
                 elif close[i] < low_min[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
                     signals[i] = -0.25
                     position = -1
