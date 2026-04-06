@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and pivot levels provide structural support/resistance that works across regimes.
-# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
+# Hypothesis: 6h Donchian breakout with 1d ATR volatility filter and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, volatility filter adapts to market conditions,
+# and volume filters out weak breakouts. Target: 60-150 total trades over 4 years (15-38/year).
 
-name = "exp_12870_1d_weekly_pivot_breakout_v1"
-timeframe = "1d"
+name = "exp_12871_6h_donchian20_1d_atr_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.5
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_MULTIPLIER = 1.5
+SIGNAL_SIZE = 0.25
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,65 +28,39 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Calculate 1d ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    atr_1d_avg = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
     
-    pivot_vals = np.zeros(len(close_w))
-    r1_vals = np.zeros(len(close_w))
-    r2_vals = np.zeros(len(close_w))
-    r3_vals = np.zeros(len(close_w))
-    s1_vals = np.zeros(len(close_w))
-    s2_vals = np.zeros(len(close_w))
-    s3_vals = np.zeros(len(close_w))
+    # Align 1d ATR average to 6h timeframe
+    atr_1d_avg_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_avg)
     
-    for i in range(len(close_w)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
-        pivot_vals[i] = pivot
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        r3_vals[i] = r3
-        s1_vals[i] = s1
-        s2_vals[i] = s2
-        s3_vals[i] = s3
-    
-    # Align to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
-    
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    atr_6h = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot levels not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if indicators not available
+        if np.isnan(atr_1d_avg_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr_6h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -117,25 +91,28 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Volatility filter: only trade when volatility is above average
+        vol_filter = atr_6h[i] > atr_1d_avg_aligned[i]
+        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above R3 or breakdown below S3
-        breakout_long = volume_ok and close[i] >= r3_aligned[i]
-        breakout_short = volume_ok and close[i] <= s3_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] >= upper[i]
+        breakout_down = close[i] <= lower[i]
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if vol_filter and volume_ok and breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+                stop_price = entry_price - (atr_6h[i] * ATR_MULTIPLIER)
+            elif vol_filter and volume_ok and breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (atr_6h[i] * ATR_MULTIPLIER)
             else:
                 signals[i] = 0.0
         elif position == 1:
