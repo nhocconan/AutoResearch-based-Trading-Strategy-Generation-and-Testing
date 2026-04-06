@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 100-180 trades over 4 years (25-45/year) to balance opportunity and cost.
+4h Donchian20 + 1d Trend + Volume Confirmation
+Breakout strategy: long when price breaks above 20-period high with 1d uptrend,
+short when breaks below 20-period low with 1d downtrend. Uses volume confirmation
+and ATR stoploss. Designed for 4h timeframe to target 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1dtrend_vol_v2"
+name = "4h_donchian20_1dtrend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -48,24 +50,17 @@ def generate_signals(prices):
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 4h timeframe
+    # Align trend bias to 4h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
-    # Donchian channels (20-period) from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Donchian channels (20-period high/low)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Upper and lower bands from previous day to avoid look-ahead
-    upper_1d = np.full_like(high_1d, np.nan)
-    lower_1d = np.full_like(low_1d, np.nan)
-    
-    for i in range(20, len(high_1d)):
-        upper_1d[i] = np.max(high_1d[i-20:i])
-        lower_1d[i] = np.min(low_1d[i-20:i])
-    
-    # Align to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    if n >= 20:
+        for i in range(20, n):
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,12 +68,12 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 30  # Need enough data for Donchian
+    start = 50  # Need enough data for calculations
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i])):
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,9 +87,9 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against 1d trend
+            # Exit: price drops below Donchian low OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower_aligned[i] or
+            if (close[i] < donchian_low[i] or
                 trend_bias_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
@@ -104,9 +99,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against 1d trend
+            # Exit: price rises above Donchian high OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper_aligned[i] or
+            if (close[i] > donchian_high[i] or
                 trend_bias_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
@@ -119,17 +114,17 @@ def generate_signals(prices):
             # Look for entries
             # Minimum holding period: only allow new entry after 12 bars flat
             if bars_since_entry >= 12:
-                # Breakout entries: upper/lower with trend
-                bull_breakout = close[i] > upper_aligned[i]
-                bear_breakout = close[i] < lower_aligned[i]
+                # Breakout entries with trend confirmation
+                bull_breakout = close[i] > donchian_high[i]
+                bear_breakout = close[i] < donchian_low[i]
                 
-                # Long: breakout with uptrend + volume
+                # Long: breakout above high with uptrend + volume
                 if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown with downtrend + volume
+                # Short: breakout below low with downtrend + volume
                 elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
