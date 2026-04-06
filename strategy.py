@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-1h RSI + 4h EMA Trend + Volume Confirmation
-Hypothesis: In strong trends (4h EMA), 1h RSI pullbacks offer high-probability entries.
-Volume confirms institutional participation. Works in bull (buy dips in uptrend) and bear
-(sell rallies in downtrend). Target: 75-150 total trades over 4 years (19-38/year).
+6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+Hypothesis: Donchian breakouts capture momentum, weekly pivots provide institutional
+support/resistance context, and volume filters ensure participation. Works in bull
+(breakouts above weekly pivot) and bear (breakdowns below weekly pivot). Target:
+75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14394_1h_rsi_4h_ema_vol_v1"
-timeframe = "1h"
+name = "14395_6h_donchian_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,81 +20,105 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA trend (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load weekly data for pivot calculation (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # 4h EMA(50) for trend filter
-    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points (using prior week's data)
+    pivot = (high_weekly + low_weekly + close_weekly) / 3
+    r1 = 2 * pivot - low_weekly
+    s1 = 2 * pivot - high_weekly
+    r2 = pivot + (high_weekly - low_weekly)
+    s2 = pivot - (high_weekly - low_weekly)
+    r3 = high_weekly + 2 * (pivot - low_weekly)
+    s3 = low_weekly - 2 * (high_weekly - pivot)
     
-    # 1h data
-    close = prices['close'].values
+    # Align weekly pivots to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1h Volume MA(20)
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.2 * vol_ma)  # Require above average volume
+    
+    # ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start = 50  # warmup for EMA and RSI
+    # Start from warmup period
+    start = 20
     
     for i in range(start, n):
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+        # Skip if required data not available
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions
-        if position == 1:  # long
-            if (rsi[i] > 70 or  # overbought exit
-                close[i] <= entry_price - 1.5 * (high[i] - low[i]) or  # simple volatility stop
-                ema_4h_aligned[i] < ema_4h_aligned[i-1]):  # trend weakening
+        # Determine bias from weekly pivot
+        bullish_bias = close[i] > pivot_aligned[i]
+        bearish_bias = close[i] < pivot_aligned[i]
+        
+        # Check exits
+        if position == 1:  # long position
+            # Exit: price breaks below donchian low OR bias flips OR stoploss
+            if (close[i] <= donchian_low[i] or not bullish_bias or
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        elif position == -1:  # short
-            if (rsi[i] < 30 or  # oversold exit
-                close[i] >= entry_price + 1.5 * (high[i] - low[i]) or
-                ema_4h_aligned[i] > ema_4h_aligned[i-1]):
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price breaks above donchian high OR bias flips OR stoploss
+            if (close[i] >= donchian_high[i] or not bearish_bias or
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Entry conditions: RSI extreme + volume + 4h trend alignment
-            vol_filter = volume[i] > 1.2 * vol_ma[i]  # above average volume
+            # Look for entries: donchian breakout + weekly pivot bias + volume
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
             
-            long_setup = (rsi[i] < 30 and  # oversold
-                         close[i] > ema_4h_aligned[i] and  # above 4h EMA (uptrend)
-                         vol_filter)
-            
-            short_setup = (rsi[i] > 70 and  # overbought
-                          close[i] < ema_4h_aligned[i] and  # below 4h EMA (downtrend)
-                          vol_filter)
+            long_setup = long_breakout and bullish_bias and vol_filter[i]
+            short_setup = short_breakout and bearish_bias and vol_filter[i]
             
             if long_setup:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             elif short_setup:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
             else:
