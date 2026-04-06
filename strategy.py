@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot levels from 1d: fade at R3/S3 with volume and ADX filter, breakout continuation at R4/S4.
-# Works in bull markets (breakouts above R4) and bear markets (breakdowns below S4). Fade at R3/S3 captures reversals in ranging markets.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4-hour Camarilla pivot reversal with daily volume confirmation and ADX trend filter.
+# Uses Camarilla levels (L3/L4 for long, H3/H4 for short) from daily pivots.
+# Enter on bounce off support/resistance with volume spike, only in trending markets (ADX>25).
+# Works in bull markets (buying dips at L3/L4) and bear markets (selling rallies at H3/H4).
+# Target: 100-200 total trades over 4 years (25-50/year).
 
-name = "exp_13559_6h_camarilla1d_v1"
-timeframe = "6h"
+name = "exp_13560_4h_camarilla1d_adx_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1  # Use previous day's high/low/close
+CAMARILLA_MULT = 1.1
 ADX_PERIOD = 14
-ADX_THRESHOLD = 20
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -23,25 +25,44 @@ ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_adx(high, low, close, period):
     """Calculate ADX using Wilder's smoothing"""
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    tr = np.zeros_like(high)
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    for i in range(1, len(high)):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    # Wilder's smoothing (alpha = 1/period)
+    atr = np.zeros_like(tr)
+    plus_dm_smooth = np.zeros_like(tr)
+    minus_dm_smooth = np.zeros_like(tr)
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    atr[0] = tr[0]
+    plus_dm_smooth[0] = plus_dm[0]
+    minus_dm_smooth[0] = minus_dm[0]
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    for i in range(1, len(tr)):
+        atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
+        plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Smooth DX to get ADX
+    adx = np.zeros_like(dx)
+    adx[0] = dx[0]
+    for i in range(1, len(dx)):
+        adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
+    
     return adx
 
 def calculate_atr(high, low, close, period):
@@ -50,7 +71,10 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
     return atr
 
 def generate_signals(prices):
@@ -58,36 +82,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla pivot ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    camarilla_range = high_1d - low_1d
-    r4 = close_1d + 1.5 * camarilla_range
-    r3 = close_1d + 1.1 * camarilla_range
-    s3 = close_1d - 1.1 * camarilla_range
-    s4 = close_1d - 1.5 * camarilla_range
-    
-    # Align Camarilla levels to 6h timeframe (shifted by 1 day for previous day's levels)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Camarilla levels: Close ± (High-Low) * multipliers
+    range_1d = high_1d - low_1d
+    camarilla_h4 = close_1d + range_1d * CAMARILLA_MULT * 1.1 / 2
+    camarilla_h3 = close_1d + range_1d * CAMARILLA_MULT * 0.5 / 2
+    camarilla_l3 = close_1d - range_1d * CAMARILLA_MULT * 0.5 / 2
+    camarilla_l4 = close_1d - range_1d * CAMARILLA_MULT * 1.1 / 2
     
     # Calculate daily ADX for trend filter
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
+    
+    # Align daily data to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -96,7 +116,7 @@ def generate_signals(prices):
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -108,10 +128,8 @@ def generate_signals(prices):
     start = max(ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Camarilla or ADX not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        # Skip if data not available
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -133,37 +151,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: ADX > threshold indicates trending market
+        # Trend filter: only trade in trending markets (ADX > 25)
         trending = adx_1d_aligned[i] > ADX_THRESHOLD
         
-        # Camarilla-based signals
-        # Fade at R3/S3 in ranging markets (ADX <= threshold)
-        fade_r3 = not trending and volume_ok and (high[i] >= r3_aligned[i]) and (close[i] < r3_aligned[i])
-        fade_s3 = not trending and volume_ok and (low[i] <= s3_aligned[i]) and (close[i] > s3_aligned[i])
-        
-        # Breakout continuation at R4/S4 in trending markets (ADX > threshold)
-        breakout_r4 = trending and volume_ok and (high[i] >= r4_aligned[i]) and (close[i] > r4_aligned[i])
-        breakout_s4 = trending and volume_ok and (low[i] <= s4_aligned[i]) and (close[i] < s4_aligned[i])
+        # Camarilla reversal signals
+        bounce_long = volume_ok and trending and (low[i] <= camarilla_l3_aligned[i]) and (close[i] > camarilla_l3_aligned[i])
+        bounce_short = volume_ok and trending and (high[i] >= camarilla_h3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
         
         # Generate signals
         if position == 0:
-            if fade_r3:
-                signals[i] = -SIGNAL_SIZE  # short at R3 rejection
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            elif fade_s3:
-                signals[i] = SIGNAL_SIZE   # long at S3 rejection
+            if bounce_long:
+                signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_r4:
-                signals[i] = SIGNAL_SIZE   # long breakout at R4
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_s4:
-                signals[i] = -SIGNAL_SIZE  # short breakdown at S4
+            elif bounce_short:
+                signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
