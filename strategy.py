@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12828_12h_donchian20_1w_vol_v1"
+name = "exp_12828_12h_weekly_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 15
-VOLUME_THRESHOLD = 1.8
+WEEKLY_PERIOD = 1
+VOLUME_MA_PERIOD = 24
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 30  # Max 15 days (30 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -25,7 +26,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channel: upper and lower bands"""
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -38,10 +39,12 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly Donchian channel
+    # Calculate weekly Donchian channels
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
-    upper_w, lower_w = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
+    close_w = df_weekly['close'].values
+    
+    upper_w, lower_w = calculate_donchian(high_w, low_w, WEEKLY_PERIOD)
     
     # Align to 12h timeframe
     upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
@@ -60,12 +63,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly Donchian not available
+        bars_since_entry += 1
+        
+        # Skip if weekly levels not available
         if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -78,12 +84,21 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
+        
+        # Time-based exit to prevent overtrading
+        if bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -99,11 +114,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -112,4 +129,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</x>
