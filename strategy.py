@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #11894: 1h Donchian Breakout with 4h Trend and Volume Confirmation
-Hypothesis: 1h Donchian(20) breakouts capture short-term momentum. 4h EMA provides trend bias,
-and volume filter ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Experiment #11894: 1h Donchian Breakout with 4h Trend and Volume Confirmation + Session Filter
+Hypothesis: 1h Donchian(20) breakouts filtered by 4h EMA trend and volume spikes yield reliable entries.
+4h/1d used for direction, 1h for timing. Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11894_1h_donchian20_4h_ema_vol_session_v1"
+name = "exp_11894_1h_donchian20_4h_1d_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
+TREND_EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -47,12 +46,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
+    # Load 4h and 1d data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate 4h EMA for trend
     ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Calculate 1d EMA for trend filter
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 1h indicators
     high = prices['high'].values
@@ -64,9 +68,6 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -76,15 +77,6 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Skip if 4h EMA not available
         if np.isnan(ema_4h_aligned[i]):
             if position != 0:
@@ -116,9 +108,17 @@ def generate_signals(prices):
         uptrend_4h = close[i] > ema_4h_aligned[i]
         downtrend_4h = close[i] < ema_4h_aligned[i]
         
+        # Trend filter (1d) - stronger filter
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
+        
+        # Session filter (08-20 UTC)
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
+        
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_4h
-        short_entry = breakout_down and volume_ok and downtrend_4h
+        long_entry = breakout_up and volume_ok and uptrend_4h and uptrend_1d and in_session
+        short_entry = breakout_down and volume_ok and downtrend_4h and downtrend_1d and in_session
         
         # Generate signals
         if position == 0:
