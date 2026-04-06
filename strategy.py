@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
 # Works in trending markets by following breakouts with trend filter
 
-name = "4h_donchian_1d_ema_vol_v2"
+name = "4h_donchian_1d_ema_vol_v3"
 timeframe = "4h"
 leverage = 1.0
 
