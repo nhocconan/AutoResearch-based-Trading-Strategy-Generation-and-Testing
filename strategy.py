@@ -4,8 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve generalization.
-# Works in bull markets by capturing breakout momentum and in bear markets by filtering with daily EMA.
+# The 12-hour timeframe balances trade frequency and signal reliability, avoiding excessive noise from lower timeframes.
+# Donchian breakouts capture momentum in both bull and bear markets, while the daily EMA ensures alignment with higher timeframe trend.
+# Volume confirmation filters out false breakouts. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 name = "exp_13192_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
