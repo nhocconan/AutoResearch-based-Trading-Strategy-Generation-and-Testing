@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(10) breakout with daily trend filter and volume confirmation.
-# Uses 1-day EMA(50) to establish trend direction (long above, short below).
-# Breakouts in direction of daily trend with volume > 2x average capture strong moves.
-# Designed for 12h timeframe to target 50-150 trades over 4 years with low frequency.
-# Works in bull/bear markets via trend-following logic with volatility filter.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA trend and volume confirmation.
+# Uses 1-day EMA50 to establish trend bias (long above EMA50, short below EMA50).
+# Breakouts in direction of EMA trend with volume capture institutional moves.
+# Designed for 4h timeframe to target 75-200 trades over 4 years with proven structure.
+# Works in bull/bear markets via EMA-based directional bias and volume confirmation.
 
-name = "12h_donchian10_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day EMA(50) for trend filter
+    # 1-day EMA50 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on daily data
-    ema_50 = np.full(len(close_1d), np.nan)
+    # Calculate EMA50 on daily closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
-        multiplier = 2 / (50 + 1)
-        ema_50[49] = np.mean(close_1d[:50])
+        ema_50_1d[49] = np.mean(close_1d[:50])
         for i in range(50, len(close_1d)):
-            ema_50[i] = (close_1d[i] - ema_50[i-1]) * multiplier + ema_50[i-1]
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA to 12h timeframe (shifted by 1 day for no look-ahead)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align EMA50 to 4h timeframe (shifted by 1 day for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12-hour Donchian channel (10-period)
+    # 4-hour Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
-    for i in range(9, n):
-        highest_high[i] = np.max(high[i-9:i+1])
-        lowest_low[i] = np.min(low[i-9:i+1])
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 12h volume > 2x 20-period average
+    # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -66,42 +65,54 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 2x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume condition: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Trend filter: price above/below daily EMA(50)
-        bullish_trend = close[i] > ema_50_aligned[i]
-        bearish_trend = close[i] < ema_50_aligned[i]
+        # Trend bias: long above EMA50, short below EMA50
+        bullish_bias = close[i] > ema_50_aligned[i]
+        bearish_bias = close[i] < ema_50_aligned[i]
         
-        # Check exits and stoploss (2x ATR approximation using Donchian width)
+        # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: trend reversal or stoploss
-            if (not bullish_trend or 
-                close[i] < entry_price - 2.0 * (highest_high[i] - lowest_low[i])):
+            # Exit: price below EMA50 or stoploss (2x ATR approximation using Donchian width)
+            donch_width = highest_high[i] - lowest_low[i]
+            if donch_width > 0:
+                stop_loss_level = entry_price - 2.0 * donch_width
+            else:
+                stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
+            
+            if (close[i] < ema_50_aligned[i] or 
+                close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: trend reversal or stoploss
-            if (not bearish_trend or 
-                close[i] > entry_price + 2.0 * (highest_high[i] - lowest_low[i])):
+            # Exit: price above EMA50 or stoploss
+            donch_width = highest_high[i] - lowest_low[i]
+            if donch_width > 0:
+                stop_loss_level = entry_price + 2.0 * donch_width
+            else:
+                stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
+            
+            if (close[i] > ema_50_aligned[i] or 
+                close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in direction of trend with volume confirmation
+            # Look for entries in direction of EMA trend
             if volume_filter:
-                # Long: breakout above resistance with bullish trend
+                # Long: breakout above resistance with bullish bias
                 if (highest_high[i] > highest_high[i-1] and 
-                    close[i] > highest_high[i] and bullish_trend):
+                    close[i] > highest_high[i-1] and bullish_bias):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakdown below support with bearish trend
+                # Short: breakdown below support with bearish bias
                 elif (lowest_low[i] < lowest_low[i-1] and 
-                      close[i] < lowest_low[i] and bearish_trend):
+                      close[i] < lowest_low[i-1] and bearish_bias):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
