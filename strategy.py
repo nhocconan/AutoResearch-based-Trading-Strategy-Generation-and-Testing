@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h ADX trend filter + 1d Bollinger Bands mean reversion + volume confirmation
-# Long when ADX < 20 (ranging) AND price < BB lower AND volume > 1.5x avg
-# Short when ADX < 20 (ranging) AND price > BB upper AND volume > 1.5x avg
-# Exit when price returns to BB middle OR ADX > 25 (trending begins)
+# Hypothesis: 12h Donchian breakout with volume confirmation and ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume spike + ADX > 20
+# Short when price breaks below 20-period Donchian low + volume spike + ADX > 20
+# Exit when price crosses back through the midpoint of the Donchian channel
 # Uses 12h timeframe to reduce trade frequency, targets 50-150 total trades over 4 years
-# Works in both bull/bear markets by fading extremes in ranging conditions
+# Works in trending markets by capturing breakouts, avoids false signals with volume/ADX filters
 
-name = "12h_adx_bb_vol_v1"
+name = "12h_donchian20_vol_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,58 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ADX (14-period) from 12h - trend strength indicator
-    # ADX < 20 = ranging market (good for mean reversion)
-    # ADX > 25 = trending market (avoid mean reversion)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-        tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.concatenate([[high[0]], high[:-1]])) > 
-                          (np.concatenate([[low[0]], low[:-1]]) - low), 
-                          np.maximum(high - np.concatenate([[high[0]], high[:-1]]), 0), 0)
-        dm_minus = np.where((np.concatenate([[low[0]], low[:-1]]) - low) > 
-                           (high - np.concatenate([[high[0]], high[:-1]])), 
-                           np.maximum(np.concatenate([[low[0]], low[:-1]]) - low, 0), 0)
-        
-        # Smoothed values
-        atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean()
-        dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False).mean()
-        dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False).mean()
-        
-        # Directional Indicators
-        di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-        di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean()
-        
-        return adx.values
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = highest_high.values
+    donchian_low = lowest_low.values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    adx = calculate_adx(high, low, close, 14)
+    # ADX (14-period) - trend strength filter
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First bar
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Bollinger Bands (20, 2) from 1d timeframe for mean reversion signals
-    df_1d = get_htf_data(prices, '1d')
-    daily_close = df_1d['close'].values
+    # Calculate Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate Bollinger Bands
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(daily_close).rolling(window=bb_period, min_periods=bb_period).mean()
-    std = pd.Series(daily_close).rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = sma + (std * bb_std)
-    bb_lower = sma - (std * bb_std)
-    bb_middle = sma
-    
-    # Align BB to 12h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper.values)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower.values)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle.values)
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean()
+    adx_values = adx.values
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -85,40 +65,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(adx[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(bb_middle_aligned[i]) or
-            np.isnan(volume_threshold[i])):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx_values[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price returns to BB middle OR ADX > 25 (trending begins)
+        # Exit conditions: price crosses back through Donchian midpoint
         if position == 1:  # long position
-            if close[i] >= bb_middle_aligned[i] or adx[i] > 25:
+            if close[i] <= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] <= bb_middle_aligned[i] or adx[i] > 25:
+            if close[i] >= donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in ranging market (ADX < 20) with BB extremes
-            # Long: price below BB lower in ranging market + volume confirmation
-            if (adx[i] < 20 and close[i] < bb_lower_aligned[i] and 
-                volume[i] > volume_threshold[i]):
+            # Look for breakouts with volume and trend confirmation
+            # Long breakout: price above Donchian high + volume + ADX > 20
+            if (close[i] > donchian_high[i] and 
+                volume[i] > volume_threshold[i] and 
+                adx_values[i] > 20):
                 signals[i] = 0.25
                 position = 1
-            # Short: price above BB upper in ranging market + volume confirmation
-            elif (adx[i] < 20 and close[i] > bb_upper_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
+            # Short breakout: price below Donchian low + volume + ADX > 20
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > volume_threshold[i] and 
+                  adx_values[i] > 20):
                 signals[i] = -0.25
                 position = -1
     
