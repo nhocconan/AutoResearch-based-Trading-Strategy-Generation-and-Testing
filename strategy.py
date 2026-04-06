@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily trend filter and volume confirmation.
-# Uses 4h Donchian channel (20-period) breakouts for trend continuation.
-# Daily trend filter (price above/below 20-day EMA) ensures alignment with higher timeframe trend.
+# Hypothesis: 12h Donchian(20) breakout with daily trend filter and volume confirmation.
+# Uses 12h Donchian channel breakouts for trend continuation.
+# Daily trend filter (price above/below 20-day EMA) ensures alignment with daily trend.
 # Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
 # Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
-# Target: 75-200 trades over 4 years (19-50/year).
+# Target: 50-150 trades over 4 years (12-37/year).
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema_vol_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
+    # 12h Donchian channel (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(19, n):
