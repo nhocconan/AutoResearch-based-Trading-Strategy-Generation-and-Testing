@@ -3,33 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Camarilla pivot reversals with 1-day trend filter and volume confirmation.
-# Camarilla levels (H4/L4 for reversal, H5/L5 for breakout) derived from prior day's range.
-# Works in ranging markets (fade at H4/L4) and trending markets (breakout at H5/L5).
-# 1-day EMA(50) filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Volume confirmation filters out low-probability setups.
+# Hypothesis: 6h volume-weighted VWAP deviation with 1d trend filter.
+# Buying when price deviates below VWAP in uptrend (mean reversion within trend),
+# selling when price deviates above VWAP in downtrend. Uses volume confirmation
+# to avoid false signals. Works in both bull (buy dips) and bear (sell rallies).
 
-name = "exp_13607_6h_camarilla_1d_trend_vol_v1"
+name = "exp_13607_6h_vwap_dev_1d_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULTIPLIER = 1.1 / 12  # H/L = close ± (high-low)*1.1/12
+VWAP_PERIOD = 20
 TREND_EMA_PERIOD = 50
+DEV_THRESHOLD = 0.015  # 1.5% deviation
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the period"""
-    range_ = high - low
-    h5 = close + range_ * 1.1 * 2 / 2  # Actually H5 = close + range * 1.1 * 2
-    h4 = close + range_ * 1.1 * 1 / 2  # H4 = close + range * 1.1 * 1
-    l4 = close - range_ * 1.1 * 1 / 2  # L4 = close - range * 1.1 * 1
-    l5 = close - range_ * 1.1 * 2 / 2  # L5 = close - range * 1.1 * 2
-    return h4, l4, h5, l5
+def calculate_vwap(high, low, close, volume, period):
+    """Calculate VWAP over period"""
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.convolve(typical_price * volume, np.ones(period), 'valid')
+    vwap_den = np.convolve(volume, np.ones(period), 'valid')
+    vwap = np.full_like(typical_price, np.nan)
+    vwap[period-1:] = vwap_num / vwap_den
+    return vwap
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -49,30 +49,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla and trend filter ONCE before loop
+    # Load 1d data for trend filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    h4, l4, h5, l5 = calculate_camarilla(high_1d, low_1d, close_1d)
-    
     # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
     ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    
-    # Align Camarilla levels and EMA to 6h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h5_aligned = align_htf_to_ltf(prices, df_1d, h5)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, l5)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1d_slope = np.diff(ema_1d, prepend=ema_1d[0])  # slope approximation
+    ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # VWAP
+    vwap = calculate_vwap(high, low, close, volume, VWAP_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -86,12 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VWAP_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) \
-           or np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(vwap[i]) or np.isnan(ema_1d_slope_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -113,58 +105,46 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1d EMA (price above/below EMA)
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend direction from 1d EMA slope
+        uptrend = ema_1d_slope_aligned[i] > 0
+        downtrend = ema_1d_slope_aligned[i] < 0
         
-        # Camarilla signals
-        # Fade at H4/L4 (reversal)
-        fade_long = close[i] <= l4_aligned[i] and close[i-1] > l4_aligned[i-1]  # cross above L4
-        fade_short = close[i] >= h4_aligned[i] and close[i-1] < h4_aligned[i-1]  # cross below H4
+        # VWAP deviation
+        if vwap[i] != 0:
+            vwap_dev = (close[i] - vwap[i]) / vwap[i]
+        else:
+            vwap_dev = 0
         
-        # Breakout at H5/L5 (continuation)
-        breakout_long = close[i] >= h5_aligned[i] and close[i-1] < h5_aligned[i-1]  # break above H5
-        breakdown_short = close[i] <= l5_aligned[i] and close[i-1] > l5_aligned[i-1]  # break below L5
+        # Entry conditions
+        # Long: price below VWAP (oversold) in uptrend
+        long_signal = volume_ok and uptrend and (vwap_dev < -DEV_THRESHOLD)
+        # Short: price above VWAP (overbought) in downtrend
+        short_signal = volume_ok and downtrend and (vwap_dev > DEV_THRESHOLD)
         
         # Generate signals
         if position == 0:
-            if volume_ok:
-                # Fade trades (mean reversion)
-                if fade_long and uptrend:  # Only long fade in uptrend
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                elif fade_short and downtrend:  # Only short fade in downtrend
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                # Breakout trades (trend continuation)
-                elif breakout_long and uptrend:  # Breakout long in uptrend
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                elif breakdown_short and downtrend:  # Breakdown short in downtrend
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i))
-                else:
-                    signals[i] = 0.0
+            if long_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on fade signal at H4 or stop loss
-            if close[i] >= h4_aligned[i] and close[i-1] < h4_aligned[i-1]:  # cross below H4 (exit fade)
+            # Exit long on mean reversion or stop loss
+            if vwap_dev > 0:  # price crossed back above VWAP
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on fade signal at L4 or stop loss
-            if close[i] <= l4_aligned[i] and close[i-1] > l4_aligned[i-1]:  # cross above L4 (exit fade)
+            # Exit short on mean reversion or stop loss
+            if vwap_dev < 0:  # price crossed back below VWAP
                 signals[i] = 0.0
                 position = 0
             else:
