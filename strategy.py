@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1D DONCHIAN(20) BREAKOUT + 1W EMA(12) TREND + VOLUME CONFIRMATION
-Hypothesis: Daily Donchian breakouts capture strong momentum. Weekly EMA(12) filters trend direction to avoid counter-trend trades in bear markets. Volume confirms breakout strength. Designed for low trade frequency (target: 30-100 total over 4 years) to minimize fee drag. Works in bull (trend-following) and bear (counter-trend filtered out).
+6H WEEKLY PIVOT BREAKOUT + VOLUME CONFIRMATION
+Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above weekly R1 or below weekly S1 with volume confirmation capture institutional flow. Works in bull (breakouts above R1) and bear (breakdowns below S1). Uses 12h trend filter to avoid whipsaws. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_ema12_vol_v1"
-timeframe = "1d"
+name = "6h_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,11 +36,27 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Calculate EMA(12) on 1w
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
+    
+    # Align weekly levels to 6h timeframe (shifted by 1 for completed weekly bar)
+    pivot_w_aligned = align_htf_to_ltf(prices, df_weekly, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_weekly, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_weekly, s1_w)
+    
+    # Get 12h trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # EMA(34) on 12h for trend
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -51,31 +67,24 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema_12 = ema(close_1w, 12)
-    ema_12_aligned = align_htf_to_ltf(prices, df_1w, ema_12)
+    ema_34_12h = ema(close_12h, 34)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Donchian channels (20-period) on 1d
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Volume filter: current volume > 1.5x average over last 20 periods
+    # Volume filter: current volume > 1.8x average over last 24 periods
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(50, 34, 24)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_12_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -83,20 +92,20 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian low or stoploss hit
-            if (close[i] < donchian_low[i] or
+            # Exit: price closes below weekly pivot or stoploss hit
+            if (close[i] < pivot_w_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian high or stoploss hit
-            if (close[i] > donchian_high[i] or
+            # Exit: price closes above weekly pivot or stoploss hit
+            if (close[i] > pivot_w_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -104,16 +113,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high, above 1w EMA12, with volume
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_12_aligned[i] and 
+            # Long: price breaks above weekly R1, above 12h EMA34, with volume
+            if (close[i] > r1_w_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1w EMA12, with volume
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_12_aligned[i] and 
+            # Short: price breaks below weekly S1, below 12h EMA34, with volume
+            elif (close[i] < s1_w_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
