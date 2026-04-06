@@ -3,36 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 6h Williams Alligator with 1d trend filter.
-# Goes long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) 
-# and price above 1d EMA200 (bullish regime).
-# Goes short when Alligator jaws < teeth < lips and price below 1d EMA200 (bearish regime).
-# Williams Alligator identifies trend phases (sleeping, awakening, feeding) which work in both bull and bear markets.
-# The 1d EMA200 filter ensures we only trade in the direction of the higher timeframe trend.
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4h strategy using 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
+# Goes long when price breaks above 4h Donchian upper channel with above-average volume and price above 12h EMA,
+# short when breaks below lower channel with volume and price below 12h EMA.
+# Uses 12h EMA as trend filter to avoid counter-trend trades.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Donchian channels provide clear breakout levels that work across market regimes.
 
-name = "exp_13791_6h_alligator_1d_ema200"
-timeframe = "6h"
+name = "exp_13793_4h_donchian4h_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-SMMA_PERIOD_JAWS = 13  # Alligator jaws (blue)
-SMMA_PERIOD_TEETH = 8   # Alligator teeth (red)
-SMMA_PERIOD_LIPS = 5    # Alligator lips (green)
-TREND_EMA_PERIOD = 200  # 1d EMA for trend filter
-SIGNAL_SIZE = 0.25      # Position size (25% of capital)
+DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 10
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_smma(data, period):
-    """Calculate Smoothed Moving Average (SMMA)"""
-    sma = pd.Series(data).rolling(window=period, min_periods=period).mean().values
-    smma = np.full_like(data, np.nan, dtype=float)
-    if len(data) >= period:
-        smma[period-1] = sma[period-1]
-        for i in range(period, len(data)):
-            smma[i] = (smma[i-1] * (period-1) + data[i]) / period
-    return smma
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -50,33 +46,33 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA200 trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for EMA trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    # Align 1d EMA200 to 6h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 6h data for Alligator calculation
+    # 4h data for Donchian channels, entry timing and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate Williams Alligator components using SMMA on median price
-    median_price = (high + low) / 2.0
-    
-    jaws = calculate_smma(median_price, SMMA_PERIOD_JAWS)   # Blue line (13-period)
-    teeth = calculate_smma(median_price, SMMA_PERIOD_TEETH) # Red line (8-period)
-    lips = calculate_smma(median_price, SMMA_PERIOD_LIPS)   # Green line (5-period)
+    # Calculate 4h Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,12 +80,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(SMMA_PERIOD_JAWS, SMMA_PERIOD_TEETH, SMMA_PERIOD_LIPS, TREND_EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr[i])):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,26 +106,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator alignment signals
-        # Bullish alignment: jaws > teeth > lips (alligator eating with mouth up)
-        bullish_alignment = jaws[i] > teeth[i] and teeth[i] > lips[i]
-        # Bearish alignment: jaws < teeth < lips (alligator eating with mouth down)
-        bearish_alignment = jaws[i] < teeth[i] and teeth[i] < lips[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter from 1d EMA200
-        above_200ema = close[i] > ema_200_1d_aligned[i]
-        below_200ema = close[i] < ema_200_1d_aligned[i]
+        # Trend direction from 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
+        
+        # Donchian breakout signals
+        long_signal = volume_ok and above_ema and close[i] > donchian_upper[i]
+        short_signal = volume_ok and below_ema and close[i] < donchian_lower[i]
         
         # Generate signals
         if position == 0:
-            # Long: bullish alignment + price above 1d EMA200
-            if bullish_alignment and above_200ema:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: bearish alignment + price below 1d EMA200
-            elif bearish_alignment and below_200ema:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -138,15 +132,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish alignment or price crosses below 1d EMA200
-            if bearish_alignment or below_200ema:
+            # Exit long on close below Donchian lower (trend reversal)
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short: bullish alignment or price crosses above 1d EMA200
-            if bullish_alignment or above_200ema:
+            # Exit short on close above Donchian upper (trend reversal)
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
