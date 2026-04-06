@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout + 1w EMA(34) trend + volume confirmation
-Hypothesis: Use weekly EMA trend filter on daily candles with Donchian breakouts and volume confirmation to capture strong momentum while filtering counter-trend moves. Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag and work in both bull and bear markets via trend alignment.
+1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
+Hypothesis: Use weekly EMA trend filter on daily candles with Donchian breakouts and volume confirmation to capture strong momentum while filtering counter-trend moves. Weekly trend filter provides stronger regime filtering than daily, reducing trades and improving robustness in both bull and bear markets. Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_ema34_vol_v1"
+name = "1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -40,7 +40,7 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate EMA(34) on 1w
+    # Calculate EMA(50) on 1w
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -51,8 +51,8 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema_34 = ema(close_1w, 34)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    ema_50 = ema(close_1w, 50)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Donchian channels (20-period) on 1d
     donchian_high = np.full(n, np.nan)
@@ -71,11 +71,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(34, 20)
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -104,16 +104,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high, above 1w EMA34, with volume
+            # Long: price breaks above Donchian high, above 1w EMA50, with volume
             if (close[i] > donchian_high[i] and 
-                close[i] > ema_34_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1w EMA34, with volume
+            # Short: price breaks below Donchian low, below 1w EMA50, with volume
             elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_34_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
