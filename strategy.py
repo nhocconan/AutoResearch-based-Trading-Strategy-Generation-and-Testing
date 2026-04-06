@@ -4,10 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
-# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
-# The 12-hour EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
-# Target: 100-250 total trades over 4 years (25-62/year) to balance opportunity and cost.
-# This strategy has historically performed well on SOLUSDT and aims to maintain performance across BTC/ETH/SOL.
+# Breakouts capture strong momentum moves in both bull and bear markets. The 12-hour EMA ensures
+# alignment with intermediate-term trend, while volume filters out false breakouts. Designed to
+# generate 75-200 trades over 4 years (19-50/year) to minimize fee drag and improve generalization.
 
 name = "exp_13263_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
