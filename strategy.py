@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d/1w trend filter and volume confirmation
-Hypothesis: 12h breakouts capture medium-term momentum with reduced transaction costs.
-Filter by 1d EMA50 and 1w EMA200 for trend bias and volume confirmation for conviction.
-Works in bull (buy breakouts above 1d EMA50 and 1w EMA200) and bear (sell breakdowns below 1d EMA50 and 1w EMA200).
-Uses 1d/1w to reduce noise vs pure 12h. Target: 50-150 total trades over 4 years.
+4h Donchian(20) breakout with 1d EMA50 and 1w EMA200 trend filter
+Hypothesis: 4h breakouts capture momentum with trend alignment from higher timeframes.
+Long when price breaks above Donchian(20) and above 1d EMA50 and 1w EMA200.
+Short when price breaks below Donchian(20) and below 1d EMA50 and 1w EMA200.
+Volume confirmation ensures breakout strength. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_1w_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_1w_trend_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -66,7 +66,7 @@ def generate_signals(prices):
     # 1w trend: above EMA200 = bullish, below = bearish
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     
-    # Align trends to 12h timeframe
+    # Align trends to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
@@ -84,11 +84,11 @@ def generate_signals(prices):
     for i in range(20, len(volume_1w)):
         vol_ma_1w[i] = np.mean(volume_1w[i-20:i])
     
-    # Align volume MA to 12h timeframe
+    # Align volume MA to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    # Donchian channels (20-period) from 12h data
+    # Donchian channels (20-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -116,15 +116,11 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.3x average of 1d and 1w volume (scaled)
-        # Scale 1d volume to 12h: approx 1/2 of 1d volume (since 2x 12h in 1d)
-        # Scale 1w volume to 12h: approx 1/14 of 1w volume (since 14x 12h in 1w)
-        vol_threshold = (vol_ma_1d_aligned[i] / 2.0 + vol_ma_1w_aligned[i] / 14.0) / 2.0 * 1.3
+        # Volume filter: current 4h volume > 1.3x average of 1d and 1w volume (scaled)
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
+        # Scale 1w volume to 4h: approx 1/42 of 1w volume (since 42x 4h in 1w)
+        vol_threshold = (vol_ma_1d_aligned[i] / 6.0 + vol_ma_1w_aligned[i] / 42.0) / 2.0 * 1.3
         volume_filter = volume[i] > vol_threshold
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        session_filter = 8 <= hour <= 20
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -161,14 +157,14 @@ def generate_signals(prices):
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
                 
-                # Long: breakout above upper with bullish trend + volume + session
-                if bull_breakout and trend_1d_aligned[i] == 1 and trend_1w_aligned[i] == 1 and volume_filter and session_filter:
+                # Long: breakout above upper with bullish trend + volume
+                if bull_breakout and trend_1d_aligned[i] == 1 and trend_1w_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish trend + volume + session
-                elif bear_breakout and trend_1d_aligned[i] == -1 and trend_1w_aligned[i] == -1 and volume_filter and session_filter:
+                # Short: breakdown below lower with bearish trend + volume
+                elif bear_breakout and trend_1d_aligned[i] == -1 and trend_1w_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
@@ -181,4 +177,3 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
-</output>
