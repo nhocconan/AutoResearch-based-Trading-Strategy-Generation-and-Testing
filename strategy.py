@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
-Hypothesis: Daily breakouts capture longer-term momentum. Filter by weekly EMA21 for trend bias and volume > 1.5x average for conviction.
-Works in bull (buy breakouts above weekly EMA21) and bear (sell breakdowns below weekly EMA21).
-Target: 30-100 total trades over 4 years.
+6h Williams Alligator + Elder Ray with 1d trend filter
+Hypothesis: Alligator identifies trend direction (jaw-teeth-lips alignment), Elder Ray measures bull/bear power behind the move.
+Combined with 1d trend filter to avoid counter-trend trades. Works in trending markets (both bull and bear) by only taking
+trades in direction of 1d trend. Uses Williams Alligator (SMAs with offsets) and Elder Ray (EMA13-based bull/bear power).
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "6h_alligator_elder_ray_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,127 +20,126 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price and volume data
+    # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 14-period ATR
-    atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+    # Williams Alligator: SMAs with specific periods and offsets
+    # Jaw: SMA(13, offset=8)
+    # Teeth: SMA(8, offset=5) 
+    # Lips: SMA(5, offset=3)
+    def sma_with_offset(arr, period, offset):
+        """Calculate SMA then shift forward by offset bars"""
+        sma = np.full(n, np.nan)
+        if n >= period:
+            for i in range(period - 1, n):
+                sma[i] = np.mean(arr[i - period + 1:i + 1])
+        # Shift forward by offset (add offset to index)
+        shifted = np.full(n, np.nan)
+        for i in range(n - offset):
+            shifted[i + offset] = sma[i]
+        return shifted
     
-    # Get 1w data for trend filter (EMA21)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    jaw = sma_with_offset(close, 13, 8)   # Blue line
+    teeth = sma_with_offset(close, 8, 5)   # Red line  
+    lips = sma_with_offset(close, 5, 3)    # Green line
     
-    # EMA21 on 1w close
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 21:
-        ema_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = np.full(n, np.nan)
+    if n >= 13:
+        ema13[12] = np.mean(close[:13])
+        for i in range(13, n):
+            ema13[i] = (close[i] * 2 + ema13[i-1] * 11) / 12
     
-    # Align trend to 1d timeframe (1 = bullish, -1 = bearish)
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Donchian channels (20-period) from 1d data
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Get 1d data for trend filter (close > EMA50 = bullish)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    # EMA50 on 1d close
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * 2 + ema_50[i-1] * 48) / 49
+    
+    # 1d trend: 1 = bullish (close > EMA50), -1 = bearish (close < EMA50)
+    trend_1d = np.where(close_1d > ema_50, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0
     
-    # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    # Warmup: need enough data for Alligator components
+    start = 30
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(trend_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema13[i]) or np.isnan(trend_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
-        
-        # Volume filter: current 1d volume > 1.5x average volume over last 20 periods
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
-        else:
-            volume_filter = False
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        session_filter = 8 <= hour <= 20
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against trend
-            # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower[i] or
-                trend_1w_aligned[i] == -1 or
-                close[i] < entry_price - 2.0 * atr[i]):
+            # Exit: Alligator lines cross (jaws below teeth) OR bear power strong OR against 1d trend
+            if (jaw[i] < teeth[i] or    # Alligator sleeping - trend weakening
+                bear_power[i] < -1.5 * np.std(bull_power[max(0, i-20):i+1]) or  # Strong bear power
+                trend_1d_aligned[i] == -1):  # Against 1d trend
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against trend
-            # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper[i] or
-                trend_1w_aligned[i] == 1 or
-                close[i] > entry_price + 2.0 * atr[i]):
+            # Exit: Alligator lines cross (jaws above teeth) OR bull power strong OR against 1d trend
+            if (jaw[i] > teeth[i] or    # Alligator sleeping - trend weakening
+                bull_power[i] > 1.5 * np.std(bear_power[max(0, i-20):i+1]) or  # Strong bull power
+                trend_1d_aligned[i] == 1):  # Against 1d trend
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         else:
-            # Look for entries
-            # Minimum holding period: only allow new entry after 6 bars flat
-            if bars_since_entry >= 6:
-                # Breakout entries: upper/lower with trend
-                bull_breakout = close[i] > upper[i]
-                bear_breakout = close[i] < lower[i]
+            # Look for entries with minimum bars between trades
+            if bars_since_exit >= 6:  # Minimum 6 bars between trades
+                # Alligator conditions: lips > teeth > jaw (bullish) OR lips < teeth < jaw (bearish)
+                bullish_alligator = lips[i] > teeth[i] and teeth[i] > jaw[i]
+                bearish_alligator = lips[i] < teeth[i] and teeth[i] < jaw[i]
                 
-                # Long: breakout above upper with bullish trend + volume + session
-                if bull_breakout and trend_1w_aligned[i] == 1 and volume_filter and session_filter:
+                # Elder Ray conditions: bull power > 0 AND increasing, OR bear power < 0 AND decreasing
+                bull_power_strong = bull_power[i] > 0 and (i == start or bull_power[i] > bull_power[i-1])
+                bear_power_strong = bear_power[i] < 0 and (i == start or bear_power[i] < bear_power[i-1])
+                
+                # Long: bullish Alligator + strong bull power + bullish 1d trend
+                if bullish_alligator and bull_power_strong and trend_1d_aligned[i] == 1:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                # Short: breakdown below lower with bearish trend + volume + session
-                elif bear_breakout and trend_1w_aligned[i] == -1 and volume_filter and session_filter:
+                    bars_since_exit = 0
+                # Short: bearish Alligator + strong bear power + bearish 1d trend
+                elif bearish_alligator and bear_power_strong and trend_1d_aligned[i] == -1:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
