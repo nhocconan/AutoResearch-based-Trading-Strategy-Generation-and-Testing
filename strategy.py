@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA25 + Volume Spike
-Hypothesis: 12h timeframe with Donchian breakouts aligned to daily EMA trend
-and volume confirmation captures momentum while avoiding chop. Daily EMA provides
-trend bias, volume spike confirms institutional participation. Target: 50-150 total
-trades over 4 years (12-37/year).
+12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
+Hypothesis: 12h timeframe with Donchian breakouts aligned to 1d EMA trend 
+and volume confirmation captures momentum while avoiding chop. 
+1d EMA provides trend bias, volume spike confirms institutional participation.
+Target: 50-150 total trades over 4 years (12-37/year) as per experiment #15012.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema_vol_v1"
+name = "12h_donchian20_1dtrend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -39,14 +39,14 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA25 for trend bias
+    # 1d EMA20 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 25:
-        ema_1d[24] = np.mean(close_1d[:25])
-        for i in range(25, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 23) / 25
+    if len(close_1d) >= 20:
+        ema_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
     
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
@@ -60,7 +60,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 25  # For EMA and Donchian
+    start = 20  # For Donchian
     
     for i in range(start, n):
         # Skip if required data not available
@@ -107,8 +107,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + 1d trend + volume spike
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
