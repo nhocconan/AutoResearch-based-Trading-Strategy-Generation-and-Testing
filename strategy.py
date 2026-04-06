@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #12128: 12h Donchian Breakout with 1w Trend and Volume Confirmation
-Hypothesis: 12h Donchian(20) breakouts with 1-week EMA trend filter and volume confirmation
-will capture major trend moves while avoiding whipsaws. Works in bull (breakouts continue)
-and bear (breakouts reverse quickly) by using 1w trend filter. Target: 50-150 trades over 4 years.
+Experiment #12130: 1d Donchian Breakout with 1w Trend and Volume Confirmation
+Hypothesis: Daily Donchian(20) breakouts capture major trends, filtered by weekly EMA trend and volume confirmation.
+Works in bull markets (breakouts continue) and bear markets (breakouts reverse quickly) via weekly trend filter.
+Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12128_12h_donchian20_1w_vol_v1"
-timeframe = "12h"
+name = "exp_12130_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
