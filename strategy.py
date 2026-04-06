@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12733_4h_donchian20_12h_vol_regime_v1"
-timeframe = "4h"
+name = "exp_12734_1h_4h1d_donchian_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-CHOP_PERIOD = 14
-CHOP_THRESHOLD = 61.8
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -32,37 +30,36 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_chop(high, low, close, period):
-    """Calculate Choppiness Index"""
-    atr = calculate_atr(high, low, close, period)
-    sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(period)
-    return chop
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Choppiness Index for regime filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    chop_12h = calculate_chop(high_12h, low_12h, close_12h, CHOP_PERIOD)
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    # Calculate 4h Donchian channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donch_4h_upper, donch_4h_lower = calculate_donchian(high_4h, low_4h, DONCHIAN_PERIOD)
     
-    # Calculate 4h indicators
+    # Align 4h Donchian to 1h
+    donch_4h_upper_aligned = align_htf_to_ltf(prices, df_4h, donch_4h_upper)
+    donch_4h_lower_aligned = align_htf_to_ltf(prices, df_4h, donch_4h_lower)
+    
+    # Calculate 1d trend (close vs 50 EMA)
+    close_1d = df_1d['close'].values
+    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d = close_1d > ema_1d_50  # True for uptrend
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d.astype(float))
+    
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -72,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, CHOP_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if regime filter not available
-        if np.isnan(chop_12h_aligned[i]):
+        # Skip if 4h Donchian not available
+        if np.isnan(donch_4h_upper_aligned[i]) or np.isnan(donch_4h_lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -98,21 +95,24 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Regime filter: only trade when choppy (range-bound market)
-        choppy = chop_12h_aligned[i] > CHOP_THRESHOLD
+        # Determine trend from 1d
+        uptrend = trend_1d_aligned[i] > 0.5
         
-        # Donchian breakout signals
-        breakout_long = volume_ok and choppy and close[i] > upper[i-1]
-        breakout_short = volume_ok and choppy and close[i] < lower[i-1]
+        # Entry conditions: breakout with volume in direction of 1d trend
+        long_breakout = volume_ok and close[i] > donch_4h_upper_aligned[i]
+        short_breakout = volume_ok and close[i] < donch_4h_lower_aligned[i]
+        
+        long_entry = long_breakout and uptrend
+        short_entry = short_breakout and not uptrend
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
