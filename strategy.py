@@ -3,43 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion filtered by 4h and 1d trend.
-# RSI(14) < 30 and > 70 identifies overextended moves. In strong trends (4h/1d EMA200),
-# these reversals have high probability. Volume confirmation filters weak signals.
-# Works in bull/bear because mean reversion occurs in all regimes, and trend filter
-# ensures we trade with the higher timeframe momentum.
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fees.
+# Hypothesis: 6h Donchian(20) breakout with daily volume confirmation and weekly ADX trend filter.
+# Works in bull: breakouts capture momentum. Works in bear: ADX filter avoids whipsaws in low volatility,
+# volume confirmation ensures only strong breakouts trigger entries. Target: 80-160 trades over 4 years.
 
-name = "exp_12974_1h_rsi_meanrev_trend_v1"
-timeframe = "1h"
+name = "exp_12975_6h_donchian20_1d_vol_1w_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_TREND_FAST = 50
-EMA_TREND_SLOW = 200
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+ADX_PERIOD = 14
+ADX_THRESHOLD = 20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -50,39 +30,77 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+, DM-
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily and weekly data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h and 1d EMAs for trend filter
-    close_4h = df_4h['close'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily indicators
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
+    volume_d = df_daily['volume'].values
     
-    ema_4h_fast = calculate_ema(close_4h, EMA_TREND_FAST)
-    ema_4h_slow = calculate_ema(close_4h, EMA_TREND_SLOW)
-    ema_1d_fast = calculate_ema(close_1d, EMA_TREND_FAST)
-    ema_1d_slow = calculate_ema(close_1d, EMA_TREND_SLOW)
+    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
+    volume_ma_d = pd.Series(volume_d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    adx_d = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
     
-    # Align to 1h timeframe (already shifted by 1 in align_htf_to_ltf)
-    ema_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_fast)
-    ema_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_slow)
-    ema_1d_fast_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_fast)
-    ema_1d_slow_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slow)
+    # Align daily indicators to 6h
+    upper_d_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_d_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
+    volume_ma_d_aligned = align_htf_to_ltf(prices, df_daily, volume_ma_d)
+    adx_d_aligned = align_htf_to_ltf(prices, df_daily, adx_d)
     
-    # Calculate 1h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Calculate weekly indicators for trend filter
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
+    adx_w = calculate_adx(high_w, low_w, close_w, ADX_PERIOD)
+    adx_w_aligned = align_htf_to_ltf(prices, df_weekly, adx_w)
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # Calculate 6h ATR for stoploss
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    atr_6h = calculate_atr(high_6h, low_6h, close_6h, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,13 +108,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_TREND_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA data not available
-        if (np.isnan(ema_4h_fast_aligned[i]) or np.isnan(ema_4h_slow_aligned[i]) or
-            np.isnan(ema_1d_fast_aligned[i]) or np.isnan(ema_1d_slow_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if indicators not available
+        if (np.isnan(upper_d_aligned[i]) or np.isnan(lower_d_aligned[i]) or 
+            np.isnan(volume_ma_d_aligned[i]) or np.isnan(adx_d_aligned[i]) or 
+            np.isnan(adx_w_aligned[i]) or np.isnan(atr_6h[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,43 +123,39 @@ def generate_signals(prices):
         
         # Check stoploss
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close_6h[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close_6h[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Trend filter: 4h and 1d both bullish or bearish
-        trend_4h_bullish = ema_4h_fast_aligned[i] > ema_4h_slow_aligned[i]
-        trend_4h_bearish = ema_4h_fast_aligned[i] < ema_4h_slow_aligned[i]
-        trend_1d_bullish = ema_1d_fast_aligned[i] > ema_1d_slow_aligned[i]
-        trend_1d_bearish = ema_1d_fast_aligned[i] < ema_1d_slow_aligned[i]
+        # Volume confirmation (daily)
+        volume_ok = volume_6h := np.mean(volume_d[max(0, i-4):i+1]) if i >= 4 else volume_d[i]
+        volume_ok = volume_6h > (volume_ma_d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_d_aligned[i]) else False
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # ADX trend filter (both daily and weekly must agree)
+        adx_ok = adx_d_aligned[i] > ADX_THRESHOLD and adx_w_aligned[i] > ADX_THRESHOLD
         
-        # Mean reversion signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Breakout conditions
+        breakout_long = volume_ok and adx_ok and close_6h[i] >= upper_d_aligned[i]
+        breakout_short = volume_ok and adx_ok and close_6h[i] <= lower_d_aligned[i]
         
         # Generate signals
         if position == 0:
-            # Long: oversold RSI + bullish trend on both TFs + volume
-            if rsi_oversold and trend_4h_bullish and trend_1d_bullish and volume_ok:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: overbought RSI + bearish trend on both TFs + volume
-            elif rsi_overbought and trend_4h_bearish and trend_1d_bearish and volume_ok:
+                entry_price = close_6h[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_6h[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                entry_price = close_6h[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_6h[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
