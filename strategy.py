@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
-"""
-exp_13904_1d_1w_donchian20_ema50_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-Targets major breakouts in both bull and bear markets with low trade frequency.
-Trade target: 30-100 total over 4 years (7-25/year).
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13904_1d_1w_donchian20_ema50_vol_v1"
+name = "exp_13904_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND_PERIOD = 50
-VOLUME_MA_PERIOD = 20
+EMA_TREND = 50
+VOLUME_MA = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_donchian_high(high, period):
+    """Calculate Donchian Channel upper band"""
+    return pd.Series(high).rolling(window=period, min_periods=period).max().values
+
+def calculate_donchian_low(low, period):
+    """Calculate Donchian Channel lower band"""
+    return pd.Series(low).rolling(window=period, min_periods=period).min().values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -53,7 +48,7 @@ def generate_signals(prices):
     
     # Calculate 1w EMA for trend direction
     close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_TREND_PERIOD)
+    ema_1w = calculate_ema(close_1w, EMA_TREND)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # 1d data for Donchian, ATR, and volume
@@ -63,13 +58,14 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donch_high = calculate_donchian_high(high, DONCHIAN_PERIOD)
+    donch_low = calculate_donchian_low(low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     # Volume confirmation
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,12 +107,8 @@ def generate_signals(prices):
         trend_down = close[i] < ema_1w_aligned[i]
         
         # Donchian breakout signals
-        long_breakout = close[i] > donchian_upper[i-1]  # Previous close above upper band
-        short_breakout = close[i] < donchian_lower[i-1]  # Previous close below lower band
-        
-        # Entry signals
-        long_signal = volume_ok and trend_up and long_breakout
-        short_signal = volume_ok and trend_down and short_breakout
+        long_signal = volume_ok and trend_up and (close[i] > donch_high[i-1])
+        short_signal = volume_ok and trend_down and (close[i] < donch_low[i-1])
         
         # Generate signals
         if position == 0:
@@ -133,15 +125,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian lower break (trailing exit)
-            if close[i] < donchian_lower[i]:
+            # Exit long on Donchian breakdown
+            if close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on Donchian upper break (trailing exit)
-            if close[i] > donchian_upper[i]:
+            # Exit short on Donchian breakout
+            if close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
