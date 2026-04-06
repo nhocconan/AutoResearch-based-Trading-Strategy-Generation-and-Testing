@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Reversal with Volume Spike and Chop Filter
-Hypothesis: Price tends to reverse at key intraday support/resistance levels (Camarilla pivots) derived from the prior day's range.
-Institutional participation is confirmed by volume spikes. The Choppiness Index filters for trending regimes (avoid reversals in strong trends).
-Works in bull markets (buy S3/S4, sell S5/S6) and bear markets (sell S5/S6, buy S3/S4) by fading extremes.
-Target: 80-160 total trades over 4 years (20-40/year).
+12h Donchian Breakout with Volume Confirmation and Chop Filter
+Hypothesis: On 12h timeframe, Donchian(20) breakouts capture medium-term trends in BTC/ETH/SOL.
+Volume filter ensures institutional participation. Choppiness index avoids whipsaws in ranging markets.
+Works in bull (long breakouts) and bear (short breakouts). Target: 80-120 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_reversal_volume_chop"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_chop_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,103 +19,104 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivot levels (once before loop)
+    # Load 1d data for trend and chop filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from prior day's range
+    # 1d EMA(50) for trend direction
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d Choppiness Index(14) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Pivot levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
-    # Camarilla formulas based on previous day's range
-    range_1d = high_1d - low_1d
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    r2 = close_1d + (range_1d * 1.1 / 6)
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    r4 = close_1d + (range_1d * 1.1 / 2)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    s2 = close_1d - (range_1d * 1.1 / 6)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    s4 = close_1d - (range_1d * 1.1 / 2)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align levels to 4h timeframe (use previous day's levels, shifted by 1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Highest High and Lowest Low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # 4h data
+    # Chop calculation: sum of TR / (HH - LL) * log10(14) * 100
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh_ll = hh - ll
+    chop = np.where(hh_ll > 0, (sum_tr / hh_ll) * np.log10(14) * 100, 50)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike filter (2x 20-period average)
+    # 12h Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 12h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.8 * vol_ma)  # Require high volume
     
-    # Choppiness Index (14) to detect trending vs ranging markets
-    # Higher values (>61.8) indicate ranging, lower (<38.2) indicate trending
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((highest_high - lowest_low) > 0, chop, 50.0)
-    chop = np.where(np.isnan(chop), 50.0, chop)
-    
-    # We want to fade extremes in ranging markets (chop > 50)
-    chop_filter = chop > 50
+    # 12h ATR(14) for stoploss
+    tr1_12h = high - low
+    tr2_12h = np.abs(high - np.roll(close, 1))
+    tr3_12h = np.abs(low - np.roll(close, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # For chop and volume calculations
+    start = 50  # For Donchian20 and EMA50
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr_12h[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: mean reversion to pivot or stoploss
+        # Check exits
         if position == 1:  # long position
-            # Exit: price reaches pivot (mean reversion) OR stoploss
-            if (close[i] >= pivot_aligned[i] or
-                close[i] <= entry_price - 2.5 * atr_sum[i]/14):  # approximate ATR
+            # Exit: price breaks below Donchian low OR stoploss
+            if (close[i] <= donch_low[i] or
+                close[i] <= entry_price - 2.5 * atr_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price reaches pivot (mean reversion) OR stoploss
-            if (close[i] <= pivot_aligned[i] or
-                close[i] >= entry_price + 2.5 * atr_sum[i]/14):
+            # Exit: price breaks above Donchian high OR stoploss
+            if (close[i] >= donch_high[i] or
+                close[i] >= entry_price + 2.5 * atr_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price at extreme levels + volume spike + chop filter
-            # Long near S3/S4, Short near R3/R4
-            long_setup = ((close[i] <= s3_aligned[i] * 1.001) or (close[i] <= s4_aligned[i] * 1.001)) and \
-                         vol_spike[i] and chop_filter[i]
-            short_setup = ((close[i] >= r3_aligned[i] * 0.999) or (close[i] >= r4_aligned[i] * 0.999)) and \
-                          vol_spike[i] and chop_filter[i]
+            # Look for entries: Donchian breakout + volume + trend + chop filter
+            # Only trade when market is not too choppy (trending regime)
+            trending_regime = chop_aligned[i] < 50  # Chop < 50 indicates trending
+            
+            long_setup = (close[i] > donch_high[i] and vol_filter[i] and
+                         ema_50_1d_aligned[i] > close[i] and trending_regime)
+            short_setup = (close[i] < donch_low[i] and vol_filter[i] and
+                          ema_50_1d_aligned[i] < close[i] and trending_regime)
             
             if long_setup:
                 signals[i] = 0.25
