@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA trend filter + volume confirmation.
-# Goes long when price breaks above 20-day high with volume > 1.5x average and price > 1w EMA.
-# Goes short when price breaks below 20-day low with volume > 1.5x average and price < 1w EMA.
-# Uses ATR-based stoploss and trailing exit. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation.
+# Goes long when price breaks above 20-day high with volume > 1.5x average and price above 1w EMA.
+# Goes short when price breaks below 20-day low with volume > 1.5x average and price below 1w EMA.
+# Uses ATR-based stoploss (2*ATR). Target: 30-100 trades over 4 years (7-25/year).
+# Designed to work in both bull (breakouts) and bear (breakdowns) markets.
 
-name = "1d_donchian20_1w_ema_vol_v2"
+name = "1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -23,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels (20-period)
+    # 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -31,26 +32,26 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate Donchian channels (20-period high/low)
+    # Donchian channels (20-period)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align to 1d timeframe (already aligned, but ensure shift for prior bar)
+    # Align to 1d timeframe (already aligned, but shift by 1 for prior day's levels)
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # 1w EMA for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=10, min_periods=10, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_strong = volume > (vol_ma * 1.5)
+    vol_strong = volume > (vol_ma * 1.5)  # Strong volume for breakouts
     
     # ATR for stoploss
     tr1 = high - low
@@ -102,7 +103,7 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend filter
+            # Look for entries with strong volume confirmation
             if vol_strong[i]:
                 # Long breakout: price breaks above Donchian high with strong volume and above 1w EMA
                 if close[i] > donchian_high_aligned[i] and close[i] > ema_1w_aligned[i]:
