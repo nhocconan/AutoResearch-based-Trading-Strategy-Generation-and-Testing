@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1w Trend + Volume Spike
+12h Donchian(20) Breakout + 1w EMA Trend + Volume Spike
 Hypothesis: 12h timeframe with Donchian breakouts aligned to 1-week EMA trend 
-and volume confirmation captures momentum while avoiding chop. 
-1w EMA provides strong trend bias, volume spike confirms institutional participation.
-Target: 100-200 total trades over 4 years (25-50/year).
+and volume confirmation captures major momentum moves while avoiding chop.
+1-week EMA provides strong trend bias, volume confirms institutional participation.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1-week EMA20 for trend bias
+    # 1-week EMA20 for trend bias (using weekly data)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     ema_1w = np.full(len(close_1w), np.nan)
@@ -107,8 +107,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + 1w trend + volume spike
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
