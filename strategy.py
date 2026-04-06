@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (2.0x 20-period average)
-# Long when price breaks above Donchian high, price > 1d EMA(50), and volume > 2.0x average
-# Short when price breaks below Donchian low, price < 1d EMA(50), and volume > 2.0x average
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (1.8x 20-period average)
+# Long when price breaks above Donchian high, price > 1d EMA(50), and volume > 1.8x average
+# Short when price breaks below Donchian low, price < 1d EMA(50), and volume > 1.8x average
 # Exit on opposite Donchian break or when price crosses below/above EMA
 # Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1d trend to avoid false breakouts in counter-trend moves
-# Higher volume threshold and longer timeframe to reduce trade frequency
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Higher volume threshold and ATR multiplier to reduce trade frequency
+# Target: 75-200 trades over 4 years (19-50/year)
 
 name = "12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -100,14 +100,14 @@ def generate_signals(prices):
             # Long: price breaks above Donchian high, price above EMA (bullish trend), volume spike
             if (close[i] > donchian_high[i] and
                 close[i] > ema_1d_aligned[i] and
-                volume[i] > 2.0 * volume_ma[i]):
+                volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low, price below EMA (bearish trend), volume spike
             elif (close[i] < donchian_low[i] and
                   close[i] < ema_1d_aligned[i] and
-                  volume[i] > 2.0 * volume_ma[i]):
+                  volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
