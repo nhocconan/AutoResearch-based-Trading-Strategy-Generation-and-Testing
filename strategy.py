@@ -3,11 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Donchian(15) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian upper with 1d EMA(50) rising and volume > 1.8x avg.
+# Enter short when price breaks below Donchian lower with 1d EMA(50) falling and volume > 1.8x avg.
+# Exit on opposite Donchian breakout or when price crosses 1d EMA(50).
+# Uses discrete position sizing (0.25) to minimize churn. Designed for fewer trades (target: 50-150 total over 4 years).
+# Works in bull (breakouts) and bear (mean reversion via opposite breakouts) by following trend.
+
+name = "12h_donchian15_1d_ema50_vol_v1"
+timeframe = "12h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 30:
+        return np.zeros(n)
+    
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Donchian(15) channels
+    donchian_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
+    donchian_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
+    
+    # Volume confirmation: volume > 1.8x 15-period average
+    volume_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
+    volume_threshold = 1.8 * volume_ma
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(15, n):
+        # Skip if required data not available
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if position == 1:  # long position
+            # Exit: price breaks below Donchian low OR crosses below EMA50
+            if close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price breaks above Donchian high OR crosses above EMA50
+            if close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries: Donchian breakout + EMA50 trend + volume
+            if volume[i] > volume_threshold[i]:
+                if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
+                    # Breakout above Donchian high in uptrend: long
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
+                    # Breakdown below Donchian low in downtrend: short
+                    signals[i] = -0.25
+                    position = -1
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
 # Hypothesis: 12h Donchian(20) breakout with 1d EMA(100) trend filter and volume confirmation.
-# Enter long when price breaks above Donchian upper with 1d EMA(100) rising and volume > 1.5x avg.
-# Enter short when price breaks below Donchian lower with 1d EMA(100) falling and volume > 1.5x avg.
+# Enter long when price breaks above Donchian upper with 1d EMA(100) rising and volume > 2.0x avg.
+# Enter short when price breaks below Donchian lower with 1d EMA(100) falling and volume > 2.0x avg.
 # Exit on opposite Donchian breakout or when price crosses 1d EMA(100).
-# Target: 75-150 total trades over 4 years (19-38/year) with controlled risk.
+# Uses discrete position sizing (0.30) to minimize churn. Designed for very few trades (target: 50-150 total over 4 years).
+# Works in bull (breakouts) and bear (mean reversion via opposite breakouts) by following trend.
 
 name = "12h_donchian20_1d_ema100_vol_v1"
 timeframe = "12h"
@@ -15,7 +99,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -34,9 +118,9 @@ def generate_signals(prices):
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * volume_ma
+    volume_threshold = 2.0 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,7 +130,7 @@ def generate_signals(prices):
         if (np.isnan(ema_100_aligned[i]) or np.isnan(volume_threshold[i]) or 
             np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.30
             else:
                 signals[i] = 0.0
             continue
@@ -57,24 +141,109 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:  # short position
             # Exit: price breaks above Donchian high OR crosses above EMA100
             if close[i] > donchian_high[i] or close[i] > ema_100_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:
             # Look for entries: Donchian breakout + EMA100 trend + volume
             if volume[i] > volume_threshold[i]:
                 if close[i] > donchian_high[i] and close[i] > ema_100_aligned[i]:
                     # Breakout above Donchian high in uptrend: long
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                 elif close[i] < donchian_low[i] and close[i] < ema_100_aligned[i]:
+                    # Breakdown below Donchian low in downtrend: short
+                    signals[i] = -0.30
+                    position = -1
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12h Donchian(25) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian upper with 1d EMA(50) rising and volume > 2.2x avg.
+# Enter short when price breaks below Donchian lower with 1d EMA(50) falling and volume > 2.2x avg.
+# Exit on opposite Donchian breakout or when price crosses 1d EMA(50).
+# Uses discrete position sizing (0.25) to minimize churn. Designed for very few trades (target: 50-150 total over 4 years).
+# Works in bull (breakouts) and bear (mean reversion via opposite breakouts) by following trend.
+
+name = "12h_donchian25_1d_ema50_vol_v1"
+timeframe = "12h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Donchian(25) channels
+    donchian_high = pd.Series(high).rolling(window=25, min_periods=25).max().values
+    donchian_low = pd.Series(low).rolling(window=25, min_periods=25).min().values
+    
+    # Volume confirmation: volume > 2.2x 25-period average
+    volume_ma = pd.Series(volume).rolling(window=25, min_periods=25).mean().values
+    volume_threshold = 2.2 * volume_ma
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(25, n):
+        # Skip if required data not available
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if position == 1:  # long position
+            # Exit: price breaks below Donchian low OR crosses below EMA50
+            if close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price breaks above Donchian high OR crosses above EMA50
+            if close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries: Donchian breakout + EMA50 trend + volume
+            if volume[i] > volume_threshold[i]:
+                if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
+                    # Breakout above Donchian high in uptrend: long
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
                     # Breakdown below Donchian low in downtrend: short
                     signals[i] = -0.25
                     position = -1
     
     return signals
+
+--- 0 ###
