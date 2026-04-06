@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with 1d volume confirmation and 1d ATR filter
-# Works in bull/bear by capturing breakouts with volume confirmation,
-# using 1d ATR to normalize breakout strength and avoid false signals in low volatility.
-# Target: 80-150 trades over 4 years (20-38/year) with controlled risk.
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR stoploss
+# Breakouts capture strong directional moves, volume filters weak breakouts,
+# ATR stoploss manages risk. Works in bull/bear by following momentum.
+# Target: 80-150 trades over 4 years (20-38/year) to balance opportunity and cost.
 
-name = "exp_12871_6h_donchian20_1d_atr_vol_v1"
-timeframe = "6h"
+name = "exp_12872_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-ATR_PERIOD = 14
-ATR_BREAKOUT_MULTIPLIER = 0.5  # Breakout must exceed 0.5*ATR
 SIGNAL_SIZE = 0.25
-ATR_STOP_MULTIPLIER = 2.5
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -41,31 +40,26 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop for Donchian channels
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate daily Donchian channels
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # 1d ATR for volatility normalization
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
     
-    # 1d volume moving average
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Calculate 12h indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Align 1d indicators to 6h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    
-    # Calculate 6h Donchian channels
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    
-    donchian_upper, donchian_lower = calculate_donchian(high_6h, low_6h, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,11 +67,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d data not available
-        if np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -86,40 +80,35 @@ def generate_signals(prices):
         
         # Check stoploss
         if position == 1:  # long position
-            if close_6h[i] <= stop_price:
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close_6h[i] >= stop_price:
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Volume confirmation: 1d volume > 1.5x MA
-        volume_ok = volume_1d[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_1d_aligned[i]) else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout strength: price must exceed Donchian level by 0.5*1d ATR
-        breakout_strength = atr_1d_aligned[i] * ATR_BREAKOUT_MULTIPLIER if not np.isnan(atr_1d_aligned[i]) else 0
-        
-        # Long breakout: close > upper + strength with volume
-        breakout_long = volume_ok and (close_6h[i] > donchian_upper[i] + breakout_strength)
-        
-        # Short breakout: close < lower - strength with volume
-        breakout_short = volume_ok and (close_6h[i] < donchian_lower[i] - breakout_strength)
+        # Breakout above upper or below lower Donchian channel
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
             if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
-                entry_price = close_6h[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_1d_aligned[i])
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
-                entry_price = close_6h[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_1d_aligned[i])
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
