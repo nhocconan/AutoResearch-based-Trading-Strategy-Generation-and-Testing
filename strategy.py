@@ -3,29 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator combined with Elder Ray Power for trend strength
-# Uses 6h as primary timeframe with 12h trend filter. Alligator (SMAs) identifies trend direction
-# and alignment, while Elder Ray (bull/bear power) measures trend strength behind price moves.
-# Works in bull/bear by capturing strong trending moves while avoiding weak/choppy markets.
-# Target: 80-180 trades over 4 years (20-45/year) to balance opportunity and cost.
+# Hypothesis: 6h Williams %R with 1-week trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions for mean reversion.
+# Weekly trend filter ensures we trade with higher timeframe momentum.
+# Volume confirmation filters low-conviction signals.
+# Designed to work in both bull and bear markets by combining mean reversion
+# with trend alignment and volume validation.
+# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
 
-name = "elder_alligator_6h_12h_v1"
+name = "williams_6r_1w_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_JAW = 13   # Smoothed SMMA(13)
-ALLIGATOR_TEETH = 8  # Smoothed SMMA(8)
-ALLIGATOR_LIPS = 5   # Smoothed SMMA(5)
-ELDER_POWER_PERIOD = 13
-EMA_TREND_PERIOD = 20
+WILLIAMS_PERIOD = 14
+WILLIAMS_OVERBOUGHT = -20
+WILLIAMS_OVERSOLD = -80
+WEEKLY_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def smma(close, period):
-    """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
-    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return williams_r.values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -40,40 +46,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_elder_power(high, low, close, period):
-    """Calculate Elder Ray Power: Bull Power = High - EMA, Bear Power = Low - EMA"""
-    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-    bull_power = high - ema
-    bear_power = low - ema
-    return bull_power, bear_power
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_TREND_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, WEEKLY_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator (3 SMMA lines)
-    jaw = smma(close, ALLIGATOR_JAW)
-    teeth = smma(close, ALLIGATOR_TEETH)
-    lips = smma(close, ALLIGATOR_LIPS)
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
-    # Elder Ray Power
-    bull_power, bear_power = calculate_elder_power(high, low, close, ELDER_POWER_PERIOD)
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stop loss
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -82,11 +80,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_JAW, ALLIGATOR_TEETH, ALLIGATOR_LIPS, ELDER_POWER_PERIOD, EMA_TREND_PERIOD, ATR_PERIOD) + 1
+    start = max(WILLIAMS_PERIOD, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,32 +103,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator alignment: check if lines are properly ordered
-        # In uptrend: Lips > Teeth > Jaw
-        # In downtrend: Lips < Teeth < Jaw
-        alligator_bull = (lips[i] > teeth[i] > jaw[i]) if not (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])) else False
-        alligator_bear = (lips[i] < teeth[i] < jaw[i]) if not (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])) else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Elder Ray confirmation: strong bull/bear power
-        strong_bull = bull_power[i] > 0 and bull_power[i] > np.mean(bull_power[max(0, i-20):i+1]) if not np.isnan(bull_power[i]) else False
-        strong_bear = bear_power[i] < 0 and abs(bear_power[i]) > np.abs(np.mean(bear_power[max(0, i-20):i+1])) if not np.isnan(bear_power[i]) else False
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
-        # Trend filter from 12h EMA
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
-        
-        # Entry signals require: Alligator alignment + Elder Ray power + 12h trend agreement
-        bullish_setup = alligator_bull and strong_bull and uptrend_12h
-        bearish_setup = alligator_bear and strong_bear and downtrend_12h
+        # Williams %R signals
+        oversold = williams_r[i] < WILLIAMS_OVERSOLD
+        overbought = williams_r[i] > WILLIAMS_OVERBOUGHT
         
         # Generate signals
         if position == 0:
-            if bullish_setup:
+            if oversold and uptrend and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif bearish_setup:
+            elif overbought and downtrend and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
