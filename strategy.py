@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h Donchian(15) breakout with 1d trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA50 trend for bias and volume for conviction. Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50). Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian(10) breakout with 1d volume confirmation and trend filter
+Hypothesis: Shorter Donchian period captures momentum with fewer whipsaws, filtered by daily trend (EMA50) and volume for conviction. Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50). Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian15_1d_trend_vol_v1"
+name = "4h_donchian10_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -64,13 +64,13 @@ def generate_signals(prices):
     # Align volume MA to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (15-period) from 4h data
+    # Donchian channels (10-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
-    for i in range(15, n):
-        upper[i] = np.max(high[i-15:i])
-        lower[i] = np.min(low[i-15:i])
+    for i in range(10, n):
+        upper[i] = np.max(high[i-10:i])
+        lower[i] = np.min(low[i-10:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -124,8 +124,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
+            # Minimum holding period: only allow new entry after 8 bars flat
+            if bars_since_entry >= 8:
                 # Breakout entries: upper/lower with 1d trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
