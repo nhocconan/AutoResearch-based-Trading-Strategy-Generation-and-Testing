@@ -3,13 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku cloud with 1-week trend filter and volume confirmation.
-# Uses 1-week Ichimoku cloud (from daily data) for primary trend bias.
-# 6-hour Tenkan/Kijun cross for entry timing with volume confirmation.
-# Designed to work in both bull and bear markets via cloud filter.
-# Targets 50-150 total trades over 4 years with strict entry conditions.
-
-name = "6h_ichimoku1w_vol_v1"
+name = "6h_camarilla_pivot_reversion_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,123 +18,193 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week Ichimoku components (from daily data)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily pivot levels from previous day (for 6h timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Tenkan-sen (9-period) and Kijun-sen (26-period) on weekly
-    def calculate_ichimoku(high_arr, low_arr, close_arr):
-        n1 = len(high_arr)
-        tenkan = np.full(n1, np.nan)
-        kijun = np.full(n1, np.nan)
-        senkou_a = np.full(n1, np.nan)
-        senkou_b = np.full(n1, np.nan)
-        
-        # Tenkan-sen: (9-period high + 9-period low)/2
-        for i in range(8, n1):
-            tenkan[i] = (np.max(high_arr[i-8:i+1]) + np.min(low_arr[i-8:i+1])) / 2
-        
-        # Kijun-sen: (26-period high + 26-period low)/2
-        for i in range(25, n1):
-            kijun[i] = (np.max(high_arr[i-25:i+1]) + np.min(low_arr[i-25:i+1])) / 2
-        
-        # Senkou Span A: (Tenkan + Kijun)/2 shifted 26 periods ahead
-        for i in range(n1):
-            if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-                idx = i + 26
-                if idx < n1:
-                    senkou_a[idx] = (tenkan[i] + kijun[i]) / 2
-        
-        # Senkou Span B: (52-period high + 52-period low)/2 shifted 26 periods ahead
-        for i in range(51, n1):
-            senkou_b[i] = (np.max(high_arr[i-51:i+1]) + np.min(low_arr[i-51:i+1])) / 2
-        
-        for i in range(n1):
-            if not np.isnan(senkou_b[i]):
-                idx = i + 26
-                if idx < n1:
-                    senkou_b[idx] = senkou_b[i]
-        
-        return tenkan, kijun, senkou_a, senkou_b
+    # Calculate Camarilla pivot levels for daily timeframe
+    # Camarilla: H = High, L = Low, C = Close of previous day
+    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    HLC_diff = (high_1d - low_1d)
+    R4 = close_1d + HLC_diff * 1.1 / 2
+    R3 = close_1d + HLC_diff * 1.1 / 4
+    S3 = close_1d - HLC_diff * 1.1 / 4
+    S4 = close_1d - HLC_diff * 1.1 / 2
     
-    tenkan_1w, kijun_1w, senkou_a_1w, senkou_b_1w = calculate_ichimoku(high_1w, low_1w, close_1w)
+    # Align pivot levels to 6h timeframe (shifted by 1 day for no look-ahead)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
-    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
-    senkou_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_a_1w)
-    senkou_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w)
-    
-    # 6-hour Tenkan-sen and Kijun-sen for entry signals
-    tenkan_6h = np.full(n, np.nan)
-    kijun_6h = np.full(n, np.nan)
-    
-    for i in range(8, n):
-        tenkan_6h[i] = (np.max(high[i-8:i+1]) + np.min(low[i-8:i+1])) / 2
-    
-    for i in range(25, n):
-        kijun_6h[i] = (np.max(high[i-25:i+1]) + np.min(low[i-25:i+1])) / 2
-    
-    # Volume confirmation: 6h volume > 1.5x 20-period average
+    # Volume confirmation: 6h volume > 1.3x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
+    
+    # Range filter: only trade when price is between S3 and R3 (mean reversion zone)
+    in_range = (close > S3_aligned) & (close < R3_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(52, n):  # Start after Ichimoku calculations are valid
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or 
-            np.isnan(senkou_a_1w_aligned[i]) or np.isnan(senkou_b_1w_aligned[i]) or
-            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine cloud color and position
-        # Green cloud (bullish): Senkou A > Senkou B
-        # Red cloud (bearish): Senkou A < Senkou B
-        bullish_cloud = senkou_a_1w_aligned[i] > senkou_b_1w_aligned[i]
-        bearish_cloud = senkou_a_1w_aligned[i] < senkou_b_1w_aligned[i]
-        
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
-        # Check exits
+        # Check exits and stoploss (1.5x daily range)
+        daily_range = (high_1d[i] - low_1d[i]) if not np.isnan(high_1d[i]) and not np.isnan(low_1d[i]) else 0
+        if np.isnan(daily_range) or daily_range == 0:
+            daily_range = high[i] - low[i]  # fallback to 6h range
+        
         if position == 1:  # long position
-            # Exit: price below cloud or Tenkan-Kijun cross down
-            if (close[i] < senkou_a_1w_aligned[i] and close[i] < senkou_b_1w_aligned[i]) or \
-               (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]):
+            # Exit: price reaches S3 (mean reversion target) or stoploss
+            if (close[i] <= S3_aligned[i] or 
+                close[i] < entry_price - 1.5 * daily_range):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above cloud or Tenkan-Kijun cross up
-            if (close[i] > senkou_a_1w_aligned[i] and close[i] > senkou_b_1w_aligned[i]) or \
-               (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]):
+            # Exit: price reaches R3 (mean reversion target) or stoploss
+            if (close[i] >= R3_aligned[i] or 
+                close[i] > entry_price + 1.5 * daily_range):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and cloud filter
-            if volume_filter:
-                # Bullish TK cross in bullish cloud
-                if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1] and
-                    bullish_cloud and close[i] > senkou_a_1w_aligned[i] and close[i] > senkou_b_1w_aligned[i]):
+            # Look for mean reversion entries at extreme levels
+            if volume_filter and in_range[i]:
+                # Long: price touches or goes below S4 with rejection (close > S4)
+                if close[i] <= S4_aligned[i] and close[i] > S4_aligned[i] * 0.999:  # touched S4
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Bearish TK cross in bearish cloud
-                elif (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and
-                      bearish_cloud and close[i] < senkou_a_1w_aligned[i] and close[i] < senkou_b_1w_aligned[i]):
+                # Short: price touches or goes above R4 with rejection (close < R4)
+                elif close[i] >= R4_aligned[i] and close[i] < R4_aligned[i] * 1.001:  # touched R4
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_camarilla_pivot_reversion_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Daily pivot levels from previous day (for 6h timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels for daily timeframe
+    # Camarilla: H = High, L = Low, C = Close of previous day
+    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    HLC_diff = (high_1d - low_1d)
+    R4 = close_1d + HLC_diff * 1.1 / 2
+    R3 = close_1d + HLC_diff * 1.1 / 4
+    S3 = close_1d - HLC_diff * 1.1 / 4
+    S4 = close_1d - HLC_diff * 1.1 / 2
+    
+    # Align pivot levels to 6h timeframe (shifted by 1 day for no look-ahead)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume confirmation: 6h volume > 1.3x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    
+    # Range filter: only trade when price is between S3 and R3 (mean reversion zone)
+    in_range = (close > S3_aligned) & (close < R3_aligned)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    for i in range(20, n):
+        # Skip if required data not available
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.3
+        
+        # Check exits and stoploss (1.5x daily range)
+        daily_range = (high_1d[i] - low_1d[i]) if not np.isnan(high_1d[i]) and not np.isnan(low_1d[i]) else 0
+        if np.isnan(daily_range) or daily_range == 0:
+            daily_range = high[i] - low[i]  # fallback to 6h range
+        
+        if position == 1:  # long position
+            # Exit: price reaches S3 (mean reversion target) or stoploss
+            if (close[i] <= S3_aligned[i] or 
+                close[i] < entry_price - 1.5 * daily_range):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price reaches R3 (mean reversion target) or stoploss
+            if (close[i] >= R3_aligned[i] or 
+                close[i] > entry_price + 1.5 * daily_range):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for mean reversion entries at extreme levels
+            if volume_filter and in_range[i]:
+                # Long: price touches or goes below S4 with rejection (close > S4)
+                if close[i] <= S4_aligned[i] and close[i] > S4_aligned[i] * 0.999:  # touched S4
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short: price touches or goes above R4 with rejection (close < R4)
+                elif close[i] >= R4_aligned[i] and close[i] < R4_aligned[i] * 1.001:  # touched R4
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
