@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and pivot levels provide structural support/resistance that works across regimes.
-# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Works in bull/bear: Donchian captures breakouts, 1d EMA filter ensures direction alignment with higher timeframe trend,
+# volume confirmation filters false breakouts. Target: 60-120 trades over 4 years (15-30/year).
 
-name = "exp_12870_1d_weekly_pivot_breakout_v1"
-timeframe = "1d"
+name = "exp_13011_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,64 +29,38 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    pivot_vals = np.zeros(len(close_w))
-    r1_vals = np.zeros(len(close_w))
-    r2_vals = np.zeros(len(close_w))
-    r3_vals = np.zeros(len(close_w))
-    s1_vals = np.zeros(len(close_w))
-    s2_vals = np.zeros(len(close_w))
-    s3_vals = np.zeros(len(close_w))
-    
-    for i in range(len(close_w)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
-        pivot_vals[i] = pivot
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        r3_vals[i] = r3
-        s1_vals[i] = s1
-        s2_vals[i] = s2
-        s3_vals[i] = s3
-    
-    # Align to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
-    
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
+    # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -94,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot levels not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if 1d EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -120,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above R3 or breakdown below S3
-        breakout_long = volume_ok and close[i] >= r3_aligned[i]
-        breakout_short = volume_ok and close[i] <= s3_aligned[i]
+        # Donchian breakout with 1d EMA filter
+        breakout_long = volume_ok and close[i] >= donchian_upper[i] and close[i] > ema_1d_aligned[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower[i] and close[i] < ema_1d_aligned[i]
         
         # Generate signals
         if position == 0:
