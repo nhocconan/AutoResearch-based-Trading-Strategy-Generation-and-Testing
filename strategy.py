@@ -5,10 +5,7 @@
 - Short: price breaks below 12h Donchian(20) + price < 1d EMA(50) + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
-- Target: 50-150 trades over 4 years (12-37/year)
-Hypothesis: 12h timeframe reduces trade frequency vs 4h while capturing multi-day trends.
-1d EMA filter ensures alignment with daily trend, reducing false breakouts.
-Volume confirmation adds confirmation of institutional participation.
+- Target: 75-200 trades over 4 years (19-50/year)
 """
 
 import numpy as np
