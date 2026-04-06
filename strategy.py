@@ -3,24 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12654_1h_4h1d_trend_vol_v1"
-timeframe = "1h"
+name = "exp_12655_6d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.20
+PIVOT_LOOKBACK = 10  # Lookback for weekly pivot calculation
+PIVOT_NEAREST = 5    # How many pivots to consider for support/resistance
+BREAKOUT_BUFFER = 0.001  # 0.1% buffer to avoid whipsaws
+VOLUME_MULTIPLIER = 1.5  # Volume must be 1.5x average
+VOLUME_LOOKBACK = 20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-SESSION_START = 8   # 8:00 UTC
-SESSION_END = 20    # 20:00 UTC
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points (standard formula)"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -31,41 +37,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot points
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate 4h trend
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Pre-compute session filter
-    hours = prices.index.hour
-    in_session = (hours >= SESSION_START) & (hours < SESSION_END)
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_LOOKBACK, min_periods=VOLUME_LOOKBACK).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -74,19 +76,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(PIVOT_LOOKBACK, VOLUME_LOOKBACK, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if outside session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if daily or 4h EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(ema_4h_aligned[i]):
+        # Skip if weekly data not available
+        if np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,28 +100,46 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (both daily and 4h must agree)
-        uptrend = close[i] > ema_1d_aligned[i] and close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i] and close[i] < ema_4h_aligned[i]
+        # Find nearest support/resistance levels
+        # For longs: look for resistance above, for shorts: look for support below
+        current_price = close[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
+        # Calculate distances to pivot levels
+        dist_to_r1 = (r1_aligned[i] - current_price) / current_price if not np.isnan(r1_aligned[i]) else np.inf
+        dist_to_r2 = (r2_aligned[i] - current_price) / current_price if not np.isnan(r2_aligned[i]) else np.inf
+        dist_to_r3 = (r3_aligned[i] - current_price) / current_price if not np.isnan(r3_aligned[i]) else np.inf
+        dist_to_s1 = (current_price - s1_aligned[i]) / current_price if not np.isnan(s1_aligned[i]) else np.inf
+        dist_to_s2 = (current_price - s2_aligned[i]) / current_price if not np.isnan(s2_aligned[i]) else np.inf
+        dist_to_s3 = (current_price - s3_aligned[i]) / current_price if not np.isnan(s3_aligned[i]) else np.inf
         
-        # Entry conditions
-        long_entry = volume_ok and uptrend and long_breakout
-        short_entry = volume_ok and downtrend and short_breakout
+        # Long conditions: break above resistance with volume
+        # Consider breakout if price is within buffer of resistance and moving up
+        near_r1 = dist_to_r1 > -BREAKOUT_BUFFER and dist_to_r1 < BREAKOUT_BUFFER
+        near_r2 = dist_to_r2 > -BREAKOUT_BUFFER and dist_to_r2 < BREAKOUT_BUFFER
+        near_r3 = dist_to_r3 > -BREAKOUT_BUFFER and dist_to_r3 < BREAKOUT_BUFFER
+        
+        # Short conditions: break below support with volume
+        near_s1 = dist_to_s1 > -BREAKOUT_BUFFER and dist_to_s1 < BREAKOUT_BUFFER
+        near_s2 = dist_to_s2 > -BREAKOUT_BUFFER and dist_to_s2 < BREAKOUT_BUFFER
+        near_s3 = dist_to_s3 > -BREAKOUT_BUFFER and dist_to_s3 < BREAKOUT_BUFFER
+        
+        # Price momentum check (ensure we're actually breaking through)
+        price_up = close[i] > close[i-1]
+        price_down = close[i] < close[i-1]
+        
+        long_breakout = volume_ok and (near_r1 or near_r2 or near_r3) and price_up
+        short_breakout = volume_ok and (near_s1 or near_s2 or near_s3) and price_down
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
