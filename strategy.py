@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Combines 12-hour price channel breakouts with daily trend bias and volume confirmation.
-Designed to capture momentum in both bull and bear markets while minimizing false breakouts in chop.
-Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag.
+Hypothesis: 12h timeframe reduces trade frequency to minimize fee drag while capturing significant moves.
+Uses Donchian breakouts aligned with daily trend and volume confirmation. Works in bull markets (breakouts with trend)
+and bear markets (breakdowns with trend). Target: 15-30 trades/year to stay under fee drag threshold.
 """
 
 import numpy as np
