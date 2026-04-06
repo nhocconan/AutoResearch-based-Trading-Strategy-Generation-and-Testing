@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 1.5x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 2x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 2x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 4h timeframe to balance trade frequency, 1d EMA for trend filter, Donchian for breakout signals
-# Target: 100-200 total trades over 4 years (25-50/year) for optimal 4h performance
+# Uses 4h timeframe for optimal balance of signal quality and trade frequency
+# Target: 75-200 total trades over 4 years (19-50/year) for optimal 4h performance
 
 name = "4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
@@ -43,9 +43,9 @@ def generate_signals(prices):
     # Align daily EMA to 4h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
+    volume_threshold = 2.0 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
