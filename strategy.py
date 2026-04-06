@@ -1,46 +1,60 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 1d EMA trend + Volume confirmation
-Hypothesis: Donchian breakout with EMA trend filter and volume confirmation
-works in both bull and bear markets. The 1d EMA provides trend context,
-while Donchian(20) captures breakouts. Volume ensures breakout validity.
-Target: 100-180 total trades over 4 years (25-45/year).
+6h Donchian Breakout + Weekly Pivot Direction + Volume Filter
+Hypothesis: Donchian channel breakouts capture momentum, while weekly pivot direction filters for higher timeframe trend. Volume confirmation reduces false breakouts. Works in bull (buy breakouts above weekly pivot) and bear (sell breakdowns below weekly pivot). Target: 100-180 total trades over 4 years (25-45/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14426_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "14427_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot points (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Weekly Pivot Points (standard calculation)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    # 4h data
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # 6h data for Donchian and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian Channel (20-period)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Volume filter
+    # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.8 * vol_ma)
+    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -55,39 +69,44 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(20, 50) + 1
+    start = max(donchian_period, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Determine weekly pivot direction (bullish if price above weekly pivot, bearish if below)
+        weekly_bullish = close[i] > pivot_1w_aligned[i]
+        weekly_bearish = close[i] < pivot_1w_aligned[i]
+        
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR trend turns bearish OR stoploss
-            if (close[i] <= donchian_low[i] or close[i] < ema_50_aligned[i] or
+            # Exit: Donchian breakdown OR weekly bias turns bearish OR stoploss
+            if (close[i] <= donchian_low[i] or not weekly_bullish or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR trend turns bullish OR stoploss
-            if (close[i] >= donchian_high[i] or close[i] > ema_50_aligned[i] or
+            # Exit: Donchian breakout OR weekly bias turns bullish OR stoploss
+            if (close[i] >= donchian_high[i] or not weekly_bearish or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend filter + volume
-            long_setup = (close[i] > donchian_high[i] and close[i] > ema_50_aligned[i] and vol_filter[i])
-            short_setup = (close[i] < donchian_low[i] and close[i] < ema_50_aligned[i] and vol_filter[i])
+            # Look for entries: Donchian breakout + weekly pivot direction + volume
+            long_setup = (close[i] >= donchian_high[i] and weekly_bullish and vol_filter[i])
+            short_setup = (close[i] <= donchian_low[i] and weekly_bearish and vol_filter[i])
             
             if long_setup:
                 signals[i] = 0.25
