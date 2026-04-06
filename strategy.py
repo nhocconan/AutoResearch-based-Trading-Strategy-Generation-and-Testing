@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14033_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14030_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -22,6 +24,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_ema(values, span):
+    """Calculate EMA"""
     return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
 
 def generate_signals(prices):
@@ -29,12 +32,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = calculate_ema(df_12h['close'].values, 50)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Load weekly data for EMA trend (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = calculate_ema(df_1w['close'].values, 21)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h data for Donchian, ATR, and volume
+    # Daily data for Donchian, ATR, volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -55,11 +58,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20, 20) + 1
+    start = max(30, 20, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -89,18 +92,16 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # EMA trend filter (12h EMA)
-        trend_up = close[i] > ema_12h_aligned[i]
-        trend_down = close[i] < ema_12h_aligned[i]
-        
         # Generate signals
         if position == 0:
-            if breakout_up and trend_up and volume_ok:
+            # Long: Donchian breakout + above weekly EMA + volume
+            if breakout_up and close[i] > ema_1w_aligned[i] and volume_ok:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
-            elif breakout_down and trend_down and volume_ok:
+            # Short: Donchian breakdown + below weekly EMA + volume
+            elif breakout_down and close[i] < ema_1w_aligned[i] and volume_ok:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -108,15 +109,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or trend reversal
-            if close[i] <= stop_price or close[i] < ema_12h_aligned[i]:
+            # Exit long on stop or reversal (price below weekly EMA)
+            if close[i] <= stop_price or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on stop or trend reversal
-            if close[i] >= stop_price or close[i] > ema_12h_aligned[i]:
+            # Exit short on stop or reversal (price above weekly EMA)
+            if close[i] >= stop_price or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
