@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above 4h Donchian(20) high and 1d close > 1d open (bullish day).
+# Short when price breaks below 4h Donchian(20) low and 1d close < 1d open (bearish day).
+# Volume > 1.5x 20-period average for confirmation.
+# Trend filter avoids counter-trend trades. Donchian breakouts capture momentum.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -25,26 +25,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
+    # 4h Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
+    # 1d trend filter: bullish/bearish day based on close vs open
+    df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -52,9 +48,9 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
+    for i in range(20, n):
+        # Skip if daily trend data not available
+        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -62,639 +58,39 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits
         if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
+            # Exit: price breaks below Donchian low or daily turn bearish
+            if (low[i] <= donchian_low[i] or 
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
+            # Exit: price breaks above Donchian high or daily turn bullish
+            if (high[i] >= donchian_high[i] or 
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend filter
+            # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: Williams %R crosses above -20 during uptrend
-                if (wr_prev <= -20 and wr_curr > -20) and trend_up_aligned[i]:
+                # Long: break above Donchian high during bullish day
+                if (high[i] > donchian_high[i] and 
+                    daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: Williams %R crosses below -80 during downtrend
-                elif (wr_prev >= -80 and wr_curr < -80) and trend_down_aligned[i]:
+                # Short: break below Donchian low during bearish day
+                elif (low[i] < donchian_low[i] and 
+                      daily_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
-
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and trend filter
-            if volume_filter:
-                # Long: Williams %R crosses above -20 during uptrend
-                if (wr_prev <= -20 and wr_curr > -20) and trend_up_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: Williams %R crosses below -80 during downtrend
-                elif (wr_prev >= -80 and wr_curr < -80) and trend_down_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
-
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and trend filter
-            if volume_filter:
-                # Long: Williams %R crosses above -20 during uptrend
-                if (wr_prev <= -20 and wr_curr > -20) and trend_up_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: Williams %R crosses below -80 during downtrend
-                elif (wr_prev >= -80 and wr_curr < -80) and trend_down_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
-
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and trend filter
-            if volume_filter:
-                # Long: Williams %R crosses above -20 during uptrend
-                if (wr_prev <= -20 and wr_curr > -20) and trend_up_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: Williams %R crosses below -80 during downtrend
-                elif (wr_prev >= -80 and wr_curr < -80) and trend_down_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
-
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and trend filter
-            if volume_filter:
-                # Long: Williams %R crosses above -20 during uptrend
-                if (wr_prev <= -20 and wr_curr > -20) and trend_up_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: Williams %R crosses below -80 during downtrend
-                elif (wr_prev >= -80 and wr_curr < -80) and trend_down_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
-
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and trend filter
-            if volume_filter:
-                # Long: Williams %R crosses above -20 during uptrend
-                if (wr_prev <= -20 and wr_curr > -20) and trend_up_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: Williams %R crosses below -80 during downtrend
-                elif (wr_prev >= -80 and wr_curr < -80) and trend_down_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 (oversold bounce) during 12h uptrend.
-# Short when Williams %R crosses below -80 (overbought rejection) during 12h downtrend.
-# Uses volume > 1.3x 20-period average for confirmation.
-# 12h trend filter avoids counter-trend trades. Williams %R captures short-term reversals.
-# Target: 75-150 total trades over 4 years (19-38/year).
-
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    
-    # 12h trend filter: EMA(21) slope
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    trend_up = ema_slope > 0
-    trend_down = ema_slope < 0
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Williams %R cross conditions
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        wr_curr = williams_r[i]
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R crosses below -80 or trend turns down
-            if (wr_prev > -80 and wr_curr <= -80) or trend_down_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R crosses above -20 or trend turns up
-            if (wr_prev < -20 and wr_curr >= -20) or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and trend filter
-            if volume_filter:
