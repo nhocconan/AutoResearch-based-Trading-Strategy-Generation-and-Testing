@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band during bullish weekly trend with volume > 1.5x average.
-# Short when price breaks below Donchian lower band during bearish weekly trend with volume > 1.5x average.
-# Weekly trend filter prevents counter-trend trades. Volume confirmation adds conviction.
+# Hypothesis: 6h Williams %R with weekly trend filter and volume confirmation.
+# Long when Williams %R crosses above -50 (oversold recovery) during weekly uptrend with volume spike.
+# Short when Williams %R crosses below -50 (overbought rejection) during weekly downtrend with volume spike.
+# Uses weekly trend (price vs weekly SMA) to ensure trend alignment and volume spike for confirmation.
 # Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
 
-name = "6h_donchian20_1w_vol_trend_v1"
+name = "6h_williamsr_1w_trend_vol_v2"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 25:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,69 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
+    # Williams %R (14 periods)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values
     
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max()
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min()
-    
-    # Weekly trend filter: bullish/bearish week based on close vs open
+    # Weekly trend filter: price vs weekly SMA(50)
     df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
     weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open   # True for bearish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    weekly_sma = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    weekly_uptrend = weekly_close > weekly_sma
+    weekly_downtrend = weekly_close < weekly_sma
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
     
     # Volume confirmation: volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    volume_ma = volume_series.rolling(window=20, min_periods=20).mean()
-    volume_threshold = volume_ma * 1.5
-    volume_confirmed = volume > volume_threshold
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if weekly trend data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
+        if np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits
+        # Check exits: reverse signal or loss of trend/volume
         if position == 1:  # long position
-            # Exit: price falls below Donchian lower band or weekly turn bearish
-            if (close[i] < donchian_lower[i] or 
-                weekly_bearish_aligned[i]):
+            # Exit: Williams %R crosses below -50 or weekly turns downtrend or volume drops
+            if (williams_r[i] < -50 and williams_r[i-1] >= -50) or \
+               weekly_downtrend_aligned[i] or \
+               not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above Donchian upper band or weekly turn bullish
-            if (close[i] > donchian_upper[i] or 
-                weekly_bullish_aligned[i]):
+            # Exit: Williams %R crosses above -50 or weekly turns uptrend or volume drops
+            if (williams_r[i] > -50 and williams_r[i-1] <= -50) or \
+               weekly_uptrend_aligned[i] or \
+               not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with weekly trend filter and volume confirmation
-            # Long: price breaks above Donchian upper band during bullish week with volume confirmation
-            if (close[i] > donchian_upper[i] and 
-                weekly_bullish_aligned[i] and 
-                volume_confirmed[i]):
+            # Long: Williams %R crosses above -50 during weekly uptrend with volume spike
+            if (williams_r[i] > -50 and williams_r[i-1] <= -50) and \
+               weekly_uptrend_aligned[i] and \
+               volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band during bearish week with volume confirmation
-            elif (close[i] < donchian_lower[i] and 
-                  weekly_bearish_aligned[i] and 
-                  volume_confirmed[i]):
+            # Short: Williams %R crosses below -50 during weekly downtrend with volume spike
+            elif (williams_r[i] < -50 and williams_r[i-1] >= -50) and \
+                 weekly_downtrend_aligned[i] and \
+                 volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
     
