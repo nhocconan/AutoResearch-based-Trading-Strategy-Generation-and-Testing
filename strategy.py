@@ -3,21 +3,48 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with daily volume confirmation and ATR stop
-# Works in bull/bear by capturing strong momentum moves, volume filters false breakouts,
-# and ATR stop adapts to volatility. Target 100-200 trades over 4 years.
+# Hypothesis: 1-day KAMA trend with RSI(14) filter and weekly volatility regime filter
+# Works in bull/bear because KAMA adapts to market noise, RSI filters extremes,
+# and weekly volatility regime identifies trending vs ranging markets.
+# Target: 50-100 trades over 4 years (12-25/year) to balance opportunity and cost.
 
-name = "exp_12917_4h_donchian20_1d_vol_atr_v1"
-timeframe = "4h"
+name = "exp_12918_1d_kama_rsi_vol_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+KAMA_ER_FAST = 2
+KAMA_ER_SLOW = 30
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+VOLATILITY_PERIOD = 20
+VOLATILITY_THRESHOLD = 0.5  # ATR ratio threshold for trending regime
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_kama(close, er_fast, er_slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
+    kama = np.copy(close)
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,32 +55,35 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate daily volume MA
-    volume_daily = df_daily['volume'].values
-    volume_ma_daily = pd.Series(volume_daily).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_daily, volume_ma_daily)
+    # Calculate weekly ATR for volatility regime
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
+    atr_w = calculate_atr(high_w, low_w, close_w, ATR_PERIOD)
     
-    # Calculate 4h indicators
+    # Calculate weekly volatility ratio (current ATR / average ATR)
+    atr_ma_w = pd.Series(atr_w).rolling(window=VOLATILITY_PERIOD, min_periods=VOLATILITY_PERIOD).mean().values
+    volatility_ratio = atr_w / atr_ma_w
+    volatility_ratio = np.where(atr_ma_w > 0, volatility_ratio, 1.0)
+    
+    # Align volatility ratio to daily timeframe
+    volatility_ratio_aligned = align_htf_to_ltf(prices, df_weekly, volatility_ratio)
+    
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    kama = calculate_kama(close, KAMA_ER_FAST, KAMA_ER_SLOW)
+    rsi = calculate_rsi(close, RSI_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -62,11 +92,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(KAMA_ER_SLOW, RSI_PERIOD, ATR_PERIOD, VOLATILITY_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not ready
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma_aligned[i]) or np.isnan(atr[i]):
+        # Skip if volatility ratio not available
+        if np.isnan(volatility_ratio_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -85,21 +115,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using daily average)
-        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD)
+        # Trend regime filter: only trade when volatility ratio > threshold (trending market)
+        is_trending = volatility_ratio_aligned[i] > VOLATILITY_THRESHOLD
         
-        # Breakout signals
-        breakout_long = volume_ok and close[i] >= upper[i]
-        breakout_short = volume_ok and close[i] <= lower[i]
+        # KAMA direction: price above KAMA = uptrend, below = downtrend
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_not_overbought = rsi[i] < RSI_OVERBOUGHT
+        rsi_not_oversold = rsi[i] > RSI_OVERSOLD
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if is_trending and price_above_kama and rsi_not_overbought:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif is_trending and price_below_kama and rsi_not_oversold:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
