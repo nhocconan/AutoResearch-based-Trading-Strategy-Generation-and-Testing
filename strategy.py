@@ -56,7 +56,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume filter: current volume > 2.0x average over last 20 periods
+    # Volume filter: current volume > 1.8x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -78,7 +78,7 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
         # Check exits and stoploss
         if position == 1:  # long position
