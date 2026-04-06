@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA(20) Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h capture momentum aligned with 1d EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Targeting 50-150 total trades over 4 years with strict entry criteria.
+4h Donchian(20) Breakout + 12h Supertrend(ATR=10,mult=3) + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 4h capture momentum aligned with 12h Supertrend, volume confirms breakout strength, ATR stoploss limits drawdown. Targeting 75-200 total trades over 4 years with strict entry criteria.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12hsupertrend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,15 +36,54 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Load 1d EMA(20) once before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Load 12h data for Supertrend calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # 12h ATR (10-period)
+    atr_12h = np.full(len(high_12h), np.nan)
+    if len(high_12h) >= 10:
+        tr_12h = np.maximum(
+            high_12h[1:] - low_12h[1:],
+            np.abs(high_12h[1:] - close_12h[:-1]),
+            np.abs(low_12h[1:] - close_12h[:-1])
+        )
+        if len(tr_12h) > 0:
+            atr_12h[1] = tr_12h[0]
+            for i in range(2, len(high_12h)):
+                atr_12h[i] = (tr_12h[i-1] * 9 + atr_12h[i-1]) / 10
+    
+    # 12h Supertrend (ATR=10, mult=3)
+    supertrend_12h = np.full(len(high_12h), np.nan)
+    direction_12h = np.full(len(high_12h), np.nan)  # 1 for uptrend, -1 for downtrend
+    if len(high_12h) >= 10 and not np.isnan(atr_12h).all():
+        # Basic upper and lower bands
+        hl_avg_12h = (high_12h + low_12h) / 2
+        upper_band_12h = hl_avg_12h + 3.0 * atr_12h
+        lower_band_12h = hl_avg_12h - 3.0 * atr_12h
+        
+        # Initialize
+        for i in range(len(high_12h)):
+            if i == 0:
+                supertrend_12h[i] = hl_avg_12h[i]
+                direction_12h[i] = 1
+            else:
+                if close_12h[i] > upper_band_12h[i-1]:
+                    direction_12h[i] = 1
+                elif close_12h[i] < lower_band_12h[i-1]:
+                    direction_12h[i] = -1
+                else:
+                    direction_12h[i] = direction_12h[i-1]
+                
+                if direction_12h[i] == 1:
+                    supertrend_12h[i] = max(lower_band_12h[i], supertrend_12h[i-1])
+                else:
+                    supertrend_12h[i] = min(upper_band_12h[i], supertrend_12h[i-1])
+    
+    # Align Supertrend direction to 4h
+    supertrend_dir_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,11 +91,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 20  # For Donchian and ATR
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(supertrend_dir_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -102,9 +141,9 @@ def generate_signals(prices):
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Trend filter: only trade long if close > 1d EMA, short if close < 1d EMA
-                trend_filter_long = close[i] > ema_1d_aligned[i]
-                trend_filter_short = close[i] < ema_1d_aligned[i]
+                # Trend filter: only trade long if 12h Supertrend uptrend, short if downtrend
+                trend_filter_long = supertrend_dir_12h_aligned[i] == 1
+                trend_filter_short = supertrend_dir_12h_aligned[i] == -1
                 
                 if bull_breakout and volume_filter and trend_filter_long:
                     signals[i] = 0.25
