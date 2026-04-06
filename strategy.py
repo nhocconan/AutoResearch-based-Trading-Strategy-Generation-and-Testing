@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR stoploss
-# Long when price breaks above Donchian(20) high + volume > 1.5x average
-# Short when price breaks below Donchian(20) low + volume > 1.5x average
-# Uses volume filter to avoid false breakouts and ATR-based stoploss for risk control
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + close > EMA50 + volume > 1.5x average
+# Short when price breaks below Donchian(20) low + close < EMA50 + volume > 1.5x average
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades
 # Target: 75-200 total trades over 4 years with controlled risk
+# ATR-based stoploss to limit drawdown
 
-name = "4h_donchian20_volume_v1"
+name = "4h_donchian20_1d_ema50_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,6 +24,19 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    
+    # EMA50 calculation
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align 1d EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Donchian channels (20-period)
     def calculate_donchian(high, low, period=20):
@@ -39,9 +53,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -54,8 +69,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Donchian lower
-            elif close[i] < donchian_lower[i]:
+            # Exit: price breaks below Donchian lower or trend changes
+            elif close[i] < donchian_lower[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -67,8 +82,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Donchian upper
-            elif close[i] > donchian_upper[i]:
+            # Exit: price breaks above Donchian upper or trend changes
+            elif close[i] > donchian_upper[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -76,13 +91,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation
-            # Long: break above Donchian upper + volume spike
-            if close[i] > donchian_upper[i] and volume[i] > 1.5 * volume_ma[i]:
+            # Long: break above Donchian upper + uptrend + volume spike
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: break below Donchian lower + volume spike
-            elif close[i] < donchian_lower[i] and volume[i] > 1.5 * volume_ma[i]:
+            # Short: break below Donchian lower + downtrend + volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
