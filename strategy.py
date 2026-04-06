@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1w_ema50_vol_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 40:
         return np.zeros(n)
     
     # Price and volume data
@@ -31,30 +31,49 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on weekly
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        alpha = 2.0 / (period + 1)
-        ema_val = np.full_like(arr, np.nan)
-        ema_val[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
-        return ema_val
+    # Calculate Camarilla pivot levels (S3, S2, S1, PP, R1, R2, R3)
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    # R2 = C + (H - L) * 1.1 / 6
+    # S2 = C - (H - L) * 1.1 / 6
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pivot_pp = np.full(len(close_1d), np.nan)
+    r1 = np.full(len(close_1d), np.nan)
+    s1 = np.full(len(close_1d), np.nan)
+    r2 = np.full(len(close_1d), np.nan)
+    s2 = np.full(len(close_1d), np.nan)
+    r3 = np.full(len(close_1d), np.nan)
+    s3 = np.full(len(close_1d), np.nan)
     
-    ema_50_1w = ema(close_1w, 50)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    for i in range(len(close_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        pp = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        range_hl = high_1d[i] - low_1d[i]
+        pivot_pp[i] = pp
+        r1[i] = close_1d[i] + range_hl * 1.1 / 12.0
+        s1[i] = close_1d[i] - range_hl * 1.1 / 12.0
+        r2[i] = close_1d[i] + range_hl * 1.1 / 6.0
+        s2[i] = close_1d[i] - range_hl * 1.1 / 6.0
+        r3[i] = close_1d[i] + range_hl * 1.1 / 4.0
+        s3[i] = close_1d[i] - range_hl * 1.1 / 4.0
     
-    # Donchian channels (20-period) on 6h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Align pivot levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
@@ -66,11 +85,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(atr[i]) or np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -82,33 +102,35 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian low or stoploss hit
-            if (close[i] < donchian_low[i] or
+            # Exit: price closes below S1 or stoploss hit
+            if (close[i] < s1_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian high or stoploss hit
-            if (close[i] > donchian_high[i] or
+            # Exit: price closes above R1 or stoploss hit
+            if (close[i] > r1_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries - only long in bull, only short in bear based on weekly trend
-            # Long: price breaks above Donchian high, above weekly EMA50, with volume
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Look for entries - mean reversion at S1/R1 with volume
+            # Long: price touches S1 and reverses up, with volume
+            if (close[i] <= s1_aligned[i] * 1.001 and  # Allow small tolerance
+                close[i] > s1_aligned[i] * 0.999 and
+                close[i] > open[i] and  # Bullish candle
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below weekly EMA50, with volume
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Short: price touches R1 and reverses down, with volume
+            elif (close[i] >= r1_aligned[i] * 0.999 and   # Allow small tolerance
+                  close[i] <= r1_aligned[i] * 1.001 and
+                  close[i] < open[i] and  # Bearish candle
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
