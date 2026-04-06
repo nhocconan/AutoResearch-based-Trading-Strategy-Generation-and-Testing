@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #12319: 6h Donchian Breakout + Daily Pivot Direction + Volume Spike
-Hypothesis: Use daily pivot points for trend direction (above/below pivot), 
-6-hour Donchian(20) breakouts for entry timing, and volume spikes for confirmation.
-This combines mean-reversion pivot levels with momentum breakouts, working in both
-bull and bear markets by fading extremes and catching breakouts. Target: 100-200 total trades.
+Experiment #12323: 4h Donchian Breakout + 12h Trend + Volume Confirmation
+Hypothesis: Use 12h EMA for trend direction, 4h Donchian(20) breakouts for entry,
+and volume spikes for confirmation. This captures momentum in both bull and bear
+markets while avoiding false breakouts. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12319_6h_donchian20_daily_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_12323_4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 1  # Use previous day's pivot
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
@@ -43,27 +42,19 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_pivot(high, low, close):
-    """Calculate pivot points: P = (H+L+C)/3"""
-    pivot = (high + low + close) / 3.0
-    return pivot
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily pivot from previous day's data
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
-    pivot_d = calculate_pivot(high_d, low_d, close_d)
-    pivot_d_aligned = align_htf_to_ltf(prices, df_daily, pivot_d)
+    # Calculate 12h EMA for trend
+    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -79,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily pivot not available
-        if np.isnan(pivot_d_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,19 +96,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Price relative to daily pivot (trend filter)
-        price_above_pivot = close[i] > pivot_d_aligned[i]
-        price_below_pivot = close[i] < pivot_d_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
-        # Donchian breakout conditions (using previous bar's levels)
-        long_breakout = close[i] > upper[i-1]
-        short_breakout = close[i] < lower[i-1]
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper[i-1]  # break above previous upper band
+        short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Entry conditions:
-        # Long: price above pivot (bullish bias) + upward breakout + volume
-        # Short: price below pivot (bearish bias) + downward breakout + volume
-        long_entry = volume_ok and price_above_pivot and long_breakout
-        short_entry = volume_ok and price_below_pivot and short_breakout
+        # Entry conditions
+        long_entry = volume_ok and uptrend_12h and long_breakout
+        short_entry = volume_ok and downtrend_12h and short_breakout
         
         # Generate signals
         if position == 0:
