@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12763_4h_donchian20_1d_vol_v1"
-timeframe = "4h"
+name = "exp_12764_1d_1w_donchian_breakout_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -29,6 +29,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
@@ -42,11 +50,11 @@ def generate_signals(prices):
     # Lower band: lowest low over period
     lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align to 4h timeframe
+    # Align to 1d timeframe (same as prices since prices is daily)
     upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
     lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Calculate 4h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 21) + 1
     
     for i in range(start, n):
         # Skip if Donchian bands not available
-        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]):
+        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -87,9 +95,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
+        # Trend filter: only long above weekly EMA, short below
+        trend_filter_long = close[i] > ema_1w_aligned[i]
+        trend_filter_short = close[i] < ema_1w_aligned[i]
+        
         # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_band_aligned[i]
+        breakout_long = volume_ok and close[i] >= upper_band_aligned[i] and trend_filter_long
+        breakout_short = volume_ok and close[i] <= lower_band_aligned[i] and trend_filter_short
         
         # Generate signals
         if position == 0:
