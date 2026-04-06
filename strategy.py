@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 1d Williams %R + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum; Williams %R identifies overbought/oversold conditions on daily chart to avoid buying tops or selling bottoms; volume confirms breakout strength; ATR stop limits downside. Designed to work in both bull and bear markets by using daily Williams %R as a filter to trade with intermediate-term momentum while avoiding extremes.
+12h Donchian(20) Breakout + 1w EMA(10) Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 12h capture momentum aligned with 1w EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for 12h timeframe to target 50-150 trades over 4 years with strict entry criteria.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_williamsr_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1wema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stop loss
+    # 14-period ATR
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -36,42 +36,32 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Load 1d data once for Williams %R
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Williams %R (14-period) on daily: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 14:
-        for i in range(13, len(close_1d)):
-            highest_high = np.max(high_1d[i-13:i+1])
-            lowest_low = np.min(low_1d[i-13:i+1])
-            if highest_high != lowest_low:
-                williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
-            else:
-                williams_r[i] = -50  # neutral if no range
-    
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_ltf_to_htf(prices, df_1d, williams_r)
+    # Load 1w EMA(10) once before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 10:
+        ema_1w[9] = np.mean(close_1w[:10])
+        for i in range(10, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 8) / 10
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_exit = 0  # bars since last exit to enforce minimum holding
+    bars_since_entry = 0
     
     # Start from warmup period
     start = 20  # For Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(williams_r_aligned[i]):
+        if np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_exit += 1
+            bars_since_entry += 1
             continue
         
         # Donchian channel (20-period)
@@ -84,57 +74,53 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR Williams %R > -20 (overbought)
+            # Exit: price closes below Donchian lower
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
-                williams_r_aligned[i] > -20 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.25
-            bars_since_exit += 1
+            bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR Williams %R < -80 (oversold)
+            # Exit: price closes above Donchian upper
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
-                williams_r_aligned[i] < -80 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_exit = 0
+                bars_since_entry = 0
             else:
                 signals[i] = -0.25
-            bars_since_exit += 1
+            bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + volume + Williams %R filter
-            # Minimum holding period: only allow new entry after 10 bars flat
-            if bars_since_exit >= 10:
+            # Look for entries: Donchian breakout + volume + trend filter
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Williams %R filter: avoid overbought/oversold extremes
-                # Long only when not overbought (Williams %R > -80)
-                # Short only when not oversold (Williams %R < -20)
-                williams_filter_long = williams_r_aligned[i] > -80
-                williams_filter_short = williams_r_aligned[i] < -20
+                # Trend filter: only trade long if close > 1w EMA, short if close < 1w EMA
+                trend_filter_long = close[i] > ema_1w_aligned[i]
+                trend_filter_short = close[i] < ema_1w_aligned[i]
                 
-                if bull_breakout and volume_filter and williams_filter_long:
+                if bull_breakout and volume_filter and trend_filter_long:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_exit = 0
-                elif bear_breakout and volume_filter and williams_filter_short:
+                    bars_since_entry = 0
+                elif bear_breakout and volume_filter and trend_filter_short:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_exit = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_exit += 1
+                    bars_since_entry += 1
             else:
                 signals[i] = 0.0
-                bars_since_exit += 1
+                bars_since_entry += 1
     
     return signals
