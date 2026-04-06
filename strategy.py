@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: 4h breakouts capture medium-term momentum with lower transaction costs.
-Filter by 1d EMA50 for trend bias and volume confirmation for conviction.
-Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50).
-Uses 1d to reduce noise vs pure 4h. Target: 100-150 total trades over 4 years.
+4h Donchian(20) breakout with volume confirmation only
+Hypothesis: Donchian breakouts with volume confirmation capture momentum while avoiding false breakouts.
+Volume filter ensures only high-conviction breakouts trigger entries, reducing trades and improving quality.
+Works in bull (buy breakouts above upper band) and bear (sell breakdowns below lower band).
+Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema_vol_v2"
+name = "4h_donchian20_volume_only_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,31 +39,129 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Donchian channels (20-period) from 4h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # EMA50 on 1d close
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
-    # Align trend to 4h timeframe: above EMA50 = bullish (1), below = bearish (-1)
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
     
-    # Get volume data for confirmation
-    volume_1d = df_1d['volume'].values
+    # Start from warmup period
+    start = 20  # Need enough data for Donchian
     
-    # 20-period average volume on 1d
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    for i in range(start, n):
+        # Skip if required data not available
+        if np.isnan(atr[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            bars_since_entry += 1
+            continue
+        
+        # Volume filter: current 4h volume > 2.0x 20-period average volume
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > (vol_ma * 2.0)
+        else:
+            volume_filter = False
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price breaks below lower Donchian OR stoploss
+            if (close[i] < lower[i] or
+                close[i] < entry_price - 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.25
+            bars_since_entry += 1
+        elif position == -1:  # short position
+            # Exit: price breaks above upper Donchian OR stoploss
+            if (close[i] > upper[i] or
+                close[i] > entry_price + 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = -0.25
+            bars_since_entry += 1
+        else:
+            # Look for entries with minimum holding period
+            if bars_since_entry >= 6:
+                # Breakout entries: upper/lower with volume confirmation
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
+                
+                # Long: breakout above upper with volume confirmation
+                if bull_breakout and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                # Short: breakdown below lower with volume confirmation
+                elif bear_breakout and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.0
+                    bars_since_entry += 1
+            else:
+                signals[i] = 0.0
+                bars_since_entry += 1
     
-    # Align volume MA to 4h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+4h Donchian(20) breakout with volume confirmation only
+Hypothesis: Donchian breakouts with volume confirmation capture momentum while avoiding false breakouts.
+Volume filter ensures only high-conviction breakouts trigger entries, reducing trades and improving quality.
+Works in bull (buy breakouts above upper band) and bear (sell breakdowns below lower band).
+Target: 75-200 total trades over 4 years.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "4h_donchian20_volume_only_v2"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 14-period ATR
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[1] = tr[0]
+            for i in range(2, n):
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
     # Donchian channels (20-period) from 4h data
     upper = np.full(n, np.nan)
@@ -79,13 +177,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 20  # Need enough data for Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        if np.isnan(atr[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -93,21 +189,17 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 4h volume > 1.3x scaled 1d average volume
-        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.3
-        volume_filter = volume[i] > vol_threshold
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        session_filter = 8 <= hour <= 20
+        # Volume filter: current 4h volume > 2.0x 20-period average volume
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > (vol_ma * 2.0)
+        else:
+            volume_filter = False
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against trend
-            # Stoploss: price drops 2*ATR below entry
+            # Exit: price breaks below lower Donchian OR stoploss
             if (close[i] < lower[i] or
-                trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -116,10 +208,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against trend
-            # Stoploss: price rises 2*ATR above entry
+            # Exit: price breaks above upper Donchian OR stoploss
             if (close[i] > upper[i] or
-                trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -128,21 +218,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries
-            # Minimum holding period: only allow new entry after 6 bars flat
+            # Look for entries with minimum holding period
             if bars_since_entry >= 6:
-                # Breakout entries: upper/lower with trend
+                # Breakout entries: upper/lower with volume confirmation
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
                 
-                # Long: breakout above upper with bullish trend + volume + session
-                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter and session_filter:
+                # Long: breakout above upper with volume confirmation
+                if bull_breakout and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish trend + volume + session
-                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter and session_filter:
+                # Short: breakdown below lower with volume confirmation
+                elif bear_breakout and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
@@ -155,3 +244,129 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+4h Donchian(20) breakout with volume confirmation only
+Hypothesis: Donchian breakouts with volume confirmation capture momentum while avoiding false breakouts.
+Volume filter ensures only high-conviction breakouts trigger entries, reducing trades and improving quality.
+Works in bull (buy breakouts above upper band) and bear (sell breakdowns below lower band).
+Target: 75-200 total trades over 4 years.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "4h_donchian20_volume_only_v2"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 14-period ATR
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[1] = tr[0]
+            for i in range(2, n):
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+    
+    # Donchian channels (20-period) from 4h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
+    
+    # Start from warmup period
+    start = 20  # Need enough data for Donchian
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if np.isnan(atr[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            bars_since_entry += 1
+            continue
+        
+        # Volume filter: current 4h volume > 2.0x 20-period average volume
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > (vol_ma * 2.0)
+        else:
+            volume_filter = False
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price breaks below lower Donchian OR stoploss
+            if (close[i] < lower[i] or
+                close[i] < entry_price - 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.25
+            bars_since_entry += 1
+        elif position == -1:  # short position
+            # Exit: price breaks above upper Donchian OR stoploss
+            if (close[i] > upper[i] or
+                close[i] > entry_price + 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = -0.25
+            bars_since_entry += 1
+        else:
+            # Look for entries with minimum holding period
+            if bars_since_entry >= 6:
+                # Breakout entries: upper/lower with volume confirmation
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
+                
+                # Long: breakout above upper with volume confirmation
+                if bull_breakout and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                # Short: breakdown below lower with volume confirmation
+                elif bear_breakout and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.0
+                    bars_since_entry += 1
+            else:
+                signals[i] = 0.0
+                bars_since_entry += 1
+    
+    return signals
+
+}
