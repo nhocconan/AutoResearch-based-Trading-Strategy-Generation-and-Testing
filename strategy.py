@@ -8,7 +8,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Enter short when price breaks below Donchian lower with 1d EMA(50) falling and volume > 1.5x avg.
 # Exit on opposite Donchian breakout or when price crosses 1d EMA(50).
 # Target: 75-200 total trades over 4 years (19-50/year) with controlled risk.
-# This strategy has proven success on SOLUSDT in backtests (see experiment history).
 
 name = "4h_donchian20_1d_ema50_vol_v1"
 timeframe = "4h"
