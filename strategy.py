@@ -3,49 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s strategy using 6h RSI(14) mean reversion with 1d Bollinger Bands regime filter.
-# Long when RSI(14) < 30 and price touches lower Bollinger Band on 1d (oversold in range).
-# Short when RSI(14) > 70 and price touches upper Bollinger Band on 1d (overbought in range).
-# Uses Bollinger Band width to detect ranging markets (BW < 50th percentile of 50-period).
-# Designed for 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
-# Mean reversion works well in ranging markets which dominate BTC/ETH price action.
+# Hypothesis: 12h strategy using 1d Donchian channel breakout with volume confirmation and ADX trend filter.
+# Long when price breaks above 1d Donchian upper band with volume > 1.5x MA and ADX > 25 (trending).
+# Short when price breaks below 1d Donchian lower band with volume > 1.5x MA and ADX > 25.
+# Exit when price crosses back through the midline of the Donchian channel.
+# Uses ATR-based stop loss for risk management.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Donchian channels provide clear trend-following structure, volume confirms breakout strength,
+# and ADX filter avoids whipsaws in ranging markets.
 
-name = "exp_13891_6s_rsi_bbands_reversion_v1"
-timeframe = "6h"
+name = "exp_13892_12h_donchian1d_vol_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-BBANDS_PERIOD = 20
-BBANDS_STD = 2.0
-BB_WIDTH_LOOKBACK = 50
-BB_WIDTH_PERCENTILE = 50  # ranging when BB width < 50th percentile
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.2
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI with proper Wilder smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_bollinger_bands(close, period, std_dev):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    return upper, lower, sma
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    midline = (upper + lower) / 2
+    return upper, lower, midline
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -57,39 +43,62 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smoothing
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Bollinger Bands regime filter ONCE before loop
+    # Load 1d data for Donchian channel and ADX ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Bollinger Bands and width
+    # Calculate 1d Donchian channel
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close_1d, BBANDS_PERIOD, BBANDS_STD)
-    bb_width = bb_upper - bb_lower
+    upper_1d, lower_1d, midline_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Calculate percentile of BB width for regime detection (ranging when width < 50th percentile)
-    # Use expanding window to avoid look-ahead
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.expanding(min_periods=BB_WIDTH_LOOKBACK).quantile(BB_WIDTH_PERCENTILE/100.0).values
-    ranging_market = bb_width < bb_width_percentile
+    # Calculate 1d ADX
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
     
-    # Align 1d Bollinger Bands and ranging market flag to 6h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
-    ranging_aligned = align_htf_to_ltf(prices, df_1d, ranging_market.astype(float))
+    # Align 1d indicators to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    midline_1d_aligned = align_htf_to_ltf(prices, df_1d, midline_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 6h data for RSI, ATR, and volume
+    # 12h data for volume and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # RSI for mean reversion signals
-    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -103,11 +112,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, BBANDS_PERIOD, BB_WIDTH_LOOKBACK, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ADX_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]) or np.isnan(ranging_aligned[i]):
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -132,20 +141,12 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # RSI mean reversion signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Trend filter from ADX
+        trending = adx_1d_aligned[i] > ADX_THRESHOLD
         
-        # Price touching Bollinger Bands
-        price_at_lower = close[i] <= bb_lower_aligned[i] * 1.001  # small tolerance
-        price_at_upper = close[i] >= bb_upper_aligned[i] * 0.999  # small tolerance
-        
-        # Ranging market filter
-        is_ranging = ranging_aligned[i] > 0.5
-        
-        # Mean reversion signals
-        long_signal = volume_ok and rsi_oversold and price_at_lower and is_ranging
-        short_signal = volume_ok and rsi_overbought and price_at_upper and is_ranging
+        # Donchian breakout signals
+        long_signal = volume_ok and trending and close[i] > upper_1d_aligned[i]
+        short_signal = volume_ok and trending and close[i] < lower_1d_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -162,15 +163,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on RSI > 50 (mean reversion complete) or price at middle band
-            if rsi[i] > 50 or close[i] >= bb_middle_aligned[i]:
+            # Exit long when price crosses below midline
+            if close[i] < midline_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on RSI < 50 (mean reversion complete) or price at middle band
-            if rsi[i] < 50 or close[i] <= bb_middle_aligned[i]:
+            # Exit short when price crosses above midline
+            if close[i] > midline_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
