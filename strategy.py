@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish daily trend (close > EMA50) with volume > 1.3x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish daily trend (close < EMA50) with volume confirmation.
-# Uses daily EMA50 for smoother trend filter than open/close. Target: 80-180 total trades over 4 years (20-45/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "4h_donchian20_1d_ema_vol_v2"
+name = "4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,12 +30,12 @@ def generate_signals(prices):
     upper = high_series.rolling(window=20, min_periods=20).max().values
     lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA50 trend filter
+    # Daily trend filter: bullish/bearish day based on close vs open
     df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
     daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_bullish = daily_close > daily_ema50  # True for bullish day
-    daily_bearish = daily_close < daily_ema50   # True for bearish day
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
     daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
     daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
@@ -77,12 +78,12 @@ def generate_signals(prices):
         else:
             # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: break above upper Donchian during bullish daily trend
+                # Long: break above upper Donchian during bullish day
                 if (high[i] > upper[i] and 
                     daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish daily trend
+                # Short: break below lower Donchian during bearish day
                 elif (low[i] < lower[i] and 
                       daily_bearish_aligned[i]):
                     signals[i] = -0.25
