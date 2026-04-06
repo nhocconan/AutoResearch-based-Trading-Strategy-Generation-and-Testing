@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-6h Donchian Breakout with 12h Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 6h, filtered by 12h trend and volume spikes,
-capture momentum in both bull and bear markets. The 12h trend filter avoids counter-trend
+4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 4h, filtered by 1d trend and volume spikes,
+capture momentum in both bull and bear markets. The 1d trend filter avoids counter-trend
 trades, while volume ensures breakout legitimacy. ATR-based stops limit drawdown.
 Target: 100-200 total trades over 4 years.
 """
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_12h_trend_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,20 +47,20 @@ def generate_signals(prices):
         donch_high[i] = np.max(high[i-20:i])
         donch_low[i] = np.min(low[i-20:i])
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 20-period EMA on 12h for trend
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 20:
-        ema_12h[19] = np.mean(close_12h[:20])
-        for i in range(20, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 18) / 20
+    # 20-period EMA on 1d for trend
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        ema_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
     
     # Trend: 1 if close > EMA (uptrend), -1 if close < EMA (downtrend)
-    trend_12h = np.where(close_12h > ema_12h, 1, -1)
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
@@ -77,7 +77,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ma[i]):
+           np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,7 +92,7 @@ def generate_signals(prices):
             # Exit: price breaks below Donchian low OR trend turns down
             # Stoploss: price drops 2.5*ATR below entry
             if (close[i] <= donch_low[i] or
-                trend_12h_aligned[i] == -1 or
+                trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -102,7 +102,7 @@ def generate_signals(prices):
             # Exit: price breaks above Donchian high OR trend turns up
             # Stoploss: price rises 2.5*ATR above entry
             if (close[i] >= donch_high[i] or
-                trend_12h_aligned[i] == 1 or
+                trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -112,14 +112,14 @@ def generate_signals(prices):
             # Look for breakout entries
             # Long: price breaks above Donchian high in uptrend with volume
             if (close[i] > donch_high[i] and
-                trend_12h_aligned[i] == 1 and
+                trend_1d_aligned[i] == 1 and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low in downtrend with volume
             elif (close[i] < donch_low[i] and
-                  trend_12h_aligned[i] == -1 and
+                  trend_1d_aligned[i] == -1 and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
