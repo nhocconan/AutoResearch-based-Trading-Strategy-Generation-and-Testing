@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish week with volume > 1.4x 20-period average.
+# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
-# Weekly trend filter prevents counter-trend trades. 12h timeframe targets 50-150 trades over 4 years.
-# Volume confirmation ensures breakouts have institutional support. Target: 0.25 position size.
+# Weekly trend filter avoids counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
 
 name = "12h_donchian20_1w_trend_vol_v1"
 timeframe = "12h"
@@ -39,7 +39,7 @@ def generate_signals(prices):
     weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
     weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
-    # Volume filter: current volume > 1.4x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -56,7 +56,7 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.4
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits
         if position == 1:  # long position
