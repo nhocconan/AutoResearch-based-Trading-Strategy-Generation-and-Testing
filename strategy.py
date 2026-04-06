@@ -1,44 +1,67 @@
 #!/usr/bin/env python3
 """
-4h Williams %R + Volume Spike Reversal
-Hypothesis: Williams %R identifies overbought/oversold conditions. Reversals occur when price shows rejection at these extremes with volume confirmation. Works in both bull (buy oversold bounces) and bear (sell overbought rejection). Target: 75-200 total trades over 4 years.
+6h Weekly Pivot + Volume + Trend Filter
+Hypothesis: Weekly pivot levels act as strong support/resistance. Price tends to respect these levels
+in both bull and bear markets. Combined with volume confirmation and 1d trend filter to avoid
+counter-trend trades. Weekly pivot provides structure, volume confirms conviction, 1d EMA50
+filters for trend alignment.
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14333_4h_williamsr_volume_v1"
-timeframe = "4h"
+name = "exp_14335_6h_weekly_pivot_vol_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # Calculate 20-period EMA for 12h trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Load 1d data for EMA50 trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 4h data
+    # Calculate 50-period EMA for daily trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Load weekly data for pivot points (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    
+    # Align weekly pivots to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low + 1e-10))
-    
-    # Volume spike detection (20-period average)
+    # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)  # Require 150% of average volume
+    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -53,11 +76,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(period, 20) + 1
+    start = max(50, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -66,23 +91,27 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: Williams %R exits oversold OR stoploss
-            if williams_r[i] >= -20 or close[i] <= entry_price - 2.0 * atr[i]:
+            # Exit: price below S1 OR stoploss
+            if close[i] <= s1_aligned[i] or close[i] <= entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R exits overbought OR stoploss
-            if williams_r[i] <= -80 or close[i] >= entry_price + 2.0 * atr[i]:
+            # Exit: price above R1 OR stoploss
+            if close[i] >= r1_aligned[i] or close[i] >= entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Williams %R extreme + volume spike + trend filter
-            long_setup = (williams_r[i] <= -80) and vol_spike[i] and (close[i] > ema_12h_aligned[i])
-            short_setup = (williams_r[i] >= -20) and vol_spike[i] and (close[i] < ema_12h_aligned[i])
+            # Look for entries: price near pivot levels + trend alignment + volume
+            # Long: price above pivot and above S1, trend up
+            long_setup = (close[i] > pivot_aligned[i]) and (close[i] > s1_aligned[i]) and \
+                       (close[i] > ema_1d_aligned[i]) and vol_filter[i]
+            # Short: price below pivot and below R1, trend down
+            short_setup = (close[i] < pivot_aligned[i]) and (close[i] < r1_aligned[i]) and \
+                          (close[i] < ema_1d_aligned[i]) and vol_filter[i]
             
             if long_setup:
                 signals[i] = 0.25
