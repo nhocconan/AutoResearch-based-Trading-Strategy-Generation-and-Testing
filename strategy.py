@@ -4,19 +4,18 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 1d weekly breakout with volume confirmation and ATR stoploss
-# Enter long when: price breaks above weekly Donchian(10) high + volume > 1.5x 20-day average
-# Enter short when: price breaks below weekly Donchian(10) low + volume > 1.5x 20-day average
-# Exit when: price crosses weekly Donchian(10) midline OR opposite breakout occurs
-# Uses weekly structure to capture multi-day trends, targeting 50-120 trades over 4 years
-# Weekly timeframe reduces noise, volume confirms breakout strength
+# Enter long when: price breaks above weekly high + volume spike
+# Enter short when: price breaks below weekly low + volume spike
+# Exit on opposite breakout or ATR stoploss
+# Uses weekly structure to capture multi-day trends, targeting 30-100 trades over 4 years
 
-name = "1d_weekly_breakout_vol_v3"
+name = "1d_weekly_breakout_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,62 +24,175 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get weekly data for structure
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Weekly Donchian(10) channels
-    high_max = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
-    low_min = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
-    mid_line = (high_max + low_min) / 2
+    # Align weekly levels to daily (already shifted by 1 week for completed bars)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low)
     
-    # Align to daily timeframe
-    high_max_aligned = align_htf_to_ltf(prices, df_1w, high_max)
-    low_min_aligned = align_htf_to_ltf(prices, df_1w, low_min)
-    mid_line_aligned = align_htf_to_ltf(prices, df_1w, mid_line)
-    
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 2.0x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.5 * volume_ma
+    volume_threshold = 2.0 * volume_ma
+    
+    # ATR for stoploss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(10, n):  # Wait for Donchian to stabilize
+    for i in range(20, n):  # Wait for indicators to stabilize
         # Skip if required data not available
-        if (np.isnan(high_max_aligned[i]) or np.isnan(low_min_aligned[i]) or 
-            np.isnan(mid_line_aligned[i]) or np.isnan(volume_threshold[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(volume_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                # Maintain position with stoploss check
+                if position == 1 and close[i] < entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close[i] > entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Exit conditions: opposite breakout or ATR stoploss
         if position == 1:  # long position
-            # Exit: price crosses below weekly midline OR opposite breakout
-            if close[i] < mid_line_aligned[i] or low[i] < low_min_aligned[i]:
+            if close[i] < weekly_low_aligned[i] or close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above weekly midline OR opposite breakout
-            if close[i] > mid_line_aligned[i] or high[i] > high_max_aligned[i]:
+            if close[i] > weekly_high_aligned[i] or close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts with volume confirmation
+            # Look for entries: weekly breakout + volume spike
             if volume[i] > volume_threshold[i]:
-                if high[i] > high_max_aligned[i]:
-                    # Bullish breakout above weekly resistance
+                if close[i] > weekly_high_aligned[i]:
+                    # Break above weekly high with volume - bullish breakout
                     signals[i] = 0.25
                     position = 1
-                elif low[i] < low_min_aligned[i]:
-                    # Bearish breakout below weekly support
+                    entry_price = close[i]
+                elif close[i] < weekly_low_aligned[i]:
+                    # Break below weekly low with volume - bearish breakout
                     signals[i] = -0.25
                     position = -1
+                    entry_price = close[i]
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 1d weekly breakout with volume confirmation and ATR stoploss
+# Enter long when: price breaks above weekly high + volume spike
+# Enter short when: price breaks below weekly low + volume spike
+# Exit on opposite breakout or ATR stoploss
+# Uses weekly structure to capture multi-day trends, targeting 30-100 trades over 4 years
+
+name = "1d_weekly_breakout_vol_v1"
+timeframe = "1d"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get weekly data for structure
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    
+    # Align weekly levels to daily (already shifted by 1 week for completed bars)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low)
+    
+    # Volume confirmation: volume > 2.0x 20-day average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 2.0 * volume_ma
+    
+    # ATR for stoploss (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    for i in range(20, n):  # Wait for indicators to stabilize
+        # Skip if required data not available
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(volume_threshold[i]) or np.isnan(atr[i])):
+            if position != 0:
+                # Maintain position with stoploss check
+                if position == 1 and close[i] < entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close[i] > entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Exit conditions: opposite breakout or ATR stoploss
+        if position == 1:  # long position
+            if close[i] < weekly_low_aligned[i] or close[i] < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            if close[i] > weekly_high_aligned[i] or close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries: weekly breakout + volume spike
+            if volume[i] > volume_threshold[i]:
+                if close[i] > weekly_high_aligned[i]:
+                    # Break above weekly high with volume - bullish breakout
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                elif close[i] < weekly_low_aligned[i]:
+                    # Break below weekly low with volume - bearish breakout
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
     
     return signals
