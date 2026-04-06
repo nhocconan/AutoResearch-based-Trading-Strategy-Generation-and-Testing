@@ -32,16 +32,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
+    # Load 1w data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA(50) for trend bias
+    # Calculate 1w EMA(50) for trend bias
     ema_1w = calculate_ema(df_1w['close'].values, 50)
     
-    # Align weekly EMA to daily timeframe (use previous week for trend)
+    # Align 1w EMA to 1d timeframe (use previous 1w bar for trend)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Daily data for Donchian, ATR, and volume
+    # 1d data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -89,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend bias from weekly EMA (50)
-        bullish_trend = close[i] > ema_1w_aligned[i]  # price above weekly EMA50 = bullish
-        bearish_trend = close[i] < ema_1w_aligned[i]  # price below weekly EMA50 = bearish
+        # Determine trend bias from 1w EMA (50)
+        bullish_trend = close[i] > ema_1w_aligned[i]  # price above 1w EMA50 = bullish
+        bearish_trend = close[i] < ema_1w_aligned[i]  # price below 1w EMA50 = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
@@ -100,7 +100,7 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of weekly trend
+        # Entry signals - only in direction of 1w trend
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
