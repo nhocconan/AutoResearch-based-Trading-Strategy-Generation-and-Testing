@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Uses 1d EMA(50) for trend direction to filter trades in both bull/bear markets.
-# Volume > 1.8x MA(24) confirms participation. Target 100-200 total trades (25-50/year).
-# ATR(14) stop at 2.0x with break-even at 1.5R and trail at 2.5R.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Focuses on high-probability breakouts with strong volume in the direction of the daily trend.
+# Aims for 100-200 total trades over 4 years (25-50/year) with disciplined risk management.
 
-name = "exp_13680_4h_donchian20_1d_trend_vol_v1"
+name = "exp_13681_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
