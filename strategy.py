@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+# Hypothesis: 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
 # Donchian(20) breakout captures momentum in trending markets.
 # EMA50 on 1-day provides trend bias: only long when price > EMA50, short when price < EMA50.
 # Volume confirmation (current volume > 1.5x 20-period average) ensures institutional participation.
-# Designed for 4h timeframe to target 75-200 trades over 4 years.
+# Designed for 12h timeframe to target 50-150 trades over 4 years.
 # Works in bull/bear markets via EMA-based directional bias and breakout entries.
 
-name = "4h_donchian20_1d_ema50_vol_v2"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,10 +36,10 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to 4h timeframe (shifted by 1 1d bar for no look-ahead)
+    # Align EMA50 to 12h timeframe (shifted by 1 1d bar for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period) on 4h data
+    # Donchian Channel (20-period) on 12h data
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
