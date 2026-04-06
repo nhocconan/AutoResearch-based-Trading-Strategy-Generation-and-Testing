@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
-# Long when price breaks above 20-bar high + price > weekly pivot + volume > 1.5x average
-# Short when price breaks below 20-bar low + price < weekly pivot + volume > 1.5x average
-# Weekly pivot from daily data: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
-# Uses weekly pivot for trend bias to avoid counter-trend trades
-# Volume confirmation reduces false signals
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + close > EMA50 + volume > 2.0x average
+# Short when price breaks below Donchian(20) low + close < EMA50 + volume > 2.0x average
+# Uses 1w EMA50 for strong trend filter to avoid counter-trend trades in bear markets
 # Target: 50-150 total trades over 4 years with controlled risk
+# ATR-based stoploss to limit drawdown
 
-name = "6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,29 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 3:
+    # 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data
-    # Weekly pivot = (Weekly High + Weekly Low + Weekly Close) / 3
-    # We'll approximate using daily data: use highest high, lowest low, last close of the week
-    # For simplicity, we use daily OHLC to calculate daily pivot then use it as weekly bias
-    # In practice, we'd resample to weekly, but using daily pivot as proxy for weekly bias
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Daily pivot point: P = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # EMA50 calculation
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align 1d pivot to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Align 1w EMA50 to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Donchian channels (20-period) on 6h
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period)
+    def calculate_donchian(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
+    
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,10 +53,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -73,8 +69,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Donchian low or trend changes (below pivot)
-            elif close[i] < low_min[i] or close[i] < pivot_1d_aligned[i]:
+            # Exit: price breaks below Donchian lower or trend changes
+            elif close[i] < donchian_lower[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -86,8 +82,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Donchian high or trend changes (above pivot)
-            elif close[i] > high_max[i] or close[i] > pivot_1d_aligned[i]:
+            # Exit: price breaks above Donchian upper or trend changes
+            elif close[i] > donchian_upper[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -95,15 +91,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation
-            # Long: price breaks above Donchian high + above pivot + volume spike
-            if (close[i] > high_max[i] and close[i] > pivot_1d_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i]):
+            # Long: break above Donchian upper + uptrend + volume spike
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema50_1w_aligned[i] and
+                volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low + below pivot + volume spike
-            elif (close[i] < low_min[i] and close[i] < pivot_1d_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i]):
+            # Short: break below Donchian lower + downtrend + volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema50_1w_aligned[i] and
+                  volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
