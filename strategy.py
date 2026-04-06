@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Daily Trend + Volume Confirmation v2
+4h Donchian Breakout + Daily Trend + Volume Confirmation v3
 Hypothesis: Daily trend filters 4h Donchian breakouts to reduce false signals.
 Volume confirmation ensures momentum behind breakouts. Works in bull via breakouts,
 bear via breakdowns with trend filter. Optimized for 75-200 trades over 4 years.
+Increased volume threshold and added price close filter to reduce whipsaws.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12437_4h_donchian20_1d_trend_vol_v2"
+name = "exp_12437_4h_donchian20_1d_trend_vol_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +19,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 2.0  # Increased to reduce whipsaws
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -100,7 +101,7 @@ def generate_signals(prices):
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
+        # Donchian breakout conditions - require close outside band
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
@@ -128,3 +129,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
