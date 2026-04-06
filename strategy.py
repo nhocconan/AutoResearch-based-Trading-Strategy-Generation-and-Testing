@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA(50) trend filter and ATR(14) volatility filter.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Enter long when Bull Power > 0, price > EMA50, and ATR > 0.5 * ATR mean (volatility filter).
-# Enter short when Bear Power > 0, price < EMA50, and ATR > 0.5 * ATR mean.
-# Exit when opposite signal occurs or ATR drops below threshold.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA(20) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian upper with 1w EMA(20) rising and volume > 1.5x avg.
+# Enter short when price breaks below Donchian lower with 1w EMA(20) falling and volume > 1.5x avg.
+# Exit on opposite Donchian breakout or when price crosses 1w EMA(20).
 # Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
-name = "6h_elderray12h_ema50_atr_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema20_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,37 +22,29 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # 1w EMA(20) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # EMA(13) for Elder Ray calculation
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = ema_13 - low   # Bear Power = EMA13 - Low
-    
-    # ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_mean = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_threshold = 0.5 * atr_mean  # Require ATR > 50% of its 50-period mean
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(atr_threshold[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(volume_threshold[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -61,28 +52,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: Bear Power > 0 (bearish pressure) OR ATR drops below threshold
-            if bear_power[i] > 0 or atr[i] < atr_threshold[i]:
+            # Exit: price breaks below Donchian low OR crosses below EMA20
+            if close[i] < donchian_low[i] or close[i] < ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Bull Power > 0 (bullish pressure) OR ATR drops below threshold
-            if bull_power[i] > 0 or atr[i] < atr_threshold[i]:
+            # Exit: price breaks above Donchian high OR crosses above EMA20
+            if close[i] > donchian_high[i] or close[i] > ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray + EMA50 trend + ATR volatility filter
-            if atr[i] > atr_threshold[i]:
-                if bull_power[i] > 0 and close[i] > ema_50_aligned[i]:
-                    # Bullish pressure + uptrend + sufficient volatility: long
+            # Look for entries: Donchian breakout + EMA20 trend + volume
+            if volume[i] > volume_threshold[i]:
+                if close[i] > donchian_high[i] and close[i] > ema_20_aligned[i]:
+                    # Breakout above Donchian high in uptrend: long
                     signals[i] = 0.25
                     position = 1
-                elif bear_power[i] > 0 and close[i] < ema_50_aligned[i]:
-                    # Bearish pressure + downtrend + sufficient volatility: short
+                elif close[i] < donchian_low[i] and close[i] < ema_20_aligned[i]:
+                    # Breakdown below Donchian low in downtrend: short
                     signals[i] = -0.25
                     position = -1
     
