@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week ATR filter and volume confirmation.
-# Buy when price breaks above 20-day high with expanding volume and low volatility (ATR < 20-day SMA).
-# Sell when price breaks below 20-day low or volatility expands (ATR > 1.5x 20-day SMA).
+# Hypothesis: 1-day Donchian breakout with 1-week ADX filter and volume confirmation.
+# Donchian channels identify breakouts in trending markets.
+# ADX filter ensures we only trade in strong trends (ADX > 25).
+# Volume confirmation ensures breakouts have institutional participation.
 # Designed for 1d timeframe to target 30-100 trades over 4 years with low frequency.
-# Works in bull markets (breakouts) and bear markets (breakdowns) with volatility filter.
 
-name = "1d_donchian20_vol_atr_v1"
+name = "1d_donchian20_1w_adx_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,96 +24,132 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day Donchian channels (20-period)
+    # 1-day Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
-    for i in range(19, n):  # 20-period lookback
+    
+    for i in range(19, n):
         highest_high[i] = np.max(high[i-19:i+1])
         lowest_low[i] = np.min(low[i-19:i+1])
     
-    # 1-week ATR for volatility filter
+    # 1-week ADX(14) for trend strength filtering
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range calculation
+    # True Range and Directional Movement
     tr = np.full(len(close_1w), np.nan)
+    dm_plus = np.full(len(close_1w), np.nan)
+    dm_minus = np.full(len(close_1w), np.nan)
+    
     if len(close_1w) > 1:
         tr[0] = high_1w[0] - low_1w[0]
+        dm_plus[0] = 0
+        dm_minus[0] = 0
         for i in range(1, len(close_1w)):
             tr[i] = max(high_1w[i] - low_1w[i],
                        abs(high_1w[i] - close_1w[i-1]),
                        abs(low_1w[i] - close_1w[i-1]))
+            dm_plus[i] = max(high_1w[i] - high_1w[i-1], 0)
+            dm_minus[i] = max(low_1w[i-1] - low_1w[i], 0)
+            dm_plus[i] = dm_plus[i] if dm_plus[i] > dm_minus[i] else 0
+            dm_minus[i] = dm_minus[i] if dm_minus[i] > dm_plus[i] else 0
     
-    # ATR(14) calculation
+    # Smoothed TR, DM+, DM-
     atr_1w = np.full(len(close_1w), np.nan)
+    s_dm_plus = np.full(len(close_1w), np.nan)
+    s_dm_minus = np.full(len(close_1w), np.nan)
+    
     if len(close_1w) >= 14:
-        atr_1w[13] = np.mean(tr[1:15])  # First ATR at index 13
+        atr_1w[13] = np.nansum(tr[1:14])
+        s_dm_plus[13] = np.nansum(dm_plus[1:14])
+        s_dm_minus[13] = np.nansum(dm_minus[1:14])
         for i in range(14, len(close_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+            atr_1w[i] = atr_1w[i-1] - (atr_1w[i-1]/14) + tr[i]
+            s_dm_plus[i] = s_dm_plus[i-1] - (s_dm_plus[i-1]/14) + dm_plus[i]
+            s_dm_minus[i] = s_dm_minus[i-1] - (s_dm_minus[i-1]/14) + dm_minus[i]
     
-    # Align ATR to daily timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # DI+ and DI-
+    di_plus = np.full(len(close_1w), np.nan)
+    di_minus = np.full(len(close_1w), np.nan)
+    dx = np.full(len(close_1w), np.nan)
     
-    # 20-day SMA of ATR for volatility regime
-    atr_sma = np.full(n, np.nan)
-    for i in range(33, n):  # Need 14 (ATR) + 19 (SMA lookback) = 33
-        if not np.isnan(atr_1w_aligned[i-19:i+1]).any():
-            atr_sma[i] = np.mean(atr_1w_aligned[i-19:i+1])
+    for i in range(13, len(close_1w)):
+        if atr_1w[i] != 0:
+            di_plus[i] = 100 * s_dm_plus[i] / atr_1w[i]
+            di_minus[i] = 100 * s_dm_minus[i] / atr_1w[i]
+            if di_plus[i] + di_minus[i] != 0:
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
     
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_sma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_sma[i] = np.mean(volume[i-19:i+1])
-    volume_filter = volume > vol_sma * 1.5
+    # ADX calculation
+    adx = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 27:  # Need 14 for DX + 14 for smoothing
+        dx_valid = dx[13:]  # Skip first 14 where DX is NaN
+        if len(dx_valid) >= 14:
+            adx[26] = np.nanmean(dx_valid[:14])  # First ADX at index 26
+            for i in range(27, len(close_1w)):
+                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # 1-week volume average for confirmation
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = np.full(len(vol_1w), np.nan)
+    for i in range(4, len(vol_1w)):  # 5-period average
+        vol_ma_1w[i] = np.mean(vol_1w[i-4:i+1])
+    
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 33  # ATR(14) + 20-day SMA
+    start = max(19, 27, 4)  # Donchian needs 19, ADX needs 27, volume needs 4
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_1w_aligned[i]) or np.isnan(atr_sma[i])):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: low volatility environment (ATR < SMA)
-        low_vol = atr_1w_aligned[i] < atr_sma[i]
+        # Volume condition: current volume > 1.5x weekly average
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        
+        # ADX filter: only trade when trending strongly (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: breakdown below 20-day low or high volatility
-            if (close[i] < lowest_low[i] or 
-                atr_1w_aligned[i] > 1.5 * atr_sma[i]):
+            # Exit: price touches lower Donchian band or stoploss
+            if (close[i] <= lowest_low[i] or 
+                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: breakout above 20-day high or high volatility
-            if (close[i] > highest_high[i] or 
-                atr_1w_aligned[i] > 1.5 * atr_sma[i]):
+            # Exit: price touches upper Donchian band or stoploss
+            if (close[i] >= highest_high[i] or 
+                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakouts in low volatility
-            if low_vol and volume_filter[i]:
-                # Long: breakout above 20-day high
+            # Look for entries: breakout with volume and strong trend
+            if volume_filter and strong_trend:
+                # Long: breakout above upper Donchian band
                 if close[i] > highest_high[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakdown below 20-day low
+                # Short: breakout below lower Donchian band
                 elif close[i] < lowest_low[i]:
                     signals[i] = -0.25
                     position = -1
