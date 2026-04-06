@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
 # Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
 # Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
