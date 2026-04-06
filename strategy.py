@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema200_vol_v1"
-timeframe = "12h"
+name = "6h_donchian20_1w_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 80:
         return np.zeros(n)
     
     # Price and volume data
@@ -31,11 +31,11 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(200) on 1d
+    # Calculate EMA(50) on weekly
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -46,10 +46,10 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema_200 = ema(close_1d, 200)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    ema_50_1w = ema(close_1w, 50)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 6h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -66,11 +66,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(200, 20)
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_200_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -98,17 +98,17 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries - only long in bull, only short in bear based on daily trend
-            # Long: price breaks above Donchian high, above 1d EMA200, with volume
+            # Look for entries - only long in bull, only short in bear based on weekly trend
+            # Long: price breaks above Donchian high, above weekly EMA50, with volume
             if (close[i] > donchian_high[i] and 
-                close[i] > ema_200_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA200, with volume
+            # Short: price breaks below Donchian low, below weekly EMA50, with volume
             elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_200_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
