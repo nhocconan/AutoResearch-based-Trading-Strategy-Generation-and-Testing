@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #12393: 4h Donchian Breakout + 12h Trend + Volume Confirmation
-Hypothesis: Use 12h EMA for trend direction, 4h Donchian(20) breakouts for entry,
-and volume spikes for confirmation. Target 75-200 total trades over 4 years.
-Works in bull markets via breakouts and in bear via short breakdowns.
+Experiment #12399: 6h Elder Ray Power + 12h Trend + Volume Confirmation
+Hypothesis: Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13.
+Combined with 12h EMA trend filter and volume spikes to avoid weak signals.
+Works in bull via strong bull power breaks, in bear via strong bear power breaks.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12393_4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12399_6h_elder_ray_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+ELDER_EMA_PERIOD = 13
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -36,12 +37,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -54,13 +49,17 @@ def generate_signals(prices):
     ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Elder Ray components
+    ema13 = calculate_ema(close, ELDER_EMA_PERIOD)
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -70,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(ELDER_EMA_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if 12h EMA not available
@@ -100,13 +99,14 @@ def generate_signals(prices):
         uptrend_12h = close[i] > ema_12h_aligned[i]
         downtrend_12h = close[i] < ema_12h_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
+        # Elder Ray signals with volume confirmation
+        # Strong bull power = buying pressure, strong bear power = selling pressure
+        bull_strong = bull_power[i] > (atr[i] * 0.5)  # bull power > 0.5*ATR
+        bear_strong = bear_power[i] < (-atr[i] * 0.5)  # bear power < -0.5*ATR
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_12h and long_breakout
-        short_entry = volume_ok and downtrend_12h and short_breakout
+        long_entry = volume_ok and uptrend_12h and bull_strong
+        short_entry = volume_ok and downtrend_12h and bear_strong
         
         # Generate signals
         if position == 0:
