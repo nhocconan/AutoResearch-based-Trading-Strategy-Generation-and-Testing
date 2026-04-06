@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 12h, filtered by 1d trend and volume spikes,
+4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 4h, filtered by 1d trend and volume spikes,
 capture momentum in both bull and bear markets. The 1d trend filter avoids counter-trend
 trades, while volume ensures breakout legitimacy. ATR-based stops limit drawdown.
-Target: 50-150 total trades over 4 years.
+Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_trend_vol_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
