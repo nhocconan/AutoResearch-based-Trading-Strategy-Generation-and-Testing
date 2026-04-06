@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian channel breakout with weekly EMA trend filter and volume confirmation.
-# Weekly trend filter ensures we trade with the dominant weekly trend, reducing false breakouts.
-# Volume confirmation filters out low-momentum breakouts. Designed for 1d timeframe to limit trades.
-# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while capturing strong moves.
+# Hypothesis: 1d Donchian channel breakout with volume confirmation and 1w EMA trend filter.
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and weekly EMA filter ensures we trade with higher timeframe momentum.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 
 name = "exp_13064_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
@@ -14,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -47,7 +47,7 @@ def generate_signals(prices):
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
