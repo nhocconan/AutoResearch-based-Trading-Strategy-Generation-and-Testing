@@ -1,51 +1,63 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend and Volume Confirmation v1
-Hypothesis: Daily Donchian(20) breakouts capture strong momentum moves.
-Weekly EMA200 filters trend direction to avoid counter-trend trades.
-Volume confirms breakout strength. Designed for 30-100 trades over 4 years to minimize fee drag.
-Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
+6h Camarilla Pivot Reversal with 1d Trend Filter and Volume Confirmation v1
+Hypothesis: Camarilla pivot reversals on 6h timeframe with daily trend filter capture mean reversion in ranging markets and breakout continuation in trending markets. Works in bull/bear via trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_reversal_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for pivot calculation and trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_prev = np.roll(ema200_1w, 1)
-    ema200_1w_prev[0] = ema200_1w[0]
-    ema200_rising = ema200_1w > ema200_1w_prev
-    ema200_falling = ema200_1w < ema200_1w_prev
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    ema200_rising_aligned = align_htf_to_ltf(prices, df_1w, ema200_rising)
-    ema200_falling_aligned = align_htf_to_ltf(prices, df_1w, ema200_falling)
+    # Daily pivot points for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily data
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels (based on previous day)
+    r4_1d = close_1d + range_1d * 1.500
+    r3_1d = close_1d + range_1d * 1.250
+    r2_1d = close_1d + range_1d * 1.166
+    r1_1d = close_1d + range_1d * 1.083
+    s1_1d = close_1d - range_1d * 1.083
+    s2_1d = close_1d - range_1d * 1.166
+    s3_1d = close_1d - range_1d * 1.250
+    s4_1d = close_1d - range_1d * 1.500
+    
+    # Daily trend filter: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_prev = np.roll(ema50_1d, 1)
+    ema50_1d_prev[0] = ema50_1d[0]
+    ema50_rising = ema50_1d > ema50_1d_prev
+    ema50_falling = ema50_1d < ema50_1d_prev
+    
+    # Align 1d data to 6h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channel (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -55,49 +67,56 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 200  # For weekly EMA200
+    start = 50  # For daily EMA50
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(ema200_rising_aligned[i]) or np.isnan(ema200_falling_aligned[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i]) or
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite breakout or stoploss
+        # Check exits: opposite Camarilla level or stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian band OR stoploss
-            if (close[i] <= lowest_low[i] or 
+            # Exit: price reaches S3 (take profit) OR stoploss
+            if (close[i] <= s3_1d_aligned[i] or 
                 close[i] <= entry_price - 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian band OR stoploss
-            if (close[i] >= highest_high[i] or 
+            # Exit: price reaches R3 (take profit) OR stoploss
+            if (close[i] >= r3_1d_aligned[i] or 
                 close[i] >= entry_price + 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend + volume
-            bull_breakout = close[i] > highest_high[i]
-            bear_breakout = close[i] < lowest_low[i]
+            # Look for entries: Camarilla reversal or breakout + trend + volume
+            # Reversal at S3/R3 with trend alignment
+            reversal_long = (low[i] <= s3_1d_aligned[i] and close[i] > s3_1d_aligned[i] and 
+                           ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5)
+            reversal_short = (high[i] >= r3_1d_aligned[i] and close[i] < r3_1d_aligned[i] and 
+                            ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5)
             
-            bull_entry = bull_breakout and ema200_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and ema200_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            # Breakout continuation at S4/R4 with trend alignment
+            breakout_long = (close[i] > s4_1d_aligned[i] and ema50_rising_aligned[i] and 
+                           volume[i] > vol_ema[i] * 2.0)
+            breakout_short = (close[i] < r4_1d_aligned[i] and ema50_falling_aligned[i] and 
+                            volume[i] > vol_ema[i] * 2.0)
             
-            if bull_entry:
+            if reversal_long or breakout_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_entry:
+            elif reversal_short or breakout_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
