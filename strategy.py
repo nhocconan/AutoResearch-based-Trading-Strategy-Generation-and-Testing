@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band in uptrend (1d EMA50 rising).
-# Enter short when price breaks below Donchian(20) lower band in downtrend (1d EMA50 falling).
+# Hypothesis: 1d Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band in uptrend (weekly EMA50 rising).
+# Enter short when price breaks below Donchian(20) lower band in downtrend (weekly EMA50 falling).
 # Volume > 1.5x 20-period average confirms breakout strength.
-# Exit on opposite Donchian breakout or when price crosses 1d EMA50.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Exit on opposite Donchian breakout or when price crosses weekly EMA50.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and ensure robustness.
+# This strategy leverages daily price channels and weekly trend to work in both bull and bear markets.
 
-name = "12h_donchian20_1dema50_vol_v1"
-timeframe = "12h"
+name = "1d_donchian20_weekly_ema50_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,11 +26,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Weekly EMA(50) for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
+    ema_50 = pd.Series(close_weekly).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_weekly, ema_50)
     
     # Donchian(20) channels
     highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -52,21 +53,21 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price breaks below Donchian lower OR crosses below EMA50
+            # Exit: price breaks below Donchian lower OR crosses below weekly EMA50
             if close[i] < lowest_low_20[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian upper OR crosses above EMA50
+            # Exit: price breaks above Donchian upper OR crosses above weekly EMA50
             if close[i] > highest_high_20[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + EMA50 trend + volume
+            # Look for entries: Donchian breakout + weekly EMA50 trend + volume
             if volume[i] > volume_threshold[i]:
                 if close[i] > highest_high_20[i] and close[i] > ema_50_aligned[i]:
                     # Breakout above upper band in uptrend: long
