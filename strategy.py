@@ -3,31 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator (13/8/5 SMAs) with Elder Ray power signals filtered by 1d EMA trend.
-# Alligator identifies trend state (sleeping/awake/eating). Elder Ray (bull/bear power) measures trend strength.
-# 1d EMA ensures trading with higher timeframe momentum. Works in bull/bear by only taking signals in trend direction.
-# Target: 75-150 total trades over 4 years (19-38/year) to balance opportunity and cost.
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d EMA trend filter.
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and EMA trend filter ensures we trade with higher timeframe momentum.
+# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
 
-name = "exp_13059_6h_alligator_elder_1d_ema_v1"
-timeframe = "6h"
+name = "exp_13060_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_PERIOD_JAW = 13  # Blue line
-ALLIGATOR_PERIOD_TEETH = 8  # Red line
-ALLIGATOR_PERIOD_LIPS = 5   # Green line
+DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_sma(arr, period):
-    """Calculate Simple Moving Average"""
-    return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,6 +29,10 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -51,21 +47,20 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: three SMAs
-    jaw = calculate_sma(close, ALLIGATOR_PERIOD_JAW)  # Blue (13)
-    teeth = calculate_sma(close, ALLIGATOR_PERIOD_TEETH)  # Red (8)
-    lips = calculate_sma(close, ALLIGATOR_PERIOD_LIPS)  # Green (5)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Elder Ray Power
-    bull_power = high - teeth  # High minus Teeth (red line)
-    bear_power = low - teeth   # Low minus Teeth (red line)
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stop loss
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -74,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_PERIOD_JAW, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
@@ -97,29 +92,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator conditions: check if lines are not intertwined (trending)
-        # Jaw > Teeth > Lips = uptrend, Jaw < Teeth < Lips = downtrend
-        alligator_up = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
-        alligator_down = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
-        
-        # Elder Ray signals with Alligator filter
-        # Long: bull power positive AND alligator aligned up
-        # Short: bear power negative AND alligator aligned down
-        long_signal = bull_power[i] > 0 and alligator_up
-        short_signal = bear_power[i] < 0 and alligator_down
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter: price above/below daily EMA
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
+        
         # Generate signals
         if position == 0:
-            if long_signal and uptrend:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal and downtrend:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
