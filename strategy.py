@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-# Enter long when: price breaks above Donchian upper band (20), close > 1d EMA(50), volume > 1.5x average
-# Enter short when: price breaks below Donchian lower band (20), close < 1d EMA(50), volume > 1.5x average
-# Exit when: opposite Donchian break occurs or trend reverses (close crosses EMA)
-# Uses daily trend filter to avoid counter-trend trades, volume to confirm breakout strength
-# Target: 50-150 trades over 4 years by combining trend + breakout + volume filters
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Enter long when: price breaks above 20-period high, price > 1d EMA50, volume > 1.5x 20-period average
+# Enter short when: price breaks below 20-period low, price < 1d EMA50, volume > 1.5x 20-period average
+# Exit when: price crosses back through the Donchian midpoint or opposite breakout occurs
+# Uses 1d trend filter to avoid counter-trend trades, volume to confirm breakout strength
+# Target: 100-200 trades over 4 years by requiring multiple confluence factors
 
-name = "12h_donchian_1d_ema_vol_v7"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,15 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
     # Donchian channels (20-period)
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # EMA(50) on 1d
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    donchian_mid = (high_roll + low_roll) / 2.0
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,7 +46,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -53,28 +54,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR close < EMA(50)
-            if close[i] < low_roll[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price crosses below Donchian midpoint OR opposite breakout
+            if close[i] < donchian_mid[i] or (low[i] < low_roll[i] and close[i] < open_price if 'open_price' in locals() else False):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR close > EMA(50)
-            if close[i] > high_roll[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price crosses above Donchian midpoint OR opposite breakout
+            if close[i] > donchian_mid[i] or (high[i] > high_roll[i] and close[i] > open_price if 'open_price' in locals() else False):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian break + trend filter + volume
+            # Look for breakouts with trend and volume confirmation
             if volume[i] > volume_threshold[i]:
-                if close[i] > high_roll[i] and close[i] > ema_50_aligned[i]:
-                    # Bullish breakout above upper band with trend confirmation
+                # Long breakout: price above upper band with uptrend
+                if high[i] > high_roll[i] and close[i] > ema_50_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < low_roll[i] and close[i] < ema_50_aligned[i]:
-                    # Bearish breakout below lower band with trend confirmation
+                # Short breakout: price below lower band with downtrend
+                elif low[i] < low_roll[i] and close[i] < ema_50_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
     
