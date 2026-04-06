@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot levels with daily volume confirmation and weekly EMA trend filter.
-# Uses Camarilla levels (H4/L4) from daily timeframe for precise reversal entries in ranging markets.
-# Weekly EMA filter ensures trades align with higher timeframe trend. Volume confirmation avoids false breakouts.
-# Works in ranging markets (mean reversion at H4/L4) and trending markets (breakouts beyond H5/L5).
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
+# Uses 4-hour price channel breakouts aligned with 12-hour momentum to capture strong trending moves.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
+# and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13512_12h_camarilla_1d_vol_1w_ema_v1"
-timeframe = "12h"
+name = "exp_13513_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1  # Use previous day's OHLC
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-EMA_PERIOD = 21
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -35,59 +34,28 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given OHLC"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    multiplier = 1.1 / 12
-    h4 = close + range_val * multiplier * 11/2
-    l4 = close - range_val * multiplier * 11/2
-    h5 = close + range_val * multiplier * 11/1
-    l5 = close - range_val * multiplier * 11/1
-    return h4, l4, h5, l5
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla levels (using previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12-hour data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12-hour EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    camarilla_h4 = np.full(len(close_1d), np.nan)
-    camarilla_l4 = np.full(len(close_1d), np.nan)
-    camarilla_h5 = np.full(len(close_1d), np.nan)
-    camarilla_l5 = np.full(len(close_1d), np.nan)
-    
-    for i in range(1, len(close_1d)):
-        h4, l4, h5, l5 = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        camarilla_h4[i] = h4
-        camarilla_l4[i] = l4
-        camarilla_h5[i] = h5
-        camarilla_l5[i] = l5
-    
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    
-    # Load weekly EMA for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -101,12 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not available
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if EMA not available
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -128,29 +95,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Camarilla-based signals
-        # Long setup: price rejects L4 (support) in uptrend or breaks above H5 (strong breakout)
-        long_setup = (volume_ok and 
-                     ((close[i] > camarilla_l4_aligned[i] and low[i] <= camarilla_l4_aligned[i]) or  # bounce off L4
-                      (high[i] > camarilla_h5_aligned[i] and uptrend)))  # break above H5 in uptrend
-        
-        # Short setup: price rejects H4 (resistance) in downtrend or breaks below L5 (strong breakdown)
-        short_setup = (volume_ok and 
-                      ((close[i] < camarilla_h4_aligned[i] and high[i] >= camarilla_h4_aligned[i]) or  # rejection at H4
-                       (low[i] < camarilla_l5_aligned[i] and downtrend)))  # break below L5 in downtrend
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if long_setup:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_setup:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
