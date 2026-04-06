@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12518_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_12519_6d_elder_ray_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
+EMA_SHORT = 13
+EMA_LONG = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -29,32 +29,28 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend
-    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily EMA for trend
+    ema_1d_short = calculate_ema(df_1d['close'].values, EMA_SHORT)
+    ema_1d_long = calculate_ema(df_1d['close'].values, EMA_LONG)
+    ema_1d_short_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_short)
+    ema_1d_long_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_long)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    ema_6h_short = calculate_ema(close, EMA_SHORT)
+    ema_6h_long = calculate_ema(close, EMA_LONG)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -63,11 +59,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_LONG, ATR_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_1d_short_aligned[i]) or np.isnan(ema_1d_long_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -86,20 +82,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation (6h)
+        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (weekly)
-        uptrend_1w = close[i] > ema_1w_aligned[i]
-        downtrend_1w = close[i] < ema_1w_aligned[i]
+        # Elder Ray components
+        bull_power = high[i] - ema_6h_long[i]  # High minus long EMA
+        bear_power = low[i] - ema_6h_long[i]   # Low minus long EMA
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
+        # Trend filters
+        uptrend_1d = ema_1d_short_aligned[i] > ema_1d_long_aligned[i]  # Daily EMA cross
+        downtrend_1d = ema_1d_short_aligned[i] < ema_1d_long_aligned[i]
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_1w and long_breakout
-        short_entry = volume_ok and downtrend_1w and short_breakout
+        long_entry = volume_ok and uptrend_1d and bull_power > 0
+        short_entry = volume_ok and downtrend_1d and bear_power < 0
         
         # Generate signals
         if position == 0:
