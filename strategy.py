@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with volume confirmation and 1-day EMA trend filter.
-# Breakouts capture strong directional moves, volume filters out weak/noisy signals,
-# and the daily EMA ensures alignment with higher timeframe trend.
-# Designed to work in both bull and bear markets by trading breakouts in the direction of the daily trend.
+# Hypothesis: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
+# The daily EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
 
-name = "exp_13161_4h_donchian20_1d_ema_vol_v1"
+name = "exp_13160_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -100,7 +99,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals (using previous bar's Donchian levels)
+        # Breakout signals
         breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
         breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
