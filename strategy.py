@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume Filter + Weekly ADX Filter
-Hypothesis: Daily Donchian breakouts capture medium-term trends with volume confirmation.
-Weekly ADX filter ensures we only trade when weekly trend is strong, reducing whipsaw.
-Designed for 30-100 trades over 4 years (7-25/year) to minimize fee drag.
-Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
+1d Donchian(20) Breakout + Volume + 1w ADX Filter
+Hypothesis: Daily Donchian breakouts capture medium-term trends with weekly trend filtering.
+Volume confirms breakout strength. Weekly ADX ensures we only trade in strong trends on higher timeframe.
+Designed for 30-100 trades over 4 years (7-25/year) to minimize fee drag and improve generalization.
+Works in bull markets (breakouts) and bear markets (breakdowns) by going long/short on channel breaks.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_volume_weekly_adx_v1"
+name = "1d_donchian20_volume_1wadx_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -21,25 +21,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load weekly data for ADX (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    df_1w = get_htf_data(prices, '1w')
     
-    # ADX calculation on weekly data
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # ADX calculation on weekly
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_weekly[1:] - low_weekly[1:])
-    tr2 = np.abs(high_weekly[1:] - close_weekly[:-1])
-    tr3 = np.abs(low_weekly[1:] - close_weekly[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_weekly[1:] - high_weekly[:-1]) > (low_weekly[:-1] - low_weekly[1:]), 
-                       np.maximum(high_weekly[1:] - high_weekly[:-1], 0), 0)
-    dm_minus = np.where((low_weekly[:-1] - low_weekly[1:]) > (high_weekly[1:] - high_weekly[:-1]), 
-                        np.maximum(low_weekly[:-1] - low_weekly[1:], 0), 0)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -63,10 +63,10 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_weekly = wilder_smooth(dx, period_adx)
+    adx_1w = wilder_smooth(dx, period_adx)
     
     # Align ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Price and volume data
     high = prices['high'].values
@@ -106,14 +106,14 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR weekly ADX < 20
+            # Exit: price closes below Donchian lower OR ADX < 20
             if close[i] < lowest_low or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR weekly ADX < 20
+            # Exit: price closes above Donchian upper OR ADX < 20
             if close[i] > highest_high or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
