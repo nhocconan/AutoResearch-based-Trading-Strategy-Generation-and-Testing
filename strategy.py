@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter, volume confirmation, and ATR stoploss
-# Long when price breaks above 4h Donchian high(20) + price > 12h EMA(50) + volume > 2x average
-# Short when price breaks below 4h Donchian low(20) + price < 12h EMA(50) + volume > 2x average
-# Exit when price returns to Donchian midline or opposite breakout occurs
-# Uses 12h trend to filter breakouts in strong trends, targeting 100-180 trades over 4 years
+# Hypothesis: 1d weekly breakout with volume confirmation and ATR stop
+# Enter long when: price breaks above weekly Donchian(10) high + volume > 1.5x average
+# Enter short when: price breaks below weekly Donchian(10) low + volume > 1.5x average
+# Exit when: price crosses back below/above Donchian midpoint OR opposite breakout
+# Uses weekly structure to capture multi-day trends with volume confirmation
+# Target: 30-80 trades over 4 years to minimize fee drag
 
-name = "4h_donchian20_12h_ema_vol_v2"
-timeframe = "4h"
+name = "1d_weekly_breakout_vol_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -24,28 +25,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2
+    # Weekly Donchian channels (10-period)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Calculate Donchian channels
+    high_roll = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
+    low_roll = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    mid_roll = (high_roll + low_roll) / 2.0
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Align to daily timeframe
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_roll)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_roll)
+    mid_1w_aligned = align_htf_to_ltf(prices, df_1w, mid_roll)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 2.0 * volume_ma
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(10, n):  # Wait for Donchian to stabilize
         # Skip if required data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
+        if (np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]) or 
+            np.isnan(mid_1w_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -53,28 +58,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price returns to midline OR breaks below lower band
-            if close[i] <= donchian_mid[i] or close[i] < low_roll[i]:
+            # Exit: price crosses below weekly midpoint OR opposite breakout
+            if close[i] < mid_1w_aligned[i] or low[i] < low_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price returns to midline OR breaks above upper band
-            if close[i] >= donchian_mid[i] or close[i] > high_roll[i]:
+            # Exit: price crosses above weekly midpoint OR opposite breakout
+            if close[i] > mid_1w_aligned[i] or high[i] > high_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakout entries: price breaks Donchian band + trend filter + volume
-            if close[i] > high_roll[i] and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]:
-                # Bullish breakout above upper band with trend and volume confirmation
-                signals[i] = 0.25
-                position = 1
-            elif close[i] < low_roll[i] and close[i] < ema_50_aligned[i] and volume[i] > volume_threshold[i]:
-                # Bearish breakout below lower band with trend and volume confirmation
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout entries with volume confirmation
+            if volume[i] > volume_threshold[i]:
+                if high[i] > high_1w_aligned[i]:
+                    # Bullish breakout above weekly high
+                    signals[i] = 0.25
+                    position = 1
+                elif low[i] < low_1w_aligned[i]:
+                    # Bearish breakout below weekly low
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
