@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Uses 4h Donchian channel breakouts for trend entry.
-# 1d trend filter (price above/below 20-day EMA) ensures alignment with daily trend.
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
+# Uses 12-hour Donchian channel (20-period) breakouts for trend continuation.
+# Daily trend filter (price above/below 20-day EMA) ensures alignment with higher timeframe trend.
 # Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
 # Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Target: 50-150 trades over 4 years (12-37/year).
 
-name = "4h_donchian20_1d_trend_vol_v2"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,14 +25,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
+    # 12h Donchian channel (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(19, n):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
     
-    # 1d trend filter: 20-day EMA on daily closes
+    # Daily trend filter: 20-day EMA on daily closes
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_20d = np.full(len(close_1d), np.nan)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(20, n):
-        # Skip if 1d trend data not available
+        # Skip if daily trend data not available
         if np.isnan(ema_20d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -88,7 +88,7 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and 1d trend filter
+            # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
                 # Breakout above Donchian high with daily uptrend
                 if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i] and 
