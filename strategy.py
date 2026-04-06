@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation (2.5x 20-period average)
-# Long when price breaks above Donchian high, price > 1w EMA(50), and volume > 2.5x average
-# Short when price breaks below Donchian low, price < 1w EMA(50), and volume > 2.5x average
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation (2.0x 20-period average)
+# Long when price breaks above Donchian high, price > 1w EMA(50), and volume > 2.0x average
+# Short when price breaks below Donchian low, price < 1w EMA(50), and volume > 2.0x average
 # Exit on opposite Donchian break or when price crosses below/above EMA
-# Stoploss at 2.0 * ATR(14)
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 1w trend to avoid false breakouts in counter-trend moves (especially in 2022 bear market)
-# Higher volume threshold (2.5x) and longer trend filter (1w) to reduce trade frequency
-# Target: 75-200 trades over 4 years (19-50/year)
+# Uses 1w trend to avoid false breakouts in counter-trend moves
+# Higher volume threshold (2.0x) and longer trend filter (1w) to reduce trade frequency
+# Target: 30-100 total trades over 4 years (7-25/year)
 
-name = "4h_donchian20_1w_ema_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,7 +39,7 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h Donchian channels (20-period)
+    # 1d Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -70,8 +70,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -83,8 +83,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -100,14 +100,14 @@ def generate_signals(prices):
             # Long: price breaks above Donchian high, price above EMA (bullish trend), volume spike
             if (close[i] > donchian_high[i] and
                 close[i] > ema_1w_aligned[i] and
-                volume[i] > 2.5 * volume_ma[i]):
+                volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low, price below EMA (bearish trend), volume spike
             elif (close[i] < donchian_low[i] and
                   close[i] < ema_1w_aligned[i] and
-                  volume[i] > 2.5 * volume_ma[i]):
+                  volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
