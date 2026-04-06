@@ -3,47 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud with daily trend filter and volume confirmation.
-# The Ichimoku Cloud (Tenkan-sen/Kijun-sen cross + cloud color) provides clear
-# trend direction and support/resistance zones. Combined with daily trend filter
-# to avoid counter-trend trades and volume confirmation for institutional
-# participation. Works in bull markets (price above cloud, bullish TK cross)
-# and bear markets (price below cloud, bearish TK cross).
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12-hour Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# In bull markets, price breaks above 20-period high with volume and EMA50 uptrend = long.
+# In bear markets, price breaks below 20-period low with volume and EMA50 downtrend = short.
+# Donchian provides clear breakout levels, EMA50 filters counter-trend trades, volume confirms conviction.
+# Target: 50-150 total trades over 4 years (12-37/year) with low turnover to minimize fee drag.
 
-name = "exp_13335_6h_ichimoku_cloud_daily_trend_vol_v1"
-timeframe = "6h"
+name = "exp_13336_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-TENKAN_PERIOD = 9    # Tenkan-sen period
-KIJUN_PERIOD = 26    # Kijun-sen period
-SENKOU_B_PERIOD = 52 # Senkou span B period
-DMA_PERIOD = 50      # Daily MA for trend filter
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components"""
-    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past TENKAN_PERIOD
-    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
-    
-    # Kijun-sen (Base Line): (highest high + lowest low)/2 for past KIJUN_PERIOD
-    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted KIJUN_PERIOD ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(KIJUN_PERIOD)
-    
-    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past SENKOU_B_PERIOD shifted KIJUN_PERIOD ahead
-    senkou_span_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
-                      pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -56,37 +37,26 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily MA for trend filter
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    daily_ma = pd.Series(close_1d).ewm(span=DMA_PERIOD, adjust=False, min_periods=DMA_PERIOD).mean().values
-    daily_ma_aligned = align_htf_to_ltf(prices, df_1d, daily_ma)
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h Ichimoku
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b = calculate_ichimoku(high, low, close)
-    
-    # Cloud top and bottom (Senkou Span A and B)
-    cloud_top = np.maximum(senkou_span_a, senkou_span_b)
-    cloud_bottom = np.minimum(senkou_span_a, senkou_span_b)
-    
-    # TK Cross (Tenkan-sen crossing Kijun-sen)
-    tk_cross = tenkan_sen - kijun_sen
-    tk_cross_above = tk_cross > 0
-    tk_cross_below = tk_cross < 0
-    
-    # Price relative to cloud
-    price_above_cloud = close > cloud_top
-    price_below_cloud = close < cloud_bottom
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -100,13 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, DMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + KIJUN_PERIOD
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(daily_ma_aligned[i]) or np.isnan(volume_ma[i])):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -128,31 +96,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Daily trend filter: price above/below daily MA
-        uptrend = close[i] > daily_ma_aligned[i]
-        downtrend = close[i] < daily_ma_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Ichimoku signals
-        # Long: Price above cloud + bullish TK cross + uptrend + volume
-        long_signal = (price_above_cloud[i] and 
-                      tk_cross_above[i] and 
-                      uptrend and 
-                      volume_ok)
-        
-        # Short: Price below cloud + bearish TK cross + downtrend + volume
-        short_signal = (price_below_cloud[i] and 
-                       tk_cross_below[i] and 
-                       downtrend and 
-                       volume_ok)
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > donchian_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < donchian_low[i-1])
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
