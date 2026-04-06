@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly volume confirmation and ADX trend filter.
-# Donchian(20) captures breakouts in both bull and bear markets.
-# Weekly volume filter ensures institutional participation.
-# Weekly ADX > 25 filters for strong trends to avoid false breakouts in ranging markets.
-# Designed for 1d timeframe targeting 75-200 trades over 4 years (20-50/year).
+# Hypothesis: 6-hour Donchian channel breakout with 1-day pivot point confirmation and volume filter.
+# Long when price breaks above 6h Donchian high(20) AND daily pivot > daily open (bullish bias).
+# Short when price breaks below 6h Donchian low(20) AND daily pivot < daily open (bearish bias).
+# Volume confirmation: current volume > 1.5x 6h volume average.
+# Uses discrete position sizing (0.25) to limit drawdown and reduce trade frequency.
+# Designed for 6h timeframe targeting 50-150 total trades over 4 years.
 
-name = "1d_donchian20_1w_vol_adx_v1"
-timeframe = "1d"
+name = "6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,134 +25,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
+    # 6-hour Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
-    for i in range(19, n):
+    
+    for i in range(19, n):  # 20-period lookback
         highest_high[i] = np.max(high[i-19:i+1])
         lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Weekly ADX for trend strength
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1-day pivot point data (daily high, low, close, open)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # True Range and Directional Movement
-    tr = np.full(len(close_1w), np.nan)
-    dm_plus = np.full(len(close_1w), np.nan)
-    dm_minus = np.full(len(close_1w), np.nan)
+    # Daily pivot point: (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    if len(close_1w) > 1:
-        tr[0] = high_1w[0] - low_1w[0]
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        for i in range(1, len(close_1w)):
-            tr[i] = max(high_1w[i] - low_1w[i],
-                       abs(high_1w[i] - close_1w[i-1]),
-                       abs(low_1w[i] - close_1w[i-1]))
-            dm_plus[i] = max(high_1w[i] - high_1w[i-1], 0)
-            dm_minus[i] = max(low_1w[i-1] - low_1w[i], 0)
-            if dm_plus[i] > dm_minus[i]:
-                dm_minus[i] = 0
-            else:
-                dm_plus[i] = 0
+    # Daily bias: pivot > open = bullish, pivot < open = bearish
+    daily_bullish = pivot_1d > open_1d
+    daily_bearish = pivot_1d < open_1d
     
-    # Smoothed TR, DM+, DM-
-    atr_1w = np.full(len(close_1w), np.nan)
-    s_dm_plus = np.full(len(close_1w), np.nan)
-    s_dm_minus = np.full(len(close_1w), np.nan)
+    # Align daily data to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish.astype(float))
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish.astype(float))
     
-    if len(close_1w) >= 14:
-        atr_1w[13] = np.nansum(tr[1:14])
-        s_dm_plus[13] = np.nansum(dm_plus[1:14])
-        s_dm_minus[13] = np.nansum(dm_minus[1:14])
-        for i in range(14, len(close_1w)):
-            atr_1w[i] = atr_1w[i-1] - (atr_1w[i-1]/14) + tr[i]
-            s_dm_plus[i] = s_dm_plus[i-1] - (s_dm_plus[i-1]/14) + dm_plus[i]
-            s_dm_minus[i] = s_dm_minus[i-1] - (s_dm_minus[i-1]/14) + dm_minus[i]
-    
-    # DI+ and DI-
-    di_plus = np.full(len(close_1w), np.nan)
-    di_minus = np.full(len(close_1w), np.nan)
-    dx = np.full(len(close_1w), np.nan)
-    
-    for i in range(13, len(close_1w)):
-        if atr_1w[i] != 0:
-            di_plus[i] = 100 * s_dm_plus[i] / atr_1w[i]
-            di_minus[i] = 100 * s_dm_minus[i] / atr_1w[i]
-            if di_plus[i] + di_minus[i] != 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX calculation
-    adx = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 27:
-        dx_valid = dx[13:]
-        if len(dx_valid) >= 14:
-            adx[26] = np.nanmean(dx_valid[:14])
-            for i in range(27, len(close_1w)):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Weekly volume average
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = np.full(len(vol_1w), np.nan)
-    for i in range(4, len(vol_1w)):
-        vol_ma_1w[i] = np.mean(vol_1w[i-4:i+1])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # 6-hour volume average (10-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(9, n):  # 10-period average
+        vol_ma[i] = np.mean(volume[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(27, 19, 4)
+    start = max(19, 9)  # Donchian needs 19, volume needs 9
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(daily_bullish_aligned[i]) or 
+            np.isnan(daily_bearish_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
-        
-        # ADX filter: only trade when strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Volume condition: current volume > 1.5x 6h volume average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low or stoploss
+            # Exit: price below Donchian low or stoploss
             if (close[i] < lowest_low[i] or 
-                close[i] < entry_price - 2.5 * (highest_high[i] - lowest_low[i])):
+                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high or stoploss
+            # Exit: price above Donchian high or stoploss
             if (close[i] > highest_high[i] or 
-                close[i] > entry_price + 2.5 * (highest_high[i] - lowest_low[i])):
+                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with volume and trend filter
-            if volume_filter and strong_trend:
-                # Long: price breaks above Donchian high
-                if close[i] > highest_high[i]:
+            # Look for entries with volume filter
+            if volume_filter:
+                # Long: break above Donchian high with bullish daily bias
+                if (close[i] > highest_high[i] and daily_bullish_aligned[i] > 0.5):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: price breaks below Donchian low
-                elif close[i] < lowest_low[i]:
+                # Short: break below Donchian low with bearish daily bias
+                elif (close[i] < lowest_low[i] and daily_bearish_aligned[i] > 0.5):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
