@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Index combined with 12-hour trend filter and 1-week volume confirmation.
-# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures bull/bear strength.
-# 12-hour EMA50 filters for trend direction to avoid counter-trend whipsaws.
-# Weekly volume surge (>2x average) confirms institutional participation.
-# Designed for 6h timeframe to target 100-200 trades over 4 years with controlled frequency.
+# Hypothesis: 12-hour price action strategy using 1-week Bollinger Bands breakout with 1-day volume confirmation.
+# In bull markets, buy the breakout above upper BB; in bear markets, short the breakdown below lower BB.
+# Volume confirms institutional participation; Bollinger Bands adapt to volatility.
+# Designed for 12h timeframe to target 50-150 trades over 4 years with low frequency and high win rate.
 
-name = "6h_elder_ray12h_trend_vol_v1"
-timeframe = "6h"
+name = "12h_bb_breakout_1d_vol_1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,60 +23,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour EMA50 for trend direction
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # 13-period EMA for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
-    
-    # 1-week volume average for confirmation
+    # 1-week Bollinger Bands (20, 2)
     df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=5, min_periods=1).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    close_1w = df_1w['close'].values
+    
+    # Calculate Bollinger Bands
+    bb_length = 20
+    bb_mult = 2.0
+    
+    basis = np.full(len(close_1w), np.nan)
+    dev = np.full(len(close_1w), np.nan)
+    upper = np.full(len(close_1w), np.nan)
+    lower = np.full(len(close_1w), np.nan)
+    
+    for i in range(bb_length - 1, len(close_1w)):
+        basis[i] = np.mean(close_1w[i - bb_length + 1:i + 1])
+        dev[i] = bb_mult * np.std(close_1w[i - bb_length + 1:i + 1])
+        upper[i] = basis[i] + dev[i]
+        lower[i] = basis[i] - dev[i]
+    
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    basis_aligned = align_htf_to_ltf(prices, df_1w, basis)
+    
+    # 1-day volume average for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    for i in range(19, len(vol_1d)):  # 20-period average
+        vol_ma_1d[i] = np.mean(vol_1d[i - 19:i + 1])
+    
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # EMA50 needs 50 periods
+    start = max(bb_length - 1, 19)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_1w_aligned[i]):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(basis_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 2x weekly average (institutional participation)
-        volume_filter = volume[i] > vol_ma_1w_aligned[i] * 2.0
-        
-        # Trend filter: EMA50 direction
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Volume condition: current volume > 1.5x daily average
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: bear power turning negative or stoploss
-            if (bear_power[i] > -0.1 * close[i] or  # Bear power weakening
+            # Exit: price below basis or stoploss
+            if (close[i] < basis_aligned[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: bull power turning positive or stoploss
-            if (bull_power[i] < 0.1 * close[i] or  # Bull power weakening
+            # Exit: price above basis or stoploss
+            if (close[i] > basis_aligned[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
@@ -86,13 +96,13 @@ def generate_signals(prices):
         else:
             # Look for entries with volume confirmation
             if volume_filter:
-                # Long: strong bull power in uptrend
-                if bull_power[i] > 0.3 * close[i] and uptrend:
+                # Long: breakout above upper Bollinger Band
+                if close[i] > upper_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: strong bear power in downtrend
-                elif bear_power[i] < -0.3 * close[i] and downtrend:
+                # Short: breakdown below lower Bollinger Band
+                elif close[i] < lower_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
