@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal strategy
-# Uses 1d Camarilla levels for reversal signals with volume confirmation.
-# Works in bull/bear markets as it fades extremes at R3/S3 levels.
-# Target: 60-150 trades over 4 years (15-38/year) to balance frequency and cost.
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR stoploss
+# Works in bull/bear because breakouts capture strong momentum moves, volume filters false signals,
+# and ATR stoploss manages risk in volatile conditions. Target: 60-120 trades over 4 years (15-30/year).
 
-name = "exp_12987_6h_camarilla_reversal_v1"
-timeframe = "6h"
+name = "exp_12988_12h_donchian20_vol_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,64 +28,30 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    range_val = high - low
-    close_val = close
-    h4 = close_val + range_val * 1.1 / 2
-    l4 = close_val - range_val * 1.1 / 2
-    h3 = close_val + range_val * 1.1 / 4
-    l3 = close_val - range_val * 1.1 / 4
-    h2 = close_val + range_val * 1.1 / 6
-    l2 = close_val - range_val * 1.1 / 6
-    h1 = close_val + range_val * 1.1 / 12
-    l1 = close_val - range_val * 1.1 / 12
-    return h1, h2, h3, h4, l1, l2, l3, l4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop (for Donchian calculation)
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels
+    # Calculate daily Donchian channels
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    donchian_upper, donchian_lower = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    h1_vals = np.zeros(len(close_d))
-    h2_vals = np.zeros(len(close_d))
-    h3_vals = np.zeros(len(close_d))
-    h4_vals = np.zeros(len(close_d))
-    l1_vals = np.zeros(len(close_d))
-    l2_vals = np.zeros(len(close_d))
-    l3_vals = np.zeros(len(close_d))
-    l4_vals = np.zeros(len(close_d))
+    # Align to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower)
     
-    for i in range(len(close_d)):
-        h1, h2, h3, h4, l1, l2, l3, l4 = calculate_camarilla(high_d[i], low_d[i], close_d[i])
-        h1_vals[i] = h1
-        h2_vals[i] = h2
-        h3_vals[i] = h3
-        h4_vals[i] = h4
-        l1_vals[i] = l1
-        l2_vals[i] = l2
-        l3_vals[i] = l3
-        l4_vals[i] = l4
-    
-    # Align to 6h timeframe
-    h1_aligned = align_htf_to_ltf(prices, df_daily, h1_vals)
-    h2_aligned = align_htf_to_ltf(prices, df_daily, h2_vals)
-    h3_aligned = align_htf_to_ltf(prices, df_daily, h3_vals)
-    h4_aligned = align_htf_to_ltf(prices, df_daily, h4_vals)
-    l1_aligned = align_htf_to_ltf(prices, df_daily, l1_vals)
-    l2_aligned = align_htf_to_ltf(prices, df_daily, l2_vals)
-    l3_aligned = align_htf_to_ltf(prices, df_daily, l3_vals)
-    l4_aligned = align_htf_to_ltf(prices, df_daily, l4_vals)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -100,12 +66,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Camarilla levels not available
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if Donchian levels not available
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -125,20 +90,20 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Reversal at H3/L3 with volume
-        reversal_long = volume_ok and close[i] <= l3_aligned[i]
-        reversal_short = volume_ok and close[i] >= h3_aligned[i]
+        # Breakout above upper or below lower Donchian
+        breakout_long = volume_ok and close[i] >= donchian_upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
-            if reversal_long:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif reversal_short:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
