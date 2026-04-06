@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with 1-day volume confirmation and ATR stoploss.
-# Breakouts capture strong momentum moves in both bull and bear markets.
-# Volume filter ensures only significant breakouts trigger entries, reducing false signals.
-# ATR-based stoploss manages risk during volatile periods.
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fee drag.
+# Hypothesis: Daily Donchian breakout with weekly EMA trend filter and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, EMA filter ensures we trade with trend,
+# and volume filters weak signals. Target: 50-150 trades over 4 years (12-38/year) to balance
+# statistical significance with low fee drag.
 
-name = "exp_12969_4h_donchian20_1d_vol_atr_v1"
-timeframe = "4h"
+name = "exp_12970_1d_donchian20_weekly_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -30,6 +30,10 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(values, period):
+    """Calculate EMA"""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
@@ -38,33 +42,26 @@ def calculate_donchian(high, low, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1D data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1D indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate weekly EMA for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_weekly = calculate_ema(close_weekly, EMA_PERIOD)
+    ema_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    donchian_upper, donchian_lower = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
-    volume_ma = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
-    
-    # Align to 4H timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 4H indicators for entry timing
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,12 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or \
-           np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,25 +92,30 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using 1D average volume)
-        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout signals
-        breakout_long = volume_ok and high[i] >= donchian_upper_aligned[i]
-        breakout_short = volume_ok and low[i] <= donchian_lower_aligned[i]
+        # Breakout above upper band or breakdown below lower band
+        breakout_long = volume_ok and close[i] >= upper[i]
+        breakout_short = volume_ok and close[i] <= lower[i]
+        
+        # Trend filter: EMA slope (using 3-period change)
+        ema_slope = 0.0
+        if i >= 3 and not np.isnan(ema_aligned[i]) and not np.isnan(ema_aligned[i-3]):
+            ema_slope = ema_aligned[i] - ema_aligned[i-3]
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if breakout_long and ema_slope > 0:  # long only in uptrend
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_aligned[i])
-            elif breakout_short:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short and ema_slope < 0:  # short only in downtrend
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_aligned[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
