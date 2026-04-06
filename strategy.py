@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #12414: 1h RSI Mean Reversion with 4h Trend Filter and Volume Spike
-Hypothesis: In 1h timeframe, use RSI(14) for mean reversion entries (oversold/overbought)
-filtered by 4h EMA(50) trend direction and volume spikes (2x MA). 4h trend prevents
-counter-trend trades in strong moves. Target 15-37 trades/year (60-150 total) by
-using strict RSI thresholds (<25 for long, >75 for short) and volume confirmation.
-Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend.
+Experiment #12414: 1h RSI(2) Extreme Reversal with 4h Trend Filter and Volume Confirmation
+Hypothesis: In 1h timeframe, use extreme RSI(2) values (<10 for long, >90 for short) as reversal signals.
+Filter by 4h EMA(50) trend direction to avoid counter-trend trades. Require volume > 1.5x 20-period MA for confirmation.
+Target 60-150 total trades over 4 years (15-37/year) to minimize fee drag. Works in bull markets via pullbacks to trend
+and in bear markets via bounces off trend. Uses 4h for trend direction, 1h only for entry timing.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12414_1h_rsi_meanrev_4h_trend_vol"
+name = "exp_12414_1h_rsi2_4h_trend_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 75
-RSI_OVERSOLD = 25
+RSI_PERIOD = 2
+RSI_LONG_THRESHOLD = 10
+RSI_SHORT_THRESHOLD = 90
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -109,9 +108,9 @@ def generate_signals(prices):
         uptrend_4h = close[i] > ema_4h_aligned[i]
         downtrend_4h = close[i] < ema_4h_aligned[i]
         
-        # RSI mean reversion conditions
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # RSI extreme conditions
+        rsi_oversold = rsi[i] < RSI_LONG_THRESHOLD
+        rsi_overbought = rsi[i] > RSI_SHORT_THRESHOLD
         
         # Entry conditions
         long_entry = volume_ok and uptrend_4h and rsi_oversold
