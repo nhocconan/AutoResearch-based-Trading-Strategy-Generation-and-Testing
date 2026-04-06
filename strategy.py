@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume + ADX Filter
+4h Donchian(20) Breakout + Volume + ADX Filter (Optimized v15)
 Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
 Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
 Optimized for 4h timeframe with proper position sizing to achieve target trade count of 75-200 total over 4 years.
@@ -99,7 +99,7 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 2.0
+            volume_filter = volume[i] > vol_ma * 1.5  # Adjusted for 4h timeframe
         else:
             volume_filter = False
         
@@ -122,7 +122,7 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25
+            trend_filter = adx_aligned[i] > 25  # Adjusted for 4h timeframe
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
