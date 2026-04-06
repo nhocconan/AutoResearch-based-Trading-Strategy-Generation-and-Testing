@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA50 filter and volume confirmation
-# Works in bull/bear because breakouts capture strong moves, EMA50 filters direction,
-# and volume ensures conviction. Target: 75-150 trades over 4 years (19-38/year).
+# Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation
+# Uses weekly EMA to filter direction, 6h Donchian for breakout signals, volume to confirm strength.
+# Works in bull/bear because trend filter avoids counter-trend trades, breakouts capture momentum,
+# and volume filters out false breakouts. Target: 60-180 total trades over 4 years (15-45/year).
 
-name = "exp_12895_6h_donchian20_1d_ema50_vol_v1"
+name = "exp_12895_6h_donchian20_1w_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -35,20 +36,24 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA50
-    close_d = df_daily['close'].values
-    ema50_d = pd.Series(close_d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate weekly EMA for trend filter
+    close_w = df_weekly['close'].values
+    ema_w = calculate_ema(close_w, EMA_PERIOD)
     
-    # Align EMA50 to 6h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_daily, ema50_d)
+    # Align weekly EMA to 6h timeframe
+    ema_w_aligned = align_htf_to_ltf(prices, df_weekly, ema_w)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -69,8 +74,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema50_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,9 +97,18 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Donchian breakout with EMA filter
-        breakout_long = volume_ok and close[i] >= upper[i] and close[i] > ema50_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower[i] and close[i] < ema50_aligned[i]
+        # Trend filter: weekly EMA slope
+        if i > start:
+            ema_slope = ema_w_aligned[i] - ema_w_aligned[i-1]
+            trend_up = ema_slope > 0
+            trend_down = ema_slope < 0
+        else:
+            trend_up = True
+            trend_down = True
+        
+        # Breakout signals with trend filter and volume
+        breakout_long = volume_ok and close[i] >= upper[i] and trend_up
+        breakout_short = volume_ok and close[i] <= lower[i] and trend_down
         
         # Generate signals
         if position == 0:
