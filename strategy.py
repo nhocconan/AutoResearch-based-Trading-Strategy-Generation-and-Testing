@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Bull/Bear Power with Trend Filter.
-# Uses daily EMA200 as trend filter (price > EMA200 = bullish, < EMA200 = bearish).
-# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Long when Bull Power > 0 and trend bullish, Short when Bear Power > 0 and trend bearish.
-# Volume filter (current volume > 1.5x 20-period average) ensures quality signals.
-# Works in bull/bear markets via trend alignment. Target: 75-200 trades over 4 years.
+# Hypothesis: 12-hour Channels with Volume and ATR Volatility Filter.
+# Uses daily Donchian channels (20-day high/low) for trend identification.
+# Enters long when price breaks above daily upper band with volume > 1.5x 20-period average.
+# Enters short when price breaks below daily lower band with volume filter.
+# Uses ATR-based stoploss (2x ATR) and exits at opposite band.
+# Works in bull/bear markets via breakout logic with volatility filtering.
+# Target: 50-150 trades over 4 years (12-37/year).
 
-name = "6h_elder_ray_trend_filter_v1"
-timeframe = "6h"
+name = "12h_donchian_vol_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -25,30 +26,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA200 for trend filter
+    # Daily OHLC for Donchian channels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA200 on daily close
-    ema200_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema200_1d[i] = (close_1d[i] * 2 / 201) + (ema200_1d[i-1] * (199 / 201))
+    # Calculate Donchian channels (20-period high/low)
+    upper = np.full(len(high_1d), np.nan)
+    lower = np.full(len(low_1d), np.nan)
     
-    # Align EMA200 to 6h timeframe (shifted by 1 daily bar)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    for i in range(19, len(high_1d)):
+        upper[i] = np.max(high_1d[i-19:i+1])
+        lower[i] = np.min(low_1d[i-19:i+1])
     
-    # EMA13 for Elder Ray (on 6h close)
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema13[12] = np.mean(close[:13])
-        for i in range(13, n):
-            ema13[i] = (close[i] * 2 / 14) + (ema13[i-1] * (12 / 14))
+    # Align Donchian levels to 12h timeframe (shifted by 1 daily bar)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # ATR calculation for volatility and stoploss
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.zeros(n)
+    atr[0] = tr[0]
+    for i in range(1, n):
+        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -60,9 +65,8 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(20, n):
-        # Skip if EMA200 or EMA13 data not available
-        if (np.isnan(ema200_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(vol_ma[i])):
+        # Skip if Donchian data not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -74,37 +78,35 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: trend turns bearish or stoploss
-            atr_approx = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price - 2.5 * atr_approx
+            # Exit: price reaches lower band (opposite) or stoploss
+            stop_loss_level = entry_price - 2.0 * atr[i]
             
-            if (close[i] < ema200_aligned[i] or 
+            if (close[i] <= lower_aligned[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: trend turns bullish or stoploss
-            atr_approx = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price + 2.5 * atr_approx
+            # Exit: price reaches upper band (opposite) or stoploss
+            stop_loss_level = entry_price + 2.0 * atr[i]
             
-            if (close[i] > ema200_aligned[i] or 
+            if (close[i] >= upper_aligned[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume and trend filter
+            # Look for entries with volume confirmation
             if volume_filter:
-                # Long: Bull Power > 0 and trend bullish (price > EMA200)
-                if (bull_power[i] > 0 and close[i] > ema200_aligned[i]):
+                # Breakout above upper band
+                if close[i] > upper_aligned[i] and close[i-1] <= upper_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: Bear Power > 0 and trend bearish (price < EMA200)
-                elif (bear_power[i] > 0 and close[i] < ema200_aligned[i]):
+                # Breakdown below lower band
+                elif close[i] < lower_aligned[i] and close[i-1] >= lower_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
