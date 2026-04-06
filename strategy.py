@@ -1,50 +1,46 @@
 #!/usr/bin/env python3
 """
-6h Camarilla Pivot with 1d Trend Filter and Volume Confirmation
-Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) work well in both bull and bear markets when filtered by 1d trend.
-In bull markets: buy at S3 bounce, break above R4 continuation. In bear markets: sell at R3 rejection, break below S4 continuation.
-Uses 1d EMA50 for trend filter and volume confirmation to ensure institutional participation. Target: 75-200 total trades over 4 years.
+6h Camarilla Pivot + Volume Confirmation
+Hypothesis: Camarilla pivot levels (based on prior day's range) identify key support/resistance.
+Fade at R3/S3 levels (mean reversion), breakout continuation at R4/S4 levels (trend following).
+Volume confirms institutional participation at these levels.
+Works in ranging markets (fade) and trending markets (breakout).
+Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_ata, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_trend_volume_v1"
+name = "6h_camarilla_pivot_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
+    # Load 1d data for Camarilla pivots (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
-    
-    # Camarilla calculations
-    range_prev = high_prev - low_prev
-    camarilla_base = (high_prev + low_prev + close_prev) / 3
-    r3 = camarilla_base + range_prev * 1.1 / 2
-    s3 = camarilla_base - range_prev * 1.1 / 2
-    r4 = camarilla_base + range_prev * 1.1
-    s4 = camarilla_base - range_prev * 1.1
-    
-    # 1d EMA50 for trend filter
+    # Calculate Camarilla levels from previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_prev = np.roll(ema50_1d, 1)
-    ema50_1d_prev[0] = ema50_1d[0]
-    ema50_rising = ema50_1d > ema50_1d_prev
-    ema50_falling = ema50_1d < ema50_1d_prev
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
-    ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
+    
+    range_1d = high_1d - low_1d
+    # Camarilla levels: close ± (range * multiplier)
+    r3 = close_1d + range_1d * 1.1 / 2
+    s3 = close_1d - range_1d * 1.1 / 2
+    r4 = close_1d + range_1d * 1.1
+    s4 = close_1d - range_1d * 1.1
+    
+    # Align to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
     # 6h data
     high = prices['high'].values
@@ -60,13 +56,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA50
+    start = 20  # For volume EMA
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(high_prev[i]) or np.isnan(low_prev[i]) or np.isnan(close_prev[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising_aligned[i]) or 
-            np.isnan(ema50_falling_aligned[i]) or np.isnan(vol_ema[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
+            np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -75,37 +71,45 @@ def generate_signals(prices):
         
         # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: price breaks below S3 OR stoploss
-            if (close[i] <= s3[i] or 
-                close[i] <= entry_price - 2.0 * (high[i] - low[i])):  # ATR proxy
+            # Exit: price reaches R4 (take profit) OR stoploss
+            if (close[i] >= r4_6h[i] or 
+                close[i] <= entry_price - 2.0 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above R3 OR stoploss
-            if (close[i] >= r3[i] or 
+            # Exit: price reaches S4 (take profit) OR stoploss
+            if (close[i] <= s4_6h[i] or 
                 close[i] >= entry_price + 2.0 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Camarilla + trend + volume
-            # Long: bounce at S3 in uptrend OR break above R4 in uptrend
-            long_entry = ((close[i] >= s3[i] and close[i-1] < s3[i]) and 
-                         ema50_rising_aligned[i] and 
+            # Look for entries: Camarilla levels + volume
+            fade_long = (close[i] <= s3_6h[i] and 
+                        volume[i] > vol_ema[i] * 1.5)
+            fade_short = (close[i] >= r3_6h[i] and 
                          volume[i] > vol_ema[i] * 1.5)
-            # Short: rejection at R3 in downtrend OR break below S4 in downtrend
-            short_entry = ((close[i] <= r3[i] and close[i-1] > r3[i]) and 
-                          ema50_falling_aligned[i] and 
-                          volume[i] > vol_ema[i] * 1.5)
+            breakout_long = (close[i] > r4_6h[i] and 
+                            volume[i] > vol_ema[i] * 2.0)
+            breakout_short = (close[i] < s4_6h[i] and 
+                             volume[i] > vol_ema[i] * 2.0)
             
-            if long_entry:
+            if fade_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_entry:
+            elif fade_short:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+            elif breakout_long:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            elif breakout_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -113,4 +117,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-</error>Invalid argument type: expected string or bytes-like object, got 'float' for argument 'other'</error>Reasoning: Error occurred during code generation. Please fix. Note: the code above may have been modified by automatic error correction utilities. If this happens, the original code may need to be revisited to identify the root cause. The above is provided for reference only. Please redo your work, taking the error into account.
