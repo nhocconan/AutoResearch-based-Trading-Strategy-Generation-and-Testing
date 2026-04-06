@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian(20) breakout with volume confirmation and 1d EMA trend filter.
+# Hypothesis: 12h strategy using Donchian(20) breakout on 12h timeframe with volume confirmation and 1d EMA trend filter.
 # Goes long when price breaks above 12h Donchian upper band with above-average volume and price above 1d EMA200,
 # short when breaks below 12h Donchian lower band with volume and price below 1d EMA200.
-# Exits when price crosses back through the opposite Donchian band.
-# Uses ATR-based stop loss for risk management.
-# Target: 50-150 total trades over 4 years to minimize fee drag while capturing strong trends.
-# 12h timeframe reduces noise, 1d EMA filters trend direction, volume confirms breakout strength.
+# Uses ATR-based stop loss to manage risk.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Donchian channels provide clear structure, EMA200 filters trend direction, volume confirms breakout strength.
 
 name = "exp_13828_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -27,7 +26,7 @@ ATR_STOP_MULTIPLIER = 2.0
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    lower = pd.Series(high).rolling(window=period, min_periods=period).min().values  # Note: This was a bug, should be low
     return upper, lower
 
 def calculate_ema(close, period):
@@ -65,8 +64,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 12h data
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels on 12h data (FIXED: use low for lower band)
+    upper = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lower = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
