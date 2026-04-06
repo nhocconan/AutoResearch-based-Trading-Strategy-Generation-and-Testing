@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band in uptrend (1d EMA50 rising).
-# Enter short when price breaks below Donchian(20) lower band in downtrend (1d EMA50 falling).
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band in uptrend (12h EMA50 rising).
+# Enter short when price breaks below Donchian(20) lower band in downtrend (12h EMA50 falling).
 # Volume > 1.5x 20-period average confirms breakout strength.
-# Exit on opposite Donchian breakout or when price crosses 1d EMA50.
+# Exit on opposite Donchian breakout or when price crosses 12h EMA50.
 # Target: 80-160 total trades over 4 years (20-40/year) to balance signal quality and fee drag.
-# Timeframe: 12h as required.
 
-name = "12h_donchian20_1dema50_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12hma50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,11 +25,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     # Donchian(20) channels
     highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
