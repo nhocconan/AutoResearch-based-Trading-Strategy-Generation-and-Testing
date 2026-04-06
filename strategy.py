@@ -3,89 +3,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud strategy with 1-day trend filter
-# Long when Tenkan-sen > Kijun-sen (bullish TK cross), price above Kumo (cloud), and price > 1d EMA(50)
-# Short when Tenkan-sen < Kijun-sen (bearish TK cross), price below Kumo, and price < 1d EMA(50)
-# Exit when TK cross reverses or price crosses 1d EMA
-# Stoploss at 2.5 * ATR(20)
+# Hypothesis: 12-hour Donchian(20) breakout with 1-week EMA(20) trend filter and volume confirmation (2.0x 20-period average)
+# Long when price breaks above Donchian high, price > 1w EMA(20), and volume > 2.0x average
+# Short when price breaks below Donchian low, price < 1w EMA(20), and volume > 2.0x average
+# Exit on opposite Donchian break or when price crosses below/above EMA
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses Ichimoku for trend/momentum and 1d EMA to avoid counter-trend trades
-# Target: 80-180 trades over 4 years (20-45/year)
+# Uses 1w trend to avoid false breakouts in counter-trend moves
+# Higher volume threshold (2.0x) and longer trend filter (1w) to reduce trade frequency
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "6h_ichimoku_1d_ema_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1w EMA(20) for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Volume average (20-period)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
-    # For cloud at current point, we need values from 26 periods ago
-    senkou_span_a_lag = np.roll(senkou_span_a, 26)
-    senkou_span_b_lag = np.roll(senkou_span_b, 26)
-    # First 26 values are invalid due to look-ahead, set to NaN
-    senkou_span_a_lag[:26] = np.nan
-    senkou_span_b_lag[:26] = np.nan
-    
-    # Cloud top and bottom
-    kumo_top = np.maximum(senkou_span_a_lag, senkou_span_b_lag)
-    kumo_bottom = np.minimum(senkou_span_a_lag, senkou_span_b_lag)
-    
-    # ATR(20) for stoploss
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(52, n):  # Need enough data for Ichimoku
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(tenkan_sen[i]) or 
-            np.isnan(kijun_sen[i]) or np.isnan(kumo_top[i]) or 
-            np.isnan(kumo_bottom[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -98,8 +75,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: TK cross turns bearish or price below EMA (trend change)
-            elif tenkan_sen[i] < kijun_sen[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: price breaks below Donchian low or trend turns bearish (below EMA)
+            elif close[i] < donchian_low[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -111,31 +88,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: TK cross turns bullish or price above EMA (trend change)
-            elif tenkan_sen[i] > kijun_sen[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: price breaks above Donchian high or trend turns bullish (above EMA)
+            elif close[i] > donchian_high[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with TK cross and trend alignment
-            # Bullish TK cross: Tenkan crosses above Kijun
-            bullish_tk = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
-            # Bearish TK cross: Tenkan crosses below Kijun
-            bearish_tk = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
-            
-            # Price above/below cloud
-            price_above_kumo = close[i] > kumo_top[i]
-            price_below_kumo = close[i] < kumo_bottom[i]
-            
-            # Long: bullish TK cross, price above cloud, price above 1d EMA (bullish trend)
-            if bullish_tk and price_above_kumo and close[i] > ema_1d_aligned[i]:
+            # Look for entries with volume confirmation and trend alignment
+            # Long: price breaks above Donchian high, price above EMA (bullish trend), volume spike
+            if (close[i] > donchian_high[i] and
+                close[i] > ema_1w_aligned[i] and
+                volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: bearish TK cross, price below cloud, price below 1d EMA (bearish trend)
-            elif bearish_tk and price_below_kumo and close[i] < ema_1d_aligned[i]:
+            # Short: price breaks below Donchian low, price below EMA (bearish trend), volume spike
+            elif (close[i] < donchian_low[i] and
+                  close[i] < ema_1w_aligned[i] and
+                  volume[i] > 2.0 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
