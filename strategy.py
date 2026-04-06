@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout + 1w EMA trend + volume confirmation
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
 # Enter long when price breaks above Donchian(20) high with volume > 1.5x average, in uptrend (price > 1w EMA50)
 # Enter short when price breaks below Donchian(20) low with volume > 1.5x average, in downtrend (price < 1w EMA50)
-# Uses strict volume filter and trend filter to limit trades to 30-100 total over 4 years
-# Exit when price crosses Donchian middle (mean of 20-period high-low) or reverses against trend
+# Uses weekly EMA for trend filter to capture major trends, reduces whipsaws in sideways markets
+# Target: 30-100 trades over 4 years on 1d timeframe
 
 name = "1d_donchian_1w_ema_vol_v1"
 timeframe = "1d"
