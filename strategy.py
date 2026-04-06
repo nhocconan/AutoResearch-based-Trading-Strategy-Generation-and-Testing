@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot level touch with daily volume confirmation and weekly trend filter.
-# Uses 12-hour price reactions at Camarilla pivot levels (H4, L4) calculated from daily OHLC.
-# Long at L4 support in uptrend, short at H4 resistance in downtrend with volume confirmation.
-# Weekly EMA filter ensures trading with higher timeframe momentum. Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour Camarilla pivot reversal strategy with daily volume filter and weekly trend filter.
+# Uses Camarilla levels (H3/L3) from daily pivot for mean reversion entries.
+# Volume confirmation filters low-liquidity false breaks.
+# Weekly EMA trend filter ensures trades align with higher timeframe momentum.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 name = "exp_13505_12h_camarilla_1d_vol_1w_ema_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULTIPLIER = 1.1
+CAMARILLA_MULT = 1.1
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 EMA_PERIOD = 21
@@ -39,21 +40,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for Camarilla calculation
+    # Load daily data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from daily OHLC
+    # Calculate Camarilla levels (H3, L3) from daily OHLC
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla H4 and L4 levels
-    camarilla_h4 = close_1d + (CAMARILLA_MULTIPLIER * (high_1d - low_1d) / 2)
-    camarilla_l4 = close_1d - (CAMARILLA_MULTIPLIER * (high_1d - low_1d) / 2)
+    # Camarilla: H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
+    camarilla_h3 = close_1d + (high_1d - low_1d) * CAMARILLA_MULT / 2
+    camarilla_l3 = close_1d - (high_1d - low_1d) * CAMARILLA_MULT / 2
     
     # Align Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Load weekly data ONCE before loop for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -82,9 +83,9 @@ def generate_signals(prices):
     start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if required data not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(volume_ma[i])):
+        # Skip if indicators not available
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -110,18 +111,20 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
-        # Camarilla level touch signals
-        touch_l4 = low[i] <= camarilla_l4_aligned[i]
-        touch_h4 = high[i] >= camarilla_h4_aligned[i]
+        # Camarilla reversal signals
+        # Long when price touches L3 support in uptrend with volume
+        long_signal = volume_ok and uptrend and (low[i] <= camarilla_l3_aligned[i])
+        # Short when price touches H3 resistance in downtrend with volume
+        short_signal = volume_ok and downtrend and (high[i] >= camarilla_h3_aligned[i])
         
         # Generate signals
         if position == 0:
-            if touch_l4 and uptrend and volume_ok:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif touch_h4 and downtrend and volume_ok:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
