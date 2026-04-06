@@ -3,29 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ATR stoploss.
-# Goes long when price breaks above 12h Donchian upper channel with above-average volume,
-# short when breaks below lower channel with volume.
+# Hypothesis: 4h strategy combining 12h Donchian breakout with volume confirmation and 12h EMA trend filter.
+# Goes long when price breaks above Donchian(20) upper band with volume (strong uptrend continuation),
+# short when breaks below Donchian(20) lower band with volume (strong downtrend continuation).
 # Uses 12h EMA50 as trend filter to avoid counter-trend trades.
 # Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Donchian channels provide clear breakout levels that work across market regimes.
+# Donchian channels provide clear breakout levels with proven effectiveness in trending markets.
 
-name = "exp_13773_4h_donchian12h_ema_vol_v1"
+name = "exp_13773_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 10
+VOLUME_MA_PERIOD = 6
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -61,7 +61,7 @@ def generate_signals(prices):
     close_12h = df_12h['close'].values
     ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    # Align 12h indicators to 4h timeframe
+    # Align 12h data to 4h timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
@@ -84,7 +84,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(TREND_EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
