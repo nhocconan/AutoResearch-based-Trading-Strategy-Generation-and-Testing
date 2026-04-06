@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with volume confirmation and ATR stop
-Hypothesis: Price breaking 20-period high/low with volume confirmation captures
-institutional breakout momentum. Works in bull (breakouts) and bear (breakdowns).
-ATR stop limits drawdown. Target: 75-200 trades over 4 years.
+1d Donchian(20) Breakout + Volume Confirmation + ATR Stop
+Hypothesis: Donchian breakouts capture institutional momentum. Volume confirmation ensures breakout strength.
+Works in bull (breakouts with volume) and bear (breakdowns with volume). Target: 75-250 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_vol_stop_v1"
-timeframe = "4h"
+name = "1d_donchian20_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +23,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 20-period ATR
     atr = np.full(n, np.nan)
-    if n >= 14:
+    if n >= 20:
         tr = np.maximum(
             high[1:] - low[1:],
             np.abs(high[1:] - close[:-1]),
@@ -35,34 +34,30 @@ def generate_signals(prices):
         if len(tr) > 0:
             atr[1] = tr[0]
             for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+                atr[i] = (tr[i-1] * 19 + atr[i-1]) / 20
     
-    # 20-period Donchian channels
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(20, n):
-            donch_high[i] = np.max(high[i-20:i])
-            donch_low[i] = np.min(low[i-20:i])
+    # 20-period Donchian channels (using previous day's data to avoid look-ahead)
+    high_20 = np.full(n, np.nan)
+    low_20 = np.full(n, np.nan)
     
-    # 1d volume average for confirmation
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    if len(vol_1d) >= 20:
-        for i in range(20, len(vol_1d)):
-            vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    for i in range(20, n):
+        high_20[i] = np.max(high[i-20:i])  # previous 20 days, not including today
+        low_20[i] = np.min(low[i-20:i])
+    
+    # 20-period volume average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_exit = 0
+    bars_since_exit = 0  # bars since last exit
     
-    start = 20
-    
-    for i in range(start, n):
-        if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma_aligned[i]):
+    # Start from index 20
+    for i in range(20, n):
+        # Skip if required data not available
+        if np.isnan(atr[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -70,21 +65,24 @@ def generate_signals(prices):
             bars_since_exit += 1
             continue
         
-        # Volume filter: current volume > 1.5x 1d average
-        vol_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        if position == 1:
-            # Exit: close below Donchian low OR 2*ATR stop
-            if close[i] < donch_low[i] or close[i] < entry_price - 2.0 * atr[i]:
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price drops below 20-day low OR stoploss hit
+            if (close[i] < low_20[i] or
+                close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
             else:
                 signals[i] = 0.25
             bars_since_exit += 1
-        elif position == -1:
-            # Exit: close above Donchian high OR 2*ATR stop
-            if close[i] > donch_high[i] or close[i] > entry_price + 2.0 * atr[i]:
+        elif position == -1:  # short position
+            # Exit: price rises above 20-day high OR stoploss hit
+            if (close[i] > high_20[i] or
+                close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_exit = 0
@@ -92,16 +90,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_exit += 1
         else:
-            # Minimum 8 bars between trades
-            if bars_since_exit >= 8:
-                # Long: break above Donchian high with volume
-                if close[i] > donch_high[i] and vol_filter:
+            # Look for entries with minimum 5 bars since last exit
+            if bars_since_exit >= 5:
+                # Long: break above 20-day high with volume
+                if close[i] > high_20[i] and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_exit = 0
-                # Short: break below Donchian low with volume
-                elif close[i] < donch_low[i] and vol_filter:
+                # Short: break below 20-day low with volume
+                elif close[i] < low_20[i] and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
@@ -114,3 +112,4 @@ def generate_signals(prices):
                 bars_since_exit += 1
     
     return signals
+</lyht>
