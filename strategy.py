@@ -3,37 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour MACD histogram divergence with 1-week EMA trend filter and volume confirmation
-# Works in bull/bear because MACD captures momentum shifts, EMA filter ensures trend alignment,
-# and volume filters false signals. Target: 80-120 trades over 4 years (20-30/year).
+# Hypothesis: Daily Donchian(20) breakout with 1-day volume confirmation and ATR stoploss.
+# Breakouts capture strong momentum moves in both bull and bear markets.
+# Volume filter ensures only significant breakouts trigger entries, reducing false signals.
+# ATR-based stoploss manages risk during volatile periods.
+# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fee drag.
 
-name = "exp_12968_12h_macd_div_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_12969_4h_donchian20_1d_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-EMA_PERIOD = 50
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_macd(close, fast, slow, signal):
-    """Calculate MACD line, signal line, and histogram"""
-    ema_fast = pd.Series(close).ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = pd.Series(close).ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    histogram = macd_line - signal_line
-    return macd_line.values, signal_line.values, histogram.values
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -44,34 +30,41 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly EMA data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1D data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA
-    ema_weekly = calculate_ema(df_weekly['close'].values, EMA_PERIOD)
+    # Calculate 1D indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Align weekly EMA to 12h timeframe
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    donchian_upper, donchian_lower = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
     
-    # Calculate daily indicators
-    close = prices['close'].values
+    # Align to 4H timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 4H indicators for entry timing
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate MACD
-    macd_line, signal_line, macd_hist = calculate_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-    
-    # Calculate volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # Calculate ATR
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,11 +72,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(MACD_SLOW, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_weekly_aligned[i]):
+        # Skip if indicators not available
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or \
+           np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,41 +96,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation (using 1D average volume)
+        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD)
         
-        # MACD histogram divergence signals
-        # Bullish divergence: price makes lower low, MACD makes higher low
-        # Bearish divergence: price makes higher high, MACD makes lower high
-        bullish_div = False
-        bearish_div = False
-        
-        if i >= 2:
-            # Bullish divergence: lower price low, higher MACD low
-            if (close[i] < close[i-1] and close[i-1] < close[i-2] and 
-                macd_hist[i] > macd_hist[i-1] and macd_hist[i-1] > macd_hist[i-2]):
-                bullish_div = True
-            # Bearish divergence: higher price high, lower MACD high
-            elif (close[i] > close[i-1] and close[i-1] > close[i-2] and 
-                  macd_hist[i] < macd_hist[i-1] and macd_hist[i-1] < macd_hist[i-2]):
-                bearish_div = True
-        
-        # Additional filter: price relative to weekly EMA
-        price_above_weekly_ema = close[i] > ema_weekly_aligned[i]
-        price_below_weekly_ema = close[i] < ema_weekly_aligned[i]
+        # Breakout signals
+        breakout_long = volume_ok and high[i] >= donchian_upper_aligned[i]
+        breakout_short = volume_ok and low[i] <= donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
-            if bullish_div and price_above_weekly_ema and volume_ok:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif bearish_div and price_below_weekly_ema and volume_ok:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_aligned[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_aligned[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
