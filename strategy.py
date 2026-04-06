@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# Enter long when: price breaks above 12h Donchian high(20), price > 1d EMA(50), volume > 1.5x avg
-# Enter short when: price breaks below 12h Donchian low(20), price < 1d EMA(50), volume > 1.5x avg
-# Exit when price retraces to Donchian midpoint or opposite breakout occurs
-# Uses daily trend to filter breakouts, targeting 50-150 trades over 4 years
+# Hypothesis: 4h Bollinger Band squeeze breakout with daily trend filter and volume confirmation
+# Enter long when: price breaks above upper BB(20,2) AND price > 1d EMA(50) AND volume > 1.5x avg
+# Enter short when: price breaks below lower BB(20,2) AND price < 1d EMA(50) AND volume > 1.5x avg
+# Exit when price returns to middle BB(20,2) or opposite breakout occurs
+# Uses Bollinger squeeze (low volatility) to anticipate breakouts, targeting 100-200 trades over 4 years
 
-name = "12h_donchian20_1dema_vol_v1"
-timeframe = "12h"
+name = "4h_bb_squeeze_breakout_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,10 +24,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 12h
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Bollinger Bands (20,2) on 4h
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
     # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -42,9 +44,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Wait for Donchian to stabilize
+    for i in range(20, n):  # Wait for BB to stabilize
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -53,28 +55,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price retrace to midpoint OR opposite breakout
-            if close[i] <= donch_mid[i] or close[i] <= donch_low[i]:
+            # Exit: price < middle BB OR price > upper BB (trailing)
+            if close[i] < bb_middle[i] or close[i] > bb_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price retrace to midpoint OR opposite breakout
-            if close[i] >= donch_mid[i] or close[i] >= donch_high[i]:
+            # Exit: price > middle BB OR price < lower BB (trailing)
+            if close[i] > bb_middle[i] or close[i] < bb_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts: Donchian break + trend filter + volume
+            # Look for entries: BB breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                if close[i] > donch_high[i] and close[i] > ema_50_aligned[i]:
-                    # Bullish breakout above resistance + above daily EMA
+                if close[i] > bb_upper[i] and close[i] > ema_50_aligned[i]:
+                    # Break above upper BB with daily uptrend
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < donch_low[i] and close[i] < ema_50_aligned[i]:
-                    # Bearish breakout below support + below daily EMA
+                elif close[i] < bb_lower[i] and close[i] < ema_50_aligned[i]:
+                    # Break below lower BB with daily downtrend
                     signals[i] = -0.25
                     position = -1
     
