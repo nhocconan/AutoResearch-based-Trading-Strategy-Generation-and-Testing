@@ -3,36 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot points for direction and daily volume confirmation.
-# Goes long when price closes above weekly R3 with above-average daily volume,
-# short when closes below weekly S3 with above-average daily volume.
-# Uses weekly pivot levels (R3/S3) as breakout/breakdown levels for strong moves.
-# Weekly pivot provides institutional levels, volume confirms institutional participation.
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Weekly pivots avoid whipsaw by requiring breaks of significant levels.
+# Hypothesis: 6h strategy combining 1d Elder Ray (bull/bear power) with 12h EMA trend filter and volume confirmation.
+# Elder Ray = Bull Power (High - EMA13) and Bear Power (Low - EMA13).
+# Go long when Bull Power > 0 and increasing, price above 12h EMA20, and volume above average.
+# Go short when Bear Power < 0 and decreasing, price below 12h EMA20, and volume above average.
+# Uses ATR-based stop loss to manage risk.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drift.
+# Elder Ray captures institutional buying/selling pressure, EMA20 filters short-term trend, volume confirms strength.
 
-name = "exp_13827_6h_weekly_pivot_daily_vol_v1"
+name = "exp_13827_6h_elderray12h_ema20_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 5  # weeks for pivot calculation
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ELDER_RAY_PERIOD = 13  # EMA period for Elder Ray
+EMA_TREND_PERIOD = 20  # EMA for trend filter
+VOLUME_MA_PERIOD = 20  # Volume moving average
+VOLUME_THRESHOLD = 1.5  # Volume must be 1.5x average
+SIGNAL_SIZE = 0.25  # Position size (25% of capital)
+ATR_PERIOD = 14  # ATR for stop loss
+ATR_STOP_MULTIPLIER = 2.0  # ATR multiplier for stop loss
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot points (R3, S3 levels)"""
-    pp = (high + low + close) / 3.0
-    r1 = 2 * pp - low
-    s1 = 2 * pp - high
-    r2 = pp + (high - low)
-    s2 = pp - (high - low)
-    r3 = high + 2 * (pp - low)
-    s3 = low - 2 * (high - pp)
-    return r3, s3  # Return only R3 and S3 for breakout/breakdown
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -49,37 +43,37 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data for Elder Ray calculation ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (R3, S3)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    r3_weekly, s3_weekly = calculate_weekly_pivot(high_weekly, low_weekly, close_weekly)
+    # Calculate 1d EMA for Elder Ray
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, ELDER_RAY_PERIOD)
     
-    # Align weekly pivot points to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_weekly)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_weekly)
+    # Calculate Elder Ray components: Bull Power = High - EMA, Bear Power = Low - EMA
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_1d
+    bear_power = low_1d - ema_1d
     
-    # Load daily data for volume confirmation ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate daily volume moving average
-    volume_daily = df_daily['volume'].values
-    volume_ma_daily = pd.Series(volume_daily).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # Align daily volume MA to 6h timeframe
-    volume_ma_aligned = align_htf_to_ltf(prices, df_daily, volume_ma_daily)
-    
-    # 6h data for price and ATR
+    # 6h data for EMA trend filter, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # EMA for trend filter on 6h data
+    ema_trend = calculate_ema(close, EMA_TREND_PERIOD)
+    
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,11 +81,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOLUME_MA_PERIOD) + 1
+    start = max(ELDER_RAY_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(volume_ma_aligned[i]):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema_trend[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -113,12 +108,27 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation from daily data
-        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Breakout/breakdown signals using weekly R3/S3
-        long_signal = volume_ok and close[i] > r3_aligned[i]
-        short_signal = volume_ok and close[i] < s3_aligned[i]
+        # Trend direction from 6h EMA
+        above_ema = close[i] > ema_trend[i]
+        below_ema = close[i] < ema_trend[i]
+        
+        # Elder Ray signals with momentum (current > previous)
+        bull_power_current = bull_power_aligned[i]
+        bear_power_current = bear_power_aligned[i]
+        bull_power_prev = bull_power_aligned[i-1] if i > 0 else 0
+        bear_power_prev = bear_power_aligned[i-1] if i > 0 else 0
+        
+        bull_power_increasing = bull_power_current > bull_power_prev
+        bear_power_decreasing = bear_power_current < bear_power_prev
+        
+        # Long signal: Bull Power > 0 and increasing, price above EMA, volume confirmation
+        long_signal = (bull_power_current > 0) and bull_power_increasing and above_ema and volume_ok
+        
+        # Short signal: Bear Power < 0 and decreasing, price below EMA, volume confirmation
+        short_signal = (bear_power_current < 0) and bear_power_decreasing and below_ema and volume_ok
         
         # Generate signals
         if position == 0:
@@ -135,15 +145,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below weekly S3 (reversal signal)
-            if close[i] < s3_aligned[i]:
+            # Exit long on Bear Power turning negative (bearish pressure)
+            if bear_power_current < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above weekly R3 (reversal signal)
-            if close[i] > r3_aligned[i]:
+            # Exit short on Bull Power turning positive (bullish pressure)
+            if bull_power_current > 0:
                 signals[i] = 0.0
                 position = 0
             else:
