@@ -3,8 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14058_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation
+# Works in bull: breaks above upper band with uptrend + volume
+# Works in bear: breaks below lower band with downtrend + volume
+# Uses 12h for trend (fewer whipsaws), 6s for entry timing
+# Target: 50-150 trades over 4 years (12-37/year)
+
+name = "exp_14059_6h_donchian20_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_donchian(high, low, period):
@@ -13,48 +19,75 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_atr(high, low, close, period):
-    """Average True Range using Wilder's smoothing"""
+def calculate_adx(high, low, close, period):
+    """ADX (Average Directional Index) - trend strength"""
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr[0] = tr1[0]
-    return pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+ and DM-
+    tr_period = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_period = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_period = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_period / tr_period
+    di_minus = 100 * dm_minus_period / tr_period
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
+def calculate_atr(high, low, close, period):
+    """ATR (Average True Range) for stop loss"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for EMA filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Load 12h data for trend filter (ADX) and volume confirmation (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 50-period EMA on weekly
-    ema_50_1w = calculate_ema(close_1w, 50)
+    # Calculate ADX on 12h for trend strength
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Align weekly EMA to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate volume ratio on 12h (current vs 20-period average)
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_12h = volume_12h / np.where(vol_ma_12h == 0, 1, vol_ma_12h)
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
-    # Daily data for Donchian and volume
+    # 6h data for Donchian channels and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels on daily
-    upper_20, lower_20 = calculate_donchian(high, low, 20)
-    
-    # Calculate 20-period average volume for confirmation
-    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian channels on 6h (20-period)
+    upper, lower = calculate_donchian(high, low, 20)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -64,13 +97,14 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 50 for EMA, 20 for Donchian, 14 for ATR)
-    start = max(50, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 14 for ADX/ATR)
+    start = max(20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_20[i]) or \
-           np.isnan(lower_20[i]) or np.isnan(avg_vol_20[i]) or np.isnan(atr[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or \
+           np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio_12h_aligned[i]) or \
+           np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,23 +126,22 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with volume confirmation and EMA filter
-        breakout_up = close[i] > upper_20[i-1]  # Break above previous upper band
-        breakout_down = close[i] < lower_20[i-1]  # Break below previous lower band
-        volume_confirm = volume[i] > avg_vol_20[i] * 1.5  # Volume > 1.5x average
-        
-        # EMA filter: only long above weekly EMA, short below weekly EMA
-        price_above_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_ema = close[i] < ema_50_1w_aligned[i]
+        # Breakout conditions with trend and volume filters
+        # Long: price breaks above upper band + ADX > 25 (trending) + volume > 1.5x average
+        # Short: price breaks below lower band + ADX > 25 (trending) + volume > 1.5x average
+        breakout_up = close[i] > upper[i]
+        breakout_down = close[i] < lower[i]
+        strong_trend = adx_12h_aligned[i] > 25
+        volume_confirm = vol_ratio_12h_aligned[i] > 1.5
         
         # Generate signals
         if position == 0:
-            if breakout_up and volume_confirm and price_above_ema:
+            if breakout_up and strong_trend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
-            elif breakout_down and volume_confirm and price_below_ema:
+            elif breakout_down and strong_trend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -116,14 +149,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or reversal breakout
+            # Exit long on stop or reverse breakout
             if close[i] <= stop_price or breakout_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on stop or reversal breakout
+            # Exit short on stop or reverse breakout
             if close[i] >= stop_price or breakout_up:
                 signals[i] = 0.0
                 position = 0
