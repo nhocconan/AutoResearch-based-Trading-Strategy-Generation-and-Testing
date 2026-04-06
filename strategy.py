@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily EMA(21) trend filter and volume confirmation.
-# Uses 12-hour price channel breakouts aligned with daily momentum to capture intermediate-term trends.
-# Volume confirmation ensures institutional participation. Designed for fewer trades with higher quality.
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Uses 12h price channel breakouts aligned with 1d momentum to capture trending moves.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
+# and bear markets (breakdowns below lower band). Target: 50-150 total trades over 4 years (12-37/year).
 
 name = "exp_13472_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -39,10 +39,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
@@ -95,7 +95,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
+        # Trend filter: price above/below 1d EMA
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
