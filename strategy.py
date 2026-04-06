@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high and daily close > daily open (bullish day).
-# Short when price breaks below Donchian(20) low and daily close < daily open (bearish day).
-# Uses volume > 1.5x 20-period average for confirmation.
-# Daily trend filter avoids counter-trend trades. Donchian breakouts capture momentum.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high and 1d close > open (bullish day).
+# Short when price breaks below Donchian(20) low and 1d close < open (bearish day).
+# Volume > 1.5x 20-period average for confirmation.
+# Trend filter avoids counter-trend trades. Donchian breakouts capture momentum.
+# Target: 75-200 total trades over 4 years (19-50/year) per symbol.
 
 name = "4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
@@ -25,13 +25,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
+    # Donchian channel (20-period) on 4h data
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Daily trend filter: bullish/bearish day based on close vs open
+    # 1d trend filter: bullish/bearish day based on close vs open
     df_1d = get_htf_data(prices, '1d')
     daily_open = df_1d['open'].values
     daily_close = df_1d['close'].values
