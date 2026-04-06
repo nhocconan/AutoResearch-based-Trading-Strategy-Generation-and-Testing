@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA(21) trend filter and volume confirmation.
-# Uses daily price channel breakouts aligned with weekly momentum to capture trending moves.
-# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Camarilla pivot reversals from S3/R3 with 12h EMA trend filter and volume confirmation.
+# Fade at S3/R3 (strong rejection levels) when aligned with higher timeframe trend.
+# Volume confirms institutional interest at these key levels.
+# Works in both bull/bear: reversals occur in ranging markets and pullbacks in trends.
+# Target: 100-200 total trades over 4 years (25-50/year).
 
-name = "exp_13478_1d_donchian20_21w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13479_6h_camarilla3_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-WEEKLY_EMA_PERIOD = 21
+CAMARILLA_PERIOD = 1  # Use previous day's OHLC
+EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -34,28 +35,61 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC"""
+    # Camarilla levels based on previous period's OHLC
+    pivot = (high + low + close) / 3
+    range_ = high - low
+    
+    # Key levels: S3, S2, S1, R1, R2, R3, R4
+    s3 = close - (range_ * 1.1 / 2)
+    s2 = close - (range_ * 1.1 / 4)
+    s1 = close - (range_ * 1.1 / 6)
+    r1 = close + (range_ * 1.1 / 6)
+    r2 = close + (range_ * 1.1 / 4)
+    r3 = close + (range_ * 1.1 / 2)
+    r4 = close + (range_ * 1.1)
+    
+    return {
+        's3': s3, 's2': s2, 's1': s1,
+        'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4
+    }
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_weekly = calculate_ema(close_weekly, WEEKLY_EMA_PERIOD)
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate daily indicators
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    # We'll use daily OHLC to calculate Camarilla for the current 6h period
+    # Resample to daily using the actual daily data from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels from daily data
+    camarilla_levels = calculate_camarilla(high_1d, low_1d, close_1d)
+    s3_1d = camarilla_levels['s3']
+    r3_1d = camarilla_levels['r3']
+    
+    # Align daily Camarilla levels to 6h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +103,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_weekly_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if required data not available
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,24 +128,33 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_weekly_aligned[i]
-        downtrend = close[i] < ema_weekly_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Camarilla reversal signals
+        # Long when price touches/bounces from S3 in uptrend
+        # Short when price touches/bounces from R3 in downtrend
+        # Using high/low for touch, close for confirmation
+        touch_s3 = low[i] <= s3_aligned[i]
+        touch_r3 = high[i] >= r3_aligned[i]
+        
+        # Reversal confirmation: price moves back inside the level
+        reverse_from_s3 = touch_s3 and (close[i] > s3_aligned[i])
+        reverse_from_r3 = touch_r3 and (close[i] < r3_aligned[i])
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            # Long setup: bounce from S3 in uptrend with volume
+            if reverse_from_s3 and uptrend and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            # Short setup: bounce from R3 in downtrend with volume
+            elif reverse_from_r3 and downtrend and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
