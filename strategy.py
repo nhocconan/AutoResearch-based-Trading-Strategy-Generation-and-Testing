@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13974_1h_4h1d_trend_vol_v1"
+name = "exp_13974_1h_donchian20_4h_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
-# Hypothesis: 1h strategy using 4h trend (EMA20) and 1d trend (EMA50) for direction, with volume confirmation on breakouts.
-# Uses 4h EMA20 and 1d EMA50 for trend bias: both above = bullish, both below = bearish.
-# Entry on 1h Donchian breakout (20) in direction of aligned trend with volume > 1.5x average.
-# Exit on trend change or Donchian reversal. Designed for 60-150 total trades over 4 years (15-37/year).
-# Works in bull (breaks above with bullish trend) and bear (breaks below with bearish trend) with dual timeframe filter.
+# Hypothesis: 1h Donchian(20) breakout with 4h EMA direction filter and volume confirmation.
+# Uses 4h EMA(50) as trend filter: price above EMA = bullish bias, price below EMA = bearish bias.
+# Entry on 1h Donchian breakout in direction of 4h EMA bias with volume > 1.5x 20-period average.
+# Exit on Donchian reversal or EMA bias change. Session filter (08-20 UTC) reduces noise.
+# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -38,18 +38,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA trend filter ONCE before loop
+    # Load 4h data for EMA filter ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    # Load 1d data for EMA trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    close_4h = df_4h['close'].values
     
-    # Calculate 4h EMA(20) and 1d EMA(50) for trend
-    ema_4h = calculate_ema(df_4h['close'].values, 20)
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate 4h EMA(50)
+    ema_4h = calculate_ema(close_4h, 50)
     
-    # Align 4h EMA and 1d EMA to 1h timeframe (use previous bar for trend)
+    # Align 4h EMA to 1h timeframe (use previous 4h bar's EMA for bias)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 1h data for Donchian, ATR, and volume
     high = prices['high'].values
@@ -66,7 +63,7 @@ def generate_signals(prices):
     # Volume confirmation (20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 8-20 UTC
+    # Session filter: 08-20 UTC (already datetime64[ms], use index.hour)
     hours = prices.index.hour
     
     signals = np.zeros(n)
@@ -75,11 +72,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20, 20, 20) + 1
+    start = max(50, 20, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.20
@@ -87,14 +84,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Session filter: only trade 8-20 UTC
+        # Session filter: only trade 08-20 UTC
         hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
+        in_session = 8 <= hour <= 20
         
         # Check stops
         if position == 1:  # long position
@@ -111,20 +103,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend bias from 4h EMA and 1d EMA (both must agree)
-        bullish_trend = (close[i] > ema_4h_aligned[i]) and (close[i] > ema_1d_aligned[i])
-        bearish_trend = (close[i] < ema_4h_aligned[i]) and (close[i] < ema_1d_aligned[i])
+        # Determine bias from 4h EMA (price vs EMA level)
+        bullish_bias = close[i] > ema_4h_aligned[i]  # price above 4h EMA = bullish bias
+        bearish_bias = close[i] < ema_4h_aligned[i]  # price below 4h EMA = bearish bias
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Donchian breakout signals (using previous bar's bands)
+        # Donchian breakout signals
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of both trends
-        long_signal = bullish_trend and volume_ok and breakout_up
-        short_signal = bearish_trend and volume_ok and breakout_down
+        # Entry signals - only in direction of 4h EMA bias and within session
+        long_signal = bullish_bias and volume_ok and breakout_up and in_session
+        short_signal = bearish_bias and volume_ok and breakout_down and in_session
         
         # Generate signals
         if position == 0:
@@ -141,15 +133,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on trend change (either 4h or 1d turns bearish) or Donchian breakdown
-            if not bullish_trend or close[i] < donchian_lower[i]:
+            # Exit long on Donchian breakdown or bias change to bearish
+            if close[i] < donchian_lower[i] or not bullish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:
-            # Exit short on trend change (either 4h or 1d turns bullish) or Donchian breakout
-            if not bearish_trend or close[i] > donchian_upper[i]:
+            # Exit short on Donchian breakout or bias change to bullish
+            if close[i] > donchian_upper[i] or not bearish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
