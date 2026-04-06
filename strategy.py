@@ -1,21 +1,20 @@
-# Python code
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA filter and volume confirmation.
-# Uses 4-hour price channels for entries and daily EMA for trend filter to capture
-# trend continuation moves in both bull and bear markets. Volume confirmation ensures
-# institutional participation. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (price vs 200 EMA) and volume confirmation.
+# Uses 6h price channel breakouts aligned with daily trend to capture trending moves while avoiding counter-trend trades.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band in uptrend) and
+# bear markets (breakdowns below lower band in downtrend). Target: 50-150 total trades over 4 years.
 
-name = "exp_13406_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13407_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_TREND_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -45,10 +44,10 @@ def generate_signals(prices):
     
     # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d = calculate_ema(close_1d, EMA_TREND_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_TREND_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
@@ -96,7 +95,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
+        # Trend filter: price above/below daily EMA200
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
@@ -124,3 +123,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
