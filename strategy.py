@@ -3,39 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with volume confirmation and weekly EMA trend filter.
-# Williams %R identifies overbought/oversold conditions; entries occur on reversals from extremes
-# with volume confirmation. Weekly EMA ensures alignment with higher timeframe momentum.
-# Works in bull markets (buying oversold dips) and bear markets (selling overbought rallies).
-# Target: 50-150 total trades over 4 years with disciplined entries.
+# Hypothesis: 6-hour Ichimoku Cloud with daily trend filter and volume confirmation.
+# The Ichimoku Cloud (Tenkan-sen/Kijun-sen cross + cloud color) provides clear
+# trend direction and support/resistance zones. Combined with daily trend filter
+# to avoid counter-trend trades and volume confirmation for institutional
+# participation. Works in bull markets (price above cloud, bullish TK cross)
+# and bear markets (price below cloud, bearish TK cross).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13335_6h_williamsr_volume_ema_v1"
+name = "exp_13335_6h_ichimoku_cloud_daily_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-OVERBOUGHT = -20
-OVERSOLD = -80
-EMA_PERIOD = 20  # Weekly EMA
+TENKAN_PERIOD = 9    # Tenkan-sen period
+KIJUN_PERIOD = 26    # Kijun-sen period
+SENKOU_B_PERIOD = 52 # Senkou span B period
+DMA_PERIOD = 50      # Daily MA for trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
-    return wr.values
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past TENKAN_PERIOD
+    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    
+    # Kijun-sen (Base Line): (highest high + lowest low)/2 for past KIJUN_PERIOD
+    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted KIJUN_PERIOD ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(KIJUN_PERIOD)
+    
+    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past SENKOU_B_PERIOD shifted KIJUN_PERIOD ahead
+    senkou_span_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                      pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
+    
+    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -48,25 +56,37 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily MA for trend filter
+    close_1d = df_1d['close'].values
+    daily_ma = pd.Series(close_1d).ewm(span=DMA_PERIOD, adjust=False, min_periods=DMA_PERIOD).mean().values
+    daily_ma_aligned = align_htf_to_ltf(prices, df_1d, daily_ma)
     
-    # Calculate 6h indicators
+    # Calculate 6h Ichimoku
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
+    tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b = calculate_ichimoku(high, low, close)
+    
+    # Cloud top and bottom (Senkou Span A and B)
+    cloud_top = np.maximum(senkou_span_a, senkou_span_b)
+    cloud_bottom = np.minimum(senkou_span_a, senkou_span_b)
+    
+    # TK Cross (Tenkan-sen crossing Kijun-sen)
+    tk_cross = tenkan_sen - kijun_sen
+    tk_cross_above = tk_cross > 0
+    tk_cross_below = tk_cross < 0
+    
+    # Price relative to cloud
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -80,11 +100,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, DMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + KIJUN_PERIOD
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if indicators not available
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(daily_ma_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,27 +128,31 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Daily trend filter: price above/below daily MA
+        uptrend = close[i] > daily_ma_aligned[i]
+        downtrend = close[i] < daily_ma_aligned[i]
         
-        # Williams %R reversal signals
-        # Long: was oversold, now reversing up with volume
-        wr_oversold = williams_r[i-1] <= OVERSOLD and williams_r[i] > OVERSOLD
-        wr_reversal_up = wr_oversold and volume_ok and uptrend
+        # Ichimoku signals
+        # Long: Price above cloud + bullish TK cross + uptrend + volume
+        long_signal = (price_above_cloud[i] and 
+                      tk_cross_above[i] and 
+                      uptrend and 
+                      volume_ok)
         
-        # Short: was overbought, now reversing down with volume
-        wr_overbought = williams_r[i-1] >= OVERBOUGHT and williams_r[i] < OVERBOUGHT
-        wr_reversal_down = wr_overbought and volume_ok and downtrend
+        # Short: Price below cloud + bearish TK cross + downtrend + volume
+        short_signal = (price_below_cloud[i] and 
+                       tk_cross_below[i] and 
+                       downtrend and 
+                       volume_ok)
         
         # Generate signals
         if position == 0:
-            if wr_reversal_up:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif wr_reversal_down:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
