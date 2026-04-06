@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4H DONCHIAN(20) BREAKOUT + 1D EMA(50) TREND + VOLUME CONFIRMATION
-Hypothesis: Donchian breakouts capture momentum bursts. 1D EMA(50) filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (breakouts with trend) and bear (breakouts against trend filtered out). Target: 100-200 total trades over 4 years.
+4H DONCHIAN(20) BREAKOUT + 1D EMA(50) TREND + VOLUME CONFIRMATION v2
+Hypothesis: Donchian breakouts capture momentum bursts. 1D EMA(50) filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (breakouts with trend) and bear (breakouts against trend filtered out). Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v1"
+name = "4h_donchian20_1d_ema50_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -61,7 +61,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume filter: current volume > 1.5x average over last 20 periods
+    # Volume filter: current volume > 1.8x average over last 20 periods (stricter)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -82,8 +82,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume condition (more restrictive)
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
         # Check exits and stoploss
         if position == 1:  # long position
