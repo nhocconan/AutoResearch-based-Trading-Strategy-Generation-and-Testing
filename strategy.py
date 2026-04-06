@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
-Hypothesis: Donchian breakouts on 4h timeframe capture momentum with lower trade frequency than 6h. 
-Filter by 12h EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 12h EMA50) 
-and bear (sell breakdowns below 12h EMA50). Target: 75-200 total trades over 4 years.
+4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+Hypothesis: Donchian breakouts on 4h timeframe capture momentum. Filter by 12h EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 12h EMA50) and bear (sell breakdowns below 12h EMA50). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
