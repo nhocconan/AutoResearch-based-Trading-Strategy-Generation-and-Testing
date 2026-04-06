@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1D Tenkan-Kijun Cross + Volume Spike
-Hypothesis: Uses 1D Ichimoku (Tenkan/Kijun cross, price vs cloud) for trend bias,
-combined with 6D price action and volume confirmation to enter trades.
-Works in bull (price above cloud, bullish cross, volume) and bear (price below cloud, bearish cross, volume).
-Designed for low trade frequency (~15-30/year) to minimize fee drag.
+12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
+Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation
+to capture momentum while avoiding chop. Works in bull (breakouts with trend) and bear
+(short breakdowns with trend). Designed for low trade frequency (~15-25/year) to minimize
+fee drag on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_ata, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_1dtkx_vol"
-timeframe = "6h"
+name = "12h_donchian20_1dtrend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,9 +26,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 2-period ATR for stoploss
+    # 14-period ATR
     atr = np.full(n, np.nan)
-    if n >= 2:
+    if n >= 14:
         tr = np.maximum(
             high[1:] - low[1:],
             np.abs(high[1:] - close[:-1]),
@@ -37,64 +37,34 @@ def generate_signals(prices):
         if len(tr) > 0:
             atr[1] = tr[0]
             for i in range(2, n):
-                atr[i] = (tr[i-1] + atr[i-1]) / 2  # Wilder's smoothing
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1D Ichimoku components
+    # 1d EMA20 for trend bias
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 20:
+        ema_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan = np.full(len(high_1d), np.nan)
-    if len(high_1d) >= 9:
-        for i in range(8, len(high_1d)):
-            tenkan[i] = (np.max(high_1d[i-8:i+1]) + np.min(low_1d[i-8:i+1])) / 2
+    # Trend bias: above EMA = bullish, below = bearish
+    trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun = np.full(len(high_1d), np.nan)
-    if len(high_1d) >= 26:
-        for i in range(25, len(high_1d)):
-            kijun[i] = (np.max(high_1d[i-25:i+1]) + np.min(low_1d[i-25:i+1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = np.full(len(high_1d), np.nan)
-    if len(high_1d) >= 52:  # Need 26+26 for calculation
-        for i in range(26, len(high_1d)):
-            if not np.isnan(tenkan[i-26]) and not np.isnan(kijun[i-26]):
-                senkou_a[i] = (tenkan[i-26] + kijun[i-26]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    senkou_b = np.full(len(high_1d), np.nan)
-    if len(high_1d) >= 78:  # Need 52+26 for calculation
-        for i in range(52, len(high_1d)):
-            if i-26 >= 0:
-                high_52 = np.max(high_1d[i-52:i-26+1]) if i-52 >= 0 else np.max(high_1d[:i-26+1])
-                low_52 = np.min(low_1d[i-52:i-26+1]) if i-52 >= 0 else np.min(low_1d[:i-26+1])
-                senkou_b[i] = (high_52 + low_52) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Align to 12h timeframe
+    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
-    # Start from warmup period (need 52 periods for Senkou B)
-    start = 52
+    # Start from warmup period
+    start = 20  # For Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or \
-           np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]):
+        if np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -102,16 +72,20 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
+        # Donchian channel (20-period)
+        highest_high = np.max(high[i-20:i])
+        lowest_low = np.min(low[i-20:i])
+        
         # Volume filter (20-period average)
-        vol_ma = np.mean(volume[max(0, i-20):i+1])
-        volume_filter = volume[i] > vol_ma * 1.5
+        vol_ma = np.mean(volume[i-20:i])
+        volume_filter = volume[i] > vol_ma * 2.0
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below cloud OR Tenkan-Kijun cross turns bearish
+            # Exit: price closes below Donchian lower OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < cloud_bottom[i] or
-                tenkan_aligned[i] < kijun_aligned[i] or
+            if (close[i] < lowest_low or
+                trend_bias_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -120,10 +94,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above cloud OR Tenkan-Kijun cross turns bullish
+            # Exit: price closes above Donchian upper OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > cloud_top[i] or
-                tenkan_aligned[i] > kijun_aligned[i] or
+            if (close[i] > highest_high or
+                trend_bias_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -132,21 +106,20 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries: Ichimoku signals + volume
-            # Minimum holding period: only allow new entry after 30 bars flat
-            if bars_since_entry >= 30:
-                # Bullish: price above cloud, bullish TK cross, volume
-                if (close[i] > cloud_top[i] and
-                    tenkan_aligned[i] > kijun_aligned[i] and
-                    volume_filter):
+            # Look for entries: Donchian breakout + 1d trend + volume spike
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
+                bull_breakout = close[i] > highest_high
+                bear_breakout = close[i] < lowest_low
+                
+                # Long: bullish breakout with bullish 1d trend and volume
+                if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Bearish: price below cloud, bearish TK cross, volume
-                elif (close[i] < cloud_bottom[i] and
-                      tenkan_aligned[i] < kijun_aligned[i] and
-                      volume_filter):
+                # Short: bearish breakout with bearish 1d trend and volume
+                elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
