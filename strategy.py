@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Enter long when price breaks above 20-period high with 1d EMA(50) rising and volume > 1.5x average.
-# Enter short when price breaks below 20-period low with 1d EMA(50) falling and volume > 1.5x average.
+# Hypothesis: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation.
+# Enter long when price breaks above upper Donchian band with 1d EMA(50) rising and volume > 1.5x average.
+# Enter short when price breaks below lower Donchian band with 1d EMA(50) falling and volume > 1.5x average.
 # Exit on opposite Donchian breakout or when price crosses 1d EMA(50).
 # Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
@@ -30,11 +30,11 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # 12h Donchian channels (20-period high/low)
+    # 12h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,8 +45,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_threshold[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -54,15 +54,15 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR crosses below EMA50
-            if close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price breaks below lower Donchian OR crosses below EMA50
+            if close[i] < donchian_lower[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR crosses above EMA50
-            if close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price breaks above upper Donchian OR crosses above EMA50
+            if close[i] > donchian_upper[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -70,12 +70,12 @@ def generate_signals(prices):
         else:
             # Look for entries: Donchian breakout + EMA50 trend + volume
             if volume[i] > volume_threshold[i]:
-                if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
-                    # Breakout above Donchian high in uptrend: long
+                if close[i] > donchian_upper[i] and close[i] > ema_50_aligned[i]:
+                    # Breakout above upper Donchian in uptrend: long
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
-                    # Breakdown below Donchian low in downtrend: short
+                elif close[i] < donchian_lower[i] and close[i] < ema_50_aligned[i]:
+                    # Breakdown below lower Donchian in downtrend: short
                     signals[i] = -0.25
                     position = -1
     
