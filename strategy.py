@@ -3,25 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian high with volume and 1d EMA up
-# Short when price breaks below 20-period Donchian low with volume and 1d EMA down
-# Exit on opposite Donchian touch or trend reversal
-# Target: 50-150 trades over 4 years (12-37/year) for low fee drag
-# Works in bull/bear via trend filter and volatility-based breakouts
+# Hypothesis: 4h strategy using Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Goes long when price breaks above 4h Donchian upper band with volume above average and price above 1d EMA200,
+# short when breaks below 4h Donchian lower band with volume and price below 1d EMA200.
+# Uses ATR-based stop loss. Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Donchian channels provide clear structure, EMA200 filters trend direction, volume confirms breakout strength.
 
-name = "exp_13822_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13823_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
@@ -45,7 +44,7 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load 1d data for EMA trend filter ONCE before loop
@@ -55,16 +54,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
+    # Donchian channels on 4h data
     upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
@@ -131,15 +130,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on touch of lower band or trend reversal
-            if close[i] <= lower[i] or not above_ema:
+            # Exit long on close below Donchian lower band
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on touch of upper band or trend reversal
-            if close[i] >= upper[i] or not below_ema:
+            # Exit short on close above Donchian upper band
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
