@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high + close > EMA50 + volume > 1.5x average volume
-# Short when price breaks below Donchian(20) low + close < EMA50 + volume > 1.5x average volume
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades
-# Target: 75-200 total trades over 4 years with controlled risk
-# ATR-based stoploss to limit drawdown
+# Hypothesis: 12-hour Donchian(20) breakout with daily EMA50 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + close > EMA50 + volume > 1.5x average
+# Short when price breaks below Donchian(20) low + close < EMA50 + volume > 1.5x average
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades in both bull and bear markets
+# Target: 100-150 total trades over 4 years (25-37/year) to minimize fee drag
+# ATR-based stoploss (2x daily ATR) to limit drawdown
 
-name = "4h_donchian20_1d_ema50_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     # EMA50 calculation
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
+    # Align 1d EMA50 to 12h timeframe
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Donchian channels (20-period)
@@ -49,6 +49,11 @@ def generate_signals(prices):
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Daily ATR approximation for stoploss (using high-low range)
+    daily_range = pd.Series(high - low).rolling(window=1, min_periods=1).sum().values  # daily range
+    atr_approx_1d = pd.Series(daily_range).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_approx_12h = align_htf_to_ltf(prices, df_1d, atr_approx_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -56,7 +61,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i])):
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr_approx_12h[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -64,8 +69,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2 * ATR approximation using price range
-            if close[i] < entry_price - 2.0 * (high[i] - low[i]):
+            # Stoploss: 2 * ATR approximation
+            if close[i] < entry_price - 2.0 * atr_approx_12h[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -78,7 +83,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2 * ATR approximation
-            if close[i] > entry_price + 2.0 * (high[i] - low[i]):
+            if close[i] > entry_price + 2.0 * atr_approx_12h[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
