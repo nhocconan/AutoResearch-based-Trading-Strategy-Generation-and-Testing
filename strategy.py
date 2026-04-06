@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d EMA(50) trend and volume confirmation
-Hypothesis: Price breaking Donchian(20) channels on 12h with 1d EMA(50) trend alignment and volume surge captures institutional breakouts. Works in bull (long on upper break) and bear (short on lower break). Target: 12-37 trades/year (50-150 total over 4 years).
+4h Donchian(20) breakout with 1d EMA(50) trend and volume confirmation
+Hypothesis: Price breaking Donchian(20) channels with 1d EMA(50) trend alignment and volume surge captures institutional breakouts. Works in bull (long on upper break) and bear (short on lower break). Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 210:
         return np.zeros(n)
     
     # Load 1d data for EMA(50) trend (once before loop)
@@ -25,7 +25,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -35,11 +35,11 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)  # Require strong volume surge
+    # 4h volume filter - more strict to reduce trades
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > (2.0 * vol_ma)  # Require stronger volume surge
     
-    # 12h ATR(14) for stoploss
+    # 4h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -101,4 +101,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-</script>
