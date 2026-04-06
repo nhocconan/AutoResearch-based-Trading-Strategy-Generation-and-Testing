@@ -1,14 +1,15 @@
-# 2021-2024 BTC/ETH/SOL Trend Following Strategy
-# Strategy: 1D Donchian(20) breakout + 1W EMA(50) trend + Volume confirmation
-# Target: 75-200 total trades over 4 years (19-50/year)
-# Edge: Captures breakouts in trending markets while filtering false signals with higher timeframe trend and volume
+#!/usr/bin/env python3
+"""
+Experiment #12311: 6h Donchian Breakout + 1D Trend + Volume Confirmation
+Hypothesis: Use 1D EMA(50) for trend direction, 6H Donchian(20) breakouts for entry, and volume spikes for confirmation. This aims to capture momentum in both bull and bear markets while avoiding false breakouts. Target: 75-200 total trades over 4 years.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12310_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_12311_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -21,11 +22,11 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
-    """Calculate EMA with proper minimum periods"""
+    """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR with proper minimum periods"""
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -34,7 +35,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels with proper minimum periods"""
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -44,14 +45,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1W data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1D data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1W EMA for trend
-    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1D EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily indicators
+    # Calculate 6H indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,8 +71,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1W EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if 1D EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,17 +94,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (1W)
-        uptrend_1w = close[i] > ema_1w_aligned[i]
-        downtrend_1w = close[i] < ema_1w_aligned[i]
+        # Trend filter (1D)
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
         
         # Donchian breakout conditions
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_1w and long_breakout
-        short_entry = volume_ok and downtrend_1w and short_breakout
+        long_entry = volume_ok and uptrend_1d and long_breakout
+        short_entry = volume_ok and downtrend_1d and short_breakout
         
         # Generate signals
         if position == 0:
