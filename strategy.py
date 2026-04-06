@@ -3,27 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily EMA crossover with weekly trend filter and volume confirmation
-# Works in bull/bear: EMA crossover captures momentum, weekly EMA filter ensures
-# alignment with higher timeframe trend, volume confirmation filters weak signals.
-# Target: 50-150 trades over 4 years (12-38/year) to balance opportunity and cost.
+# Hypothesis: Weekly pivot breakout with volume confirmation on 1d timeframe
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and pivot levels provide structural support/resistance that works across regimes.
+# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
 
-name = "ema_crossover_weekly_trend_v1"
+name = "exp_12870_1d_weekly_pivot_breakout_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-FAST_EMA = 9
-SLOW_EMA = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_ema(prices, period):
-    """Calculate EMA with proper Wilder's smoothing"""
-    return pd.Series(prices).ewm(alpha=2/(period+1), adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -34,6 +28,17 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -42,10 +47,37 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA for trend filter
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, 21)
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Calculate weekly pivot points
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
+    
+    pivot_vals = np.zeros(len(close_w))
+    r1_vals = np.zeros(len(close_w))
+    r2_vals = np.zeros(len(close_w))
+    r3_vals = np.zeros(len(close_w))
+    s1_vals = np.zeros(len(close_w))
+    s2_vals = np.zeros(len(close_w))
+    s3_vals = np.zeros(len(close_w))
+    
+    for i in range(len(close_w)):
+        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
+        pivot_vals[i] = pivot
+        r1_vals[i] = r1
+        r2_vals[i] = r2
+        r3_vals[i] = r3
+        s1_vals[i] = s1
+        s2_vals[i] = s2
+        s3_vals[i] = s3
+    
+    # Align to daily timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -53,8 +85,6 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    fast_ema = calculate_ema(close, FAST_EMA)
-    slow_ema = calculate_ema(close, SLOW_EMA)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -64,11 +94,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(FAST_EMA, SLOW_EMA, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if pivot levels not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -90,24 +120,18 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # EMA crossover signals
-        ema_bullish = fast_ema[i] > slow_ema[i]
-        ema_bearish = fast_ema[i] < slow_ema[i]
-        
-        # Weekly trend filter: only trade in direction of weekly trend
-        weekly_bullish = close[i] > weekly_ema_aligned[i]
-        weekly_bearish = close[i] < weekly_ema_aligned[i]
+        # Breakout above R3 or breakdown below S3
+        breakout_long = volume_ok and close[i] >= r3_aligned[i]
+        breakout_short = volume_ok and close[i] <= s3_aligned[i]
         
         # Generate signals
         if position == 0:
-            # Long: bullish EMA crossover + above weekly EMA + volume
-            if ema_bullish and weekly_bullish and volume_ok:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: bearish EMA crossover + below weekly EMA + volume
-            elif ema_bearish and weekly_bearish and volume_ok:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -115,10 +139,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Maintain long position
             signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Maintain short position
             signals[i] = -SIGNAL_SIZE
     
     return signals
