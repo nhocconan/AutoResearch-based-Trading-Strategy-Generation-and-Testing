@@ -3,37 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(2) extreme mean reversion with 4-hour trend filter and volume confirmation.
-# In bull markets, buy RSI(2) < 5 during uptrend; in bear markets, sell RSI(2) > 95 during downtrend.
-# The 4-hour RSI(14) determines trend direction to avoid counter-trend trades.
-# Volume > 1.5x average confirms genuine momentum exhaustion.
-# Target: 100-200 total trades over 4 years (25-50/year) balanced for 1h frequency.
+# Hypothesis: 6-hour Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Weekly pivot levels (from 1w data) define the trend direction: price above weekly pivot = bullish bias, below = bearish bias.
+# Breakouts are taken only in the direction of the weekly pivot bias, with volume confirmation to filter false signals.
+# This structure works in both bull and bear markets by aligning with higher timeframe momentum.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
-name = "exp_13194_1h_rsi2_extreme_4h_rsi14_vol_v1"
-timeframe = "1h"
+name = "exp_13195_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI2_PERIOD = 2
-RSI14_PERIOD = 14
+DONCHIAN_PERIOD = 20
+PIVOT_LOOKBACK = 5  # Use last 5 weekly candles for pivot calculation
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-RSI2_LONG_THRESHOLD = 5
-RSI2_SHORT_THRESHOLD = 95
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_pivot(high, low, close):
+    """Calculate pivot point: (H + L + C) / 3"""
+    return (high + low + close) / 3.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -44,27 +35,34 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h RSI for trend filter
-    close_4h = df_4h['close'].values
-    rsi_14_4h = calculate_rsi(close_4h, RSI14_PERIOD)
-    rsi_14_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_14_4h)
+    # Calculate weekly pivot for trend bias
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = calculate_pivot(high_1w, low_1w, close_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(2)
-    rsi_2 = calculate_rsi(close, RSI2_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -78,11 +76,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI2_PERIOD, RSI14_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h RSI not available
-        if np.isnan(rsi_14_4h_aligned[i]):
+        # Skip if pivot not available
+        if np.isnan(pivot_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,22 +102,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter from 4h RSI
-        uptrend_4h = rsi_14_4h_aligned[i] > 50
-        downtrend_4h = rsi_14_4h_aligned[i] < 50
+        # Trend bias from weekly pivot: price above pivot = bullish, below = bearish
+        bullish_bias = close[i] > pivot_1w_aligned[i]
+        bearish_bias = close[i] < pivot_1w_aligned[i]
         
-        # RSI(2) extreme signals
-        rsi2_oversold = rsi_2[i] < RSI2_LONG_THRESHOLD
-        rsi2_overbought = rsi_2[i] > RSI2_SHORT_THRESHOLD
+        # Breakout signals (only in direction of weekly pivot bias)
+        breakout_up = volume_ok and bullish_bias and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and bearish_bias and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if rsi2_oversold and uptrend_4h and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif rsi2_overbought and downtrend_4h and volume_ok:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
