@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation v1
-Hypothesis: Donchian(20) breakouts on 4h timeframe capture strong momentum moves with low frequency.
+4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation v1
+Hypothesis: Donchian breakouts on 4h capture momentum moves with low frequency.
 Daily EMA200 filters trend direction to avoid counter-trend trades.
 Volume confirms breakout strength. Designed for 75-200 trades over 4 years to minimize fee drag.
 Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
@@ -63,7 +63,7 @@ def generate_signals(prices):
             np.isnan(vol_ema[i]) or np.isnan(ema200_1d_aligned[i]) or 
             np.isnan(ema200_rising_aligned[i]) or np.isnan(ema200_falling_aligned[i])):
             if position != 0:
-                signals[i] = position * 0.30
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -76,7 +76,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Exit: price breaks above upper Donchian band OR stoploss
             if (close[i] >= highest_high[i] or 
@@ -84,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout + trend + volume
             bull_breakout = close[i] > highest_high[i]
@@ -94,11 +94,11 @@ def generate_signals(prices):
             bear_entry = bear_breakout and ema200_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             elif bear_entry:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
             else:
