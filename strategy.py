@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
 # and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13413_4h_donchian20_12h_ema_vol_v1"
+name = "exp_13473_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
