@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Bollinger Band breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong momentum moves, volume filters false signals,
-# and Bollinger Bands adapt to volatility, making them effective across market regimes.
-# Target: 50-100 trades over 4 years (12-25/year) to balance opportunity and cost.
+# Hypothesis: Weekly high/low breakout with volume confirmation on 1d timeframe.
+# Weekly highs/lows act as structural support/resistance that work across bull/bear regimes.
+# Volume confirms conviction behind the breakout. Fewer trades expected (target: 30-80 total)
+# due to strict breakout condition, reducing fee drag. Works in trends (continuation) and
+# ranges (false breakouts filtered by volume).
 
-name = "exp_12884_1d_weekly_bb_breakout_v1"
+name = "exp_12884_1d_weekly_breakout_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-BB_PERIOD = 20
-BB_STD_DEV = 2.0
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -30,14 +29,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period, std_dev):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
-    std = pd.Series(close).rolling(window=period, min_periods=period).std()
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    return upper.values, lower.values, sma.values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -46,14 +37,13 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly Bollinger Bands
-    close_w = df_weekly['close'].values
-    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close_w, BB_PERIOD, BB_STD_DEV)
+    # Extract weekly high and low
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
     
-    # Align to daily timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_weekly, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_weekly, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_weekly, bb_middle)
+    # Align weekly high/low to daily timeframe
+    high_w_aligned = align_htf_to_ltf(prices, df_weekly, high_w)
+    low_w_aligned = align_htf_to_ltf(prices, df_weekly, low_w)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -70,11 +60,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(BB_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if BB levels not available
-        if np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]):
+        # Skip if weekly levels not available
+        if np.isnan(high_w_aligned[i]) or np.isnan(low_w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,9 +86,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= bb_upper_aligned[i]
-        breakout_short = volume_ok and close[i] <= bb_lower_aligned[i]
+        # Breakout above weekly high or below weekly low
+        breakout_long = volume_ok and close[i] > high_w_aligned[i]
+        breakout_short = volume_ok and close[i] < low_w_aligned[i]
         
         # Generate signals
         if position == 0:
