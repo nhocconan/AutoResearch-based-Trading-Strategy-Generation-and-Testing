@@ -3,30 +3,38 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(21) trend filter and volume confirmation.
-# This strategy captures breakouts aligned with the intermediate-term trend (12h EMA) while
-# requiring volume confirmation to filter false breakouts. Works in both bull and bear markets:
-# - In bull markets: long breakouts above upper band with upward 12h trend
-# - In bear markets: short breakdowns below lower band with downward 12h trend
-# Volume requirement ensures institutional participation, reducing false signals.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 1-hour RSI(14) with 4-hour Supertrend trend filter and volume confirmation.
+# Supertrend identifies strong trends (ATR-based), RSI provides mean-reversion entries within trend,
+# volume confirms institutional participation. Works in both bull (buy pullbacks in uptrend) and 
+# bear (sell bounces in downtrend) markets. Session filter (08-20 UTC) reduces noise.
+# Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "exp_13573_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13574_1h_rsi14_4h_supertrend_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,34 +45,82 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_supertrend(high, low, close, period, multiplier):
+    """Calculate Supertrend indicator"""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    upper = hl2 + (multiplier * atr)
+    lower = hl2 - (multiplier * atr)
+    
+    upper_band = np.zeros_like(close)
+    lower_band = np.zeros_like(close)
+    upper_band[0] = upper[0]
+    lower_band[0] = lower[0]
+    
+    for i in range(1, len(close)):
+        if close[i-1] <= upper_band[i-1]:
+            upper_band[i] = min(upper[i], upper_band[i-1])
+        else:
+            upper_band[i] = upper[i]
+            
+        if close[i-1] >= lower_band[i-1]:
+            lower_band[i] = max(lower[i], lower_band[i-1])
+        else:
+            lower_band[i] = lower[i]
+    
+    supertrend = np.zeros_like(close)
+    direction = np.ones_like(close, dtype=int)
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close)):
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    return supertrend, direction
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12-hour data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4-hour data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12-hour EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4-hour Supertrend for trend filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    supertrend_4h, trend_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
+    trend_direction_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_direction_4h)
     
-    # Calculate 4-hour indicators
+    # Calculate 1-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # RSI
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Session filter: 08-20 UTC (pre-compute hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,11 +128,20 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, SUPERTREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if Supertrend not available
+        if np.isnan(supertrend_4h_aligned[i]) or np.isnan(trend_direction_4h_aligned[i]) or np.isnan(rsi[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -98,22 +163,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 12h EMA
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Trend filter: 4-hour Supertrend direction
+        uptrend = trend_direction_4h_aligned[i] == 1
+        downtrend = trend_direction_4h_aligned[i] == -1
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # RSI signals: mean reversion within trend
+        rsi_oversold = rsi[i] < RSI_OVERSOLD
+        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if volume_ok and uptrend and rsi_oversold:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif volume_ok and downtrend and rsi_overbought:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
