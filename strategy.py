@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with daily EMA trend filter and volume confirmation.
-# Captures strong momentum moves aligned with daily trend, using 12h candles to reduce noise.
-# Works in both bull and bear markets by trading breakouts in the direction of daily trend.
-# Target: 50-150 total trades over 4 years (12-37/year) with sufficient statistical power.
+# Hypothesis: 12-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+# Captures strong trending moves aligned with daily momentum. Volume ensures institutional participation.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 name = "exp_13572_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -22,7 +22,7 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
-    """Calculate EMA with proper minimum period"""
+    """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
