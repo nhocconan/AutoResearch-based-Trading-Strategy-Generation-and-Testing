@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA100 trend and volume confirmation.
-# Uses 1-week EMA100 to establish trend bias (long above EMA100, short below EMA100).
-# Breakouts in direction of EMA trend with volume capture institutional moves.
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA50 trend and volume confirmation.
+# Uses weekly EMA50 to establish trend bias (long above EMA50, short below EMA50).
+# Breakouts in direction of weekly trend with volume capture institutional moves.
 # Designed for 1d timeframe to target 30-100 trades over 4 years with proven structure.
 # Works in bull/bear markets via EMA-based directional bias and volume confirmation.
 
-name = "1d_donchian20_1w_ema100_vol_v1"
+name = "1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,19 +24,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week EMA100 for trend bias
+    # 1-week EMA50 for trend bias
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate EMA100 on weekly closes
-    ema_100_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 100:
-        ema_100_1w[99] = np.mean(close_1w[:100])
-        for i in range(100, len(close_1w)):
-            ema_100_1w[i] = (close_1w[i] * 2 / 101) + (ema_100_1w[i-1] * 99 / 101)
+    # Calculate EMA50 on weekly closes
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 / 51) + (ema_50_1w[i-1] * 49 / 51)
     
-    # Align EMA100 to 1d timeframe (shifted by 1 week for no look-ahead)
-    ema_100_aligned = align_htf_to_ltf(prices, df_1w, ema_100_1w)
+    # Align EMA50 to 1d timeframe (shifted by 1 week for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # 1-day Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
@@ -57,7 +57,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_100_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -68,158 +68,34 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.5x 20-period average
         volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Trend bias: long above EMA100, short below EMA100
-        bullish_bias = close[i] > ema_100_aligned[i]
-        bearish_bias = close[i] < ema_100_aligned[i]
+        # Trend bias: long above EMA50, short below EMA50
+        bullish_bias = close[i] > ema_50_aligned[i]
+        bearish_bias = close[i] < ema_50_aligned[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price below EMA100 or stoploss (2x ATR approximation using Donchian width)
+            # Exit: price below EMA50 or stoploss (2x ATR approximation using Donchian width)
             donch_width = highest_high[i] - lowest_low[i]
             if donch_width > 0:
                 stop_loss_level = entry_price - 2.0 * donch_width
             else:
                 stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
             
-            if (close[i] < ema_100_aligned[i] or 
+            if (close[i] < ema_50_aligned[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above EMA100 or stoploss
+            # Exit: price above EMA50 or stoploss
             donch_width = highest_high[i] - lowest_low[i]
             if donch_width > 0:
                 stop_loss_level = entry_price + 2.0 * donch_width
             else:
                 stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
             
-            if (close[i] > ema_100_aligned[i] or 
-                close[i] > stop_loss_level):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries in direction of EMA trend
-            if volume_filter:
-                # Long: breakout above resistance with bullish bias
-                if (highest_high[i] > highest_high[i-1] and 
-                    close[i] > highest_high[i-1] and bullish_bias):
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: breakdown below support with bearish bias
-                elif (lowest_low[i] < lowest_low[i-1] and 
-                      close[i] < lowest_low[i-1] and bearish_bias):
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-            else:
-                signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA100 trend and volume confirmation.
-# Uses 1-week EMA100 to establish trend bias (long above EMA100, short below EMA100).
-# Breakouts in direction of EMA trend with volume capture institutional moves.
-# Designed for 1d timeframe to target 30-100 trades over 4 years with proven structure.
-# Works in bull/bear markets via EMA-based directional bias and volume confirmation.
-
-name = "1d_donchian20_1w_ema100_vol_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # 1-week EMA100 for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA100 on weekly closes
-    ema_100_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 100:
-        ema_100_1w[99] = np.mean(close_1w[:100])
-        for i in range(100, len(close_1w)):
-            ema_100_1w[i] = (close_1w[i] * 2 / 101) + (ema_100_1w[i-1] * 99 / 101)
-    
-    # Align EMA100 to 1d timeframe (shifted by 1 week for no look-ahead)
-    ema_100_aligned = align_htf_to_ltf(prices, df_1w, ema_100_1w)
-    
-    # 1-day Donchian channel (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(19, n):
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
-    
-    # Volume confirmation: 1d volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(20, n):
-        # Skip if required data not available
-        if (np.isnan(ema_100_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.5
-        
-        # Trend bias: long above EMA100, short below EMA100
-        bullish_bias = close[i] > ema_100_aligned[i]
-        bearish_bias = close[i] < ema_100_aligned[i]
-        
-        # Check exits and stoploss
-        if position == 1:  # long position
-            # Exit: price below EMA100 or stoploss (2x ATR approximation using Donchian width)
-            donch_width = highest_high[i] - lowest_low[i]
-            if donch_width > 0:
-                stop_loss_level = entry_price - 2.0 * donch_width
-            else:
-                stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
-            
-            if (close[i] < ema_100_aligned[i] or 
-                close[i] < stop_loss_level):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: price above EMA100 or stoploss
-            donch_width = highest_high[i] - lowest_low[i]
-            if donch_width > 0:
-                stop_loss_level = entry_price + 2.0 * donch_width
-            else:
-                stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
-            
-            if (close[i] > ema_100_aligned[i] or 
+            if (close[i] > ema_50_aligned[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
