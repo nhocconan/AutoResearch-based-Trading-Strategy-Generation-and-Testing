@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
-# Uses 12h primary timeframe to reduce trade frequency and avoid fee drag.
-# Weekly EMA ensures alignment with higher timeframe momentum.
-# Volume filters out false breakouts.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
+# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
+# The weekly EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve generalization.
+# This strategy has historically performed well on SOLUSDT and aims to maintain performance across BTC/ETH/SOL.
 
 name = "exp_13248_12h_donchian20_1w_ema_vol_v1"
 timeframe = "12h"
