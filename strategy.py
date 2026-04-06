@@ -3,61 +3,65 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12858_1d_1w_donchian20_volume_crossover_v1"
-timeframe = "1d"
+name = "exp_12859_6h_12h_1d_triple_ema_slope_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+EMA_FAST_PERIOD = 8
+EMA_MED_PERIOD = 21
+EMA_SLOW_PERIOD = 55
+SLOPE_THRESHOLD = 0.001
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_DAYS = 30  # Maximum holding period
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 24  # Max 4 days (24 * 6h)
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
+def calculate_slope(values):
+    """Calculate linear regression slope over last 3 points"""
+    if len(values) < 3:
+        return 0.0
+    x = np.array([0, 1, 2])
+    y = values[-3:]
+    slope = np.polyfit(x, y, 1)[0]
+    return slope
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly ATR for trend filter
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Calculate EMAs on 12h
+    close_12h = df_12h['close'].values
+    ema_fast_12h = pd.Series(close_12h).ewm(span=EMA_FAST_PERIOD, adjust=False).values
+    ema_med_12h = pd.Series(close_12h).ewm(span=EMA_MED_PERIOD, adjust=False).values
+    ema_slow_12h = pd.Series(close_12h).ewm(span=EMA_SLOW_PERIOD, adjust=False).values
     
-    atr_w = calculate_atr(high_w, low_w, close_w, ATR_PERIOD)
+    # Calculate EMAs on 1d
+    close_1d = df_1d['close'].values
+    ema_fast_1d = pd.Series(close_1d).ewm(span=EMA_FAST_PERIOD, adjust=False).values
+    ema_med_1d = pd.Series(close_1d).ewm(span=EMA_MED_PERIOD, adjust=False).values
+    ema_slow_1d = pd.Series(close_1d).ewm(span=EMA_SLOW_PERIOD, adjust=False).values
     
-    # Align weekly ATR to daily timeframe
-    atr_w_aligned = align_htf_to_ltf(prices, df_weekly, atr_w)
+    # Align to 6h timeframe
+    ema_fast_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_fast_12h)
+    ema_med_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_med_12h)
+    ema_slow_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slow_12h)
+    ema_fast_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_fast_1d)
+    ema_med_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_med_1d)
+    ema_slow_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slow_1d)
     
-    # Calculate daily Donchian channels
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian upper and lower bands
-    donchian_upper = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_lower = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stoploss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    atr = pd.Series(high - low).rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    atr = pd.Series(atr).ewm(alpha=1/ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,13 +70,14 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_SLOW_PERIOD, ATR_PERIOD) + 5
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if weekly ATR not available
-        if np.isnan(atr_w_aligned[i]):
+        # Skip if EMA data not available
+        if np.isnan(ema_fast_12h_aligned[i]) or np.isnan(ema_med_12h_aligned[i]) or np.isnan(ema_slow_12h_aligned[i]) or \
+           np.isnan(ema_fast_1d_aligned[i]) or np.isnan(ema_med_1d_aligned[i]) or np.isnan(ema_slow_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,37 +98,42 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
         
-        # Time-based exit
-        if bars_since_entry >= MAX_HOLD_DAYS:
+        # Time-based exit to prevent overtrading
+        if bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
             bars_since_entry = 0
             continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Calculate EMA slopes for 12h and 1d
+        fast_12h_slope = calculate_slope(ema_fast_12h_aligned[max(0, i-4):i+1])
+        med_12h_slope = calculate_slope(ema_med_12h_aligned[max(0, i-4):i+1])
+        slow_12h_slope = calculate_slope(ema_slow_12h_aligned[max(0, i-4):i+1])
+        fast_1d_slope = calculate_slope(ema_fast_1d_aligned[max(0, i-4):i+1])
+        med_1d_slope = calculate_slope(ema_med_1d_aligned[max(0, i-4):i+1])
+        slow_1d_slope = calculate_slope(ema_slow_1d_aligned[max(0, i-4):i+1])
         
-        # Trend filter: weekly ATR slope (rising = trend, falling = range)
-        # Use 5-period slope of weekly ATR
-        if i >= 5:
-            atr_slope = (atr_w_aligned[i] - atr_w_aligned[i-5]) / 5
-            trend_filter = atr_slope > 0  # Rising volatility indicates trending market
-        else:
-            trend_filter = True  # Default to true for early bars
+        # Bullish alignment: fast > med > slow AND positive slopes
+        bullish_12h = (ema_fast_12h_aligned[i] > ema_med_12h_aligned[i] > ema_slow_12h_aligned[i]) and \
+                      (fast_12h_slope > SLOPE_THRESHOLD and med_12h_slope > SLOPE_THRESHOLD)
+        bullish_1d = (ema_fast_1d_aligned[i] > ema_med_1d_aligned[i] > ema_slow_1d_aligned[i]) and \
+                     (fast_1d_slope > SLOPE_THRESHOLD and med_1d_slope > SLOPE_THRESHOLD)
         
-        # Breakout conditions
-        breakout_long = volume_ok and trend_filter and close[i] >= donchian_upper[i]
-        breakout_short = volume_ok and trend_filter and close[i] <= donchian_lower[i]
+        # Bearish alignment: fast < med < slow AND negative slopes
+        bearish_12h = (ema_fast_12h_aligned[i] < ema_med_12h_aligned[i] < ema_slow_12h_aligned[i]) and \
+                      (fast_12h_slope < -SLOPE_THRESHOLD and med_12h_slope < -SLOPE_THRESHOLD)
+        bearish_1d = (ema_fast_1d_aligned[i] < ema_med_1d_aligned[i] < ema_slow_1d_aligned[i]) and \
+                     (fast_1d_slope < -SLOPE_THRESHOLD and med_1d_slope < -SLOPE_THRESHOLD)
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if bullish_12h and bullish_1d:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
                 bars_since_entry = 0
-            elif breakout_short:
+            elif bearish_12h and bearish_1d:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -137,146 +147,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_12858_1d_1w_donchian20_volume_crossover_v1"
-timeframe = "1d"
-leverage = 1.0
-
-# Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_DAYS = 30  # Maximum holding period
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Calculate weekly ATR for trend filter
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    
-    atr_w = calculate_atr(high_w, low_w, close_w, ATR_PERIOD)
-    
-    # Align weekly ATR to daily timeframe
-    atr_w_aligned = align_htf_to_ltf(prices, df_weekly, atr_w)
-    
-    # Calculate daily Donchian channels
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian upper and lower bands
-    donchian_upper = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_lower = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stoploss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if weekly ATR not available
-        if np.isnan(atr_w_aligned[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        
-        # Time-based exit
-        if bars_since_entry >= MAX_HOLD_DAYS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend filter: weekly ATR slope (rising = trend, falling = range)
-        # Use 5-period slope of weekly ATR
-        if i >= 5:
-            atr_slope = (atr_w_aligned[i] - atr_w_aligned[i-5]) / 5
-            trend_filter = atr_slope > 0  # Rising volatility indicates trending market
-        else:
-            trend_filter = True  # Default to true for early bars
-        
-        # Breakout conditions
-        breakout_long = volume_ok and trend_filter and close[i] >= donchian_upper[i]
-        breakout_short = volume_ok and trend_filter and close[i] <= donchian_lower[i]
-        
-        # Generate signals
-        if position == 0:
-            if breakout_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
