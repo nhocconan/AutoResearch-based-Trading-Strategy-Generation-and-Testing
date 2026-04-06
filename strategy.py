@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and 1d EMA200 trend filter.
-# Goes long when price breaks above 4h Donchian upper band with above-average volume and price above 1d EMA200,
-# short when breaks below 4h Donchian lower band with volume and price below 1d EMA200.
-# Uses ATR-based stop loss to manage risk.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drain.
-# Donchian channels provide clear structure, EMA200 filters trend direction, volume confirms breakout strength.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper channel with volume and 1d EMA up
+# Short when price breaks below Donchian lower channel with volume and 1d EMA down
+# Exit on opposite Donchian touch or EMA trend reversal
+# ATR-based stop loss to manage risk
+# Target: 100-200 trades over 4 years (25-50/year) for balanced frequency
+# Works in bull/bear via trend filter and volatility-based channels
 
 name = "exp_13821_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
@@ -16,12 +17,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 200
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
@@ -45,7 +46,7 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data for EMA trend filter ONCE before loop
@@ -58,14 +59,14 @@ def generate_signals(prices):
     # Align 1d EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h data for Donchian channels, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 4h data
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels
+    upper_channel, lower_channel = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -83,7 +84,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -113,8 +115,8 @@ def generate_signals(prices):
         below_ema = close[i] < ema_1d_aligned[i]
         
         # Donchian breakout signals
-        long_signal = volume_ok and above_ema and close[i] > upper[i]
-        short_signal = volume_ok and below_ema and close[i] < lower[i]
+        long_signal = volume_ok and above_ema and close[i] > upper_channel[i]
+        short_signal = volume_ok and below_ema and close[i] < lower_channel[i]
         
         # Generate signals
         if position == 0:
@@ -131,15 +133,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below Donchian lower band
-            if close[i] < lower[i]:
+            # Exit long on touch of lower channel or EMA trend reversal
+            if close[i] <= lower_channel[i] or not above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above Donchian upper band
-            if close[i] > upper[i]:
+            # Exit short on touch of upper channel or EMA trend reversal
+            if close[i] >= upper_channel[i] or not below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
