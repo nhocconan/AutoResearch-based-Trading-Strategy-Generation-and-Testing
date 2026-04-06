@@ -3,42 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h/1d trend filter (RSI<30/70) and volume confirmation.
-# Uses 4h trend (EMA21) for direction and 1d volatility filter (ATR ratio) to avoid chop.
-# Designed for 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Works in bull/bear: mean reversion in range, trend filter prevents counter-trend in strong moves.
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA50 filter and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, EMA50 filters direction,
+# and volume ensures conviction. Target: 75-150 trades over 4 years (19-38/year).
 
-name = "exp_12894_1h_rsi_meanrev_4h_trend_v1"
-timeframe = "1h"
+name = "exp_12895_6h_donchian20_1d_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_FAST = 21
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-ATR_RATIO_PERIOD = 10
-ATR_RATIO_THRESHOLD = 0.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_ema(arr, period):
-    return pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -46,39 +29,36 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA21 for trend
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, EMA_FAST)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate daily EMA50
+    close_d = df_daily['close'].values
+    ema50_d = pd.Series(close_d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Calculate 1d ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align EMA50 to 6h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_daily, ema50_d)
     
-    # Calculate 1h indicators
-    close = prices['close'].values
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr_1h = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # ATR ratio (1h ATR / 1d ATR) for volatility regime
-    atr_ratio = atr_1h / (atr_1d_aligned + 1e-10)
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,11 +66,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_FAST, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA or 1d ATR not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema50_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -112,29 +92,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Volatility filter: only trade when 1h ATR is not too low vs 1d ATR (avoid chop)
-        vol_filter = atr_ratio[i] > ATR_RATIO_THRESHOLD
-        
-        # RSI conditions
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
-        
-        # Trend filter: 4h EMA21
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Donchian breakout with EMA filter
+        breakout_long = volume_ok and close[i] >= upper[i] and close[i] > ema50_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower[i] and close[i] < ema50_aligned[i]
         
         # Generate signals
         if position == 0:
-            if rsi_oversold and uptrend and volume_ok and vol_filter:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_1h[i])
-            elif rsi_overbought and downtrend and volume_ok and vol_filter:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_1h[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
