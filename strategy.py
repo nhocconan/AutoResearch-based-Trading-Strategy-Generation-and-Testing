@@ -3,28 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12515_6d_weekly_pivot_vol"
+name = "exp_12515_6d_camarilla1d_v2"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-PIVOT_PERIOD = 1  # Weekly pivot from daily high/low/close
+CAMARILLA_PERIOD = 10
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points using daily OHLC"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -35,27 +28,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla(high, low, close, period):
+    """Calculate Camarilla pivot levels"""
+    typical_price = (high + low + close) / 3
+    pivot = pd.Series(typical_price).rolling(window=period, min_periods=period).mean().values
+    range_val = pd.Series(high - low).rolling(window=period, min_periods=period).mean().values
+    
+    # Camarilla levels
+    r4 = pivot + (range_val * 1.1)
+    r3 = pivot + (range_val * 1.1/2)
+    s3 = pivot - (range_val * 1.1/2)
+    s4 = pivot - (range_val * 1.1)
+    
+    return r3, r4, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for weekly pivot calculation
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points from daily data (using Friday's close for weekly pivot)
-    # We'll use the most recent complete week's data
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate pivots using daily data (will be aligned to 6h)
-    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_1d, low_1d, close_1d)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3, r4, s3, s4 = calculate_camarilla(high_1d, low_1d, close_1d, CAMARILLA_PERIOD)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -72,11 +75,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(CAMARILLA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if daily Camarilla not available
+        if np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -98,9 +101,11 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Fade at S3/R3 levels with volume confirmation
-        long_signal = volume_ok and close[i] <= s3_aligned[i]  # Near support, look for bounce
-        short_signal = volume_ok and close[i] >= r3_aligned[i]  # Near resistance, look for rejection
+        # Camarilla conditions
+        # Long: price crosses above S3 with volume
+        long_signal = volume_ok and close[i] > s3_aligned[i] and close[i-1] <= s3_aligned[i-1]
+        # Short: price crosses below R3 with volume
+        short_signal = volume_ok and close[i] < r3_aligned[i] and close[i-1] >= r3_aligned[i-1]
         
         # Generate signals
         if position == 0:
