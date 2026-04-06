@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14015_6h_donchian20_1w_ema_vol_v1"
-timeframe = "6h"
+name = "exp_14016_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_ema(values, span):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -21,23 +23,42 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_ema(values, span):
+    """Calculate EMA"""
+    return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
+
+def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points (daily)"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, s1, r2, s2, r3, s3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for EMA trend (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    ema_200_1w = calculate_ema(df_1w['close'].values, 200)
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Load daily data for pivot points (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    pivot, r1, s1, r2, s2, r3, s3 = calculate_pivot_points(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
     
-    # 6h data for Donchian, ATR, and volume
+    # Align pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -58,11 +79,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(200, 20, 20) + 1
+    start = max(50, 20, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
+           np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -92,18 +114,37 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Trend filter: weekly EMA200
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
+        # Pivot-based signals: fade at R3/S3, breakout at R4/S4
+        # R4 = R3 + (R2 - R1), S4 = S3 - (S1 - S2)
+        r4 = r3_aligned[i] + (r2_aligned[i] - r1_aligned[i])
+        s4 = s3_aligned[i] - (s1_aligned[i] - s2_aligned[i])
+        
+        # Fade at R3/S3 (mean reversion)
+        fade_short = close[i] > r3_aligned[i] and volume_ok
+        fade_long = close[i] < s3_aligned[i] and volume_ok
+        
+        # Breakout at R4/S4 (trend continuation)
+        breakout_long = close[i] > r4 and volume_ok and breakout_up
+        breakout_short = close[i] < s4 and volume_ok and breakout_down
         
         # Generate signals
         if position == 0:
-            if breakout_up and volume_ok and uptrend:
+            if fade_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
-            elif breakout_down and volume_ok and downtrend:
+            elif fade_short:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (2.0 * atr[i])
+            elif breakout_long:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (2.0 * atr[i])
+            elif breakout_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -111,15 +152,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or trend reversal
-            if close[i] <= stop_price or not uptrend:
+            # Exit long on stop or reversal signals
+            if close[i] <= stop_price or close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on stop or trend reversal
-            if close[i] >= stop_price or not downtrend:
+            # Exit short on stop or reversal signals
+            if close[i] >= stop_price or close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
