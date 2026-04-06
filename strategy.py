@@ -3,13 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14006_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14007_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -27,21 +23,42 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot_points(high, low, close):
+    """Calculate daily pivot points and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
+    # Load daily data for pivot points and trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(50) for trend bias
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate daily pivot points
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values
+    )
     
-    # Align 1d EMA to 4h timeframe (use previous 1d bar for trend)
+    # Align daily pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 1d EMA(50) for trend bias
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h data for Donchian, ATR, and volume
+    # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -66,7 +83,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or \
+           np.isnan(s3_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -100,9 +118,19 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of 1d trend
-        long_signal = bullish_trend and volume_ok and breakout_up
-        short_signal = bearish_trend and volume_ok and breakout_down
+        # Pivot-based signals
+        # Long: price above S3 with bullish trend and volume
+        long_from_pivot = close[i] > s3_aligned[i] and bullish_trend and volume_ok
+        # Short: price below R3 with bearish trend and volume
+        short_from_pivot = close[i] < r3_aligned[i] and bearish_trend and volume_ok
+        
+        # Donchian breakout signals with trend filter
+        long_from_breakout = bullish_trend and volume_ok and breakout_up
+        short_from_breakout = bearish_trend and volume_ok and breakout_down
+        
+        # Combined entry signals
+        long_signal = long_from_pivot or long_from_breakout
+        short_signal = short_from_pivot or short_from_breakout
         
         # Generate signals
         if position == 0:
