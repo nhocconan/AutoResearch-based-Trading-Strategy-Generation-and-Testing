@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Daily timeframe reduces trade frequency to target 30-100 trades over 4 years. Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency to minimize fee decay in both bull and bear markets.
+6h Donchian(20) Breakout + Daily Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 6h capture momentum, daily volume confirms breakout strength,
+and ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years)
+to minimize fee decay. Works in both bull and bear by filtering breakouts with volume and
+ATR-based risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_vol_atr_v1"
-timeframe = "1d"
+name = "6h_donchian20_vol_atr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,6 +40,11 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
+    # 20-period volume MA on daily timeframe
+    df_1d = get_htf_data(prices, '1d')
+    vol_20d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_20d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -46,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(vol_20d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -57,9 +65,8 @@ def generate_signals(prices):
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter (20-period average)
-        vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 1.5
+        # Volume filter: current volume > 1.5x 20-day average volume
+        volume_filter = volume[i] > vol_20d_aligned[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -81,19 +88,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + price direction filter
+            # Look for entries: Donchian breakout + volume filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Price direction filter: only trade in direction of recent momentum
-            price_up = close[i] > close[i-1]
-            price_down = close[i] < close[i-1]
-            
-            if bull_breakout and volume_filter and price_up:
+            if bull_breakout and volume_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_down:
+            elif bear_breakout and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
