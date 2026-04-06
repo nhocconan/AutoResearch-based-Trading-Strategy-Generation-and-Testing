@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #12088: 12h Donchian Breakout with 1w Trend and Volume Confirmation
-Hypothesis: 12h Donchian(20) breakouts capture medium-term trends with fewer whipsaws than lower timeframes.
-1-week EMA provides strong trend bias, and volume filter ensures institutional participation.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-Works in bull markets by capturing continuation and in bear markets by catching reversals at extremes.
+Experiment #12090: 1d Donchian Breakout with 1w Trend and Volume Confirmation
+Hypothesis: Daily timeframe captures longer-term trends with fewer trades, reducing fee drag.
+Weekly EMA provides trend bias, and volume filter ensures institutional participation.
+Designed to work in bull markets (trend continuation) and bear markets (trend reversals)
+by using the weekly trend filter. Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12088_12h_donchian20_1w_vol_v1"
-timezone = "12h"
+name = "exp_12090_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -44,7 +44,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 50:
         return np.zeros(n)
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -129,3 +129,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</p>
