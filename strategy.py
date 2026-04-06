@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Bollinger Band Squeeze + Volume Breakout
-Hypothesis: Bollinger Band width contraction (squeeze) followed by expansion with volume confirms volatility breakouts.
-Works in both bull and bear markets by capturing explosive moves after low volatility periods.
-Uses Bollinger Bands (20,2) on 6h with volume confirmation to filter false breakouts.
-Target: 60-120 trades over 4 years (15-30/year) to minimize fee drag while capturing significant moves.
+6h Donchian(20) Breakout + Weekly ADX Filter
+Hypothesis: Donchian breakouts on 6h timeframe capture medium-term momentum.
+Weekly ADX ensures we only trade when the weekly trend is strong, filtering out chop.
+Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
+Designed for 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_bb_squeeze_volume_breakout_v1"
+name = "6h_donchian20_weekly_adx_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -20,90 +20,117 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # Load weekly data for ADX (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    
+    # ADX calculation on weekly
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_w[1:] - low_w[1:])
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_w[1:] - high_w[:-1]) > (low_w[:-1] - low_w[1:]), 
+                       np.maximum(high_w[1:] - high_w[:-1], 0), 0)
+    dm_minus = np.where((low_w[:-1] - low_w[1:]) > (high_w[1:] - high_w[:-1]), 
+                        np.maximum(low_w[:-1] - low_w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period_adx = 14
+    tr_smooth = wilder_smooth(tr, period_adx)
+    dm_plus_smooth = wilder_smooth(dm_plus, period_adx)
+    dm_minus_smooth = wilder_smooth(dm_minus, period_adx)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_w = wilder_smooth(dx, period_adx)
+    
+    # Align ADX to 6h timeframe
+    adx_w_aligned = align_htf_to_ltf(prices, df_weekly, adx_w)
+    
     # Price and volume data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    
-    # Calculate rolling mean and std
-    bb_mean = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    
-    upper_band = bb_mean + (bb_std_dev * bb_std)
-    lower_band = bb_mean - (bb_std_dev * bb_std)
-    bb_width = upper_band - lower_band
-    
-    # Bollinger Band width percentile (50-period) for squeeze detection
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=1).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Volume moving average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = max(bb_period, 50)  # For BB and percentile
+    start = max(20, 14)  # For Donchian and ADX
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(bb_mean[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(adx_w_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Squeeze condition: BB width in lowest 10% percentile (tight consolidation)
-        squeeze_condition = bb_width_percentile[i] <= 10
-        
-        # Expansion condition: BB width expanding from squeeze
-        if i >= 1:
-            width_expanding = bb_width[i] > bb_width[i-1]
+        # Donchian channel (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
         else:
-            width_expanding = False
+            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
+            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmation = volume[i] > vol_ma[i] * 1.5
-        
-        # Breakout direction: price outside Bollinger Bands
-        breakout_up = close[i] > upper_band[i]
-        breakout_down = close[i] < lower_band[i]
+        # Volume filter (20-period average)
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > vol_ma * 1.5
+        else:
+            volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price returns to middle band OR volatility contraction returns
-            if close[i] <= bb_mean[i] or bb_width_percentile[i] <= 5:
+            # Exit: price closes below Donchian lower OR weekly ADX < 20
+            if close[i] < lowest_low or adx_w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price returns to middle band OR volatility contraction returns
-            if close[i] >= bb_mean[i] or bb_width_percentile[i] <= 5:
+            # Exit: price closes above Donchian upper OR weekly ADX < 20
+            if close[i] > highest_high or adx_w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: squeeze + expansion + volume + breakout
-            if squeeze_condition and width_expanding and volume_confirmation:
-                if breakout_up:
-                    signals[i] = 0.25
-                    position = 1
-                elif breakout_down:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # Look for entries: Donchian breakout + volume + weekly ADX trend
+            bull_breakout = close[i] > highest_high
+            bear_breakout = close[i] < lowest_low
+            trend_filter = adx_w_aligned[i] > 25  # Strong weekly trend
+            
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
+                signals[i] = 0.25
+                position = 1
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
     
