@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with daily EMA filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 2.0x avg
-# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 2.0x avg
-# Exit on opposite Donchian break or EMA crossover
-# Targets 50-150 trades over 4 years with strong trend-following edge in both bull/bear markets
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) upper band, price > 1d EMA(50), volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) lower band, price < 1d EMA(50), volume > 1.5x avg
+# Exit when: price touches opposite Donchian band OR volume drops below average
+# Uses daily trend to avoid counter-trend trades, targeting 100-150 trades over 4 years
 
 name = "12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -15,7 +15,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 12h
+    # Donchian(20) channels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -36,9 +36,10 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 2.0 * volume_ma
+    volume_threshold = 1.5 * volume_ma
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,28 +55,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR price < 1d EMA(50)
-            if close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price touches lower Donchian band OR volume < average
+            if close[i] <= donchian_low[i] or volume[i] < volume_avg[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR price > 1d EMA(50)
-            if close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price touches upper Donchian band OR volume < average
+            if close[i] >= donchian_high[i] or volume[i] < volume_avg[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian break + EMA filter + volume
+            # Look for entries: Donchian breakout + trend filter + volume confirmation
             if volume[i] > volume_threshold[i]:
                 if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
-                    # Bullish breakout above resistance and above daily EMA
+                    # Bullish breakout above upper band with daily uptrend
                     signals[i] = 0.25
                     position = 1
                 elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
-                    # Bearish breakdown below support and below daily EMA
+                    # Bearish breakout below lower band with daily downtrend
                     signals[i] = -0.25
                     position = -1
     
