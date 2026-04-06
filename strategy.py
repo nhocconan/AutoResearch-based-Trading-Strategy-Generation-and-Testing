@@ -3,28 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and weekly EMA trend filter.
-# Donchian breakouts capture institutional breakout moves. Volume confirms institutional participation.
-# Weekly EMA ensures alignment with higher timeframe momentum to avoid counter-trend trades.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 75-200 total trades over 4 years.
+# Hypothesis: 12-hour Trix + Volume Spike + Choppiness Regime Filter
+# Uses TRIX (12-period) for momentum, volume confirmation for institutional interest,
+# and Choppiness Index to identify trending vs ranging markets.
+# In trending markets (CHOP < 38.2): TRIX crossover signals
+# In ranging markets (CHOP > 61.8): Mean reversion at Bollinger Bands
+# This dual approach adapts to market conditions, working in both bull and bear markets.
+# Target: 50-150 total trades over 4 years with strict entry conditions.
 
-name = "exp_13361_4h_donchian20_1d_vol_1w_ema_v1"
-timeframe = "4h"
+name = "exp_13362_12h_trix_volume_chop_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20  # Weekly EMA
+TRIX_PERIOD = 12
+TRIX_SIGNAL = 9
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
+CHOPPINESS_PERIOD = 14
+CHOPPINESS_THRESHOLD_TREND = 38.2
+CHOPPINESS_THRESHOLD_RANGE = 61.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+BBANDS_PERIOD = 20
+BBANDS_STD = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_trix(close, period, signal):
+    """Calculate TRIX and signal line"""
+    # Triple exponential moving average
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    # TRIX = percent change of ema3
+    trix = (ema3 / ema3.shift(1) - 1) * 100
+    # Signal line
+    trix_signal = trix.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    return trix.values, trix_signal.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -35,43 +50,51 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_choppiness(high, low, close, period):
+    """Calculate Choppiness Index"""
+    atr = calculate_atr(high, low, close, 1)  # True Range
+    sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum()
+    max_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    min_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    chop = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(period)
+    return chop.values
+
+def calculate_bollinger_bands(close, period, std_dev):
+    """Calculate Bollinger Bands"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
+    std = pd.Series(close).rolling(window=period, min_periods=period).std()
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    return upper.values, lower.values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for volume
+    # Load daily data ONCE before loop for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate daily volume MA
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # TRIX and signal line
+    trix, trix_signal = calculate_trix(close, TRIX_PERIOD, TRIX_SIGNAL)
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Choppiness Index
+    chop = calculate_choppiness(high, low, close, CHOPPINESS_PERIOD)
+    
+    # Bollinger Bands
+    bb_upper, bb_lower = calculate_bollinger_bands(close, BBANDS_PERIOD, BBANDS_STD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,12 +102,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TRIX_PERIOD + TRIX_SIGNAL, VOLUME_MA_PERIOD, ATR_PERIOD, CHOPPINESS_PERIOD, BBANDS_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or \
-           np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(atr[i]):
+        # Skip if any indicator not available
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or 
+            np.isnan(chop[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,29 +127,43 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (daily volume > threshold * daily volume MA)
-        volume_ok = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_1d_aligned[i]) else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Market regime detection
+        is_trending = chop[i] < CHOPPINESS_THRESHOLD_TREND
+        is_ranging = chop[i] > CHOPPINESS_THRESHOLD_RANGE
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > donch_upper[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < donch_lower[i-1])
-        
-        # Generate signals
+        # Generate signals based on regime
         if position == 0:
-            if breakout_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            if is_trending and volume_ok:
+                # In trending markets: TRIX crossover
+                if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]:
+                    # Bullish crossover
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                elif trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]:
+                    # Bearish crossover
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif is_ranging and volume_ok:
+                # In ranging markets: mean reversion at Bollinger Bands
+                if close[i] <= bb_lower[i]:
+                    # Oversold - go long
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                elif close[i] >= bb_upper[i]:
+                    # Overbought - go short
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
