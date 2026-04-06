@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""
-EXPERIMENT #14114 - 1h Strategy with 4h/1d Multi-Timeframe
-Hypothesis: Use 4h trend (EMA50/200) and 1d volatility regime (ATR percentile) 
-for directional bias, with 1h RSI pullback entries during London/NY session (08-20 UTC).
-Designed to work in both bull/bear markets by filtering counter-trend trades.
-Target: 60-150 trades over 4 years (15-37/year) to minimize fee drag.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14114_1h_ema_rsi_session_v1"
-timeframe = "1h"
+name = "exp_14115_6d_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI with proper min_periods"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR with proper min_periods"""
@@ -38,105 +19,139 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # === PRE-COMPUTE INDICATORS BEFORE LOOP ===
+    # Load weekly data for pivot points (once before loop)
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # 1. 4h EMA trend filter (primary trend direction)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Calculate weekly pivot points (using previous week)
+    # Pivot = (H + L + C) / 3
+    # R1 = (2 * P) - L
+    # S1 = (2 * P) - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    # R3 = H + 2*(P - L)
+    # S3 = L - 2*(H - P)
+    H = high_w
+    L = low_w
+    C = close_w
+    pivot = (H + L + C) / 3
+    r1 = (2 * pivot) - L
+    s1 = (2 * pivot) - H
+    r2 = pivot + (H - L)
+    s2 = pivot - (H - L)
+    r3 = H + 2 * (pivot - L)
+    s3 = L - 2 * (H - pivot)
     
-    # 2. 1d ATR percentile for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    # Calculate percentile rank of current ATR vs 50-day lookback
-    atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_w, s3)
     
-    # 3. 1h RSI for entry timing
+    # 6h data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    rsi = calculate_rsi(close, 14)
-    
-    # 4. Session filter (08-20 UTC)
-    hours = prices.index.hour  # Already datetime64[ms], .hour works
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # 5. Volume filter (avoid low liquidity periods)
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.5 * vol_ma)  # At least 50% of average volume
     
-    # === SIGNAL GENERATION LOOP ===
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
+    
+    # ATR for stop loss (14-period)
+    atr = calculate_atr(high, low, close, 14)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    stop_price = 0.0
     
-    start = max(200, 50, 20) + 1  # Warmup for longest indicator
+    # Start from warmup period (max of 20 for volume, 14 for ATR)
+    start = max(20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_ma[i])):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
+           np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or \
+           np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check if we're in preferred volatility regime (not too choppy, not too volatile)
-        vol_regime_ok = 0.3 <= atr_percentile_aligned[i] <= 0.8
+        # Check stops
+        if position == 1:  # long position
+            # Check stop loss
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Determine 4h trend bias
-        uptrend_4h = ema50_4h_aligned[i] > ema200_4h_aligned[i]
-        downtrend_4h = ema50_4h_aligned[i] < ema200_4h_aligned[i]
+        elif position == -1:  # short position
+            # Check stop loss
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # RSI conditions for pullback entries
-        rsi_oversold = rsi[i] < 35
-        rsi_overbought = rsi[i] > 65
+        # Weekly pivot-based signals with volume confirmation
+        # Bounce at S1/S2: Long
+        # Breakdown below S2: Short
+        # Bounce at R1/R2: Short
+        # Breakout above R2: Long
+        bounce_s1 = (close[i] > s1_aligned[i-1]) and (close[i-1] <= s1_aligned[i-1]) and vol_filter[i]
+        bounce_s2 = (close[i] > s2_aligned[i-1]) and (close[i-1] <= s2_aligned[i-1]) and vol_filter[i]
+        breakdown_s2 = (close[i] < s2_aligned[i-1]) and vol_filter[i]
+        bounce_r1 = (close[i] < r1_aligned[i-1]) and (close[i-1] >= r1_aligned[i-1]) and vol_filter[i]
+        bounce_r2 = (close[i] < r2_aligned[i-1]) and (close[i-1] >= r2_aligned[i-1]) and vol_filter[i]
+        breakout_r2 = (close[i] > r2_aligned[i-1]) and vol_filter[i]
         
-        # Exit conditions: trend reversal or extreme RSI
-        exit_long = not uptrend_4h or rsi[i] > 75
-        exit_short = not downtrend_4h or rsi[i] < 25
-        
-        # Manage existing positions
-        if position == 1:  # Long position
-            if exit_long:
+        # Generate signals
+        if position == 0:
+            if bounce_s1 or bounce_s2:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (2.0 * atr[i])
+            elif breakdown_s2:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (2.0 * atr[i])
+            elif bounce_r1 or bounce_r2:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (2.0 * atr[i])
+            elif breakout_r2:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (2.0 * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long on stop or reversal at R1/R2
+            if close[i] <= stop_price or bounce_r1 or bounce_r2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        elif position == -1:  # Short position
-            if exit_short:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short on stop or reversal at S1/S2
+            if close[i] >= stop_price or bounce_s1 or bounce_s2:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
-        else:  # No position - look for entry
-            if (session_filter[i] and vol_filter[i] and vol_regime_ok):
-                # Long: uptrend + RSI pullback from oversold
-                if uptrend_4h and rsi_oversold and rsi[i] > rsi[i-1]:  # RSI turning up
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = close[i]
-                # Short: downtrend + RSI pullback from overbought
-                elif downtrend_4h and rsi_overbought and rsi[i] < rsi[i-1]:  # RSI turning down
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = close[i]
-                else:
-                    signals[i] = 0.0
-            else:
-                signals[i] = 0.0
+                signals[i] = -0.25
     
     return signals
