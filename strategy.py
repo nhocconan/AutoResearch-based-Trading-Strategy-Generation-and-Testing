@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour breakout with 4-hour ATR trend filter and volume confirmation.
-# Uses 4-hour ATR to determine market volatility regime (high ATR = trending, low ATR = ranging).
-# In trending regimes (high ATR): trade breakouts in direction of 1-day trend.
-# In ranging regimes (low ATR): trade mean reversion at Bollinger Bands.
-# Volume confirmation ensures institutional participation.
-# Designed for 1h timeframe targeting 60-150 total trades over 4 years with proper risk management.
-# Works in bull/bear markets via volatility regime adaptation.
+# Hypothesis: 1-hour RSI(14) mean reversion with 4-hour ADX(14) regime filter and 1-day EMA200 trend filter.
+# Uses 4h ADX to identify trending (ADX>25) vs ranging (ADX<20) markets.
+# In ranging markets (ADX<20): RSI<30 long, RSI>70 short.
+# In trending markets (ADX>25): RSI<40 long in uptrend (price>EMA200), RSI>60 short in downtrend (price<EMA200).
+# Includes session filter (08-20 UTC) to avoid low-liquidity hours.
+# Designed for 1h timeframe to target 60-150 trades over 4 years with strict entry conditions.
 
-name = "1h_atr_vol_breakout_meanrev_v1"
+name = "1h_rsi14_adx14_ema200_regime_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -20,153 +19,173 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Price and volume data
+    # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 4-hour ATR for volatility regime detection
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate True Range and ATR(14) on 4h
-    tr_4h = np.zeros(len(close_4h))
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    for i in range(1, len(close_4h)):
-        tr_4h[i] = max(high_4h[i] - low_4h[i], 
-                       abs(high_4h[i] - close_4h[i-1]), 
-                       abs(low_4h[i] - close_4h[i-1]))
-    
-    atr_4h = np.full(len(close_4h), np.nan)
-    if len(tr_4h) >= 14:
-        atr_4h[13] = np.mean(tr_4h[:14])
-        for i in range(14, len(tr_4h)):
-            atr_4h[i] = (tr_4h[i] + 13 * atr_4h[i-1]) / 14
-    
-    # Align ATR to 1h timeframe (shifted by 1 4h bar for no look-ahead)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    
-    # 1-day trend via EMA200
+    # 1-day EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    
-    # Calculate EMA200 on 1d closes
     ema_200_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 200:
         ema_200_1d[199] = np.mean(close_1d[:200])
         for i in range(200, len(close_1d)):
             ema_200_1d[i] = (close_1d[i] * 2 / 201) + (ema_200_1d[i-1] * 199 / 201)
-    
-    # Align EMA200 to 1h timeframe (shifted by 1 1d bar for no look-ahead)
     ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # 1-hour Bollinger Bands (20, 2)
-    sma_20 = np.full(n, np.nan)
-    std_20 = np.full(n, np.nan)
+    # 4-hour ADX(14) for regime filter
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    for i in range(19, n):
-        sma_20[i] = np.mean(close[i-19:i+1])
-        std_20[i] = np.std(close[i-19:i+1])
+    # True Range
+    tr = np.zeros(len(high_4h))
+    tr[0] = high_4h[0] - low_4h[0]
+    for i in range(1, len(high_4h)):
+        tr[i] = max(high_4h[i] - low_4h[i], abs(high_4h[i] - close_4h[i-1]), abs(low_4h[i] - close_4h[i-1]))
     
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # +DM and -DM
+    plus_dm = np.zeros(len(high_4h))
+    minus_dm = np.zeros(len(high_4h))
+    for i in range(1, len(high_4h)):
+        up_move = high_4h[i] - high_4h[i-1]
+        down_move = low_4h[i-1] - low_4h[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
     
-    # 1-hour volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
+    # Smoothed values (Wilder's smoothing)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    volume_filter = volume > vol_ma * 1.5
+    tr14 = wilder_smooth(tr, 14)
+    plus_dm14 = wilder_smooth(plus_dm, 14)
+    minus_dm14 = wilder_smooth(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di14 = np.full_like(tr14, np.nan)
+    minus_di14 = np.full_like(tr14, np.nan)
+    for i in range(len(tr14)):
+        if not np.isnan(tr14[i]) and tr14[i] != 0:
+            plus_di14[i] = (plus_dm14[i] / tr14[i]) * 100
+            minus_di14[i] = (minus_dm14[i] / tr14[i]) * 100
+    
+    # DX and ADX
+    dx = np.full_like(tr14, np.nan)
+    for i in range(len(tr14)):
+        if not np.isnan(plus_di14[i]) and not np.isnan(minus_di14[i]):
+            di_sum = plus_di14[i] + minus_di14[i]
+            if di_sum != 0:
+                dx[i] = abs(plus_di14[i] - minus_di14[i]) / di_sum * 100
+    
+    adx_14 = wilder_smooth(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx_14)
+    
+    # 1-hour RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    def rsi_wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    avg_gain = rsi_wilder_smooth(gain, 14)
+    avg_loss = rsi_wilder_smooth(loss, 14)
+    rs = np.full_like(avg_gain, np.nan)
+    for i in range(len(avg_gain)):
+        if not np.isnan(avg_loss[i]) and avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+    rsi = np.full_like(avg_gain, np.nan)
+    for i in range(len(rs)):
+        if not np.isnan(rs[i]):
+            rsi[i] = 100 - (100 / (1 + rs[i]))
     
     # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
-        # Skip if required data not available or outside session
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(vol_ma[i]) or not session_filter[i]):
+    for i in range(100, n):  # Warmup period
+        # Skip if required data not available
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_200_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Volatility regime: high ATR = trending, low ATR = ranging
-        # Using 50-period average of ATR to determine regime
-        if i >= 50:
-            atr_ma = np.mean(atr_4h_aligned[i-50:i+1])
-            trending_regime = atr_4h_aligned[i] > atr_ma
-        else:
-            trending_regime = True  # default to trending for early bars
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = position * 0.20
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Check exits and stoploss (2x ATR)
+        adx = adx_aligned[i]
+        rsi_val = rsi[i]
+        price = close[i]
+        ema200 = ema_200_aligned[i]
+        
+        # Check exits
         if position == 1:  # long position
-            if i >= 14:  # need ATR for stop
-                atr_val = atr_4h_aligned[i]
-                if np.isnan(atr_val):
-                    atr_val = np.nanmean(atr_4h_aligned[max(0, i-13):i+1])
-                stop_loss = entry_price - 2.0 * atr_val
-                
-                if close[i] < stop_loss:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
+            # Exit: RSI > 70 or price < EMA200 in uptrend
+            if rsi_val > 70 or (adx > 25 and price < ema200):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            if i >= 14:
-                atr_val = atr_4h_aligned[i]
-                if np.isnan(atr_val):
-                    atr_val = np.nanmean(atr_4h_aligned[max(0, i-13):i+1])
-                stop_loss = entry_price + 2.0 * atr_val
-                
-                if close[i] > stop_loss:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+            # Exit: RSI < 30 or price > EMA200 in downtrend
+            if rsi_val < 30 or (adx > 25 and price > ema200):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -0.20
         else:
             # Look for entries based on regime
-            if volume_filter[i]:
-                if trending_regime:
-                    # Trending regime: breakout in direction of 1d trend
-                    bullish_trend = close[i] > ema_200_aligned[i]
-                    bearish_trend = close[i] < ema_200_aligned[i]
-                    
-                    # Breakout conditions
-                    breakout_up = high[i] > upper_band[i-1] if i > 0 else False
-                    breakout_down = low[i] < lower_band[i-1] if i > 0 else False
-                    
-                    if breakout_up and bullish_trend:
-                        signals[i] = 0.20
-                        position = 1
-                        entry_price = close[i]
-                    elif breakout_down and bearish_trend:
-                        signals[i] = -0.20
-                        position = -1
-                        entry_price = close[i]
+            if adx < 20:  # Ranging market
+                if rsi_val < 30:
+                    signals[i] = 0.20
+                    position = 1
+                    entry_price = price
+                elif rsi_val > 70:
+                    signals[i] = -0.20
+                    position = -1
+                    entry_price = price
                 else:
-                    # Ranging regime: mean reversion at Bollinger Bands
-                    # Long at lower band, short at upper band
-                    if close[i] <= lower_band[i]:
-                        signals[i] = 0.20
-                        position = 1
-                        entry_price = close[i]
-                    elif close[i] >= upper_band[i]:
-                        signals[i] = -0.20
-                        position = -1
-                        entry_price = close[i]
+                    signals[i] = 0.0
+            elif adx > 25:  # Trending market
+                if price > ema200 and rsi_val < 40:  # Uptrend pullback
+                    signals[i] = 0.20
+                    position = 1
+                    entry_price = price
+                elif price < ema200 and rsi_val > 60:  # Downtrend pullback
+                    signals[i] = -0.20
+                    position = -1
+                    entry_price = price
+                else:
+                    signals[i] = 0.0
+            else:  # Transition zone (20 <= ADX <= 25)
+                signals[i] = 0.0
     
     return signals
