@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly breakout with volume confirmation and ATR trailing stop on 1d timeframe
-# Uses weekly high/low breakouts to capture strong trends, volume to filter false breakouts,
-# and ATR-based trailing stop to manage risk. Works in bull/bear by capturing momentum.
-# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot levels on 1d timeframe with volume confirmation on 6h
+# Uses Camarilla's mathematically derived support/resistance levels (R3/S3 for mean reversion, R4/S4 for breakout)
+# Works in bull/bear because it captures both mean reversion in ranges and breakouts in trends
+# Volume confirmation filters weak signals. Target: 75-150 trades over 4 years (19-38/year).
 
-name = "exp_12910_1d_weekly_breakout_v1"
-timeframe = "1d"
+name = "exp_12911_6h_camarilla_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -17,7 +17,7 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,23 +28,51 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    range_val = high - low
+    pivot = (high + low + close) / 3.0
+    r4 = close + range_val * 1.1 / 2
+    r3 = close + range_val * 1.1 / 4
+    s3 = close - range_val * 1.1 / 4
+    s4 = close - range_val * 1.1 / 2
+    return pivot, r3, r4, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly high and low
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
+    # Calculate Camarilla pivot points
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    # Align to daily timeframe
-    high_w_aligned = align_htf_to_ltf(prices, df_weekly, high_w)
-    low_w_aligned = align_htf_to_ltf(prices, df_weekly, low_w)
+    pivot_vals = np.zeros(len(close_d))
+    r3_vals = np.zeros(len(close_d))
+    r4_vals = np.zeros(len(close_d))
+    s3_vals = np.zeros(len(close_d))
+    s4_vals = np.zeros(len(close_d))
     
-    # Calculate daily indicators
+    for i in range(len(close_d)):
+        pivot, r3, r4, s3, s4 = calculate_camarilla(high_d[i], low_d[i], close_d[i])
+        pivot_vals[i] = pivot
+        r3_vals[i] = r3
+        r4_vals[i] = r4
+        s3_vals[i] = s3
+        s4_vals[i] = s4
+    
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot_vals)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3_vals)
+    r4_aligned = align_htf_to_ltf(prices, df_daily, r4_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3_vals)
+    s4_aligned = align_htf_to_ltf(prices, df_daily, s4_vals)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -62,15 +90,15 @@ def generate_signals(prices):
     start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly levels not available
-        if np.isnan(high_w_aligned[i]) or np.isnan(low_w_aligned[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check trailing stop
+        # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
                 signals[i] = 0.0
@@ -85,18 +113,20 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above weekly high or below weekly low
-        breakout_long = volume_ok and close[i] >= high_w_aligned[i]
-        breakout_short = volume_ok and close[i] <= low_w_aligned[i]
+        # Mean reversion at S3/R3 OR breakout at S4/R4
+        mean_reversion_long = volume_ok and close[i] <= s3_aligned[i] and close[i] > s4_aligned[i]
+        mean_reversion_short = volume_ok and close[i] >= r3_aligned[i] and close[i] < r4_aligned[i]
+        breakout_long = volume_ok and close[i] >= r4_aligned[i]
+        breakout_short = volume_ok and close[i] <= s4_aligned[i]
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if mean_reversion_long or breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif mean_reversion_short or breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -105,11 +135,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             signals[i] = SIGNAL_SIZE
-            # Trail stop for long position
-            stop_price = max(stop_price, close[i] - (ATR_STOP_MULTIPLIER * atr[i]))
         elif position == -1:
             signals[i] = -SIGNAL_SIZE
-            # Trail stop for short position
-            stop_price = min(stop_price, close[i] + (ATR_STOP_MULTIPLIER * atr[i]))
     
     return signals
