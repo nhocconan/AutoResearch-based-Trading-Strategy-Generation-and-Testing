@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 100-180 trades over 4 years (25-45/year) to balance opportunity and cost.
+4h Donchian(20) breakout with 12h EMA25 trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture momentum, filtered by 12h EMA for trend bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 80-160 trades over 4 years (20-40/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1dtrend_vol_v2"
+name = "4h_donchian20_12h_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,36 +36,36 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA50 for trend bias
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    # 12h EMA25 for trend bias
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 25:
+        ema_12h[24] = np.mean(close_12h[:25])
+        for i in range(25, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 18) / 20
     
     # Trend bias: above EMA = bullish, below = bearish
-    trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_bias_12h = np.where(close_12h > ema_12h, 1, -1)
     
     # Align to 4h timeframe
-    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
+    trend_bias_aligned = align_htf_to_ltf(prices, df_12h, trend_bias_12h)
     
-    # Donchian channels (20-period) from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Donchian channels (20-period) from 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Upper and lower bands from previous day to avoid look-ahead
-    upper_1d = np.full_like(high_1d, np.nan)
-    lower_1d = np.full_like(low_1d, np.nan)
+    # Upper and lower bands from previous period to avoid look-ahead
+    upper_12h = np.full_like(high_12h, np.nan)
+    lower_12h = np.full_like(low_12h, np.nan)
     
-    for i in range(20, len(high_1d)):
-        upper_1d[i] = np.max(high_1d[i-20:i])
-        lower_1d[i] = np.min(low_1d[i-20:i])
+    for i in range(20, len(high_12h)):
+        upper_12h[i] = np.max(high_12h[i-20:i])
+        lower_12h[i] = np.min(low_12h[i-20:i])
     
     # Align to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -92,7 +92,7 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against 1d trend
+            # Exit: price breaks below lower Donchian OR against 12h trend
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lower_aligned[i] or
                 trend_bias_aligned[i] == -1 or
@@ -104,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against 1d trend
+            # Exit: price breaks above upper Donchian OR against 12h trend
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > upper_aligned[i] or
                 trend_bias_aligned[i] == 1 or
@@ -143,4 +143,3 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
-</s>
