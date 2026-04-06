@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13972_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13973_4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-# Uses daily EMA(50) for trend bias: price above EMA = bullish bias, price below EMA = bearish bias.
-# Entry on 12h Donchian breakout in direction of daily EMA bias with volume > 1.5x average.
-# Exit on Donchian reversal or trend bias change. Designed for 50-150 total trades over 4 years
-# (12-37/year) to minimize fee drag. Works in bull (breaks above with bullish bias) and bear
-# (breaks below with bearish bias) with EMA filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
+# Uses 12h EMA(20) for trend bias: price above EMA = bullish, below = bearish.
+# Entry on 4h Donchian breakout in direction of 12h trend with volume > 1.5x average.
+# Exit on Donchian reversal or trend change. Designed for 75-200 total trades over 4 years
+# (19-50/year) to minimize fee drag. Works in bull (breaks above with bullish trend) and bear
+# (breaks below with bearish trend) with EMA filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -39,28 +39,28 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for EMA calculation ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for EMA trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA(50)
-    daily_ema = calculate_ema(df_1d['close'].values, 50)
+    # Calculate 12h EMA(20) for trend
+    ema_12h = calculate_ema(df_12h['close'].values, 20)
     
-    # Align daily EMA to 12h timeframe (use prior day's EMA for bias)
-    ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # Align 12h EMA to 4h timeframe (use previous 12h bar for trend)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
+    # Donchian channels (20-period)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
-    # ATR for stop loss
+    # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
     
-    # Volume confirmation
+    # Volume confirmation (20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -69,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20) + 1
+    start = max(50, 20, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -96,20 +96,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine bias from daily EMA (price vs EMA level)
-        bullish_bias = close[i] > ema_aligned[i]  # price above daily EMA = bullish bias
-        bearish_bias = close[i] < ema_aligned[i]  # price below daily EMA = bearish bias
+        # Determine trend bias from 12h EMA
+        bullish_trend = close[i] > ema_12h_aligned[i]  # price above 12h EMA = bullish
+        bearish_trend = close[i] < ema_12h_aligned[i]  # price below 12h EMA = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Donchian breakout signals
+        # Donchian breakout signals (using previous bar's bands)
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of EMA bias
-        long_signal = bullish_bias and volume_ok and breakout_up
-        short_signal = bearish_bias and volume_ok and breakout_down
+        # Entry signals - only in direction of 12h trend
+        long_signal = bullish_trend and volume_ok and breakout_up
+        short_signal = bearish_trend and volume_ok and breakout_down
         
         # Generate signals
         if position == 0:
@@ -126,15 +126,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or bias change to bearish
-            if close[i] < donchian_lower[i] or not bullish_bias:
+            # Exit long on Donchian breakdown or trend change to bearish
+            if close[i] < donchian_lower[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on Donchian breakout or bias change to bullish
-            if close[i] > donchian_upper[i] or not bearish_bias:
+            # Exit short on Donchian breakout or trend change to bullish
+            if close[i] > donchian_upper[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
