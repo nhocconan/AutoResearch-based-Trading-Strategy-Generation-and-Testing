@@ -3,7 +3,7 @@
 12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
 Hypothesis: Donchian(20) breakouts on 12h timeframe capture strong momentum moves.
 Daily EMA200 filters trend direction to avoid counter-trend trades.
-Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drag.
+Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drift.
 Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
