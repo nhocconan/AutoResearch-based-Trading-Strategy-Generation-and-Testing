@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and pivot levels provide structural support/resistance that works across regimes.
+# Hypothesis: Weekly breakout with volume confirmation and ATR trailing stop on 1d timeframe
+# Uses weekly high/low breakouts to capture strong trends, volume to filter false breakouts,
+# and ATR-based trailing stop to manage risk. Works in bull/bear by capturing momentum.
 # Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
 
-name = "exp_12910_1d_weekly_pivot_breakout_v1"
+name = "exp_12910_1d_weekly_breakout_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,17 +28,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -47,37 +36,13 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points
+    # Calculate weekly high and low
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    
-    pivot_vals = np.zeros(len(close_w))
-    r1_vals = np.zeros(len(close_w))
-    r2_vals = np.zeros(len(close_w))
-    r3_vals = np.zeros(len(close_w))
-    s1_vals = np.zeros(len(close_w))
-    s2_vals = np.zeros(len(close_w))
-    s3_vals = np.zeros(len(close_w))
-    
-    for i in range(len(close_w)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
-        pivot_vals[i] = pivot
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        r3_vals[i] = r3
-        s1_vals[i] = s1
-        s2_vals[i] = s2
-        s3_vals[i] = s3
     
     # Align to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
+    high_w_aligned = align_htf_to_ltf(prices, df_weekly, high_w)
+    low_w_aligned = align_htf_to_ltf(prices, df_weekly, low_w)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -97,15 +62,15 @@ def generate_signals(prices):
     start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot levels not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if weekly levels not available
+        if np.isnan(high_w_aligned[i]) or np.isnan(low_w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
+        # Check trailing stop
         if position == 1:  # long position
             if close[i] <= stop_price:
                 signals[i] = 0.0
@@ -120,9 +85,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above R3 or breakdown below S3
-        breakout_long = volume_ok and close[i] >= r3_aligned[i]
-        breakout_short = volume_ok and close[i] <= s3_aligned[i]
+        # Breakout above weekly high or below weekly low
+        breakout_long = volume_ok and close[i] >= high_w_aligned[i]
+        breakout_short = volume_ok and close[i] <= low_w_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -140,7 +105,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             signals[i] = SIGNAL_SIZE
+            # Trail stop for long position
+            stop_price = max(stop_price, close[i] - (ATR_STOP_MULTIPLIER * atr[i]))
         elif position == -1:
             signals[i] = -SIGNAL_SIZE
+            # Trail stop for short position
+            stop_price = min(stop_price, close[i] + (ATR_STOP_MULTIPLIER * atr[i]))
     
     return signals
