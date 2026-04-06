@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 20-day average.
+# Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 50-period average.
 # Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
-# Weekly trend filter avoids counter-trend trades. Target: 75-150 total trades over 4 years (19-38/year).
+# Weekly trend filter avoids counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 50-100 total trades over 4 years (12-25/year) to stay within optimal range.
 
 name = "1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
@@ -14,7 +15,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -38,14 +39,14 @@ def generate_signals(prices):
     weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
     weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 50-period average
     volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = volume_series.rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if weekly trend data not available
         if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
             if position != 0:
