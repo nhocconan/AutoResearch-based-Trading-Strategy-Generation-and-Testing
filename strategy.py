@@ -3,22 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12715_6d_elder_ray_volume_v2"
-timeframe = "6h"
+name = "exp_12714_1h_4h_donchian_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-EMA_PERIOD = 13
-EMA_LONG_PERIOD = 30
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -29,25 +24,44 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Calculate 6h indicators
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    
+    # Calculate 4h Donchian channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_4h, lower_4h = calculate_donchian(high_4h, low_4h, DONCHIAN_PERIOD)
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    
+    # Load daily data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    ema = calculate_ema(close, EMA_PERIOD)
-    ema_long = calculate_ema(close, EMA_LONG_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Calculate Elder Ray components: Bull Power = High - EMA, Bear Power = Low - EMA
-    bull_power = high - ema
-    bear_power = low - ema
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,9 +69,22 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_LONG_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Skip if indicators not available
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(sma_50_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Session filter
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -71,20 +98,24 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Elder Ray signals with volume confirmation
-        long_signal = volume_ok and bull_power[i] > 0 and ema[i] > ema_long[i]
-        short_signal = volume_ok and bear_power[i] < 0 and ema[i] < ema_long[i]
+        # 4h trend filter: price above/below 1d SMA50
+        trend_up = close[i] > sma_50_1d_aligned[i]
+        trend_down = close[i] < sma_50_1d_aligned[i]
+        
+        # Entry conditions: Donchian breakout with volume and trend
+        long_entry = in_session and volume_ok and trend_up and close[i] >= upper_4h_aligned[i]
+        short_entry = in_session and volume_ok and trend_down and close[i] <= lower_4h_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
