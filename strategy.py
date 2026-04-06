@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12751_6d_donchian20_1d_vol_v1"
-timeframe = "6h"
+name = "exp_12753_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+EMA_PERIOD = 20
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -31,6 +32,8 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate daily Donchian channels
     high_1d = df_1d['high'].values
@@ -42,11 +45,16 @@ def generate_signals(prices):
     # Lower band: lowest low over period
     lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align to 6h timeframe
+    # Align to 4h timeframe
     upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
     lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Calculate 6h indicators
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if Donchian bands not available
@@ -87,9 +95,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
+        # Trend filter: 12h EMA
+        uptrend = ema_12h_aligned[i] > close[i] if not np.isnan(ema_12h_aligned[i]) else False
+        downtrend = ema_12h_aligned[i] < close[i] if not np.isnan(ema_12h_aligned[i]) else True
+        
         # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_band_aligned[i]
+        breakout_long = volume_ok and close[i] >= upper_band_aligned[i] and uptrend
+        breakout_short = volume_ok and close[i] <= lower_band_aligned[i] and downtrend
         
         # Generate signals
         if position == 0:
