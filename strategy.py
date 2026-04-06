@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12603_4h_donchian20_1d_trend_vol_v2"
+name = "exp_12603_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for proper trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 2.5  # Increased to reduce false signals
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5  # Increased to reduce premature stops
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -86,7 +86,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation - require strong volume spike
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
@@ -97,7 +97,7 @@ def generate_signals(prices):
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Entry conditions
+        # Entry conditions - stricter requirements
         long_entry = volume_ok and uptrend_1d and long_breakout
         short_entry = volume_ok and downtrend_1d and short_breakout
         
