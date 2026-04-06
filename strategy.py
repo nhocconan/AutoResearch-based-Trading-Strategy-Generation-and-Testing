@@ -1,37 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #11814: 1h Donchian Breakout with 4h Trend and Volume Confirmation
-Hypothesis: 1h Donchian(20) breakouts capture short-term momentum. 4h EMA provides trend bias,
-and volume filter ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-Target: 75-150 trades over 4 years (19-38/year) to balance opportunity and cost.
+Experiment #11815: 6h Donchian Breakout with Weekly Pivot and Volume Confirmation
+Hypothesis: 6h Donchian breakouts with weekly pivot bias and volume confirmation capture medium-term trends.
+Weekly pivot provides directional bias from higher timeframe, volume ensures institutional participation.
+Works in bull (continuation) and bear (reversal) by filtering with weekly pivot direction.
+Target: 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
-name = "exp_11814_1h_donchian20_4h_ema_vol_session_v1"
-timeframe = "1h"
+name = "exp_11815_6h_donchian20_wpivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -47,14 +54,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate 1h indicators
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
+    
+    # Align weekly pivot levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,11 +85,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if weekly data not available
+        if np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -100,17 +115,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
+        # Weekly pivot bias
+        bullish_bias = close[i] > pivot_aligned[i]
+        bearish_bias = close[i] < pivot_aligned[i]
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_4h and in_session
-        short_entry = breakout_down and volume_ok and downtrend_4h and in_session
+        # Entry conditions: breakout in direction of weekly pivot bias
+        long_entry = breakout_up and volume_ok and bullish_bias
+        short_entry = breakout_down and volume_ok and bearish_bias
         
         # Generate signals
         if position == 0:
