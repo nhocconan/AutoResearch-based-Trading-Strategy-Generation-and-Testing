@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1h Donchian(20) Breakout + Volume Spike + 1d EMA Trend Filter
-Hypothesis: 1h breakouts with volume confirmation and daily trend filter capture momentum while reducing whipsaws. Daily EMA filter ensures alignment with higher timeframe trend. Target: 100-180 total trades over 4 years.
+6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+Hypothesis: Donchian breakouts aligned with weekly pivot direction (price > weekly pivot = bullish bias, price < weekly pivot = bearish bias) with volume confirmation (>1.5x average) capture high-probability moves. Weekly pivot provides structural bias to avoid counter-trend trades. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_donchian20_vol_1dema_v1"
-timeframe = "1h"
+name = "6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,32 +36,35 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Daily EMA trend filter (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 19) / 21
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly pivot points (calculated from weekly data)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
+        return np.zeros(n)
+    
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    
+    # Calculate weekly pivot: P = (H + L + C) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0
     
     # Start from warmup period
-    start = 20  # For Donchian and ATR
+    start = 20  # For Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
         
         # Donchian channel (20-period)
@@ -70,57 +73,58 @@ def generate_signals(prices):
         
         # Volume filter (20-period average)
         vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 2.0
+        volume_filter = volume[i] > vol_ma * 1.5  # Volume > 1.5x average
         
-        # Daily trend filter
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Weekly pivot bias
+        weekly_pivot_val = weekly_pivot_aligned[i]
+        price_above_pivot = close[i] > weekly_pivot_val
+        price_below_pivot = close[i] < weekly_pivot_val
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower
-            # Stoploss: price drops 2*ATR below entry
+            # Exit: price closes below Donchian lower OR 2*ATR stoploss
             if (close[i] < lowest_low or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
-                signals[i] = 0.20
-            bars_since_entry += 1
+                signals[i] = 0.25
+            bars_since_exit += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper
-            # Stoploss: price rises 2*ATR above entry
+            # Exit: price closes above Donchian upper OR 2*ATR stoploss
             if (close[i] > highest_high or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
-                signals[i] = -0.20
-            bars_since_entry += 1
+                signals[i] = -0.25
+            bars_since_exit += 1
         else:
-            # Look for entries: Donchian breakout + volume + daily trend filter
-            # Minimum holding period: only allow new entry after 25 bars flat
-            if bars_since_entry >= 25:
+            # Look for entries: Donchian breakout + weekly pivot bias + volume filter
+            # Minimum 10 bars between trades to prevent overtrading
+            if bars_since_exit >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                if bull_breakout and volume_filter and uptrend:
-                    signals[i] = 0.20
+                # Long: breakout above resistance + price above weekly pivot + volume
+                if bull_breakout and price_above_pivot and volume_filter:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_breakout and volume_filter and downtrend:
-                    signals[i] = -0.20
+                    bars_since_exit = 0
+                # Short: breakout below support + price below weekly pivot + volume
+                elif bear_breakout and price_below_pivot and volume_filter:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
