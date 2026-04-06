@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation to capture momentum while avoiding chop.
-Works in bull (breakouts with trend) and bear (breakdowns with trend). Target 75-200 trades over 4 years.
+4h Donchian(20) Breakout + 1d EMA50 + Volume Spike
+Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation
+to capture momentum while avoiding chop. Works in bull (breakouts with trend) and bear 
+(short breakdowns with trend). Designed for moderate trade frequency (~20-35/year) 
+to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1dtrend_vol_v5"
+name = "4h_donchian20_1dema50_vol_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,14 +39,14 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA20 for trend bias
+    # 1d EMA50 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
@@ -58,7 +60,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 50  # For EMA50
     
     for i in range(start, n):
         # Skip if required data not available
@@ -130,5 +132,3 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
-
-</think>
