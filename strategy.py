@@ -3,27 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Uses 12h price channel breakouts aligned with 1d momentum to capture trending moves across multiple cycles.
-# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 6h Camarilla pivot levels from 1d with volume confirmation and trend filter.
+# Camarilla levels (H4/L4, H3/L3) act as strong intraday support/resistance.
+# Price approaching L3/H3 with mean reversion tendency, while H4/L4 breaks indicate continuation.
+# Volume filter ensures institutional participation. Works in ranging markets (reversions at H3/L3)
+# and trending markets (breakouts at H4/L4). Target: 100-200 total trades over 4 years (25-50/year).
 
-name = "exp_13468_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13471_6h_camarilla_pivot_1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+CAMARILLA_MULTIPLIER = 1.1 / 12  # Standard Camarilla multiplier
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+PROXIMITY_THRESHOLD = 0.001  # 0.1% proximity to level for entry
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_pivot_levels(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3.0
+    range_ = high - low
+    # Camarilla levels
+    h4 = close + range_ * CAMARILLA_MULTIPLIER * 1.1
+    h3 = close + range_ * CAMARILLA_MULTIPLIER * 0.55
+    l3 = close - range_ * CAMARILLA_MULTIPLIER * 0.55
+    l4 = close - range_ * CAMARILLA_MULTIPLIER * 1.1
+    return h4, h3, l3, l4
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -42,20 +50,24 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    h4_1d, h3_1d, l3_1d, l4_1d = calculate_pivot_levels(high_1d, low_1d, close_1d)
+    
+    # Align Camarilla levels to 6h timeframe
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +81,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(h4_1d_aligned[i]) or np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,22 +107,32 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
-        
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Proximity to Camarilla levels
+        near_l3 = abs(close[i] - l3_1d_aligned[i]) / close[i] < PROXIMITY_THRESHOLD
+        near_h3 = abs(close[i] - h3_1d_aligned[i]) / close[i] < PROXIMITY_THRESHOLD
+        break_h4 = close[i] > h4_1d_aligned[i]
+        break_l4 = close[i] < l4_1d_aligned[i]
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            # Mean reversion at H3/L3 with volume
+            if near_l3 and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif near_h3 and volume_ok:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            # Breakout continuation at H4/L4 with volume
+            elif break_h4 and volume_ok:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif break_l4 and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
