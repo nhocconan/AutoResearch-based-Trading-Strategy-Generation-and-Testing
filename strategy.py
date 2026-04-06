@@ -32,20 +32,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter and ATR
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA(50) for trend bias
     ema_1d = calculate_ema(df_1d['close'].values, 50)
     
-    # Calculate 1d ATR(14) for volatility filter
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    
-    # Align 1d indicators to 12h timeframe
+    # Align 1d EMA to 12h timeframe (use previous 1d bar for trend)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 12h data for Donchian, volume, and close
+    # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -53,6 +49,9 @@ def generate_signals(prices):
     
     # Donchian channels (20-period)
     donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # ATR for stop loss (14-period)
+    atr = calculate_atr(high, low, close, 14)
     
     # Volume confirmation (20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,7 +67,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(volume_ma[i]) or np.isnan(atr_1d_aligned[i]):
+           np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -97,17 +96,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Volatility filter - only trade when 1d ATR is above average (avoid choppy markets)
-        atr_ma = np.mean(atr_1d_aligned[max(0, i-50):i+1]) if i >= 50 else atr_1d_aligned[i]
-        volatility_ok = atr_1d_aligned[i] > (atr_ma * 0.8)  # avoid very low volatility periods
-        
         # Donchian breakout signals (using previous bar's bands)
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of 1d trend with volume and volatility confirmation
-        long_signal = bullish_trend and volume_ok and volatility_ok and breakout_up
-        short_signal = bearish_trend and volume_ok and volatility_ok and breakout_down
+        # Entry signals - only in direction of 1d trend
+        long_signal = bullish_trend and volume_ok and breakout_up
+        short_signal = bearish_trend and volume_ok and breakout_down
         
         # Generate signals
         if position == 0:
@@ -115,12 +110,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr_1d_aligned[i])
+                stop_price = entry_price - (2.0 * atr[i])
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr_1d_aligned[i])
+                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
