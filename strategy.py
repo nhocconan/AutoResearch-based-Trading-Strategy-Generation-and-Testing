@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with volume confirmation and ATR stoploss
-Hypothesis: 12h Donchian(20) breakouts capture medium-term trends in BTC/ETH/SOL.
-Volume confirmation reduces false breakouts, ATR stoploss manages risk.
-Works in bull (breakout continuation) and bear (breakdown continuation).
-Target: 75-200 total trades over 4 years.
+4h Donchian breakout with volume confirmation and ATR stoploss
+Hypothesis: 4h Donchian(20) breakouts with volume confirmation capture trends across market regimes.
+Volume filters false breakouts, ATR stoploss manages risk. Works in bull (breakout continuation) 
+and bear (breakdown continuation). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_atr_v2"
-timeframe = "12h"
+name = "4h_donchian20_volume_atr_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,11 +30,11 @@ def generate_signals(prices):
     high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 12h timeframe
-    donch_high_12h = align_htf_to_ltf(prices, df_1d, high_max)
-    donch_low_12h = align_htf_to_ltf(prices, df_1d, low_min)
+    # Align Donchian channels to 4h timeframe
+    donch_high_4h = align_htf_to_ltf(prices, df_1d, high_max)
+    donch_low_4h = align_htf_to_ltf(prices, df_1d, low_min)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or 
+        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
             np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -73,7 +72,7 @@ def generate_signals(prices):
         if position == 1:  # long position
             # Exit: stoploss or breakdown below Donchian low
             if (close[i] <= entry_price - 2.5 * atr[i] or
-                close[i] <= donch_low_12h[i]):
+                close[i] <= donch_low_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -81,16 +80,16 @@ def generate_signals(prices):
         elif position == -1:  # short position
             # Exit: stoploss or breakout above Donchian high
             if (close[i] >= entry_price + 2.5 * atr[i] or
-                close[i] >= donch_high_12h[i]):
+                close[i] >= donch_high_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries: breakout with volume confirmation
-            breakout_long = (close[i] > donch_high_12h[i] and
+            breakout_long = (close[i] > donch_high_4h[i] and
                            volume[i] > vol_ema[i] * 1.5)
-            breakout_short = (close[i] < donch_low_12h[i] and
+            breakout_short = (close[i] < donch_low_4h[i] and
                             volume[i] > vol_ema[i] * 1.5)
             
             if breakout_long:
