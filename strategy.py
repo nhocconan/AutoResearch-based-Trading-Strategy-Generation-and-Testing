@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA(20) trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20) AND price > weekly EMA(20) AND volume > 2x 20-day avg
-# Short when price breaks below Donchian lower (20) AND price < weekly EMA(20) AND volume > 2x 20-day avg
+# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 1.5x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Daily timeframe reduces trade frequency, weekly EMA filters trend, Donchian provides clear breakout signals
-# Target: 30-100 total trades over 4 years (7-25/year) for optimal daily performance
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
 
-name = "1d_donchian20_1w_ema_vol_v1"
+name = "1d_donchian20_1w_ema_vol_v4"
 timeframe = "1d"
 leverage = 1.0
 
@@ -32,25 +31,25 @@ def generate_signals(prices):
     donchian_lower = lowest_low.values
     donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # 1-week EMA(20) trend filter
+    # 1-week EMA(50) trend filter
     df_1w = get_htf_data(prices, '1w')
     weekly_close = df_1w['close'].values
     
-    # Calculate 20-period EMA on weekly close
+    # Calculate 50-period EMA on weekly close
     weekly_close_series = pd.Series(weekly_close)
-    weekly_ema = weekly_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    weekly_ema = weekly_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align weekly EMA to daily timeframe
+    # Align weekly EMA to 1d timeframe
     weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 2.0 * volume_ma.values
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if required data not available
         if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(weekly_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
