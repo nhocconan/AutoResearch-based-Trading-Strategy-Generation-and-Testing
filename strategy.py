@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+4h Donchian Breakout with 1d Trend Filter and Volume Confirmation v2
 Hypothesis: Donchian(20) breakouts on 4h timeframe capture strong momentum moves.
 Daily EMA200 filters trend direction to avoid counter-trend trades.
 Volume confirms breakout strength. Designed for 75-200 trades over 4 years to minimize fee drag.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_volume_v1"
+name = "4h_donchian20_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
