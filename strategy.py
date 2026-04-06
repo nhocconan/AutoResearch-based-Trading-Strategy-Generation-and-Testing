@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian breakout with 1d EMA filter and volume confirmation
-Hypothesis: Breakouts aligned with daily trend (1d EMA) and volume confirmation capture strong momentum moves.
-In bull markets, captures upward breakouts; in bear markets, captures downward breakdowns.
-Volume filter ensures momentum, reducing false breakouts. Target: 75-200 trades over 4 years.
+12h Donchian breakout with 1d EMA filter and volume contraction filter.
+Hypothesis: Breakouts from Donchian channels on 12h timeframe, filtered by 1d EMA trend,
+with volume contraction (low volatility) to catch explosive moves. Works in bull via breakouts
+and bear via breakdowns. Volume filter avoids false breakouts in choppy markets.
+Target: 50-150 trades over 4 years on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14255_6d_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_14256_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -41,7 +42,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, 50)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 6h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -51,9 +52,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume < 0.8x 20-period average (contraction before breakout)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume < (0.8 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -91,9 +92,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with 1d EMA filter and volume
-        # Long: break above upper band + price > 1d EMA + volume
-        # Short: break below lower band + price < 1d EMA + volume
+        # Donchian breakout signals with 1d EMA filter and volume contraction
+        # Long: break above upper band + price > 1d EMA + volume contraction
+        # Short: break below lower band + price < 1d EMA + volume contraction
         breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1d_aligned[i]) and vol_filter[i]
         breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1d_aligned[i]) and vol_filter[i]
         
