@@ -3,30 +3,31 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12800_4h_donchian20_1d_vol_v2"
+name = "exp_12801_4h_donchian20_1d_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+# Parameters - Adjusted for higher trade frequency
+DONCHIAN_PERIOD = 15  # Reduced from 20 for more signals
+VOLUME_MA_PERIOD = 15  # Reduced from 20
+VOLUME_THRESHOLD = 1.5  # Reduced from 2.0 for more volume signals
 SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_PERIOD = 10  # Reduced from 14 for faster ATR
+ATR_STOP_MULTIPLIER = 1.5  # Reduced from 2.0 for tighter stops
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR with proper handling"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=1).mean().values
     return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
@@ -35,7 +36,6 @@ def generate_signals(prices):
     # Calculate daily Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Upper band: highest high over period
     upper_band = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
