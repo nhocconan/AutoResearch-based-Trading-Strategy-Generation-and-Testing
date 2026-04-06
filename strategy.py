@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA trend filter and volume capture.
-- Long: break above upper Donchian + above 1d EMA + volume > 1.5x average
-- Short: break below lower Donchian + below 1d EMA + volume > 1.5x average
+6h Donchian breakout with weekly pivot direction filter and volume confirmation.
+- Long: break above upper Donchian(20) + price > weekly pivot + volume > 1.5x average
+- Short: break below lower Donchian(20) + price < weekly pivot + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
-- Target: 75-200 trades over 4 years (19-50/year)
+- Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14186_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14187_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -31,17 +31,20 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA(20) trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot calculation (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(20) on 1d close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points
+    # Pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    # Align EMA to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Align pivot to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # 4h data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,12 +66,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 20 for volume, 14 for ATR)
+    # Start from warmup period (max of 20 for Donchian, 20 for pivot, 20 for volume, 14 for ATR)
     start = max(20, 20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(pivot_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -91,11 +94,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above 1d EMA + volume
-        # Short: break below lower band + below 1d EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with weekly pivot filter and volume
+        # Long: break above upper band + price above weekly pivot + volume
+        # Short: break below lower band + price below weekly pivot + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > pivot_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < pivot_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
