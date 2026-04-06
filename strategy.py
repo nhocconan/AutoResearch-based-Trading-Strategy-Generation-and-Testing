@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Trade breakouts of daily Donchian channels in direction of weekly trend.
-Uses weekly EMA for trend direction, daily Donchian breakout for entry, volume spike for confirmation.
-Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
-Target: 30-100 total trades over 4 years (7-25/year).
+4h Donchian Breakout with Volume Confirmation and Regime Filter
+Hypothesis: Breakouts from Donchian channels (20) on 4h timeframe, confirmed by volume surge and filtered by Choppy market regime, capture institutional moves while avoiding false breakouts in sideways markets. Works in both bull (long breakouts) and bear (short breakdowns) by using symmetric entry conditions.
+Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "4h_donchian20_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,87 +18,114 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for Chop regime filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA(20) for trend direction
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Choppy market regime (14-period) on daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Daily Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike filter (volume > 1.5x 20-day EMA)
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema)
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Highest high and lowest low over last 14 periods
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop calculation: log(sum(TR)/range) / log(14)
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_1d = hh_1d - ll_1d
+    chop = 100 * np.log10(sum_tr / (range_1d + 1e-10)) / np.log10(14)
+    chop_filter = chop > 61.8  # Choppy market threshold
+    
+    # 4h data for Donchian breakout
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Donchian channels (20-period) on 4h
+    dc_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume_4h > (1.5 * vol_ma)
+    
+    # ATR for stoploss calculation
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    
+    # Align HTF Chop filter to 4h timeframe
+    chop_filter_4h = align_htf_to_ltf(prices, df_1d, chop_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 100
+    start = 20  # For Donchian channels
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or np.isnan(vol_ema[i]) or np.isnan(atr[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr_4h[i]) or
+            np.isnan(chop_filter_4h[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Weekly trend: above EMA20 = uptrend, below = downtrend
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Avoid choppy markets - only trade in trending conditions
+        if chop_filter_4h[i]:
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR stoploss
-            if (close[i] <= donch_low[i] or
-                close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: breakdown below Donchian low OR stoploss
+            if (close_4h[i] <= dc_low[i] or
+                close_4h[i] <= entry_price - 2.5 * atr_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR stoploss
-            if (close[i] >= donch_high[i] or
-                close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: breakout above Donchian high OR stoploss
+            if (close_4h[i] >= dc_high[i] or
+                close_4h[i] >= entry_price + 2.5 * atr_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout in trend direction + volume spike
-            long_setup = (close[i] > donch_high[i] and uptrend and vol_spike[i])
-            short_setup = (close[i] < donch_low[i] and downtrend and vol_spike[i])
+            # Look for entries: Donchian breakout + volume confirmation
+            long_breakout = close_4h[i] > dc_high[i]
+            short_breakout = close_4h[i] < dc_low[i]
             
-            if long_setup:
+            if long_breakout and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close[i]
-            elif short_setup:
+                entry_price = close_4h[i]
+            elif short_breakout and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close[i]
+                entry_price = close_4h[i]
             else:
                 signals[i] = 0.0
     
