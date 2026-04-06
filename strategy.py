@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema50_vol_v1"
+name = "12h_camarilla1d_vol_break_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -31,30 +30,23 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        alpha = 2.0 / (period + 1)
-        ema_val = np.full_like(arr, np.nan)
-        ema_val[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
-        return ema_val
+    # Calculate Camarilla levels from previous day
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
     
-    ema_50 = ema(close_1d, 50)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    for i in range(1, len(close_1d)):
+        if not np.isnan(high_1d[i-1]) and not np.isnan(low_1d[i-1]) and not np.isnan(close_1d[i-1]):
+            camarilla_h4[i] = close_1d[i-1] + 1.5 * (high_1d[i-1] - low_1d[i-1])
+            camarilla_l4[i] = close_1d[i-1] - 1.5 * (high_1d[i-1] - low_1d[i-1])
     
-    # Donchian channels (20-period) on 12h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Volume filter: current volume > 1.8x average over last 20 periods
     vol_ma = np.full(n, np.nan)
@@ -66,11 +58,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(20, 14)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -82,34 +74,30 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian low or stoploss hit
-            if (close[i] < donchian_low[i] or
+            # Exit: price closes below Camarilla L4 or stoploss hit
+            if (close[i] < camarilla_l4_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian high or stoploss hit
-            if (close[i] > donchian_high[i] or
+            # Exit: price closes above Camarilla H4 or stoploss hit
+            if (close[i] > camarilla_h4_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries - only long in bull, only short in bear based on daily trend
-            # Long: price breaks above Donchian high, above 1d EMA50, with volume (only in bull market)
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_filter):
+            # Look for entries
+            # Long: price breaks above Camarilla H4 with volume
+            if (close[i] > camarilla_h4_aligned[i] and volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA50, with volume (only in bear market)
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_filter):
+            # Short: price breaks below Camarilla L4 with volume
+            elif (close[i] < camarilla_l4_aligned[i] and volume_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
