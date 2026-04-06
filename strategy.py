@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation v5
-Hypothesis: Donchian(20) breakouts capture strong trends. 1d EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Tightened volume threshold to reduce trades to target range (75-200 over 4 years). Works in bull (buy breakouts above) and bear (sell breakouts below).
+1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation v1
+Hypothesis: Donchian(20) breakouts on daily timeframe capture multi-week trends. 
+Weekly EMA50 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength.
+Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag.
+Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_volume_v5"
-timeframe = "4h"
+name = "1d_donchian20_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 1d EMA25 for trend filter
-    close_1d = df_1d['close'].values
-    ema25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema25_1d_prev = np.roll(ema25_1d, 1)
-    ema25_1d_prev[0] = ema25_1d[0]
-    ema25_rising = ema25_1d > ema25_1d_prev
-    ema25_falling = ema25_1d < ema25_1d_prev
-    ema25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema25_1d)
-    ema25_rising_aligned = align_htf_to_ltf(prices, df_1d, ema25_rising)
-    ema25_falling_aligned = align_htf_to_ltf(prices, df_1d, ema25_falling)
+    # Weekly EMA50 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_prev = np.roll(ema50_weekly, 1)
+    ema50_weekly_prev[0] = ema50_weekly[0]
+    ema50_rising = ema50_weekly > ema50_weekly_prev
+    ema50_falling = ema50_weekly < ema50_weekly_prev
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_weekly, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_weekly, ema50_falling)
     
-    # 4h data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -52,13 +55,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA25 and Donchian
+    start = 70  # For weekly EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema25_1d_aligned[i]) or 
-            np.isnan(ema25_rising_aligned[i]) or np.isnan(ema25_falling_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(ema50_weekly_aligned[i]) or 
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -87,9 +90,8 @@ def generate_signals(prices):
             bull_breakout = close[i] > highest_high[i]
             bear_breakout = close[i] < lowest_low[i]
             
-            # Tightened volume threshold from 1.5x to 2.0x to reduce trades
-            bull_entry = bull_breakout and ema25_rising_aligned[i] and volume[i] > vol_ema[i] * 2.0
-            bear_entry = bear_breakout and ema25_falling_aligned[i] and volume[i] > vol_ema[i] * 2.0
+            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
