@@ -1,44 +1,44 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Volume Spike + 1d Trend Filter
-Hypothesis: Donchian breakouts capture strong momentum, volume spike confirms institutional interest, and 1d EMA200 filter ensures trades align with higher timeframe trend. Works in both bull and bear markets by allowing long and short entries with strict entry conditions to limit trade frequency.
-Target: 75-150 total trades over 4 years (19-37/year).
+4h Donchian Breakout + Volume + Trend Filter
+Hypothesis: Donchian breakouts capture strong momentum. Volume confirms institutional participation. 1d EMA50 filters for trend direction.
+Works in bull (breakouts above EMA50) and bear (breakdowns below EMA50). Targets 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14342_12h_donchian_vol_trend_v1"
-timeframe = "12h"
+name = "exp_14343_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 200-period EMA for daily trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 50-period EMA for daily trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20 periods)
+    # Donchian Channel (20)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike filter (2x 20-period average)
+    # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 200  # Wait for EMA200
+    start = max(20, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
@@ -67,25 +67,22 @@ def generate_signals(prices):
         # Check exits
         if position == 1:  # long position
             # Exit: price breaks below Donchian low OR stoploss
-            if close[i] <= donchian_low[i] or close[i] <= entry_price - 2.5 * atr[i]:
+            if close[i] <= donchian_low[i] or close[i] <= entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
             # Exit: price breaks above Donchian high OR stoploss
-            if close[i] >= donchian_high[i] or close[i] >= entry_price + 2.5 * atr[i]:
+            if close[i] >= donchian_high[i] or close[i] >= entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume spike + trend alignment
-            long_breakout = close[i] > donchian_high[i-1]  # Break above previous high
-            short_breakout = close[i] < donchian_low[i-1]  # Break below previous low
-            
-            long_setup = long_breakout and vol_spike[i] and (close[i] > ema_1d_aligned[i])
-            short_setup = short_breakout and vol_spike[i] and (close[i] < ema_1d_aligned[i])
+            # Look for entries: Donchian breakout + trend alignment + volume
+            long_setup = (close[i] > donchian_high[i]) and (close[i] > ema_1d_aligned[i]) and vol_filter[i]
+            short_setup = (close[i] < donchian_low[i]) and (close[i] < ema_1d_aligned[i]) and vol_filter[i]
             
             if long_setup:
                 signals[i] = 0.25
