@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13974_1h_donchian20_4h_ema_vol_v1"
-timeframe = "1h"
+name = "exp_13975_6d_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Hypothesis: 1h Donchian(20) breakout with 4h EMA direction filter and volume confirmation.
-# Uses 4h EMA(50) as trend filter: price above EMA = bullish bias, price below EMA = bearish bias.
-# Entry on 1h Donchian breakout in direction of 4h EMA bias with volume > 1.5x 20-period average.
-# Exit on Donchian reversal or EMA bias change. Session filter (08-20 UTC) reduces noise.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Uses weekly pivot point (calculated from prior week) for trend bias: price above pivot = bullish, below = bearish.
+# Entry on 6h Donchian breakout in direction of weekly pivot with volume > 1.5x average.
+# Exit on Donchian reversal or pivot direction change. Designed for 75-200 total trades over 4 years
+# (19-50/year) to minimize fee drag. Works in bull (breaks above with bullish pivot) and bear
+# (breaks below with bearish pivot) with pivot filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
@@ -33,22 +34,35 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot(high, low, close):
+    """Calculate pivot point and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA filter ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load weekly data for pivot calculation ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA(50)
-    ema_4h = calculate_ema(close_4h, 50)
+    # Calculate weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot(high_1w, low_1w, close_1w)
     
-    # Align 4h EMA to 1h timeframe (use previous 4h bar's EMA for bias)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align weekly pivot to 6h timeframe (use previous week's pivot for bias)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # 1h data for Donchian, ATR, and volume
+    # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,9 +77,6 @@ def generate_signals(prices):
     # Volume confirmation (20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC (already datetime64[ms], use index.hour)
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -76,17 +87,13 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(pivot_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
         
         # Check stops
         if position == 1:  # long position
@@ -103,48 +110,48 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine bias from 4h EMA (price vs EMA level)
-        bullish_bias = close[i] > ema_4h_aligned[i]  # price above 4h EMA = bullish bias
-        bearish_bias = close[i] < ema_4h_aligned[i]  # price below 4h EMA = bearish bias
+        # Determine trend bias from weekly pivot
+        bullish_bias = close[i] > pivot_aligned[i]  # price above weekly pivot = bullish
+        bearish_bias = close[i] < pivot_aligned[i]  # price below weekly pivot = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Donchian breakout signals
+        # Donchian breakout signals (using previous bar's bands)
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals - only in direction of 4h EMA bias and within session
-        long_signal = bullish_bias and volume_ok and breakout_up and in_session
-        short_signal = bearish_bias and volume_ok and breakout_down and in_session
+        # Entry signals - only in direction of weekly pivot bias
+        long_signal = bullish_bias and volume_ok and breakout_up
+        short_signal = bearish_bias and volume_ok and breakout_down
         
         # Generate signals
         if position == 0:
             if long_signal:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif short_signal:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or bias change to bearish
+            # Exit long on Donchian breakdown or pivot bias change to bearish
             if close[i] < donchian_lower[i] or not bullish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short on Donchian breakout or bias change to bullish
+            # Exit short on Donchian breakout or pivot bias change to bullish
             if close[i] > donchian_upper[i] or not bearish_bias:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
