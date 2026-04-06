@@ -7,7 +7,7 @@ name = "exp_12522_12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for 12h timeframe
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
