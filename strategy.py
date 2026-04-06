@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
-"""
-4h Donchian(20) + Daily EMA(50) + Volume Spike (2.0x)
-- Trend filter: Daily EMA(50) filters breakout direction
-- Volume: Requires 2x average volume for confirmation
-- Entry: Breakout above/below Donchian channel with trend + volume
-- Exit: Stoploss at 2*ATR(14) or opposite signal
-- Position: 0.25 (25% of capital)
-Target: 75-200 trades over 4 years (19-50/year)
-Works in bull via breakouts, bear via breakdowns with trend filter
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12457_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_12459_6d_donchian20_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -51,14 +40,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA for trend
+    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -77,8 +66,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -100,17 +89,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (daily)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
         # Donchian breakout conditions
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_1d and long_breakout
-        short_entry = volume_ok and downtrend_1d and short_breakout
+        long_entry = volume_ok and uptrend_12h and long_breakout
+        short_entry = volume_ok and downtrend_12h and short_breakout
         
         # Generate signals
         if position == 0:
