@@ -3,36 +3,60 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-day Williams %R for overbought/oversold levels
-# with 6-hour price action confirmation. Goes long when price pulls back from
-# oversold (Williams %R < -80) and closes above prior high, short when price
-# rallies from overbought (Williams %R > -20) and closes below prior low.
-# Uses volume confirmation to filter weak signals. Designed for 50-150 total
-# trades over 4 years (12-37/year) to minimize fee drag. Williams %R identifies
-# exhaustion points, price action confirms reversal, volume validates strength.
+# Hypothesis: 6h strategy using 1d ADX for trend strength, 1d Williams %R for overbought/oversold, and volume confirmation.
+# Goes long when ADX > 25 (strong trend), Williams %R < -80 (oversold), and volume > 1.5x average.
+# Goes short when ADX > 25, Williams %R > -20 (overbought), and volume > 1.5x average.
+# Uses ATR-based stop loss. Designed for 50-150 total trades over 4 years (12-37/year).
+# ADX filters trend strength, Williams %R identifies extremes in trending markets, volume confirms momentum.
 
-name = "exp_13831_6h_williamsr1d_priceaction_vol_v1"
+name = "exp_13831_6h_adx_williamsr_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-OVERSOLD = -80
-OVERBOUGHT = -20
+ADX_PERIOD = 14
+WILLIAMS_R_PERIOD = 14
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+ADX_THRESHOLD = 25
+WR_OVERBOUGHT = -20
+WR_OVERSOLD = -80
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    tr_smoothed = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    plus_dm_smoothed = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    minus_dm_smoothed = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def calculate_williams_r(high, low, close, period):
     """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan)
-    return williams_r.values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+    return wr
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -49,19 +73,23 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Williams %R filter ONCE before loop
+    # Load 1d data for ADX and Williams %R ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Williams %R for overbought/oversold
+    # Calculate 1d ADX for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    williams_r_1d = calculate_williams_r(high_1d, low_1d, close_1d, WILLIAMS_PERIOD)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
     
-    # Align 1d Williams %R to 6h timeframe
+    # Calculate 1d Williams %R for overbought/oversold
+    williams_r_1d = calculate_williams_r(high_1d, low_1d, close_1d, WILLIAMS_R_PERIOD)
+    
+    # Align 1d indicators to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
-    # 6h data for price action, ATR, and volume
+    # 6h data for entry and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -79,11 +107,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(ADX_PERIOD, WILLIAMS_R_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(williams_r_1d_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r_1d_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,22 +136,16 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Williams %R conditions from 1d
-        oversold = williams_r_1d_aligned[i] < OVERSOLD
-        overbought = williams_r_1d_aligned[i] > OVERBOUGHT
+        # Trend strength from 1d ADX
+        strong_trend = adx_1d_aligned[i] > ADX_THRESHOLD
         
-        # Price action confirmation: close above/below prior bar
-        # Need at least 2 bars of data
-        if i >= 1:
-            close_above_prior = close[i] > high[i-1]
-            close_below_prior = close[i] < low[i-1]
-        else:
-            close_above_prior = False
-            close_below_prior = False
+        # Overbought/oversold from 1d Williams %R
+        oversold = williams_r_1d_aligned[i] < WR_OVERSOLD
+        overbought = williams_r_1d_aligned[i] > WR_OVERBOUGHT
         
-        # Signal generation
-        long_signal = volume_ok and oversold and close_above_prior
-        short_signal = volume_ok and overbought and close_below_prior
+        # Entry signals
+        long_signal = strong_trend and oversold and volume_ok
+        short_signal = strong_trend and overbought and volume_ok
         
         # Generate signals
         if position == 0:
@@ -140,15 +162,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below prior low (failure of bullish momentum)
-            if close[i] < low[i-1]:
+            # Exit long when trend weakens or overbought
+            if not strong_trend or williams_r_1d_aligned[i] > WR_OVERBOUGHT:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above prior high (failure of bearish momentum)
-            if close[i] > high[i-1]:
+            # Exit short when trend weakens or oversold
+            if not strong_trend or williams_r_1d_aligned[i] < WR_OVERSOLD:
                 signals[i] = 0.0
                 position = 0
             else:
