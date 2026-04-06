@@ -3,34 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with 1-day trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; trades taken only in
-# direction of daily trend to avoid counter-trend whipsaws. Volume confirms
-# institutional participation. Designed for 60-150 total trades over 4 years.
+# Hypothesis: 6h Donchian(20) breakout with daily pivot confirmation and volume filter.
+# Uses daily pivot points for trend direction and 6h Donchian breakout for entry timing.
+# Volume > 1.5x 20-period MA confirms institutional participation.
+# Works in bull markets (breakouts above daily pivot) and bear markets (breakdowns below pivot).
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "exp_13367_6h_williamsr_1d_trend_vol_v1"
+name = "exp_13367_6h_donchian20_daily_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-TREND_EMA_PERIOD = 50  # Daily EMA for trend filter
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.fillna(-50).values  # neutral when undefined
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -49,10 +44,19 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily pivot points (standard)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    pivot_point = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot_point - low_1d
+    s1 = 2 * pivot_point - high_1d
+    
+    # Align daily pivots to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -60,8 +64,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -75,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if daily pivot not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -99,24 +103,24 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter from daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend filter: price relative to daily pivot
+        above_pivot = close[i] > pivot_aligned[i]
+        below_pivot = close[i] < pivot_aligned[i]
         
-        # Williams %R signals: oversold (< -80) for long, overbought (> -20) for short
-        williams_oversold = williams_r[i] < -80
-        williams_overbought = williams_r[i] > -20
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and above_pivot and (high[i] > donch_upper[i-1])
+        breakout_down = volume_ok and below_pivot and (low[i] < donch_lower[i-1])
         
         # Generate signals
         if position == 0:
-            if williams_oversold and uptrend and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif williams_overbought and downtrend and volume_ok:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
