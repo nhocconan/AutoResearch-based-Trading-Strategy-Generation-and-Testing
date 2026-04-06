@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with Daily EMA Filter and Volume Confirmation.
-# Uses Williams %R(14) on 6h timeframe for oversold/overbought conditions.
-# Filters trades by 6h EMA(50) for trend direction (long above EMA, short below).
-# Requires volume > 1.5x 20-period average to ensure quality signals.
-# Works in bull/bear markets via EMA filter that adapts to trend direction.
-# Target: 50-150 trades over 4 years (12-37/year).
+# Hypothesis: 12-hour Donchian Channel Breakout with Daily Trend Filter and Volume Confirmation
+# Uses 20-period Donchian channels on 12h timeframe for breakout signals.
+# Filters: price above/below daily 50 EMA for trend direction, volume > 1.5x 20-period average.
+# Works in bull/bear markets by aligning with daily trend while capturing momentum breakouts.
+# Target: 75-150 trades over 4 years (19-38/year).
 
-name = "6h_williamsr_ema_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_vol_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R(14) calculation
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(13, n):
-        highest_high[i] = np.max(high[i-13:i+1])
-        lowest_low[i] = np.min(low[i-13:i+1])
+    # Daily EMA for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    williams_r = np.full(n, np.nan)
-    for i in range(13, n):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-        else:
-            williams_r[i] = -50  # neutral when no range
+    # Calculate daily EMA(50)
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * 2 / 51) + (ema_50[i-1] * 49 / 51)
     
-    # EMA(50) on 6h timeframe
-    ema50 = np.full(n, np.nan)
-    alpha = 2.0 / (50 + 1)
-    for i in range(n):
-        if i == 0:
-            ema50[i] = close[i]
-        elif not np.isnan(close[i]):
-            ema50[i] = alpha * close[i] + (1 - alpha) * ema50[i-1]
-        else:
-            ema50[i] = ema50[i-1]
+    # Align daily EMA to 12h timeframe (shifted by 1 daily bar)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Donchian channels on 12h (20-period)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(19, n):
+        upper[i] = np.max(high[i-19:i+1])
+        lower[i] = np.min(low[i-19:i+1])
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -59,10 +55,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(williams_r[i]) or np.isnan(ema50[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -74,39 +70,39 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Williams %R crosses above -20 (overbought) or stoploss
+            # Exit: price breaks below lower Donchian or stoploss
             atr_approx = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price - 2.0 * atr_approx
+            stop_loss_level = entry_price - 2.5 * atr_approx
             
-            if (williams_r[i] >= -20 or 
+            if (close[i] < lower[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R crosses below -80 (oversold) or stoploss
+            # Exit: price breaks above upper Donchian or stoploss
             atr_approx = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price + 2.0 * atr_approx
+            stop_loss_level = entry_price + 2.5 * atr_approx
             
-            if (williams_r[i] <= -80 or 
+            if (close[i] > upper[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation
+            # Look for entries with volume confirmation and trend filter
             if volume_filter:
-                # Long: Williams %R crosses above -80 from below AND price above EMA50
-                if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                    close[i] > ema50[i]):
+                # Long breakout: price breaks above upper Donchian with daily uptrend
+                if (close[i] > upper[i] and close[i-1] <= upper[i] and 
+                    close[i] > ema_50_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: Williams %R crosses below -20 from above AND price below EMA50
-                elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                      close[i] < ema50[i]):
+                # Short breakdown: price breaks below lower Donchian with daily downtrend
+                elif (close[i] < lower[i] and close[i-1] >= lower[i] and 
+                      close[i] < ema_50_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
