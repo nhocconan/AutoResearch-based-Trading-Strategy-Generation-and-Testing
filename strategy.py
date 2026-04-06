@@ -1,54 +1,49 @@
 #!/usr/bin/env python3
 """
-6h Donchian breakout with weekly pivot direction and volume confirmation
-Hypothesis: Donchian breakouts capture strong directional moves. Weekly pivot (from 1w) filters direction: only take long breaks above weekly pivot in uptrend, short breaks below in downtrend. Volume confirms institutional participation. Works in bull (breakouts up) and bear (breakouts down). Target: 100-200 total trades over 4 years.
+1d Donchian breakout with weekly trend filter and volume confirmation
+Hypothesis: Donchian channel breakouts on daily timeframe capture strong trends. Weekly EMA50 filters for higher timeframe trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in both bull (buy breakouts above) and bear (sell breakouts below). Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1w_pivot_volume_v1"
-timeframe = "6h"
+name = "1d_donchian20_weekly_trend_volume_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load weekly data for trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Weekly pivot points: (H+L+C)/3
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly EMA50 for trend filter
+    close_weekly = df_weekly['close'].values
+    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_prev = np.roll(ema50_weekly, 1)
+    ema50_weekly_prev[0] = ema50_weekly[0]
+    ema50_rising = ema50_weekly > ema50_weekly_prev
+    ema50_falling = ema50_weekly < ema50_weekly_prev
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_weekly, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_weekly, ema50_falling)
     
-    # Weekly trend: higher highs and higher lows for uptrend
-    # Simple: price above 20-period EMA = uptrend
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_uptrend = close_1w > ema20_1w
-    
-    # Align to 6h
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    
-    # 6h data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channel (20-period)
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        donchian_high[i] = np.max(high[i-lookback:i])
-        donchian_low[i] = np.min(low[i-lookback:i])
+    # Highest high of last 20 periods
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -58,55 +53,49 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, lookback)  # For Donchian and volume EMA
+    start = 50  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(weekly_uptrend_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(ema50_weekly_aligned[i]) or 
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: reverse signal or stoploss
+        # Check exits: opposite breakout or stoploss
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR stoploss
-            atr_proxy = (high[i] - low[i])  # Simple range as ATR proxy
-            if (close[i] <= donchian_low[i] or 
-                close[i] <= entry_price - 2.0 * atr_proxy):
+            # Exit: price breaks below lower Donchian band OR stoploss
+            if (close[i] <= lowest_low[i] or 
+                close[i] <= entry_price - 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR stoploss
-            atr_proxy = (high[i] - low[i])
-            if (close[i] >= donchian_high[i] or 
-                close[i] >= entry_price + 2.0 * atr_proxy):
+            # Exit: price breaks above upper Donchian band OR stoploss
+            if (close[i] >= highest_high[i] or 
+                close[i] >= entry_price + 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + weekly pivot direction + volume
-            atr_proxy = (high[i] - low[i])
-            bull_breakout = close[i] > donchian_high[i]
-            bear_breakout = close[i] < donchian_low[i]
+            # Look for entries: Donchian breakout + trend + volume
+            bull_breakout = close[i] > highest_high[i]
+            bear_breakout = close[i] < lowest_low[i]
             
-            # Weekly pivot direction: only take longs in weekly uptrend, shorts in downtrend
-            weekly_long_filter = weekly_uptrend_aligned[i]  # Only long when weekly uptrend
-            weekly_short_filter = not weekly_uptrend_aligned[i]  # Only short when weekly downtrend
+            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
-            vol_filter = volume[i] > vol_ema[i] * 1.5
-            
-            if bull_breakout and weekly_long_filter and vol_filter:
+            if bull_entry:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and weekly_short_filter and vol_filter:
+            elif bear_entry:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
