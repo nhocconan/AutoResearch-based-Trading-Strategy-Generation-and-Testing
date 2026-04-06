@@ -1,51 +1,76 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 12h capture trend continuation, 
-while 1d volume spikes confirm institutional participation. 
-Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
-Target: 50-150 total trades over 4 years (12-37/year).
+6h Bollinger Bands Squeeze Breakout with Volume and ADX Trend Filter
+Hypothesis: Bollinger Band squeeze indicates low volatility, often preceding breakouts.
+Breakouts in direction of ADX trend (ADX>25) with volume confirmation (1.5x average) capture explosive moves.
+Works in bull (buy upside breakouts) and bear (sell downside breakouts). Target: 80-160 total trades over 4 years (20-40/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14396_12h_donchian20_1d_vol_atr_v1"
-timeframe = "12h"
+name = "14399_6h_bb_squeeze_breakout_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for volume confirmation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    
-    # 12h data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 12h
-    donchian_window = 20
-    upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper = sma + (std * bb_std)
+    lower = sma - (std * bb_std)
+    bb_width = (upper - lower) / sma  # normalized width
     
-    # Volume filter: 12h volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    # Bollinger Band Squeeze: width below 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
+    squeeze = bb_width < bb_width_ma
     
-    # 1d volume confirmation: current 1d volume > 1.5x 20-period average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    vol_filter_1d = volume_1d > (1.5 * vol_ma_1d)
-    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float)).astype(bool)
+    # ADX (14) for trend strength
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros(len(high))
+        minus_dm = np.zeros(len(high))
+        tr = np.zeros(len(high))
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).mean()
+        plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).sum() / (atr * period)
+        minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).sum() / (atr * period)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean()
+        return adx.fillna(0).values
     
-    # ATR for stoploss (12h)
+    adx = calculate_adx(high, low, close)
+    
+    # Volume filter: above average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_filter = volume > vol_ma
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # ATR for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -53,17 +78,13 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
     # Start from warmup period
-    start = donchian_window + 20  # max(donchian_window, vol_ma window) + buffer
+    start = max(bb_period, 20) + 14  # BB period + ADX period
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -72,32 +93,31 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below lower band OR stoploss
-            if (close[i] <= lower[i] or close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: price closes below middle Bollinger Band OR ADX weakens OR stoploss
+            if (close[i] < sma[i] or adx[i] < 20 or 
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper band OR stoploss
-            if (close[i] >= upper[i] or close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: price closes above middle Bollinger Band OR ADX weakens OR stoploss
+            if (close[i] > sma[i] or adx[i] < 20 or 
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume confirmation (both timeframes)
-            long_breakout = close[i] > upper[i-1]  # break above previous upper band
-            short_breakout = close[i] < lower[i-1]  # break below previous lower band
+            # Look for entries: Bollinger Band breakout + ADX trend + volume
+            long_setup = (close[i] > upper[i] and squeeze[i] and adx[i] > 25 and vol_filter[i])
+            short_setup = (close[i] < lower[i] and squeeze[i] and adx[i] > 25 and vol_filter[i])
             
-            # Require volume confirmation on both 12h and 1d
-            vol_confirm = vol_filter[i] and vol_filter_1d_aligned[i]
-            
-            if long_breakout and vol_confirm:
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and vol_confirm:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
