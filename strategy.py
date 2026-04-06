@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d pivot rejection and volume confirmation.
-- Long: break above upper Donchian + above 1d R3 pivot + volume > 1.8x average
-- Short: break below lower Donchian + below 1d S3 pivot + volume > 1.8x average
+12h Donchian breakout with 1d EMA trend filter and volume confirmation.
+- Long: break above upper Donchian + above 1d EMA + volume > 1.5x average
+- Short: break below lower Donchian + below 1d EMA + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
-- Target: 75-200 trades over 4 years (19-50/year)
-- Hypothesis: 12h timeframe captures multi-day trends while avoiding 4h whipsaw; pivot rejection filters false breakouts; volume confirms institutional participation.
+- Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14192_12h_donchian20_1d_pivot_vol_v1"
+name = "exp_14192_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,34 +26,20 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivots(high, low, close):
-    """Calculate classic pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation (once before loop)
+    # Load 1d data for EMA(20) trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivots on 1d data
-    _, r3_1d, _, _, _, _, s3_1d = calculate_pivots(high_1d, low_1d, close_1d)
+    # Calculate EMA(20) on 1d close
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align pivots to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align EMA to 12h timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
     # 12h data
     high = prices['high'].values
@@ -66,9 +51,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -78,13 +63,13 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR)
-    start = max(20, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 20 for volume, 14 for ATR)
+    start = max(20, 20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(r3_1d_aligned[i]) or \
-           np.isnan(s3_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]) or \
+           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -106,11 +91,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with pivot rejection and volume
-        # Long: break above upper band + above 1d R3 + volume
-        # Short: break below lower band + below 1d S3 + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > r3_1d_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < s3_1d_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with volume and EMA filter
+        # Long: break above upper band + above 1d EMA + volume
+        # Short: break below lower band + below 1d EMA + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
@@ -147,20 +132,19 @@ def generate_signals(prices):
 
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d pivot rejection and volume confirmation.
-- Long: break above upper Donchian + above 1d R3 pivot + volume > 1.8x average
-- Short: break below lower Donchian + below 1d S3 pivot + volume > 1.8x average
+12h Donchian breakout with 1d EMA trend filter and volume confirmation.
+- Long: break above upper Donchian + above 1d EMA + volume > 1.5x average
+- Short: break below lower Donchian + below 1d EMA + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
-- Target: 75-200 trades over 4 years (19-50/year)
-- Hypothesis: 12h timeframe captures multi-day trends while avoiding 4h whipsaw; pivot rejection filters false breakouts; volume confirms institutional participation.
+- Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14192_12h_donchian20_1d_pivot_vol_v1"
+name = "exp_14192_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -174,34 +158,20 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivots(high, low, close):
-    """Calculate classic pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation (once before loop)
+    # Load 1d data for EMA(20) trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivots on 1d data
-    _, r3_1d, _, _, _, _, s3_1d = calculate_pivots(high_1d, low_1d, close_1d)
+    # Calculate EMA(20) on 1d close
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align pivots to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align EMA to 12h timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
     # 12h data
     high = prices['high'].values
@@ -213,9 +183,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -225,13 +195,13 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR)
-    start = max(20, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 20 for volume, 14 for ATR)
+    start = max(20, 20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(r3_1d_aligned[i]) or \
-           np.isnan(s3_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]) or \
+           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -253,11 +223,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with pivot rejection and volume
-        # Long: break above upper band + above 1d R3 + volume
-        # Short: break below lower band + below 1d S3 + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > r3_1d_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < s3_1d_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with volume and EMA filter
+        # Long: break above upper band + above 1d EMA + volume
+        # Short: break below lower band + below 1d EMA + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
