@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12814_1h_donchian_4h_trend_v1"
-timeframe = "1h"
+name = "exp_12815_6d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Parameters - Optimized for 1h timeframe with 4h trend filter
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
+# Parameters
+WEEKLY_PIVOT_PERIOD = 1
+VOLUME_MA_PERIOD = 24
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # Max 24 hours (24 * 1h) to prevent overtrading
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 48  # Max 12 days (48 * 6h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -25,39 +25,65 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Load 1d data for session filter and volatility context
-    df_1d = get_htf_data(prices, '1d')
+    pivot_vals = np.zeros(len(close_w))
+    r1_vals = np.zeros(len(close_w))
+    r2_vals = np.zeros(len(close_w))
+    r3_vals = np.zeros(len(close_w))
+    s1_vals = np.zeros(len(close_w))
+    s2_vals = np.zeros(len(close_w))
+    s3_vals = np.zeros(len(close_w))
     
-    # Calculate 1h indicators
+    for i in range(len(close_w)):
+        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
+        pivot_vals[i] = pivot
+        r1_vals[i] = r1
+        r2_vals[i] = r2
+        r3_vals[i] = r3
+        s1_vals[i] = s1
+        s2_vals[i] = s2
+        s3_vals[i] = s3
+    
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Calculate 1h Donchian channels
-    upper_band = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_band = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,13 +92,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ma[i]):
+        # Skip if pivot levels not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -100,34 +126,22 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
         
-        # Session filter: only trade during active hours (08-20 UTC)
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band[i]
-        breakout_short = volume_ok and close[i] <= lower_band[i]
-        
-        # 4h trend filter: only take longs in uptrend, shorts in downtrend
-        trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] if i > 0 else False
-        trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] if i > 0 else False
+        # Breakout above R3 or breakdown below S3
+        breakout_long = volume_ok and close[i] >= r3_aligned[i]
+        breakout_short = volume_ok and close[i] <= s3_aligned[i]
         
         # Generate signals
         if position == 0:
-            if breakout_long and trend_up:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
                 bars_since_entry = 0
-            elif breakout_short and trend_down:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -141,618 +155,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_12814_1h_donchian_4h_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-# Parameters - Optimized for 1h timeframe with 4h trend filter
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # Max 24 hours (24 * 1h) to prevent overtrading
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Load 1d data for session filter and volatility context
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Calculate 1h Donchian channels
-    upper_band = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_band = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ma[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
-        # Session filter: only trade during active hours (08-20 UTC)
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band[i]
-        breakout_short = volume_ok and close[i] <= lower_band[i]
-        
-        # 4h trend filter: only take longs in uptrend, shorts in downtrend
-        trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] if i > 0 else False
-        trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] if i > 0 else False
-        
-        # Generate signals
-        if position == 0:
-            if breakout_long and trend_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short and trend_down:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_12814_1h_donchian_4h_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-# Parameters - Optimized for 1h timeframe with 4h trend filter
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # Max 24 hours (24 * 1h) to prevent overtrading
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Load 1d data for session filter and volatility context
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Calculate 1h Donchian channels
-    upper_band = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_band = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ma[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
-        # Session filter: only trade during active hours (08-20 UTC)
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band[i]
-        breakout_short = volume_ok and close[i] <= lower_band[i]
-        
-        # 4h trend filter: only take longs in uptrend, shorts in downtrend
-        trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] if i > 0 else False
-        trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] if i > 0 else False
-        
-        # Generate signals
-        if position == 0:
-            if breakout_long and trend_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short and trend_down:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_12814_1h_donchian_4h_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-# Parameters - Optimized for 1h timeframe with 4h trend filter
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # Max 24 hours (24 * 1h) to prevent overtrading
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Load 1d data for session filter and volatility context
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Calculate 1h Donchian channels
-    upper_band = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_band = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ma[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
-        # Session filter: only trade during active hours (08-20 UTC)
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band[i]
-        breakout_short = volume_ok and close[i] <= lower_band[i]
-        
-        # 4h trend filter: only take longs in uptrend, shorts in downtrend
-        trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] if i > 0 else False
-        trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] if i > 0 else False
-        
-        # Generate signals
-        if position == 0:
-            if breakout_long and trend_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short and trend_down:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_12814_1h_donchian_4h_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-# Parameters - Optimized for 1h timeframe with 4h trend filter
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # Max 24 hours (24 * 1h) to prevent overtrading
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Load 1d data for session filter and volatility context
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Calculate 1h Donchian channels
-    upper_band = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_band = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if indicators not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ma[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
-        # Session filter: only trade during active hours (08-20 UTC)
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band[i]
-        breakout_short = volume_ok and close[i] <= lower_band[i]
-        
-        # 4h trend filter: only take longs in uptrend, shorts in downtrend
-        trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] if i > 0 else False
-        trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] if i > 0 else False
-        
-        # Generate signals
-        if position == 0:
-            if breakout_long and trend_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short and trend_down:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_12814_1h_donchian_4h_trend_v1"
-timeframe = "1h"
-leverage = 1.0
-
-# Parameters - Optimized for 1h timeframe with 4h trend filter
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # Max 24 hours (24 * 1h) to prevent overtrading
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    #
