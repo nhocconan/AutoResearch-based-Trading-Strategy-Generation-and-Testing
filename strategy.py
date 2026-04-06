@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #12333: 4h Donchian Breakout + 12h Trend + Volume Confirmation
+Experiment #12333: 4h Donchian Breakout + 12h EMA Trend + Volume Confirmation
 Hypothesis: Use 12h EMA for trend direction, 4h Donchian(20) breakouts for entry,
 and volume spikes for confirmation. This captures momentum in both bull and bear
 markets while avoiding false breakouts. Target: 75-200 total trades over 4 years.
