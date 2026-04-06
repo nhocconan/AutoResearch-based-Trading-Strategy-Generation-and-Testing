@@ -1,25 +1,31 @@
+#13539
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-# Uses daily price channel breakouts aligned with weekly momentum to capture strong trending moves.
-# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6-hour Donchian(20) breakout with daily pivot direction and volume confirmation.
+# Uses 6h price channel breakouts aligned with daily pivot levels to capture strong trending moves.
+# Pivot levels from daily timeframe provide institutional reference points. Volume confirms participation.
+# Works in bull markets (breakouts above upper band with pivot support) and bear markets (breakdowns below lower band with pivot resistance).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13538_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13539_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+PIVOT_LOOKBACK = 1  # Use previous day's pivot
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_pivot(high, low, close):
+    """Calculate pivot point: (H + L + C) / 3"""
+    return (high + low + close) / 3.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -39,15 +45,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot_1d = calculate_pivot(high_1d, low_1d, close_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -69,11 +77,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if pivot not available
+        if np.isnan(pivot_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,13 +103,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Pivot direction: price above/below daily pivot
+        above_pivot = close[i] > pivot_1d_aligned[i]
+        below_pivot = close[i] < pivot_1d_aligned[i]
         
         # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and above_pivot and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and below_pivot and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
