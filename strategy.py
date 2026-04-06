@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with 12h regime filter
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# Bull market regime (12h ADX > 25): go long when Bull Power > 0 and rising
-# Bear market regime (12h ADX < 20): go short when Bear Power > 0 and rising
-# Range market (20 <= 12h ADX <= 25): fade extremes - long when Bear Power < 0 and rising, short when Bull Power < 0 and rising
-# Volume confirmation: require volume > 20-period average
-# Target: 50-150 total trades over 4 years with balanced performance in bull/bear/range
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA trend filter and volume confirmation
+# Long when price breaks above 20-period Donchian high and 1w EMA(20) is rising
+# Short when price breaks below 20-period Donchian low and 1w EMA(20) is falling
+# Uses volume > 20-period average to confirm breakouts
+# Target: 50-150 total trades over 4 years with controlled risk in both bull and bear markets
+# Uses 12h timeframe with 1w trend filter to reduce trade frequency and improve signal quality
 
-name = "6h_elderray_12h_regime_v3"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,67 +25,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for regime filter (ADX)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate ADX components
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            
-            plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-            minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth with Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros(len(high))
-        plus_di = np.zeros(len(high))
-        minus_di = np.zeros(len(high))
-        
-        atr[period-1] = np.mean(tr[:period])
-        plus_dm_sum = np.sum(plus_dm[:period])
-        minus_dm_sum = np.sum(minus_dm[:period])
-        
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
-            minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
-            plus_di[i] = 100 * plus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
-            minus_di[i] = 100 * minus_dm_sum / (atr[i] * period) if atr[i] != 0 else 0
-        
-        dx = np.zeros(len(high))
-        adx = np.zeros(len(high))
-        for i in range(period, len(high)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-            else:
-                dx[i] = 0
-        
-        adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-        for i in range(2*period-1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Elder Ray components (13-period EMA)
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -96,11 +46,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -108,27 +57,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2 * ATR approximation
+            # Stoploss: 2 * ATR approximation using price range
             if close[i] < entry_price - 2.0 * (high[i] - low[i]):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit conditions based on regime
-            elif adx_12h_aligned[i] > 25:  # Bull trend
-                if bull_power[i] <= 0:  # Bull power failed
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-            elif adx_12h_aligned[i] < 20:  # Bear trend
-                if bear_power[i] <= 0:  # Bear power failed
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-            else:  # Range
-                if bull_power[i] >= 0:  # Bull power recovered
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
+            # Exit: price breaks below Donchian low or 1w EMA turns down
+            elif close[i] < low_min[i] or ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
@@ -137,46 +75,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit conditions based on regime
-            elif adx_12h_aligned[i] > 25:  # Bull trend
-                if bear_power[i] >= 0:  # Bear power failed
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-            elif adx_12h_aligned[i] < 20:  # Bear trend
-                if bull_power[i] >= 0:  # Bull power recovered
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-            else:  # Range
-                if bear_power[i] >= 0:  # Bear power recovered
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
+            # Exit: price breaks above Donchian high or 1w EMA turns up
+            elif close[i] > high_max[i] or ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation
             if vol_filter[i]:
-                # Regime-based entries
-                if adx_12h_aligned[i] > 25:  # Bull trend - buy strength
-                    if bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
-                        signals[i] = 0.25
-                        position = 1
-                        entry_price = close[i]
-                elif adx_12h_aligned[i] < 20:  # Bear trend - sell weakness
-                    if bear_power[i] > 0 and bear_power[i] > bear_power[i-1]:
-                        signals[i] = -0.25
-                        position = -1
-                        entry_price = close[i]
-                else:  # Range - fade extremes
-                    if bear_power[i] < 0 and bear_power[i] > bear_power[i-1]:
-                        signals[i] = 0.25
-                        position = 1
-                        entry_price = close[i]
-                    elif bull_power[i] < 0 and bull_power[i] > bull_power[i-1]:
-                        signals[i] = -0.25
-                        position = -1
-                        entry_price = close[i]
+                # Long when price breaks above Donchian high and 1w EMA rising
+                if close[i] > high_max[i] and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short when price breaks below Donchian low and 1w EMA falling
+                elif close[i] < low_min[i] and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
     
     return signals
