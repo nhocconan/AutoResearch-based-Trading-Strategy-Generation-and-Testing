@@ -4,11 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 6h Williams %R + 1d EMA trend filter + volume confirmation
-# Williams %R identifies overbought/oversold conditions
-# 1d EMA (50) provides trend direction - only take trades in direction of trend
-# Volume confirmation ensures institutional participation
-# Works in bull markets (trend following oversold bounces) and bear markets (trend following bounces in downtrend)
-# Targets 50-150 total trades over 4 years with disciplined entry criteria
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x average
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x average
+# Exit when Williams %R returns to -50 level or volume drops below threshold
+# Uses 6h timeframe to balance trade frequency and responsiveness
+# Williams %R identifies extremes, EMA50 filters for trend direction, volume confirms strength
+# Works in bull markets (buy oversold dips in uptrend) and bear markets (sell rallies in downtrend)
 
 name = "6h_williamsr_1d_ema_vol_v1"
 timeframe = "6h"
@@ -25,22 +26,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period) - momentum oscillator
-    # Values: -100 to 0, readings below -80 oversold, above -20 overbought
+    # Williams %R (14-period) - measures overbought/oversold levels
+    # Values: -100 to 0, where < -80 = oversold, > -20 = overbought
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low + 1e-10))
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     williams_r = williams_r.values
     
-    # 1d EMA (50-period) for trend filter
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     daily_close = df_1d['close'].values
-    
-    # Calculate EMA on daily close
-    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False).mean()
+    ema_50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean()
     ema_50 = ema_50.values
     
-    # Align daily EMA to 6h timeframe
+    # Align daily EMA50 to 6h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume confirmation: volume > 1.5x 20-period average
@@ -50,7 +49,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if required data not available
         if np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
@@ -59,26 +58,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: Williams %R returns to neutral range (-50 level)
+        # Exit conditions: Williams %R returns to -50 level OR volume drops below threshold
         if position == 1:  # long position
-            if williams_r[i] > -50:
+            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if williams_r[i] < -50:
+            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in direction of 1d EMA trend
-            # Long: Williams %R oversold (< -80) AND price above 1d EMA (uptrend) + volume
+            # Look for entries with Williams %R extremes, EMA trend filter, and volume confirmation
+            # Long: Williams %R oversold (<-80) AND price above 1d EMA50 (uptrend) AND volume confirmation
             if (williams_r[i] < -80 and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (> -20) AND price below 1d EMA (downtrend) + volume
+            # Short: Williams %R overbought (>-20) AND price below 1d EMA50 (downtrend) AND volume confirmation
             elif (williams_r[i] > -20 and close[i] < ema_50_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
