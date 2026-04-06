@@ -9,7 +9,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_EMA_PERIOD = 50
+WEEKLY_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
@@ -44,7 +44,7 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate weekly EMA for trend
-    ema_1w = calculate_ema(df_1w['close'].values, WEEKLY_EMA_PERIOD)
+    ema_1w = calculate_ema(df_1w['close'].values, WEEKLY_TREND_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate daily indicators
@@ -63,7 +63,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if weekly EMA not available
