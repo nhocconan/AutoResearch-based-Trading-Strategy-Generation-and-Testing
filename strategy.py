@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-Hypothesis: Use 1d EMA trend filter on 4h candles with Donchian breakouts and volume confirmation to capture strong momentum while filtering counter-trend moves. Target: 100-200 total trades over 4 years.
+12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+Hypothesis: Use 12h timeframe with Donchian breakouts filtered by 1d EMA trend and volume confirmation to capture medium-term momentum while avoiding whipsaws. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v2"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema_50 = ema(close_1d, 50)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Donchian channels (20-period) on 4h
+    # Donchian channels (20-period) on 12h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
