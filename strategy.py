@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13942_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13943_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
 # Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 50-150 trades over 4 years by using strict volume threshold (2.0x) and
+# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
 # requiring alignment with daily trend to avoid counter-trend whipsaws
 # Added: ATR-based trailing stop (2.5x) and exit on Donchian reversal or trend change
 
@@ -46,7 +46,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, 50)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
