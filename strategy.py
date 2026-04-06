@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Daily Trend + Volume Spike
-Hypothesis: Combines price channel breakouts with daily trend bias and volume
-confirmation to capture momentum on 6h timeframe. Works in bull (breakouts with
-trend) and bear (breakdowns with trend). Designed for moderate trade frequency
-(~15-30/year) to minimize fee drift while maintaining edge.
+6h Donchian(20) Breakout + Daily EMA Trend + Volume Spike + ATR Stop
+Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation
+to capture momentum while avoiding chop. Works in bull (breakouts with trend) and bear
+(breakdowns with trend). Designed for moderate trade frequency (~15-25/year) to minimize
+fee drift on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_dailytrend_vol_v1"
+name = "6h_donchian20_1dtrend_vol_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -82,7 +82,7 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR against daily trend
+            # Exit: price closes below Donchian lower OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
                 trend_bias_aligned[i] == -1 or
@@ -94,7 +94,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR against daily trend
+            # Exit: price closes above Donchian upper OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
                 trend_bias_aligned[i] == 1 or
@@ -106,19 +106,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + daily trend + volume spike
+            # Look for entries: Donchian breakout + 1d trend + volume spike
             # Minimum holding period: only allow new entry after 15 bars flat
             if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Long: bullish breakout with bullish daily trend and volume
+                # Long: bullish breakout with bullish 1d trend and volume
                 if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: bearish breakout with bearish daily trend and volume
+                # Short: bearish breakout with bearish 1d trend and volume
                 elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
