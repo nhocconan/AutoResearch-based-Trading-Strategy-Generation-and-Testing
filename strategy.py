@@ -3,27 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
-# Works in bull/bear because breakouts capture strong moves, 1w trend filters countertrend noise,
-# and volume ensures breakout legitimacy. Target: 80-150 trades over 4 years (20-38/year).
+# Hypothesis: 4-hour Donchian breakout with volume confirmation and ADX trend filter
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# ADX ensures we trade in trending conditions only, reducing false breakouts in ranging markets.
+# Target: 100-200 trades over 4 years (25-50/year) for balance between opportunity and cost.
 
-name = "exp_12888_12h_donchian20_1w_trend_vol_v1"
-timeframe = "12h"
+name = "exp_12889_4h_donchian20_vol_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.8
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -34,32 +31,54 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1h and 1w data ONCE before loop
-    df_1h = get_htf_data(prices, '1h')
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 1h EMA50 for trend filter
-    close_1h = df_1h['close'].values
-    ema_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_1h)
+    # Calculate daily ADX for trend filter
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    adx_daily = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
     
-    # Calculate 12h indicators
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -72,8 +91,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not available
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,16 +111,13 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Volume confirmation and ADX filter
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        adx_ok = adx_aligned[i] > ADX_THRESHOLD
         
-        # Trend filter: both 1h and 1w EMA50 must agree
-        trend_up = ema_1h_aligned[i] > ema_1w_aligned[i]
-        trend_down = ema_1h_aligned[i] < ema_1w_aligned[i]
-        
-        # Breakout conditions
-        breakout_long = volume_ok and trend_up and close[i] >= upper[i]
-        breakout_short = volume_ok and trend_down and close[i] <= lower[i]
+        # Breakout above/below Donchian channels
+        breakout_long = volume_ok and adx_ok and close[i] >= donchian_high[i]
+        breakout_short = volume_ok and adx_ok and close[i] <= donchian_low[i]
         
         # Generate signals
         if position == 0:
@@ -123,3 +139,148 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4-hour Donchian breakout with volume confirmation and ADX trend filter
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# ADX ensures we trade in trending conditions only, reducing false breakouts in ranging markets.
+# Target: 100-200 trades over 4 years (25-50/year) for balance between opportunity and cost.
+
+name = "exp_12889_4h_donchian20_vol_adx_v1"
+timeframe = "4h"
+leverage = 1.0
+
+# Parameters
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
+SIGNAL_SIZE = 0.30
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
+
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    
+    # Calculate daily ADX for trend filter
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
+    
+    adx_daily = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
+    
+    # Calculate 4-hour indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    
+    # Start from warmup period
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if ADX not available
+        if np.isnan(adx_aligned[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Volume confirmation and ADX filter
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        adx_ok = adx_aligned[i] > ADX_THRESHOLD
+        
+        # Breakout above/below Donchian channels
+        breakout_long = volume_ok and adx_ok and close[i] >= donchian_high[i]
+        breakout_short = volume_ok and adx_ok and close[i] <= donchian_low[i]
+        
+        # Generate signals
+        if position == 0:
+            if breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
