@@ -3,63 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13953_4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "exp_13954_1h_ema13_ema48_vol"
+timeframe = "1h"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Uses 12h EMA(50) as trend filter: price above EMA = bullish bias (only long),
-# price below EMA = bearish bias (only short). Entry on 4h Donchian breakout in
-# direction of 12h trend with volume > 1.5x average. Exit on Donchian reversal
-# or trend change. Designed for 75-200 total trades over 4 years (19-50/year)
-# to minimize fee drift. Works in bull (breaks above trend) and bear (breaks
-# below trend) with EMA filter. Uses Wilder's ATR(14) for stop loss.
+# Hypothesis: 1h EMA crossover (13/48) with volume confirmation and session filter (08-20 UTC).
+# Uses EMA crossover for momentum: EMA13 > EMA48 = bullish, EMA13 < EMA48 = bearish.
+# Entry on crossover with volume > 1.5x average during active session.
+# Designed for low trade frequency to avoid fee drag: ~20-30 trades/year.
+# Works in bull (bullish crossover) and bear (bearish crossover) markets.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Precompute session hours
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Calculate 12h EMA(50)
-    ema_12h = calculate_ema(df_12h['close'].values, 50)
-    
-    # Align EMA to 4h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # 4h data for Donchian, ATR, and volume
-    high = prices['high'].values
-    low = prices['low'].values
+    # Price and volume arrays
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # ATR for stop loss
-    atr = calculate_atr(high, low, close, 14)
+    # EMA indicators
+    ema_13 = calculate_ema(close, 13)
+    ema_48 = calculate_ema(close, 48)
     
     # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,78 +39,70 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20, 20) + 1
+    start = max(48, 20) + 1
     
     for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(ema_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stops
-        if position == 1:  # long position
-            # Check stop loss
-            if close[i] <= stop_price:
+        # Skip if required data not available
+        if np.isnan(ema_13[i]) or np.isnan(ema_48[i]) or np.isnan(volume_ma[i]):
+            if position != 0:
+                signals[i] = position * 0.20
+            else:
                 signals[i] = 0.0
-                position = 0
-                continue
+            continue
         
-        elif position == -1:  # short position
-            # Check stop loss
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # EMA crossover signals
+        ema_bullish = ema_13[i] > ema_48[i]
+        ema_bearish = ema_13[i] < ema_48[i]
         
-        # Determine bias from 12h EMA
-        bullish_bias = close[i] > ema_aligned[i]  # price above EMA = bullish
-        bearish_bias = close[i] < ema_aligned[i]  # price below EMA = bearish
+        # Previous EMA values for crossover detection
+        ema_13_prev = ema_13[i-1]
+        ema_48_prev = ema_48[i-1]
+        ema_bullish_prev = ema_13_prev > ema_48_prev
+        ema_bearish_prev = ema_13_prev < ema_48_prev
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Donchian breakout signals (using previous bar's bands)
-        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
-        
-        # Entry signals - only in direction of 12h trend
-        long_signal = bullish_bias and volume_ok and breakout_up
-        short_signal = bearish_bias and volume_ok and breakout_down
+        # Crossover detection
+        bullish_cross = ema_bullish and not ema_bullish_prev  # EMA13 crosses above EMA48
+        bearish_cross = ema_bearish and not ema_bearish_prev  # EMA13 crosses below EMA48
         
         # Generate signals
         if position == 0:
-            if long_signal:
-                signals[i] = 0.25
+            if bullish_cross and volume_ok:
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
-            elif short_signal:
-                signals[i] = -0.25
+            elif bearish_cross and volume_ok:
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or trend change to bearish
-            if close[i] < donchian_lower[i] or not bullish_bias:
+            # Exit long on bearish crossover
+            if bearish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short on Donchian breakout or trend change to bullish
-            if close[i] > donchian_upper[i] or not bearish_bias:
+            # Exit short on bullish crossover
+            if bullish_cross:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
