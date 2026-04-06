@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot levels from daily data with volume confirmation and 1-week trend filter.
-# Captures mean-reversion bounces off institutional pivot levels in ranging markets.
-# Uses daily Camarilla levels (H3/L3) for entry, 1-week EMA for trend filter, and volume spike for confirmation.
-# Works in both bull and bear markets by fading extremes during ranging conditions.
+# Hypothesis: 12h Camarilla pivot with daily trend filter and volume confirmation.
+# Captures mean-reversion at institutional levels in ranging markets and breakouts in trending markets.
+# Uses Camarilla levels (H3/L3) from prior day as entry zones with daily EMA trend filter.
+# Works in bull markets (buying dips at L3 in uptrend) and bear markets (selling rallies at H3 in downtrend).
 # Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13562_12h_camarilla1d_1w_ema_vol_v1"
+name = "exp_13562_12h_camarilla1d_vol_filter_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULT = 1.1
-EMA_PERIOD = 21
+CAMARILLA_PERIOD = 1  # Use prior day's range
+EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -35,42 +35,47 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the period"""
+    # Camarilla levels based on previous period's range
+    range_val = high - low
+    h3 = close + (range_val * 1.1 / 4)
+    l3 = close - (range_val * 1.1 / 4)
+    h4 = close + (range_val * 1.1 / 2)
+    l4 = close - (range_val * 1.1 / 2)
+    return h3, l3, h4, l4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Camarilla levels ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels (H3, L3)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: H3/L3
-    h3_1d = pivot_1d + (range_1d * CAMARILLA_MULT / 2.0)
-    l3_1d = pivot_1d - (range_1d * CAMARILLA_MULT / 2.0)
-    
-    # Align to 12h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # Load weekly EMA for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    h3, l3, h4, l4 = calculate_camarilla(high_1d, low_1d, close_1d)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -84,8 +89,8 @@ def generate_signals(prices):
     start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not available
-        if np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]):
+        # Skip if EMA or Camarilla not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,32 +109,29 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using 12h volume)
-        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-        volume_ok = not np.isnan(volume_ma[i]) and volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price relative to weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Mean-reversion signals at Camarilla H3/L3 levels
-        touch_h3 = high[i] >= h3_1d_aligned[i]  # Price touches or exceeds H3
-        touch_l3 = low[i] <= l3_1d_aligned[i]   # Price touches or goes below L3
+        # Mean reversion signals at Camarilla H3/L3 with trend filter
+        long_signal = volume_ok and (low[i] <= l3_aligned[i]) and uptrend
+        short_signal = volume_ok and (high[i] >= h3_aligned[i]) and downtrend
         
-        # Generate signals: fade extremes in ranging conditions
+        # Generate signals
         if position == 0:
-            # Short at H3 resistance in downtrend or ranging
-            if touch_h3 and (not uptrend) and volume_ok:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            # Long at L3 support in uptrend or ranging
-            elif touch_l3 and (not downtrend) and volume_ok:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
