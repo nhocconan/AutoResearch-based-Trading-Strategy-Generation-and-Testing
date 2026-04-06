@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
 # Goes long when price breaks above 20-period high with 1d EMA uptrend and volume > average.
 # Goes short when price breaks below 20-period low with 1d EMA downtrend and volume > average.
 # Uses ATR-based stoploss to limit downside. Designed to work in both bull and bear markets
 # by following the trend on higher timeframe while capturing breakouts on lower timeframe.
-# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled risk.
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -110,5 +110,3 @@ def generate_signals(prices):
                     entry_price = close[i]
     
     return signals
-
-</think>
