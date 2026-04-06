@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Daily Trend + Volume Confirmation
-Hypothesis: Daily trend filters 4h Donchian breakouts to reduce false signals.
+12h Donchian Breakout + Daily Trend + Volume Confirmation
+Hypothesis: Daily trend filters 12h Donchian breakouts to reduce false signals.
 Volume confirmation ensures momentum behind breakouts.
 Works in bull via breakouts, bear via breakdowns with trend filter.
-Target: 75-200 total trades over 4 years (19-50/year).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12486_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12488_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -55,7 +55,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
