@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_rsi_mean_reversion_4h1d_trend_volume_v1
-Hypothesis: RSI mean reversion on 1h timeframe with 4h/1d trend filter and volume confirmation.
-In bull markets: buy oversold RSI during uptrends. In bear markets: sell overbought RSI during downtrends.
-Volume filter ensures institutional participation. Targets 15-35 trades/year with strict entry conditions.
-Works in both bull and bear markets by trading in direction of higher timeframe trend.
+6h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Weekly pivot levels act as strong support/resistance on 6h timeframe.
+Price reversals at weekly Camarilla levels with volume confirmation and trend alignment
+capture both mean reversion and breakout moves. Weekly trend filter ensures trading
+in direction of higher timeframe momentum, working in both bull and bear markets.
+Targets 12-37 trades/year with disciplined entries to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_mean_reversion_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "6h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,89 +27,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA200 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 1-week OHLC for Camarilla pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla levels for each week
+    camarilla_range = 1.1 * (high_1w - low_1w) / 12
+    camarilla_s1 = close_1w - camarilla_range  # Support level 1
+    camarilla_r1 = close_1w + camarilla_range  # Resistance level 1
     
-    # 14-period RSI on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 6h timeframe
+    camarilla_s1_6h = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    camarilla_r1_6h = align_htf_to_ltf(prices, df_1w, camarilla_r1)
     
-    # 20-period volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # 20-period SMA for volume average
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema200_4h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_6h[i]) or 
+            np.isnan(camarilla_s1_6h[i]) or 
+            np.isnan(camarilla_r1_6h[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
-        
-        # Trend alignment: both 4h and 1d EMAs agree
-        uptrend = close[i] > ema200_4h_aligned[i] and close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema200_4h_aligned[i] and close[i] < ema50_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: RSI overbought OR trend breaks down
-            if rsi[i] >= 70 or not uptrend:
+            # Exit: price reaches resistance OR trend turns down
+            if close[i] >= camarilla_r1_6h[i] or close[i] < ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: RSI oversold OR trend breaks up
-            if rsi[i] <= 30 or not downtrend:
+            # Exit: price reaches support OR trend turns up
+            if close[i] <= camarilla_s1_6h[i] or close[i] > ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: RSI oversold + volume confirmation + uptrend
-            if (rsi[i] <= 30 and 
+            # Long: price touches support + volume confirmation + uptrend
+            if (close[i] <= camarilla_s1_6h[i] and 
                 vol_confirm and 
-                uptrend):
+                close[i] > ema50_6h[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: RSI overbought + volume confirmation + downtrend
-            elif (rsi[i] >= 70 and 
+                signals[i] = 0.25
+            # Short: price touches resistance + volume confirmation + downtrend
+            elif (close[i] >= camarilla_r1_6h[i] and 
                   vol_confirm and 
-                  downtrend):
+                  close[i] < ema50_6h[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
