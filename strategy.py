@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_pivot_volume_v2"
-timeframe = "12h"
+name = "daily_ema_rsi_weekly_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -18,88 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Calculate daily EMA(20) for momentum
+    ema_fast = pd.Series(close).ewm(span=20, adjust=False).mean().values
     
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Calculate daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Calculate Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (20-period average)
+    # Volume filter: daily volume > 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_ema_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions (previous bar)
-        breakout_up = close[i] > donchian_high[i-1]
-        breakout_down = close[i] < donchian_low[i-1]
+        # Trend filter: price above/below weekly EMA(50)
+        trend_up = close[i] > weekly_ema_aligned[i]
+        trend_down = close[i] < weekly_ema_aligned[i]
+        
+        # Momentum: EMA(20) direction
+        ema_up = ema_fast[i] > ema_fast[i-1]
+        ema_down = ema_fast[i] < ema_fast[i-1]
+        
+        # RSI conditions
+        rsi_overbought = rsi_values[i] > 70
+        rsi_oversold = rsi_values[i] < 30
         
         # Volume confirmation
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Pivot levels
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        r2_level = r2_aligned[i]
-        s2_level = s2_aligned[i]
-        
-        # Exit conditions: opposite Donchian break
-        exit_long = close[i] < donchian_low[i-1]
-        exit_short = close[i] > donchian_high[i-1]
-        
         if position == 1:  # Long position
-            # Exit on breakdown
-            if exit_long:
+            # Exit on trend reversal or overbought RSI
+            if not trend_up or rsi_overbought:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on breakout
-            if exit_short:
+            # Exit on trend reversal or oversold RSI
+            if not trend_down or rsi_oversold:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: breakout above R1 + volume confirmation
-            if breakout_up and close[i] > r1_level and vol_confirm:
+            # Enter long: uptrend + EMA rising + oversold RSI + volume
+            if trend_up and ema_up and rsi_oversold and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: breakout below S1 + volume confirmation
-            elif breakout_down and close[i] < s1_level and vol_confirm:
+            # Enter short: downtrend + EMA falling + overbought RSI + volume
+            elif trend_down and ema_down and rsi_overbought and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
