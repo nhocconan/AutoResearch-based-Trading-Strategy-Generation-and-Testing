@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_ema_volume_v3
-Hypothesis: On 6-hour timeframe, use daily Camarilla pivot levels for mean reversion at S3/R3 and breakout continuation at S4/R4, with 1-day EMA50 for trend filter and volume confirmation. Targets 15-25 trades/year to minimize fee drag while capturing both reversals and breakouts. Works in bull (breakouts at S4/R4) and bear (reversals at S3/R3) markets by adapting to price action relative to pivots and trend.
+12h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: On 12-hour timeframe, use weekly (1w) Camarilla pivot levels for mean reversion at S3/R3 and breakout continuation at S4/R4, with daily EMA50 for trend filter and volume confirmation. Targets 15-25 trades/year to minimize fee drag. Works in bull (breakouts at S4/R4) and bear (reversals at S3/R3) markets by adapting to price action relative to pivots and trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_ema_volume_v3"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_camarilla(high, low, close):
@@ -30,7 +30,7 @@ def calculate_camarilla(high, low, close):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -39,37 +39,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    w_high = df_1w['high'].values
+    w_low = df_1w['low'].values
+    w_close = df_1w['close'].values
     
-    # Calculate daily Camarilla levels
-    camarilla_data = np.array([calculate_camarilla(d_high[i], d_low[i], d_close[i]) 
-                               for i in range(len(d_close))])
+    # Calculate weekly Camarilla levels
+    camarilla_data = np.array([calculate_camarilla(w_high[i], w_low[i], w_close[i]) 
+                               for i in range(len(w_close))])
     # Columns: pivot, s1, s2, s3, s4, r1, r2, r3, r4
-    camarilla_pivot = camarilla_data[:, 0]
     camarilla_s3 = camarilla_data[:, 3]
     camarilla_s4 = camarilla_data[:, 4]
     camarilla_r3 = camarilla_data[:, 7]
     camarilla_r4 = camarilla_data[:, 8]
     
-    # Calculate daily EMA50 for trend filter
+    # Get daily EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    d_close = df_1d['close'].values
     daily_close_series = pd.Series(d_close)
     ema50 = daily_close_series.ewm(span=50, adjust=False).mean().values
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
     
-    # Volume filter: 6h volume > 1.5x 20-period average
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = vol_series / vol_ma
@@ -78,7 +82,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if daily EMA not available
         if np.isnan(ema50_aligned[i]):
             signals[i] = 0.0
