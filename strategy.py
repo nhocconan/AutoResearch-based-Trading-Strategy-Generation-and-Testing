@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Spike
-Hypothesis: Breakouts above/below Donchian channels capture momentum.
+12h Donchian Breakout with 1d Trend Filter and Volume Spike
+Hypothesis: Breakouts above/below Donchian channels capture momentum with lower frequency.
 Using 1d EMA50 as trend filter provides stronger trend identification.
 Volume spikes confirm institutional participation.
-This should work in both bull and bear regimes by following the trend.
-Target: 20-50 trades/year per symbol to minimize fee drag.
+12h timeframe reduces trade frequency to avoid fee drag while capturing trends.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
