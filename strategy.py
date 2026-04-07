@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Donchian breakout with daily volume confirmation and volatility filter
-# Uses weekly Donchian(20) breakout for trend direction, daily volume surge for confirmation,
-# and ATR-based volatility filter to avoid choppy markets. Designed for very low trade frequency
-# (target: 5-15 trades/year) to minimize fee drag. Works in bull markets via breakout continuation
-# and in bear markets via mean reversion at channel extremes.
+# Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation
+# Williams %R(14) identifies overbought/oversold conditions for mean reversion
+# 1d ADX(14) filters trades to only take signals in trending markets (ADX > 25)
+# Volume confirmation requires current volume > 1.5x 20-period average
+# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag
+# Works in bull markets via trend-aligned mean reversion and in bear markets via same logic
 
-name = "weekly_donchian20_daily_volume_vol_filter_v1"
-timeframe = "1d"
+name = "6h_williamsr_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,61 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Williams %R(14) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Rolling max/min for Donchian channels
-    high_max = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # ADX(14) on daily data
+    # Calculate +DM and -DM
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to daily timeframe (shifted by 1 for completed weekly bars only)
-    donchian_high = align_htf_to_ltf(prices, df_1w, high_max)
-    donchian_low = align_htf_to_ltf(prices, df_1w, low_min)
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
     
-    # Daily volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Smooth using Wilder's smoothing (alpha = 1/period)
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    dx = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid trading in extremely high volatility
-        vol_ratio = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
-        vol_filter = vol_ratio < 2.0  # Only trade when volatility is below 2x average
+        # ADX filter: only trade in trending markets (ADX > 25)
+        trending = adx_1d_aligned[i] > 25
         
-        # Volume confirmation: require volume above average
-        vol_confirm = volume[i] > vol_ma[i]
+        # Williams %R levels: oversold < -80, overbought > -20
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
-        # Long breakout: price breaks above weekly Donchian high
-        long_breakout = close[i] > donchian_high[i] and vol_filter and vol_confirm
-        
-        # Short breakout: price breaks below weekly Donchian low
-        short_breakout = close[i] < donchian_low[i] and vol_filter and vol_confirm
-        
-        if long_breakout:
+        # Long conditions: ADX trending + oversold + volume confirmation
+        if trending and oversold and volume_filter[i]:
             signals[i] = 0.25
-        elif short_breakout:
+        # Short conditions: ADX trending + overbought + volume confirmation
+        elif trending and overbought and volume_filter[i]:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
