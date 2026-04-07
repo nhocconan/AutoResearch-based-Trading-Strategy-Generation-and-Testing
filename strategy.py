@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Weekly Range Breakout with Volume and ATR Filter
-# Hypothesis: Price breaking above/below the previous week's high/low indicates
-# continuation of the previous week's trend. Volume confirms institutional participation.
-# ATR filter ensures volatility is sufficient for breakout. Works in both bull and bear markets:
-# In bull markets, only long breakouts are taken; in bear markets, only short breakdowns.
-# Target: 15-35 trades/year (60-140 over 4 years).
+# Strategy: 12h Weekly Range Breakout with Volume Confirmation
+# Hypothesis: Price breaking above/below the previous week's high/low indicates continuation
+# of the weekly trend. Volume confirms institutional participation. Works in both bull and bear:
+# - Bull market: Only long breakouts when price above weekly 200 EMA
+# - Bear market: Only short breakdowns when price below weekly 200 EMA
+# Target: 12-37 trades/year (50-150 over 4 years) with discrete position sizing to minimize fees.
 
-name = "4h_weekly_range_breakout_volume_atr_v1"
-timeframe = "4h"
+name = "12h_weekly_range_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,57 +40,53 @@ def generate_signals(prices):
     prev_weekly_high[0] = prev_weekly_high[1] if len(prev_weekly_high) > 1 else 0
     prev_weekly_low[0] = prev_weekly_low[1] if len(prev_weekly_low) > 1 else 0
     
-    # Align to 4h timeframe (use previous week's levels)
+    # Align to 12h timeframe (use previous week's levels)
     weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, prev_weekly_high)
     weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, prev_weekly_low)
     
-    # ATR for volatility filter (14-period)
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    high_close[0] = 0
-    low_close[0] = 0
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly trend filter: price above/below 200 EMA (using weekly close)
+    weekly_close_series = pd.Series(df_weekly['close'].values)
+    weekly_ema_200 = weekly_close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    weekly_ema_200_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema_200)
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(200, n):
         # Skip if required data not available
         if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+            np.isnan(weekly_ema_200_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below previous week's low or volatility drops
-            if low[i] < weekly_low_aligned[i] or atr[i] < 0.5 * atr[i-1]:
+            # Exit: price falls below previous week's low or trend turns bearish or volume drops
+            if (low[i] < weekly_low_aligned[i] or close[i] < weekly_ema_200_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above previous week's high or volatility drops
-            if high[i] > weekly_high_aligned[i] or atr[i] < 0.5 * atr[i-1]:
+            # Exit: price rises above previous week's high or trend turns bullish or volume drops
+            if (high[i] > weekly_high_aligned[i] or close[i] > weekly_ema_200_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above previous week's high with volume and sufficient volatility
+            # Long: price breaks above previous week's high with volume and bullish trend
             if ((high[i] > weekly_high_aligned[i] or close[i] > weekly_high_aligned[i]) and 
-                vol_filter[i] and atr[i] > 0.5 * atr[i-1]):
+                close[i] > weekly_ema_200_aligned[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below previous week's low with volume and sufficient volatility
+            # Short: price breaks below previous week's low with volume and bearish trend
             elif ((low[i] < weekly_low_aligned[i] or close[i] < weekly_low_aligned[i]) and 
-                  vol_filter[i] and atr[i] > 0.5 * atr[i-1]):
+                  close[i] < weekly_ema_200_aligned[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
