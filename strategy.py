@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1D Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-Long when price breaks above 20-day Donchian high with expanding volume AND weekly EMA trend up
-Short when price breaks below 20-day Donchian low with expanding volume AND weekly EMA trend down
-Exit when price crosses back to Donchian midline
-Designed for low trade frequency (<25/year) to minimize fee drag while capturing trends.
+12h Donchian Breakout with Volume Confirmation and Weekly Trend Filter
+Long when price breaks above Donchian(20) upper band with volume > 1.5x average AND weekly EMA trend up
+Short when price breaks below Donchian(20) lower band with volume > 1.5x average AND weekly EMA trend down
+Exit when price crosses back to Donchian middle line (10-day average)
+Uses Donchian channels that adapt to price extremes, capturing breakouts in trending markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v2"
-timeframe = "1d"
+name = "12h_donchian_breakout_volume_weekly_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,10 +26,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # === Donchian Channels (20-period) ===
+    # Upper band: 20-period high
+    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Middle line: average of upper and lower
+    donch_middle = (donch_upper + donch_lower) / 2
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,38 +47,38 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
+            np.isnan(donch_middle[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below midline
-            if close[i] < donchian_mid[i]:
+            # Exit: price crosses back below middle line
+            if close[i] < donch_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above midline
-            if close[i] > donchian_mid[i]:
+            # Exit: price crosses back above middle line
+            if close[i] > donch_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Need expanding volume (above average)
-            if vol_ratio[i] < 1.2:
+            if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
             # Entry: Donchian breakout with volume confirmation AND weekly trend filter
-            if close[i] > donchian_high[i] and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+            if close[i] > donch_upper[i] and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
                 # Breakout above upper channel with rising weekly EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donchian_low[i] and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+            elif close[i] < donch_lower[i] and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
                 # Breakdown below lower channel with falling weekly EMA -> short
                 position = -1
                 signals[i] = -0.25
