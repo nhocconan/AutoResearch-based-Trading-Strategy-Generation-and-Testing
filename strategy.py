@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1w trend filter and volume confirmation.
+Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation.
 In bull market (1w close > 1w EMA50): long on 20-bar high breakout.
 In bear market (1w close < 1w EMA50): short on 20-bar low breakout.
 Volume must be above 20-period average to confirm breakout strength.
-Target: 50-150 total trades over 4 years (12-37/year).
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1w_trend_volume_v1"
-timeframe = "12h"
+name = "1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +32,7 @@ def generate_signals(prices):
         return np.zeros(n)
     one_w_close = df_1w['close'].values
     one_w_ema = pd.Series(one_w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)  # already shifted
+    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)
     
     # === DONCHIAN CHANNEL (LTF) ===
     lookback = 20
@@ -77,12 +77,12 @@ def generate_signals(prices):
             # Entry logic based on 1w trend
             if bull_trend:
                 # In bull market: long on breakout above Donchian high
-                if high[i] > high_max[i-1]:  # Use previous bar's high to avoid look-ahead
+                if high[i] > high_max[i-1]:
                     position = 1
                     signals[i] = 0.25
             else:
                 # In bear market: short on breakdown below Donchian low
-                if low[i] < low_min[i-1]:  # Use previous bar's low to avoid look-ahead
+                if low[i] < low_min[i-1]:
                     position = -1
                     signals[i] = -0.25
     
