@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
-# Long when price breaks above Donchian upper(20) and weekly pivot shows bullish bias
-# Short when price breaks below Donchian lower(20) and weekly pivot shows bearish bias
-# Weekly pivot: price above weekly VWAP = bullish, below = bearish
-# Volume confirmation: current volume > 2.0 * average volume of last 20 periods
-# Position size: 0.25 (25% of capital)
-# Target: 60-150 total trades over 4 years (15-38/year)
-# Uses weekly trend filter to avoid counter-trend trades in choppy markets
+# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above Donchian upper(20) and weekly trend is bullish
+# Short when price breaks below Donchian lower(20) and weekly trend is bearish
+# Weekly trend: price above weekly SMA(50) = bullish, below = bearish
+# Volume confirmation: current volume > 1.8 * average volume of last 20 periods
+# Position size: 0.28 (28% of capital)
+# Target: 60-120 total trades over 4 years (15-30/year)
 
-name = "6h_donchian20_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_weekly_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,17 +26,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot/VWAP filter
+    # Weekly data for trend filter (SMA50)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly VWAP for trend filter
-    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3
-    vwap_numerator = np.cumsum(typical_price_1w * df_1w['volume'].values)
-    vwap_denominator = np.cumsum(df_1w['volume'].values)
-    vwap_1w = vwap_numerator / vwap_denominator
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # Weekly SMA(50) for trend filter
+    sma_50_1w = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -55,12 +51,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if required data not available
-        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.28
             else:
                 signals[i] = 0.0
             continue
@@ -77,7 +73,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:  # short position
             # Stoploss: 2.5 * ATR
             if close[i] > entry_price + 2.5 * atr[i]:
@@ -90,27 +86,27 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:
             # Calculate Donchian channels (20-period)
-            highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
-            lowest_low = low[i-20:i].min() if i >= 20 else low[:i].min()
+            highest_high = high[i-20:i].max()
+            lowest_low = low[i-20:i].min()
             
-            # Weekly trend filter: price above/below weekly VWAP
-            bullish = close[i] > vwap_1w_aligned[i]
-            bearish = close[i] < vwap_1w_aligned[i]
+            # Weekly trend filter: price above/below weekly SMA(50)
+            bullish = close[i] > sma_50_1w_aligned[i]
+            bearish = close[i] < sma_50_1w_aligned[i]
             
-            # Volume confirmation: current volume > 2.0 * average volume
-            volume_confirm = volume[i] > 2.0 * vol_avg[i]
+            # Volume confirmation: current volume > 1.8 * average volume
+            volume_confirm = volume[i] > 1.8 * vol_avg[i]
             
             # Long: price breaks above Donchian upper(20) in bullish weekly trend with volume
             if close[i] > highest_high and bullish and volume_confirm:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian lower(20) in bearish weekly trend with volume
             elif close[i] < lowest_low and bearish and volume_confirm:
-                signals[i] = -0.25
+                signals[i] = -0.28
                 position = -1
                 entry_price = close[i]
     
