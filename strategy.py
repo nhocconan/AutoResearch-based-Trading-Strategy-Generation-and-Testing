@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with weekly trend filter and volume confirmation
-# Hypothesis: Donchian breakouts capture major moves; weekly trend filters ensure we trade with the primary trend; volume confirms breakout strength.
-# Works in bull via upward breakouts, in bear via downward breakdowns. Designed for low trade frequency (~15-25/year) to minimize fee drag.
-name = "12h_donchian20_1w_trend_volume_v1"
-timeframe = "12h"
+# Strategy: Daily KAMA + RSI + Chop Filter
+# Hypothesis: KAMA adapts to market regime, RSI identifies extremes, chop filter avoids whipsaws.
+# Works in bull via KAMA trend following, in bear via mean reversion at RSI extremes when chop high.
+# Target: 10-25 trades/year to minimize fee drag on 1d timeframe.
+name = "daily_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,69 +22,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (HTF)
+    # Get weekly data for chop filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly 50-period EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate KAMA(10) on close
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    er = np.zeros_like(close)
+    for i in range(1, len(close)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 1.0
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get daily data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate Chop(14) from weekly data
+    # True Range
+    tr1 = df_1w['high'].values[1:] - df_1w['low'].values[1:]
+    tr2 = np.abs(df_1w['high'].values[1:] - df_1w['close'].values[:-1])
+    tr3 = np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1])
+    tr_w = np.concatenate([[np.max([df_1w['high'].values[0] - df_1w['low'].values[0], 
+                                   np.abs(df_1w['high'].values[0] - df_1w['close'].values[0]), 
+                                   np.abs(df_1w['low'].values[0] - df_1w['close'].values[0])])], 
+                          np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Highest high and lowest low over 14 periods
+    hh_w = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
+    ll_w = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
+    
+    # Chop calculation
+    chop_w = 100 * np.log10(hh_w - ll_w) / np.log10(14) / np.log10(np.sum(atr_w, axis=0))
+    # Fix: sum over rolling window
+    atr_sum_w = pd.Series(tr_w).rolling(window=14, min_periods=14).sum().values
+    chop_w = 100 * np.log10(hh_w - ll_w) / np.log10(14) / np.log10(atr_sum_w)
+    chop_w = np.where(atr_sum_w > 0, chop_w, 50)  # default to neutral chop
+    
+    # Align weekly chop to daily
+    chop_w_aligned = align_htf_to_ltf(prices, df_1w, chop_w)
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        # Chop filter: only trade when chop > 61.8 (ranging market) for mean reversion
+        # or when chop < 38.2 (trending) for trend following
+        chop = chop_w_aligned[i]
+        is_ranging = chop > 61.8
+        is_trending = chop < 38.2
         
-        if position == 1:  # Long position
-            # Exit: price closes below Donchian low (trend reversal)
-            if close[i] < donchian_low[i]:
-                position = 0
-                signals[i] = 0.0
+        if is_ranging:
+            # Mean reversion in ranging markets
+            if close[i] > kama[i] and rsi[i] < 30:
+                signals[i] = 0.25  # Long
+            elif close[i] < kama[i] and rsi[i] > 70:
+                signals[i] = -0.25  # Short
             else:
-                signals[i] = 0.25  # Maintain long position
-        elif position == -1:  # Short position
-            # Exit: price closes above Donchian high (trend reversal)
-            if close[i] > donchian_high[i]:
-                position = 0
                 signals[i] = 0.0
+        elif is_trending:
+            # Trend following in trending markets
+            if close[i] > kama[i]:
+                signals[i] = 0.25  # Long
+            elif close[i] < kama[i]:
+                signals[i] = -0.25  # Short
             else:
-                signals[i] = -0.25  # Maintain short position
-        else:  # Flat, look for entry
-            # Enter long: price closes above Donchian high + weekly uptrend + volume confirmation
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                vol_confirm):
-                position = 1
-                signals[i] = 0.25
-            # Enter short: price closes below Donchian low + weekly downtrend + volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  vol_confirm):
-                position = -1
-                signals[i] = -0.25
+                signals[i] = 0.0
+        else:
+            # Neutral chop - no trade
+            signals[i] = 0.0
     
     return signals
