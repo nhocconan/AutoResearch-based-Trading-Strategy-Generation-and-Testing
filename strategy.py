@@ -1,19 +1,20 @@
+# 12h donchian20_1d_vol_adx_v1
+# Hypothesis: 12-hour Donchian(20) breakout with daily volume confirmation and daily ADX trend filter.
+# Long when price breaks above 12h Donchian high + daily volume > 1.2x 20-day average + daily ADX > 20
+# Short when price breaks below 12h Donchian low + daily volume > 1.2x 20-day average + daily ADX > 20
+# Exit when price crosses opposite Donchian level or ADX falls below 15
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Uses 1d timeframe for volume and ADX filters to reduce noise and avoid overtrading.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray with daily Bollinger mean reversion filter
-# Long when Bull Power > 0 and price < Bollinger Lower Band (20,2.0)
-# Short when Bear Power < 0 and price > Bollinger Upper Band (20,2.0)
-# Exit when price crosses EMA(13) or opposite signal occurs
-# Stoploss at 2.0 * ATR(14)
-# Position size: 0.25
-# Uses EMA(13) for trend and Bollinger Bands for mean reversion zones
-# Target: 50-150 total trades over 4 years (12-37/year)
-
-name = "6h_elder_ray_bb_mr_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_vol_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,24 +26,57 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for EMA and Bollinger Bands
+    # 1-day data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA(13) for trend filter
-    close_1d = df_1d['close'].values
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    # Daily volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Daily Bollinger Bands (20,2.0)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Daily ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 12-hour Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -53,19 +87,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Elder Ray components
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_13_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -78,8 +108,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below EMA(13) or mean reversion signal
-            elif close[i] < ema_13_aligned[i] or low[i] > lower_bb_aligned[i]:
+            # Exit: price crosses below Donchian low OR ADX < 15 (trend weakening)
+            elif close[i] < lowest_low[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -91,22 +121,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above EMA(13) or mean reversion signal
-            elif close[i] > ema_13_aligned[i] or high[i] < upper_bb_aligned[i]:
+            # Exit: price crosses above Donchian high OR ADX < 15 (trend weakening)
+            elif close[i] > highest_high[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray + Bollinger mean reversion
-            # Long: Bull Power > 0 and price < Lower Bollinger Band
-            if bull_power[i] > 0 and low[i] < lower_bb_aligned[i]:
+            # Look for entries: Donchian breakout with volume confirmation and ADX trend filter
+            # Volume filter: volume > 1.2x 20-day average
+            volume_filter = volume[i] > 1.2 * volume_ma_aligned[i]
+            # Trend filter: daily ADX > 20 (trending market)
+            adx_filter = adx_aligned[i] > 20
+            
+            # Long: price breaks above Donchian high + volume filter + ADX filter
+            if close[i] > highest_high[i] and volume_filter and adx_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Bear Power < 0 and price > Upper Bollinger Band
-            elif bear_power[i] < 0 and high[i] > upper_bb_aligned[i]:
+            # Short: price breaks below Donchian low + volume filter + ADX filter
+            elif close[i] < lowest_low[i] and volume_filter and adx_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
