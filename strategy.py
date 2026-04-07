@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Range Breakout with Volume and Trend Filter
-# Hypothesis: Price breaking above/below the previous day's high/low indicates
-# continuation of the previous day's trend. Volume confirms institutional participation.
-# Trend filter (price above/below 200 EMA) ensures alignment with higher timeframe trend.
-# Works in both bull and bear markets: in bull, only long breakouts; in bear, only short breakdowns.
-# Target: 20-50 trades/year (80-200 over 4 years).
+# Strategy: 4h ADX Trend Strength with Volume Confirmation
+# Hypothesis: Strong trends (ADX > 25) with volume confirmation provide
+# reliable directional moves. Uses +DI/-DI crossovers for entries.
+# ADX filters out ranging markets, reducing false signals.
+# Works in both bull and bear markets by following the trend direction.
+# Target: 20-40 trades/year (80-160 over 4 years).
 
-name = "4h_daily_range_breakout_volume_trend_v1"
+name = "4h_adx_trend_strength_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,67 +25,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for range calculation
+    # Get daily data for trend context
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate daily data (previous day's OHLC)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Calculate ADX (+DI, -DI) on 4h data
+    period = 14
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
-    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align to 4h timeframe (use previous day's levels)
-    daily_high_aligned = align_htf_to_ltf(prices, df_daily, prev_daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_daily, prev_daily_low)
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        for i in range(len(data)):
+            if np.isnan(result[i-1]) if i > 0 else True:
+                result[i] = data[i]
+            else:
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # 1d trend filter: price above/below 200 EMA
+    tr_sum = wilders_smoothing(tr, period)
+    plus_dm_sum = wilders_smoothing(plus_dm, period)
+    minus_dm_sum = wilders_smoothing(minus_dm, period)
+    
+    # Avoid division by zero
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period)
+    
+    # Daily trend filter: price above/below 50 EMA
     close_series = pd.Series(close)
-    ema_200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_50_daily = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
-            np.isnan(ema_200[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
+            np.isnan(daily_ema_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below previous day's low or trend turns bearish or volume drops
-            if (low[i] < daily_low_aligned[i] or close[i] < ema_200[i] or not vol_filter[i]):
+            # Exit: ADX weakens OR DI cross turns bearish OR trend filter fails OR volume drops
+            if (adx[i] < 20 or minus_di[i] > plus_di[i] or close[i] < daily_ema_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above previous day's high or trend turns bullish or volume drops
-            if (high[i] > daily_high_aligned[i] or close[i] > ema_200[i] or not vol_filter[i]):
+            # Exit: ADX weakens OR DI cross turns bullish OR trend filter fails OR volume drops
+            if (adx[i] < 20 or plus_di[i] > minus_di[i] or close[i] > daily_ema_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above previous day's high with volume and bullish trend
-            if ((high[i] > daily_high_aligned[i] or close[i] > daily_high_aligned[i]) and 
-                close[i] > ema_200[i] and vol_filter[i]):
+            # Long: ADX strong AND +DI crosses above -DI AND price above daily EMA AND volume
+            if (adx[i] > 25 and plus_di[i] > minus_di[i] and 
+                plus_di[i-1] <= minus_di[i-1] and  # Cross just happened
+                close[i] > daily_ema_aligned[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below previous day's low with volume and bearish trend
-            elif ((low[i] < daily_low_aligned[i] or close[i] < daily_low_aligned[i]) and 
-                  close[i] < ema_200[i] and vol_filter[i]):
+            # Short: ADX strong AND -DI crosses above +DI AND price below daily EMA AND volume
+            elif (adx[i] > 25 and minus_di[i] > plus_di[i] and 
+                  minus_di[i-1] <= plus_di[i-1] and  # Cross just happened
+                  close[i] < daily_ema_aligned[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
