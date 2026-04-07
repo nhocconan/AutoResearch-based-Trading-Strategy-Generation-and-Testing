@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and weekly trend filter
-# Long when price breaks above 4h 20-period Donchian high + daily volume > 1.5x 20-period daily average + weekly RSI > 50
-# Short when price breaks below 4h 20-period Donchian low + daily volume > 1.5x 20-period daily average + weekly RSI < 50
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1w RSI trend filter
+# Long when price breaks above 20-period Donchian high + daily volume > 1.3x 20-period daily average + weekly RSI > 50
+# Short when price breaks below 20-period Donchian low + daily volume > 1.3x 20-period daily average + weekly RSI < 50
 # Exit when price crosses opposite Donchian level (long exits at Donchian low, short exits at Donchian high)
-# Stoploss at 2.5 * ATR(14)
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses daily volume for confirmation and weekly RSI for trend strength
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Target: 75-150 total trades over 4 years (19-38/year) - within 50-200 acceptable range
 
-name = "4h_donchian20_1d_vol_weekly_rsi_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_vol_1w_rsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +37,7 @@ def generate_signals(prices):
     volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Weekly RSI (14-period) for trend filter
+    # 1-week RSI (14-period) for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 14:
         return np.zeros(n)
@@ -55,7 +54,7 @@ def generate_signals(prices):
     rsi_1w = 100 - (100 / (1 + rs))
     rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # 4-hour 20-period Donchian channels
+    # 20-period Donchian channels
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -84,8 +83,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -97,8 +96,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -111,8 +110,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout with volume confirmation and RSI trend filter
-            # Volume filter: volume > 1.5x 20-period daily average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
+            # Volume filter: volume > 1.3x 20-period daily average
+            volume_filter = volume[i] > 1.3 * volume_ma_aligned[i]
             # Trend filter: weekly RSI > 50 for long, < 50 for short
             rsi_filter_long = rsi_1w_aligned[i] > 50
             rsi_filter_short = rsi_1w_aligned[i] < 50
