@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Keltner Channel Breakout with Weekly Trend Filter
-# Hypothesis: During low volatility (KC width < 25th percentile), price breaks out in direction of weekly EMA(20) trend.
-# Works in bull/bear by trading breakouts with trend filter. Target: 30-100 total trades over 4 years (7-25/year).
+# Strategy: 12h Donchian Breakout + Volume Confirmation + ADX Trend Filter
+# Hypothesis: Price breaks out of 20-period Donchian channel with volume confirmation (volume > 1.5x average) and ADX > 20 (trending market).
+# Works in bull/bear by capturing breakouts with trend confirmation. Target: 50-150 total trades over 4 years (12-37/year).
+# Uses 1d trend filter via EMA(50) to avoid counter-trend trades.
 
-name = "1d_keltner_breakout_weekly_trend_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_vol_adx_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,77 +21,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
+    close_1d = df_1d['close'].values
     
-    # Keltner Channels (20, 1.5) on daily
-    kc_period = 20
-    kc_mult = 1.5
-    ema_20 = pd.Series(close).ewm(span=kc_period, adjust=False).mean().values
+    # Donchian Channel (20-period high/low)
+    donch_period = 20
+    highest_high = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=kc_period, adjust=False).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
-    upper = ema_20 + kc_mult * atr
-    lower = ema_20 - kc_mult * atr
-    kc_width = upper - lower
+    # ADX (14-period) for trend strength
+    adx_period = 14
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
+    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=adx_period, min_periods=adx_period).mean().values
     
-    # Keltner Channel width percentile (25-period lookback)
-    kc_width_pct = pd.Series(kc_width).rolling(window=50, min_periods=25).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    up_move = pd.Series(high).diff()
+    down_move = pd.Series(low).diff() * -1
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=adx_period, min_periods=adx_period).sum().values / (atr * adx_period)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=adx_period, min_periods=adx_period).sum().values / (atr * adx_period)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=adx_period, min_periods=adx_period).mean().values
     
-    # Weekly EMA(20) for trend filter
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(kc_width_pct[i]) or 
-            np.isnan(ema_20_weekly_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Low volatility condition: KC width in lowest 25% of recent range
-        low_vol = kc_width_pct[i] <= 0.25
-        
         if position == 1:  # Long position
-            # Exit: price closes below EMA(20) or trend changes
-            if close[i] < ema_20[i] or close[i] < ema_20_weekly_aligned[i]:
+            # Exit: price closes below Donchian lower or trend weakens
+            if close[i] < lowest_low[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above EMA(20) or trend changes
-            if close[i] > ema_20[i] or close[i] > ema_20_weekly_aligned[i]:
+            # Exit: price closes above Donchian upper or trend weakens
+            if close[i] > highest_high[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if low_vol:
-                # Breakout above upper KC with uptrend
-                if close[i] > upper[i] and close[i] > ema_20_weekly_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Breakdown below lower KC with downtrend
-                elif close[i] < lower[i] and close[i] < ema_20_weekly_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Volume and trend filters
+            vol_ok = vol_ratio[i] > 1.5
+            adx_ok = adx[i] > 20
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_50_1d_aligned[i]
+            
+            # Breakout above upper band with volume and trend
+            if close[i] > highest_high[i] and vol_ok and adx_ok and uptrend:
+                position = 1
+                signals[i] = 0.25
+            # Breakdown below lower band with volume and trend
+            elif close[i] < lowest_low[i] and vol_ok and adx_ok and downtrend:
+                position = -1
+                signals[i] = -0.25
     
     return signals
