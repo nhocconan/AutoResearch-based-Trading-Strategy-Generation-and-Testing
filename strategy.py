@@ -4,18 +4,19 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Strategy: 12h Daily Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Donchian(20) breakouts in direction of daily ADX > 25 trend with volume
-# confirmation capture momentum moves while avoiding whipsaws. Uses daily trend for
-# robustness across bull/bear markets, volume filter to reduce false breakouts.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Hypothesis: Donchian(20) breakouts on 12h timeframe in direction of daily ADX > 20
+# with volume confirmation capture momentum moves while avoiding whipsaws.
+# Daily trend filter ensures robustness across bull/bear markets, volume filter reduces
+# false breakouts. Target: 15-25 trades/year (60-100 total over 4 years) to minimize
+# fee drag and improve generalization.
 
-name = "12h_daily_donchian_breakout_volume_adx_v1"
+name = "12h_daily_donchian_breakout_volume_adx_v3"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -84,15 +85,15 @@ def generate_signals(prices):
     high_20_aligned = align_htf_to_ltf(prices, df_daily, daily_high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_daily, daily_low_20)
     
-    # Volume filter on 12h: volume > 1.8x 30-period average
+    # Volume filter on 12h: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(adx_aligned[i]) or np.isnan(high_20_aligned[i]) or
             np.isnan(low_20_aligned[i]) or np.isnan(vol_ma[i])):
@@ -101,21 +102,21 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: price falls back below 20-day low or ADX weakens
-            if close[i] < low_20_aligned[i] or adx_aligned[i] < 20:
+            if close[i] < low_20_aligned[i] or adx_aligned[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
             # Exit: price rises back above 20-day high or ADX weakens
-            if close[i] > high_20_aligned[i] or adx_aligned[i] < 20:
+            if close[i] > high_20_aligned[i] or adx_aligned[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Strong trend required
-            if adx_aligned[i] >= 25:
+            # Moderate trend required
+            if adx_aligned[i] >= 20:
                 # Long entry: breakout above 20-day high with volume
                 if (high[i] > high_20_aligned[i] and close[i] > high_20_aligned[i] and
                     vol_filter[i]):
