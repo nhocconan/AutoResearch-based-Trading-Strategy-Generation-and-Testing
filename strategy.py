@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h trend filter and volume confirmation
-# Uses 12h EMA(34) for trend direction, 6h RSI(14) for momentum exhaustion,
-# and volume spike (>1.5x 20-period average) for entry confirmation.
-# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
-# Works in bull markets via trend continuation and in bear markets via mean reversion at extremes.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Uses Donchian channel breakouts for entry, 1d EMA for trend filter, and volume spike for confirmation.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Works in bull markets via trend-following breakouts and in bear markets via mean-reversion at channel extremes.
 
-name = "6h_ema34_rsi_volume_spike_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,50 +23,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA(34) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 35:
+    # Daily EMA for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 6h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike detection (>1.5x 20-period average)
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
-    vol_spike = vol_ratio > 1.5
     
     signals = np.zeros(n)
     
-    for i in range(34, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction from 12h EMA
-        bullish_trend = close[i] > ema_12h_aligned[i]
-        bearish_trend = close[i] < ema_12h_aligned[i]
+        # Volume confirmation: current volume > 1.5x average
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
         
-        # RSI conditions for momentum exhaustion
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Trend filter from daily EMA
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
         
-        # Long conditions: bullish trend + RSI oversold + volume spike
-        if bullish_trend and rsi_oversold and vol_spike[i]:
+        # Donchian breakout conditions
+        long_breakout = high[i] > high_max[i-1]  # break above previous high
+        short_breakout = low[i] < low_min[i-1]   # break below previous low
+        
+        # Long: bullish trend + volume spike + long breakout
+        if bullish_trend and volume_spike and long_breakout:
             signals[i] = 0.25
-        # Short conditions: bearish trend + RSI overbought + volume spike
-        elif bearish_trend and rsi_overbought and vol_spike[i]:
+        # Short: bearish trend + volume spike + short breakout
+        elif bearish_trend and volume_spike and short_breakout:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
