@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(15) breakout with 1-day EMA(50) trend filter and volume confirmation
-# Long when price breaks above 12h Donchian upper band, 1d close > 1d EMA50 (uptrend), and volume > 1.3x 12h average volume
-# Short when price breaks below 12h Donchian lower band, 1d close < 1d EMA50 (downtrend), and volume > 1.3x 12h average volume
-# Exit when trend reverses (1d close crosses EMA50) or opposite breakout occurs
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: 12h Donchian(15) breakout with 1d EMA200 trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper band, 1d close > 1d EMA200 (uptrend), and volume > 1.8x 12h average volume
+# Short when price breaks below 12h Donchian lower band, 1d close < 1d EMA200 (downtrend), and volume > 1.8x 12h average volume
+# Exit when trend reverses (1d close crosses EMA200) or opposite breakout occurs
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 1d EMA50 for trend filter and 12h volume average for confirmation
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Uses 1d EMA200 for trend filter and 12h volume average for confirmation
+# Target: 80-150 total trades over 4 years (20-38/year)
 
-name = "12h_donchian15_1d_ema50_vol_v1"
+name = "12h_donchian15_1d_ema200_vol_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -45,13 +45,13 @@ def generate_signals(prices):
     upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
     lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
-    # 1d data for EMA50 trend filter
+    # 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 12h volume average for confirmation
@@ -84,12 +84,12 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (price below EMA50) or breaks below lower band
+            # Exit: trend reverses (price below EMA200) or breaks below lower band
             elif close[i] < ema_1d_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -97,12 +97,12 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (price above EMA50) or breaks above upper band
+            # Exit: trend reverses (price above EMA200) or breaks above upper band
             elif close[i] > ema_1d_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -111,17 +111,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: price breaks above upper band, price above EMA50 (uptrend), volume spike
+            # Long: price breaks above upper band, price above EMA200 (uptrend), volume spike
             if (close[i] > upper_aligned[i] and
                 close[i] > ema_1d_aligned[i] and
-                volume[i] > 1.3 * volume_ma_12h_aligned[i]):
+                volume[i] > 1.8 * volume_ma_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower band, price below EMA50 (downtrend), volume spike
+            # Short: price breaks below lower band, price below EMA200 (downtrend), volume spike
             elif (close[i] < lower_aligned[i] and
                   close[i] < ema_1d_aligned[i] and
-                  volume[i] > 1.3 * volume_ma_12h_aligned[i]):
+                  volume[i] > 1.8 * volume_ma_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
