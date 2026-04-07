@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h_ema_trend_1w_volume_v1
-Hypothesis: On 12-hour timeframe, use EMA trend from weekly timeframe with volume confirmation. 
-Enter long when price > weekly EMA20 with volume > 1.5x average, short when price < weekly EMA20 with volume > 1.5x average. 
-Exit when price crosses back over weekly EMA20. Weekly EMA provides strong trend filter that works in both bull/bear markets. 
-Designed for low frequency (12-37 trades/year) to minimize fee drag.
+4h_camarilla_pivot_1d_volume_v2
+Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from daily timeframe with volume confirmation and stricter entry conditions. 
+Enter long when price breaks above R4 with volume > 2.0x average and price > 200 EMA, short when price breaks below S4 with volume > 2.0x average and price < 200 EMA. 
+Exit when price touches opposite pivot level (S4 for long, R4 for short). 
+Reduced trade frequency by increasing volume threshold and adding trend filter to avoid whipsaws. Designed for low frequency (20-50 trades/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_ema_trend_1w_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1d_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -26,53 +26,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA20
-    close_1w = df_1w['close'].values
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    # Calculate daily Camarilla pivot levels
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Align to 12h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    pivot = (d_high + d_low + d_close) / 3
+    range_val = d_high - d_low
     
-    # Calculate 20-period average volume for confirmation
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
+    r4 = d_close + range_val * 1.1 / 2
+    s4 = d_close - range_val * 1.1 / 2
+    
+    # Align to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 50-period average volume for confirmation
+    vol_avg = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    
+    # Calculate 200 EMA for trend filter
+    close_series = pd.Series(close)
+    ema_200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume average warmup
-        # Skip if weekly data not available
-        if np.isnan(ema_20_aligned[i]):
+    for i in range(200, n):  # Start after EMA and volume average warmup
+        # Skip if daily data not available
+        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 2.0x 50-period average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price crosses below weekly EMA20
-            if close[i] <= ema_20_aligned[i]:
+            # Exit when price touches or goes below S4
+            if close[i] <= s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price crosses above weekly EMA20
-            if close[i] >= ema_20_aligned[i]:
+            # Exit when price touches or goes above R4
+            if close[i] >= r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price above weekly EMA20 with volume confirmation
-            long_entry = (close[i] > ema_20_aligned[i]) and vol_confirm
-            # Short entry: price below weekly EMA20 with volume confirmation
-            short_entry = (close[i] < ema_20_aligned[i]) and vol_confirm
+            # Long entry: price breaks above R4 with volume confirmation AND price > 200 EMA (uptrend)
+            long_entry = (close[i] > r4_aligned[i]) and vol_confirm and (close[i] > ema_200[i])
+            # Short entry: price breaks below S4 with volume confirmation AND price < 200 EMA (downtrend)
+            short_entry = (close[i] < s4_aligned[i]) and vol_confirm and (close[i] < ema_200[i])
             
             if long_entry:
                 position = 1
