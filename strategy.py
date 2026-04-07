@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_cci_trend_following_v1
-Hypothesis: On 4-hour timeframe, use Commodity Channel Index (CCI) with period 20 to identify overbought/oversold conditions, filtered by daily trend direction. Enter long when CCI crosses below -100 (oversold) in a daily uptrend, and short when CCI crosses above +100 (overbought) in a daily downtrend. Exit when CCI returns to zero line. This captures mean-reversion within the trend, reducing whipsaws. Target: 50-150 trades over 4 years (12-38/year) to balance opportunity and cost.
+1d_keltner_channel_1w_trend_v1
+Hypothesis: On daily timeframe, use Keltner Channel (ATR-based) to detect breakouts, filtered by weekly Supertrend for higher timeframe alignment. 
+Keltner Channel breakouts capture momentum moves, while the weekly Supertrend filter ensures we only trade in the direction of the higher timeframe trend, 
+reducing whipsaws in both bull and bear markets. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_trend_following_v1"
-timeframe = "4h"
+name = "1d_keltner_channel_1w_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,78 +24,122 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # CCI parameters
-    cci_period = 20
-    cci_constant = 0.015
+    # Keltner Channel parameters
+    ema_period = 20
+    atr_period = 10
+    atr_multiplier = 2.0
     
-    # Calculate Typical Price
-    tp = (high + low + close) / 3
+    # Calculate EMA (middle line)
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    # Calculate SMA of TP
-    tp_series = pd.Series(tp)
-    sma_tp = tp_series.rolling(window=cci_period, min_periods=cci_period).mean().values
+    # Calculate ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate Mean Deviation
-    md = tp_series.rolling(window=cci_period, min_periods=cci_period).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
+    # Calculate Keltner Channel bands
+    upper_keltner = ema + (atr_multiplier * atr)
+    lower_keltner = ema - (atr_multiplier * atr)
     
-    # Calculate CCI
-    cci = (tp - sma_tp) / (cci_constant * md)
-    # Handle division by zero or near-zero MD
-    cci = np.where(md == 0, 0, cci)
-    
-    # Load daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < cci_period:
+    # Load weekly Supertrend for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < atr_period:
         return np.zeros(n)
     
-    # Calculate daily EMA for trend
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_uptrend = close_1d > ema_1d
+    # Calculate weekly Supertrend
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align daily trend to 4h
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend)
+    # Calculate ATR for weekly
+    tr1_1w = high_1w[1:] - low_1w[1:]
+    tr2_1w = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3_1w = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
+                            np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))])
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    hl2_1w = (high_1w + low_1w) / 2
+    upper_band_1w = hl2_1w + (3.0 * atr_1w)  # ATR multiplier 3 for Supertrend
+    lower_band_1w = hl2_1w - (3.0 * atr_1w)
+    
+    supertrend_1w = np.full(len(df_1w), np.nan)
+    direction_1w = np.full(len(df_1w), 1)
+    
+    for i in range(atr_period, len(df_1w)):
+        if np.isnan(atr_1w[i]) or np.isnan(upper_band_1w[i]) or np.isnan(lower_band_1w[i]):
+            continue
+            
+        if i == atr_period:
+            supertrend_1w[i] = upper_band_1w[i]
+            direction_1w[i] = -1
+        else:
+            if close_1w[i] <= supertrend_1w[i-1]:
+                supertrend_1w[i] = upper_band_1w[i]
+                direction_1w[i] = -1
+            else:
+                supertrend_1w[i] = lower_band_1w[i]
+                direction_1w[i] = 1
+            
+            # Adjust bands
+            if direction_1w[i] == 1:  # uptrend
+                if lower_band_1w[i] < lower_band_1w[i-1]:
+                    lower_band_1w[i] = lower_band_1w[i-1]
+            else:  # downtrend
+                if upper_band_1w[i] > upper_band_1w[i-1]:
+                    upper_band_1w[i] = upper_band_1w[i-1]
+            
+            # Recalculate supertrend with adjusted bands
+            if direction_1w[i] == 1:
+                supertrend_1w[i] = lower_band_1w[i]
+            else:
+                supertrend_1w[i] = upper_band_1w[i]
+    
+    # Align weekly Supertrend to daily
+    supertrend_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w)
+    direction_1w_aligned = align_htf_to_ltf(prices, df_1w, direction_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(cci_period, n):
+    for i in range(max(ema_period, atr_period), n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(daily_uptrend_aligned[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(ema[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(close[i]) or np.isnan(supertrend_1w_aligned[i]) or np.isnan(direction_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Daily trend filter
-        is_uptrend = daily_uptrend_aligned[i] == 1
+        # Weekly trend filter: only trade in direction of weekly trend
+        weekly_uptrend = direction_1w_aligned[i] == 1
         
         if position == 1:  # Long position
-            # Exit: CCI crosses above zero (mean reversion complete)
-            if cci[i] > 0:
+            # Exit: price closes below lower Keltner Channel (trend weakness)
+            if close[i] < lower_keltner[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses below zero (mean reversion complete)
-            if cci[i] < 0:
+            # Exit: price closes above upper Keltner Channel (trend weakness)
+            if close[i] > upper_keltner[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter if daily trend aligns
-            if is_uptrend:
-                # Long entry: CCI crosses below -100 (oversold in uptrend)
-                if cci[i] < -100 and cci[i-1] >= -100:
+            # Only enter if weekly trend aligns
+            if weekly_uptrend:
+                # Long entry: price closes above upper Keltner Channel (breakout)
+                if close[i] > upper_keltner[i]:
                     position = 1
                     signals[i] = 0.25
             else:
-                # Short entry: CCI crosses above +100 (overbought in downtrend)
-                if cci[i] > 100 and cci[i-1] <= 100:
+                # Short entry: price closes below lower Keltner Channel (breakdown)
+                if close[i] < lower_keltner[i]:
                     position = -1
                     signals[i] = -0.25
     
