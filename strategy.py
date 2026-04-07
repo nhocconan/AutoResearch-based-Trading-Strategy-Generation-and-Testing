@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Range Breakout with Volume and Trend Filter
+# Strategy: 4h Daily Range Breakout with Volume and Trend Filter (Optimized)
 # Hypothesis: Price breaking above/below the previous day's high/low indicates
 # continuation of the previous day's trend. Volume confirms institutional participation.
 # Trend filter (price above/below 200 EMA) ensures alignment with higher timeframe trend.
 # Works in both bull and bear markets: in bull, only long breakouts; in bear, only short breakdowns.
 # Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "4h_daily_range_breakout_volume_trend_v1"
+name = "4h_daily_range_breakout_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
