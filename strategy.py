@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Donchian(10) breakouts in direction of daily ADX > 20 trend with volume
-# confirmation capture momentum moves while avoiding whipsaws. Uses daily trend for
-# robustness across bull/bear markets, volume filter to reduce false breakouts.
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
+# Strategy: 1h Timeframe Momentum with Daily Trend Filter
+# Hypothesis: Use daily ADX > 25 to determine trend direction, then enter 1h breakouts
+# in that direction with volume confirmation. This avoids counter-trend trades and
+# reduces whipsaws. Daily trend provides robustness across bull/bear markets.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
-name = "4h_daily_donchian_breakout_volume_adx_v4"
-timeframe = "4h"
+name = "1h_daily_trend_momentum_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX and breakout levels
+    # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
@@ -73,58 +73,69 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Daily breakout levels (10-period high/low)
-    high_series = pd.Series(daily_high)
-    low_series = pd.Series(daily_low)
-    daily_high_10 = high_series.rolling(window=10, min_periods=10).max().values
-    daily_low_10 = low_series.rolling(window=10, min_periods=10).min().values
-    
-    # Align daily indicators to 4h timeframe
+    # Align daily ADX to 1h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
-    high_10_aligned = align_htf_to_ltf(prices, df_daily, daily_high_10)
-    low_10_aligned = align_htf_to_ltf(prices, df_daily, daily_low_10)
     
-    # Volume filter on 4h: volume > 1.5x 20-period average
+    # 1h breakout levels (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    high_20 = high_series.rolling(window=20, min_periods=20).max().values
+    low_20 = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(40, n):
         # Skip if required data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(high_10_aligned[i]) or
-            np.isnan(low_10_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Apply session filter
+        if not session_filter[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: price falls back below 10-day low or ADX weakens
-            if close[i] < low_10_aligned[i] or adx_aligned[i] < 15:
+            # Exit: price falls back below 20-period low or ADX weakens
+            if close[i] < low_20[i] or adx_aligned[i] < 25:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.20  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises back above 10-day high or ADX weakens
-            if close[i] > high_10_aligned[i] or adx_aligned[i] < 15:
+            # Exit: price rises back above 20-period high or ADX weakens
+            if close[i] > high_20[i] or adx_aligned[i] < 25:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
+                signals[i] = -0.20  # Maintain short
         else:  # Flat, look for entry
-            # Moderate trend required
-            if adx_aligned[i] >= 20:
-                # Long entry: breakout above 10-day high with volume
-                if (high[i] > high_10_aligned[i] and close[i] > high_10_aligned[i] and
+            # Strong trend required
+            if adx_aligned[i] >= 25:
+                # Long entry: breakout above 20-period high with volume
+                if (high[i] > high_20[i] and close[i] > high_20[i] and
                     vol_filter[i]):
                     position = 1
-                    signals[i] = 0.25
-                # Short entry: breakdown below 10-day low with volume
-                elif (low[i] < low_10_aligned[i] and close[i] < low_10_aligned[i] and
+                    signals[i] = 0.20
+                # Short entry: breakdown below 20-period low with volume
+                elif (low[i] < low_20[i] and close[i] < low_20[i] and
                       vol_filter[i]):
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
