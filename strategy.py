@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Ehlers Fisher Transform with 1d Regime Filter
-Long when Fisher crosses above -1.5 and 1d EMA50 > EMA200 (bullish regime)
-Short when Fisher crosses below +1.5 and 1d EMA50 < EMA200 (bearish regime)
-Exit when Fisher crosses back through zero
-Designed to capture reversals in both trending and ranging markets
+6h Donchian Breakout + Weekly Trend Filter + Volume Confirmation
+Long: Price breaks above Donchian(20) high AND weekly close > weekly open (bullish week) AND volume > 1.5x avg volume
+Short: Price breaks below Donchian(20) low AND weekly close < weekly open (bearish week) AND volume > 1.5x avg volume
+Exit: Opposite Donchian break (long exits on lower band break, short exits on upper band break)
+Designed to capture strong momentum moves with weekly trend alignment and volume confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_fisher_transform_1d_regime_v1"
+name = "6h_donchian_breakout_weekly_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,64 +24,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === Ehlers Fisher Transform (9) ===
-    price = (high + low) / 2
-    # Normalize price to [-1, 1] range
-    max_h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    min_l = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    diff = max_h - min_l
-    diff = np.where(diff == 0, 1, diff)  # Avoid division by zero
-    value1 = 2 * ((price - min_l) / diff - 0.5)
-    # Smooth
-    value1 = pd.Series(value1).ewm(alpha=0.5, adjust=False).mean().values
-    # Fisher transform
-    value1 = np.clip(value1, -0.999, 0.999)  # Avoid log(0)
-    fish = 0.5 * np.log((1 + value1) / (1 - value1))
-    fish = pd.Series(fish).ewm(alpha=0.5, adjust=False).mean().values
+    # === Donchian Channels (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d EMA Regime Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # === Weekly Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open  # Bullish week = close > open
+    weekly_bearish = weekly_close < weekly_open  # Bearish week = close < open
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    
+    # === Volume Confirmation ===
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * avg_volume
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(10, n):
-        if np.isnan(fish[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]):
+    for i in range(20, n):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume[i]) or np.isnan(volume_threshold[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Fisher crosses below zero
-            if fish[i] < 0 and fish[i-1] >= 0:
+            # Exit: Price breaks below Donchian lower band
+            if close[i] < lowest_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Fisher crosses above zero
-            if fish[i] > 0 and fish[i-1] <= 0:
+            # Exit: Price breaks above Donchian upper band
+            if close[i] > highest_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Bullish regime: EMA50 > EMA200
-            # Bearish regime: EMA50 < EMA200
-            if ema_50_aligned[i] > ema_200_aligned[i]:
-                # Bullish regime - look for long
-                if fish[i] > -1.5 and fish[i-1] <= -1.5:
-                    position = 1
-                    signals[i] = 0.25
-            elif ema_50_aligned[i] < ema_200_aligned[i]:
-                # Bearish regime - look for short
-                if fish[i] < 1.5 and fish[i-1] >= 1.5:
-                    position = -1
-                    signals[i] = -0.25
+            # Long entry: Break above upper band + bullish week + volume surge
+            if (close[i] > highest_high[i] and 
+                weekly_bullish_aligned[i] and 
+                volume[i] > volume_threshold[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: Break below lower band + bearish week + volume surge
+            elif (close[i] < lowest_low[i] and 
+                  weekly_bearish_aligned[i] and 
+                  volume[i] > volume_threshold[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
