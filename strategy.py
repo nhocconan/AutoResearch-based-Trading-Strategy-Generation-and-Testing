@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
-Long when price breaks above R4 with volume confirmation and price above daily EMA (bullish continuation).
-Short when price breaks below S4 with volume confirmation and price below daily EMA (bearish continuation).
-Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
-Uses stricter volume confirmation, longer cooldown, and daily EMA filter to reduce trade frequency.
-Works in both bull/bear markets by adapting to volatility and volume.
-Timeframe: 12h (primary), HTF: 1d.
-Target: 50-150 trades over 4 years (12-37/year) to avoid fee drag.
+4h_ema_pullback_1d_trend_volume_v1
+Hypothesis: In trending markets, price pulls back to the 21-period EMA on 4h before resuming trend.
+Use daily trend filter (price vs 50-day EMA) and volume confirmation to enter pullbacks.
+Works in bull markets (buy pullbacks in uptrend) and bear markets (sell pullbacks in downtrend).
+Low trade frequency due to strict trend + pullback + volume alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "4h_ema_pullback_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -30,116 +26,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day's values (shifted by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First day has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla calculations
-    range_1d = prev_high - prev_low
-    # Avoid division by zero
-    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
-    
-    # Camarilla levels
-    r3 = prev_close + range_1d * 1.1 / 4
-    r4 = prev_close + range_1d * 1.1 / 2
-    s3 = prev_close - range_1d * 1.1 / 4
-    s4 = prev_close - range_1d * 1.1 / 2
-    
     # Daily EMA for trend filter
-    close_series = pd.Series(close_1d)
-    ema_1d = close_series.ewm(span=20, min_periods=20).mean().values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 4h EMA for pullback
+    ema_21_4h = pd.Series(close).ewm(span=21, min_periods=21).mean().values
     
-    # Volume confirmation: volume > 30-period average (stricter)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    
-    # Cooldown counter to prevent overtrading
-    cooldown = 0
-    cooldown_period = 4  # 4 bars = 48 hours minimum between trades
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_21_4h[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Decrease cooldown
-        if cooldown > 0:
-            cooldown -= 1
-        
-        vol_confirmed = volume[i] > vol_ma[i]
-        
         if position == 1:  # Long position
-            # Exit: price crosses below R3 (mean reversion) or stop at S4 break
-            if close[i] < r3_aligned[i]:
+            # Exit: price crosses below 21 EMA
+            if close[i] < ema_21_4h[i]:
                 position = 0
                 signals[i] = 0.0
-                cooldown = cooldown_period
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above S3 (mean reversion) or stop at R4 break
-            if close[i] > s3_aligned[i]:
+            # Exit: price crosses above 21 EMA
+            if close[i] > ema_21_4h[i]:
                 position = 0
                 signals[i] = 0.0
-                cooldown = cooldown_period
             else:
                 signals[i] = -0.25
-        else:  # Flat, look for entry (only if cooldown is 0)
-            if cooldown > 0:
-                signals[i] = 0.0
-                continue
-                
-            # Breakout long: price breaks above R4 with volume and above daily EMA
-            if close[i] > r4_aligned[i] and vol_confirmed and close[i] > ema_1d_aligned[i]:
+        else:  # Flat, look for entry
+            # Pullback long: uptrend (price > daily EMA50) + price near 4h EMA21 + volume
+            if close[i] > ema_50_1d_aligned[i] and close[i] <= ema_21_4h[i] * 1.005 and volume[i] > vol_ma[i]:
                 position = 1
                 signals[i] = 0.25
-                cooldown = cooldown_period
-            # Breakout short: price breaks below S4 with volume and below daily EMA
-            elif close[i] < s4_aligned[i] and vol_confirmed and close[i] < ema_1d_aligned[i]:
+            # Pullback short: downtrend (price < daily EMA50) + price near 4h EMA21 + volume
+            elif close[i] < ema_50_1d_aligned[i] and close[i] >= ema_21_4h[i] * 0.995 and volume[i] > vol_ma[i]:
                 position = -1
                 signals[i] = -0.25
-                cooldown = cooldown_period
-            # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
-            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
-                # Look for bullish rejection (close > open)
-                if close[i] > prices['open'].iloc[i]:
-                    position = 1
-                    signals[i] = 0.25
-                    cooldown = cooldown_period
-            # Mean reversion short: price rejects R3 with volume divergence
-            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
-                # Look for bearish rejection (close < open)
-                if close[i] < prices['open'].iloc[i]:
-                    position = -1
-                    signals[i] = -0.25
-                    cooldown = cooldown_period
     
     return signals
