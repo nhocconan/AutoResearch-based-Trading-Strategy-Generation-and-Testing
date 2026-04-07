@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4d_donchian_breakout_1d_trend_volume_v4
-Hypothesis: Breakouts from Donchian(20) channel on 4h filtered by daily EMA20 trend and volume spike (>1.5x average).
-Long when price breaks above upper Donchian with volume spike and price above daily EMA20.
-Short when price breaks below lower Donchian with volume spike and price below daily EMA20.
-Designed for ~25-35 trades/year on 4h with strict entry conditions to avoid overtrading.
+1d_rsi_momentum_1w_trend_volume_v1
+Hypothesis: RSI(14) momentum on daily timeframe, filtered by weekly trend (EMA20) and volume spike.
+Long when RSI > 55, price above weekly EMA20, and volume > 1.5x average.
+Short when RSI < 45, price below weekly EMA20, and volume > 1.5x average.
+Designed for low trade frequency (~10-20 trades/year) with strong momentum signals to work in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4d_donchian_breakout_1d_trend_volume_v4"
-timeframe = "4h"
+name = "1d_rsi_momentum_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +26,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    ema20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Donchian channels (20-period) on 4h
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[1:14]) if n >= 14 else 0
+    avg_loss[13] = np.mean(loss[1:14]) if n >= 14 else 0
+    
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
@@ -53,37 +67,37 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x average (spike)
         vol_spike = volume[i] > (vol_ma[i] * 1.5)
         
-        # Donchian breakout conditions
-        bullish_breakout = close[i] > high_max[i-1]
-        bearish_breakout = close[i] < low_min[i-1]
+        # RSI conditions
+        rsi_over = rsi[i] > 55
+        rsi_under = rsi[i] < 45
         
-        # Daily trend filter
-        above_1d_ema20 = close[i] > ema20_1d_aligned[i]
-        below_1d_ema20 = close[i] < ema20_1d_aligned[i]
+        # Weekly trend filter
+        above_1w_ema20 = close[i] > ema20_1w_aligned[i]
+        below_1w_ema20 = close[i] < ema20_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: bearish breakout or trend turns bearish
-            if bearish_breakout or below_1d_ema20:
+            # Exit: RSI turns bearish or trend turns bearish
+            if rsi[i] < 50 or below_1w_ema20:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish breakout or trend turns bullish
-            if bullish_breakout or above_1d_ema20:
+            # Exit: RSI turns bullish or trend turns bullish
+            if rsi[i] > 50 or above_1w_ema20:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: bullish Donchian breakout with volume spike and bullish trend
-            if bullish_breakout and vol_spike and above_1d_ema20:
+            # Long: RSI bullish with volume spike and bullish trend
+            if rsi_over and vol_spike and above_1w_ema20:
                 position = 1
-                signals[i] = 0.30
-            # Short: bearish Donchian breakout with volume spike and bearish trend
-            elif bearish_breakout and vol_spike and below_1d_ema20:
+                signals[i] = 0.25
+            # Short: RSI bearish with volume spike and bearish trend
+            elif rsi_under and vol_spike and below_1w_ema20:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
