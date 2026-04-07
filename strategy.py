@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d 200 EMA + 4h ADX + Volume Confirmation
-# Hypothesis: 200 EMA defines long-term trend, ADX > 25 confirms strong trend,
-# Volume > 1.5x average confirms institutional participation. Works in both bull/bear
-# by only taking trades in direction of 200 EMA. Target: 10-25 trades/year (40-100 over 4 years).
-name = "1d_200ema_4h_adx_volume_v1"
-timeframe = "1d"
+# Strategy: 6h Donchian Breakout + 1d Daily Pivot + Volume Confirmation
+# Hypothesis: Donchian breakouts on 6h timeframe capture momentum bursts.
+# Direction is filtered by 1d daily pivot (bullish if above pivot, bearish if below).
+# Volume confirms institutional participation. Works in bull/bear via pivot bias.
+# Target: 15-40 trades/year (60-160 over 4 years) with strict criteria.
+name = "6h_donchian_breakout_1d_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,52 +23,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for ADX calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1-day data for pivot and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 200 EMA on 1d timeframe
-    close_s = pd.Series(close)
-    ema_200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Donchian Channel on 6h (20 periods)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max()
+    donchian_low = low_series.rolling(window=20, min_periods=20).min()
     
-    # Calculate ADX on 4h timeframe (14 period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Daily Pivot Points from 1d data
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
+    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
     
-    # Directional Movement
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align 4h indicators to 1d timeframe
-    adx_1d = align_htf_to_ltf(prices, df_4h, adx)
+    # Align pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -76,35 +67,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_200[i]) or np.isnan(adx_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below 200 EMA or ADX drops below 20
-            if close[i] < ema_200[i] or adx_1d[i] < 20:
+            # Exit: price breaks below S1 or reaches R2 (take profit)
+            if close[i] < s1_6h[i] or close[i] > r2_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price crosses above 200 EMA or ADX drops below 20
-            if close[i] > ema_200[i] or adx_1d[i] < 20:
+            # Exit: price breaks above R1 or reaches S2 (take profit)
+            if close[i] > r1_6h[i] or close[i] < s2_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require ADX > 25 (strong trend) and volume confirmation
-            if adx_1d[i] > 25 and vol_filter[i]:
-                # Long: price above 200 EMA in uptrend
-                if close[i] > ema_200[i]:
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Long: breakout above Donchian high with bullish bias (above daily pivot)
+                if close[i] > donchian_high[i] and close[i] > pivot_6h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price below 200 EMA in downtrend
-                elif close[i] < ema_200[i]:
+                # Short: breakdown below Donchian low with bearish bias (below daily pivot)
+                elif close[i] < donchian_low[i] and close[i] < pivot_6h[i]:
                     position = -1
                     signals[i] = -0.25
     
