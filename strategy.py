@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Weekly Camarilla Pivot with Volume and Trend Filter
-# Hypothesis: Price reacting at weekly Camarilla pivot levels (S3/S4 for long, R3/R4 for short) 
-# with volume confirmation and trend filter (price vs 200 EMA) works in both bull and bear markets.
-# In bull markets: long at S3/S4 reversals/breakouts, short at R3/R4 reversals/breakouts.
-# In bear markets: short at R3/R4 reversals/breakouts, long at S3/S4 reversals/breakouts.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Strategy: 4h Daily Pivot Breakout with Volume and Trend Filter
+# Hypothesis: Price breaking above/below daily pivot levels with volume confirmation
+# and trend filter (price vs 200 EMA) works in both bull and bear markets.
+# In bull markets: long on breakout above R1, short on breakdown below S1.
+# In bear markets: short on breakdown below S1, long on breakout above R1.
+# Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "12h_weekly_camarilla_pivot_volume_trend_v1"
-timeframe = "12h"
+name = "4h_daily_pivot_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,103 +25,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get daily data for pivot calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 1:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels based on previous week's OHLC
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate daily pivot levels from previous day's OHLC
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Calculate pivot and support/resistance levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    range_hl = weekly_high - weekly_low
+    # Pivot point and support/resistance levels
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    range_hl = daily_high - daily_low
     
-    # Camarilla levels
-    r4 = pivot + (range_hl * 1.1 / 2)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
+    # Standard pivot levels (R1, S1, R2, S2)
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
+    r2 = pivot + range_hl
+    s2 = pivot - range_hl
     
-    # Shift by 1 to use previous week's data (avoid look-ahead)
+    # Shift by 1 to use previous day's data (avoid look-ahead)
     pivot = np.roll(pivot, 1)
-    r4 = np.roll(r4, 1)
-    r3 = np.roll(r3, 1)
-    s3 = np.roll(s3, 1)
-    s4 = np.roll(s4, 1)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    r2 = np.roll(r2, 1)
+    s2 = np.roll(s2, 1)
     
     # Handle first element
     if len(pivot) > 1:
         pivot[0] = pivot[1]
-        r4[0] = r4[1]
-        r3[0] = r3[1]
-        s3[0] = s3[1]
-        s4[0] = s4[1]
+        r1[0] = r1[1]
+        s1[0] = s1[1]
+        r2[0] = r2[1]
+        s2[0] = s2[1]
     else:
         pivot[0] = 0
-        r4[0] = 0
-        r3[0] = 0
-        s3[0] = 0
-        s4[0] = 0
+        r1[0] = 0
+        s1[0] = 0
+        r2[0] = 0
+        s2[0] = 0
     
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, s2)
     
     # Trend filter: price vs 200 EMA
     close_series = pd.Series(close)
     ema_200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_200[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_200[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: reversal at R3 or breakdown below S4
-            if (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or \
-               (low[i] <= s4_aligned[i] and close[i] < s4_aligned[i]) or \
-               close[i] < ema_200[i] or not vol_filter[i]:
+            # Exit conditions: breakdown below S1 or trend reversal
+            if low[i] <= s1_aligned[i] or close[i] < ema_200[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit conditions: reversal at S3 or breakout above R4
-            if (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or \
-               (high[i] >= r4_aligned[i] and close[i] > r4_aligned[i]) or \
-               close[i] > ema_200[i] or not vol_filter[i]:
+            # Exit conditions: breakout above R1 or trend reversal
+            if high[i] >= r1_aligned[i] or close[i] > ema_200[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: reversal at S3 or breakdown below S4 with volume
-            if ((low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or \
-                (low[i] < s4_aligned[i] and close[i] < s4_aligned[i])) and \
-               close[i] > ema_200[i] and vol_filter[i]:
+            # Long entry: breakout above R1 with volume and trend
+            if high[i] > r1_aligned[i] and close[i] > ema_200[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: reversal at R3 or breakout above R4 with volume
-            elif ((high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or \
-                  (high[i] > r4_aligned[i] and close[i] > r4_aligned[i])) and \
-                 close[i] < ema_200[i] and vol_filter[i]:
+            # Short entry: breakdown below S1 with volume and trend
+            elif low[i] < s1_aligned[i] and close[i] < ema_200[i] and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
