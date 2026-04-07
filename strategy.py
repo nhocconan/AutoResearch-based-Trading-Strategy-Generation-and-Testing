@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
-1h_breakout_4h1d_volume_v1
-Hypothesis: Breakout above 4h high/low with volume confirmation and daily trend filter captures momentum moves.
-Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by trading with daily trend.
-Targets 15-37 trades/year by requiring 4h breakout + volume spike + daily trend alignment.
+4h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Camarilla pivot levels from weekly chart + volume confirmation + daily trend filter provides high-probability entries in both bull and bear markets. The weekly pivot acts as institutional support/resistance, while volume confirms institutional participation and daily trend ensures alignment with higher timeframe momentum. Targets 20-40 trades/year by requiring weekly pivot proximity + volume spike + daily trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_breakout_4h1d_volume_v1"
-timeframe = "1h"
+name = "4h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val <= 0:
+        return close, close, close, close, close, close, close, close
+    close_val = close
+    l3 = close_val + (range_val * 1.1 / 6)
+    l4 = close_val + (range_val * 1.1 / 4)
+    h3 = close_val - (range_val * 1.1 / 4)
+    h4 = close_val - (range_val * 1.1 / 6)
+    return l3, l4, h3, h4
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,14 +35,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for breakout levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h high/low for breakout levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly Camarilla levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Initialize arrays for Camarilla levels
+    l3_1w = np.full_like(close_1w, np.nan)
+    l4_1w = np.full_like(close_1w, np.nan)
+    h3_1w = np.full_like(close_1w, np.nan)
+    h4_1w = np.full_like(close_1w, np.nan)
+    
+    # Calculate Camarilla for each weekly bar
+    for i in range(len(close_1w)):
+        l3, l4, h3, h4 = calculate_camarilla(high_1w[i], low_1w[i], close_1w[i])
+        l3_1w[i] = l3
+        l4_1w[i] = l4
+        h3_1w[i] = h3
+        h4_1w[i] = h4
     
     # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -41,19 +66,15 @@ def generate_signals(prices):
     
     close_1d = df_1d['close'].values
     
-    # Calculate 4h breakout levels (previous bar's high/low)
-    # For breakout, we use the previous completed 4h bar's high/low
-    high_4h_prev = np.roll(high_4h, 1)
-    low_4h_prev = np.roll(low_4h, 1)
-    # First value will be incorrect due to roll, but will be handled by alignment
-    
-    # Align 4h levels to 1h timeframe
-    high_breakout = align_htf_to_ltf(prices, df_4h, high_4h_prev)
-    low_breakout = align_htf_to_ltf(prices, df_4h, low_4h_prev)
+    # Align weekly Camarilla levels to 4h timeframe
+    l3_4h = align_htf_to_ltf(prices, df_1w, l3_1w)
+    l4_4h = align_htf_to_ltf(prices, df_1w, l4_1w)
+    h3_4h = align_htf_to_ltf(prices, df_1w, h3_1w)
+    h4_4h = align_htf_to_ltf(prices, df_1w, h4_1w)
     
     # Daily EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema50_1h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # 20-period volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,42 +84,41 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema50_1h[i]) or 
-            np.isnan(high_breakout[i]) or 
-            np.isnan(low_breakout[i]) or 
-            np.isnan(vol_sma[i])):
+        if (np.isnan(l3_4h[i]) or np.isnan(l4_4h[i]) or 
+            np.isnan(h3_4h[i]) or np.isnan(h4_4h[i]) or
+            np.isnan(ema50_4h[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume
-        vol_confirm = volume[i] > 2.0 * vol_sma[i]
+        # Volume confirmation: current volume > 1.8x average volume
+        vol_confirm = volume[i] > 1.8 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below 4h low OR trend turns down
-            if close[i] < low_breakout[i] or close[i] < ema50_1h[i]:
+            # Exit: price breaks below H3 level OR trend turns down
+            if close[i] < h3_4h[i] or close[i] < ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above 4h high OR trend turns up
-            if close[i] > high_breakout[i] or close[i] > ema50_1h[i]:
+            # Exit: price breaks above L3 level OR trend turns up
+            if close[i] > l3_4h[i] or close[i] > ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above 4h high + volume + uptrend
-            if (close[i] > high_breakout[i] and 
+            # Long: price touches L4 level + volume + uptrend
+            if (abs(close[i] - l4_4h[i]) < 0.001 * close[i] and  # Within 0.1% of L4
                 vol_confirm and 
-                close[i] > ema50_1h[i]):
+                close[i] > ema50_4h[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: price breaks below 4h low + volume + downtrend
-            elif (close[i] < low_breakout[i] and 
+                signals[i] = 0.25
+            # Short: price touches H4 level + volume + downtrend
+            elif (abs(close[i] - h4_4h[i]) < 0.001 * close[i] and  # Within 0.1% of H4
                   vol_confirm and 
-                  close[i] < ema50_1h[i]):
+                  close[i] < ema50_4h[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
