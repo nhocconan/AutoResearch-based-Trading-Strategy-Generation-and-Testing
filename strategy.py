@@ -6,13 +6,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-day ADX trend filter
 # Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + daily ADX > 25
 # Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + daily ADX > 25
-# Exit when price crosses 10-period EMA in opposite direction
+# Exit when price crosses 4-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 1-day volume and ADX for confirmation/trend
+# Uses 1-day volume for confirmation and 1-day ADX for trend strength
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_vol_adx_v1"
+name = "4h_donchian20_1d_vol_adx_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,18 +27,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume and ADX
+    # 1-day data for volume confirmation and ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-day volume average (20-period)
+    # Calculate 1-day volume average (20-period)
     volume_1d = df_1d['volume'].values
     volume_1d_s = pd.Series(volume_1d)
     volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # 1-day ADX (14-period)
+    # Calculate 1-day ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -76,8 +76,8 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 10-period EMA for exit
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 4-period EMA for exit
+    ema_4 = pd.Series(close).ewm(span=4, adjust=False, min_periods=4).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -96,7 +96,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_10[i]) or np.isnan(atr[i])):
+            np.isnan(ema_4[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -109,8 +109,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 10-period EMA
-            elif close[i] < ema_10[i]:
+            # Exit: price crosses below 4-period EMA
+            elif close[i] < ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -122,8 +122,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 10-period EMA
-            elif close[i] > ema_10[i]:
+            # Exit: price crosses above 4-period EMA
+            elif close[i] > ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
