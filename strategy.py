@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Range Breakout with Volume and Trend Filter (Optimized)
-# Hypothesis: Price breaking above/below the previous day's high/low indicates
-# continuation of the previous day's trend. Volume confirms institutional participation.
+# Strategy: 1d Weekly Range Breakout with Volume and Trend Filter
+# Hypothesis: Price breaking above/below the previous week's high/low indicates
+# continuation of the weekly trend. Volume confirms institutional participation.
 # Trend filter (price above/below 200 EMA) ensures alignment with higher timeframe trend.
 # Works in both bull and bear markets: in bull, only long breakouts; in bear, only short breakdowns.
-# Target: 20-50 trades/year (80-200 over 4 years).
+# Target: 10-25 trades/year (40-100 over 4 years).
 
-name = "4h_daily_range_breakout_volume_trend_v2"
-timeframe = "4h"
+name = "1d_weekly_range_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,24 +25,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for range calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Get weekly data for range calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate daily data (previous day's OHLC)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Calculate weekly data (previous week's OHLC)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
-    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
+    # Shift by 1 to use previous week's data (avoid look-ahead)
+    prev_weekly_high = np.roll(weekly_high, 1)
+    prev_weekly_low = np.roll(weekly_low, 1)
+    prev_weekly_high[0] = prev_weekly_high[1] if len(prev_weekly_high) > 1 else 0
+    prev_weekly_low[0] = prev_weekly_low[1] if len(prev_weekly_low) > 1 else 0
     
-    # Align to 4h timeframe (use previous day's levels)
-    daily_high_aligned = align_htf_to_ltf(prices, df_daily, prev_daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_daily, prev_daily_low)
+    # Align to 1d timeframe (use previous week's levels)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, prev_weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, prev_weekly_low)
     
     # 1d trend filter: price above/below 200 EMA
     close_series = pd.Series(close)
@@ -58,33 +58,33 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
             np.isnan(ema_200[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below previous day's low or trend turns bearish or volume drops
-            if (low[i] < daily_low_aligned[i] or close[i] < ema_200[i] or not vol_filter[i]):
+            # Exit: price falls below previous week's low or trend turns bearish or volume drops
+            if (low[i] < weekly_low_aligned[i] or close[i] < ema_200[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above previous day's high or trend turns bullish or volume drops
-            if (high[i] > daily_high_aligned[i] or close[i] > ema_200[i] or not vol_filter[i]):
+            # Exit: price rises above previous week's high or trend turns bullish or volume drops
+            if (high[i] > weekly_high_aligned[i] or close[i] > ema_200[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above previous day's high with volume and bullish trend
-            if ((high[i] > daily_high_aligned[i] or close[i] > daily_high_aligned[i]) and 
+            # Long: price breaks above previous week's high with volume and bullish trend
+            if ((high[i] > weekly_high_aligned[i] or close[i] > weekly_high_aligned[i]) and 
                 close[i] > ema_200[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below previous day's low with volume and bearish trend
-            elif ((low[i] < daily_low_aligned[i] or close[i] < daily_low_aligned[i]) and 
+            # Short: price breaks below previous week's low with volume and bearish trend
+            elif ((low[i] < weekly_low_aligned[i] or close[i] < weekly_low_aligned[i]) and 
                   close[i] < ema_200[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
