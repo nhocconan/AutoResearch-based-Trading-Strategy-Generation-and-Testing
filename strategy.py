@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_cci_breakout_12h_trend_volume_v5
-Hypothesis: On 4h timeframe, use 12h CCI for trend strength and direction, with 12h EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic.
+4h_cci_breakout_12h_trend_volume_v6
+Hypothesis: On 4h timeframe, use 12h CCI for trend strength and direction, with 12h EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic. Adjusted to reduce trade frequency and improve robustness.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_12h_trend_volume_v5"
+name = "4h_cci_breakout_12h_trend_volume_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -62,8 +62,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (increased threshold)
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
         # Trend direction from EMA
         uptrend = close[i] > ema_12h_4h[i]
