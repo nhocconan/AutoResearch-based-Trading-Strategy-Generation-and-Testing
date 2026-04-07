@@ -1,84 +1,93 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly Pivot Range Breakout with Volume Confirmation
-# Hypothesis: Price breaking above/below weekly pivot support/resistance levels
-# on 1d timeframe with volume > 1.5x average indicates institutional interest.
-# Weekly pivot levels act as significant support/resistance in both bull and bear markets.
-# Volume confirmation filters false breakouts. Target: 10-25 trades/year.
+# Strategy: 6h Camarilla Pivot Reversal with 1d EMA Trend Filter
+# Hypothesis: Fade at Camarilla R3/S3 levels during strong 1d trend (EMA50) captures mean reversion in trending markets.
+# Works in bull/bear: EMA50 filter ensures we only fade against the trend, avoiding counter-trend trades in strong moves.
+# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag.
 
-name = "1d_weekly_pivot_range_breakout_volume_v3"
-timeframe = "1d"
+name = "6h_camarilla_pivot_reversal_1d_ema_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Get 1d data for EMA trend and Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate EMA(50) on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    support1 = 2 * pivot - weekly_high
-    resistance1 = 2 * pivot - weekly_low
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Using previous day's high, low, close (already available in df_1d)
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    # Align weekly levels to daily
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    support1_aligned = align_htf_to_ltf(prices, df_weekly, support1)
-    resistance1_aligned = align_htf_to_ltf(prices, df_weekly, resistance1)
+    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # We'll use R3/S3 for fade, R4/S4 for breakout confirmation
+    range_hl = phigh - plow
+    r3 = pclose + (range_hl * 1.1 / 4)
+    s3 = pclose - (range_hl * 1.1 / 4)
+    r4 = pclose + (range_hl * 1.1 / 2)
+    s4 = pclose - (range_hl * 1.1 / 2)
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(support1_aligned[i]) or np.isnan(resistance1_aligned[i]) or np.isnan(vol_avg[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below pivot or volume drops
-            if close[i] < pivot_aligned[i] or volume[i] < vol_avg[i] * 0.5:
+            # Exit: price reaches S3 (support) or trend changes to down
+            if close[i] <= s3_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price closes above pivot or volume drops
-            if close[i] > pivot_aligned[i] or volume[i] < vol_avg[i] * 0.5:
+            # Exit: price reaches R3 (resistance) or trend changes to up
+            if close[i] >= r3_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
-        else:  # Flat, look for breakout
-            # Volume confirmation: current volume > 1.5x average
-            if volume[i] > vol_avg[i] * 1.5:
-                # Long breakout: price closes above resistance1
-                if close[i] > resistance1_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short breakout: price closes below support1
-                elif close[i] < support1_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Fade at R3/S3 in direction of 1d EMA trend
+            if close[i] > ema_50_aligned[i]:  # Uptrend - look for short at R3
+                if close[i] >= r3_aligned[i]:  # Price at or above R3 resistance
+                    # Additional filter: avoid fading in extremely strong trends (price > R4 suggests breakout)
+                    if close[i] < r4_aligned[i]:  # Below R4, not a strong breakout
+                        position = -1
+                        signals[i] = -0.25
+            else:  # Downtrend - look for long at S3
+                if close[i] <= s3_aligned[i]:  # Price at or below S3 support
+                    # Additional filter: avoid fading in extremely strong trends (price < S4 suggests breakdown)
+                    if close[i] > s4_aligned[i]:  # Above S4, not a strong breakdown
+                        position = 1
+                        signals[i] = 0.25
     
     return signals
