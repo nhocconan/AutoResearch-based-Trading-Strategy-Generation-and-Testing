@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with 1-week volume confirmation and 1-week ADX trend filter
-# Long when price breaks above 20-day Donchian high + volume > 1.5x 20-day average + weekly ADX > 20
-# Short when price breaks below 20-day Donchian low + volume > 1.5x 20-day average + weekly ADX > 20
-# Exit when price crosses 20-day EMA in opposite direction
+# Hypothesis: Daily Donchian(20) breakout with weekly ADX trend filter and volume confirmation
+# Long when price breaks above 20-day Donchian high + volume > 1.5x 20-day average + weekly ADX > 25
+# Short when price breaks below 20-day Donchian low + volume > 1.5x 20-day average + weekly ADX > 25
+# Exit when price crosses 50-day EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Uses 1-week volume for confirmation and 1-week ADX for trend strength
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# Position size: 0.30 (30% of capital)
+# Uses daily volume for confirmation and weekly ADX for trend strength
+# Target: 50-120 total trades over 4 years (12-30/year)
 
-name = "1d_donchian20_1w_vol_1w_adx_v1"
+name = "1d_donchian20_vol_1w_adx_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -27,22 +27,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for Donchian and EMA (base timeframe)
-    if len(close) < 20:
+    # Daily data for volume confirmation and Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-week data for volume confirmation and ADX trend filter
+    # Weekly data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1-week volume average (20-period)
-    volume_1w = df_1w['volume'].values
-    volume_1w_s = pd.Series(volume_1w)
-    volume_ma = volume_1w_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma)
+    # Calculate daily volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # 1-week ADX (14-period)
+    # Calculate weekly ADX (14-period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -76,12 +77,12 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # 20-day Donchian channels
+    # 20-period Donchian channels
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 20-day EMA for exit
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 50-day EMA for exit
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -96,13 +97,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.30
             else:
                 signals[i] = 0.0
             continue
@@ -113,41 +114,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 20-day EMA
-            elif close[i] < ema_20[i]:
+            # Exit: price crosses below 50-day EMA
+            elif close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 20-day EMA
-            elif close[i] > ema_20[i]:
+            # Exit: price crosses above 50-day EMA
+            elif close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:
             # Look for entries: Donchian breakout with volume confirmation and ADX filter
             # Volume filter: volume > 1.5x 20-day average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 20
-            trend_filter = adx_aligned[i] > 20
+            # Trend filter: weekly ADX > 25
+            trend_filter = adx_aligned[i] > 25
             
             # Long: price breaks above Donchian high + volume filter + trend filter
             if close[i] > highest_high[i] and volume_filter and trend_filter:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low + volume filter + trend filter
             elif close[i] < lowest_low[i] and volume_filter and trend_filter:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close[i]
     
