@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with 12h trend filter and volume confirmation
-# Uses Donchian(20) breakout for entry, 12h EMA trend filter for direction,
-# and volume spike confirmation to avoid false breakouts. Designed for low
-# trade frequency (target: 12-37 trades/year) to minimize fee drift.
-# Works in bull markets via breakout follow-through and in bear markets via
-# breakdown continuation with trend alignment.
+# Hypothesis: 6h Donchian breakout with daily pivot direction filter and volume confirmation
+# Uses Donchian(20) breakouts for trend entries, filtered by daily pivot direction (bullish/bearish bias)
+# and volume spikes (>1.5x average) to confirm momentum. Designed for low trade frequency
+# (target: 15-25 trades/year) to minimize fee drag while capturing strong momentum moves.
+# Works in bull markets via breakout continuation and in bear markets via breakdown continuation.
 
-name = "12h_donchian20_1d_trend_volume_v1"
-timeframe = "12h"
+name = "6h_donchian20_daily_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,47 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Donchian channels
+    # Daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h EMA for trend filter
-    ema_fast = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_slow = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Daily Donchian channels (20-period)
+    # Calculate daily pivot points (using previous day's OHLC)
+    # Pivot = (H + L + C) / 3
+    # Support 1 = (2 * Pivot) - High
+    # Resistance 1 = (2 * Pivot) - Low
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1d = df_1d['close'].values
     
-    # Volume spike detector (20-period average)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = (2 * pivot_1d) - low_1d
+    s1_1d = (2 * pivot_1d) - high_1d
+    
+    # Align daily pivots to 6h timeframe (use previous day's pivot for look-ahead bias protection)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Determine daily bias: bullish if close > pivot, bearish if close < pivot
+    daily_bias = np.where(close_1d > pivot_1d, 1, np.where(close_1d < pivot_1d, -1, 0))
+    daily_bias_aligned = align_htf_to_ltf(prices, df_1d, daily_bias)
+    
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(daily_bias_aligned[i]) or
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or
+            np.isnan(s1_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: fast EMA above/below slow EMA
-        uptrend = ema_fast[i] > ema_slow[i]
-        downtrend = ema_fast[i] < ema_slow[i]
-        
         # Volume confirmation: current volume > 1.5x average
-        vol_spike = volume[i] > 1.5 * vol_ma[i]
+        volume_confirm = volume[i] > (1.5 * vol_ma[i])
         
-        # Long: price breaks above Donchian high + uptrend + volume spike
-        if close[i] > donchian_high_aligned[i] and uptrend and vol_spike:
+        # Long conditions: price breaks above Donchian high AND daily bias bullish AND volume confirmation
+        if (close[i] > donchian_high[i] and 
+            daily_bias_aligned[i] == 1 and 
+            volume_confirm):
             signals[i] = 0.25
-        # Short: price breaks below Donchian low + downtrend + volume spike
-        elif close[i] < donchian_low_aligned[i] and downtrend and vol_spike:
+        # Short conditions: price breaks below Donchian low AND daily bias bearish AND volume confirmation
+        elif (close[i] < donchian_low[i] and 
+              daily_bias_aligned[i] == -1 and 
+              volume_confirm):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
