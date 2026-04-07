@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Daily Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-Long when price breaks above 20-day Donchian upper band with expanding volume AND weekly EMA trend up
-Short when price breaks below 20-day Donchian lower band with expanding volume AND weekly EMA trend down
-Exit when price crosses back to 20-day moving average
-Designed for low frequency (7-25 trades/year) to minimize fee drag while capturing trends in both bull and bear markets.
+6H Bollinger Band Width + RSI Mean Reversion with 12h Trend Filter
+Hypothesis: In ranging markets (low BBW), price tends to revert from RSI extremes.
+In trending markets (high BBW), we follow the 12h EMA trend.
+This dual-regime approach works in both bull and bear markets by adapting to volatility regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_bbw_rsi_meanrev_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,58 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 20-day Donchian Channels ===
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # === Bollinger Bands (20, 2) ===
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma20 + 2 * std20
+    bb_lower = sma20 - 2 * std20
+    bb_middle = sma20
+    bb_width = (bb_upper - bb_lower) / (bb_middle + 1e-10)
     
-    # === Volume confirmation (20-day average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    # === RSI (14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Weekly trend filter (EMA 21) ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 12h EMA trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
-            np.isnan(donch_middle[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i])):
+    # Regime thresholds
+    bbw_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    low_vol_threshold = bbw_ma * 0.5   # Below this = ranging market
+    high_vol_threshold = bbw_ma * 2.0  # Above this = trending market
+    
+    for i in range(50, n):
+        if (np.isnan(bb_width[i]) or np.isnan(rsi[i]) or 
+            np.isnan(bbw_ma[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below middle line
-            if close[i] < donch_middle[i]:
+            # Exit: RSI crosses above 60 or price touches upper BB
+            if rsi[i] > 60 or close[i] >= bb_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above middle line
-            if close[i] > donch_middle[i]:
+            # Exit: RSI crosses below 40 or price touches lower BB
+            if rsi[i] < 40 or close[i] <= bb_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need expanding volume (above average)
-            if vol_ratio[i] < 1.5:
-                signals[i] = 0.0
-                continue
-            
-            # Entry: Donchian breakout with volume confirmation AND weekly trend filter
-            if close[i] > donch_upper[i] and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
-                # Breakout above upper channel with rising weekly EMA -> long
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < donch_lower[i] and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
-                # Breakdown below lower channel with falling weekly EMA -> short
-                position = -1
-                signals[i] = -0.25
+            # Determine regime based on Bollinger Band Width
+            if bb_width[i] < low_vol_threshold[i]:
+                # Ranging market: mean reversion from RSI extremes
+                if rsi[i] < 30 and close[i] > bb_lower[i]:
+                    # Oversold and above lower BB -> long
+                    position = 1
+                    signals[i] = 0.25
+                elif rsi[i] > 70 and close[i] < bb_upper[i]:
+                    # Overbought and below upper BB -> short
+                    position = -1
+                    signals[i] = -0.25
+            elif bb_width[i] > high_vol_threshold[i]:
+                # Trending market: follow 12h EMA trend
+                if ema_12h_aligned[i] > ema_12h_aligned[i-1] and close[i] > bb_middle[i]:
+                    # Uptrend and above middle BB -> long
+                    position = 1
+                    signals[i] = 0.25
+                elif ema_12h_aligned[i] < ema_12h_aligned[i-1] and close[i] < bb_middle[i]:
+                    # Downtrend and below middle BB -> short
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
