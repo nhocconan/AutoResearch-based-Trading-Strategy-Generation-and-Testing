@@ -1,32 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_hull_ma_rsi_filter_4h1d_trend
-Hypothesis: Use Hull Moving Average (HMA) on 1h for entry signals, filtered by 4h RSI trend and 1d volume regime. Works in bull/bear markets by using RSI > 50 for long bias and RSI < 50 for short bias on 4h, while 1d volume filter ensures trades occur only during active market periods. Hull MA reduces lag and whipsaws compared to traditional MA.
+12h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, use 1-day Donchian breakouts for entry with 1-day trend filter (EMA50) and volume confirmation to capture strong trending moves. Exit when price returns to the midpoint of the Donchian channel. This strategy targets sustained trends while avoiding false breakouts, working in both bull and bear markets via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_hull_ma_rsi_filter_4h1d_trend"
-timeframe = "1h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def _wma(values, window):
-    """Weighted Moving Average"""
-    weights = np.arange(1, window + 1)
-    return np.convolve(values, weights / weights.sum(), mode='same')
-
-def _hull_ma(values, period):
-    """Hull Moving Average"""
-    half_period = max(2, period // 2)
-    sqrt_period = max(2, int(np.sqrt(period)))
-    
-    wma_half = _wma(values, half_period)
-    wma_full = _wma(values, period)
-    
-    raw_hma = 2 * wma_half - wma_full
-    return _wma(raw_hma, sqrt_period)
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,119 +23,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for RSI trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate RSI on 4h close
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    
-    # 1d data for volume regime filter
+    # 1d data for Donchian and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate volume moving average on 1d
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian Channel on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align indicators to 1h timeframe
-    rsi_4h_1h = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    vol_ma_1d_1h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Donchian Channel (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Hull Moving Average on 1h close (period 16 for responsiveness)
-    hull_ma = _hull_ma(close, 16)
+    # 1d EMA for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # Volume confirmation on 1h (current vs 20-period average)
-    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align indicators to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_12h = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation (20-period average on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(hull_ma[i]) or np.isnan(rsi_4h_1h[i]) or 
-            np.isnan(vol_ma_1d_1h[i]) or np.isnan(vol_ma_1h[i]) or
-            vol_ma_1d_1h[i] <= 0 or vol_ma_1h[i] <= 0):
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or
+            np.isnan(donchian_mid_12h[i]) or np.isnan(ema_1d_12h[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume regime: trade only when 1d volume is above average (active market)
-        vol_regime = volume_1d[-1] > vol_ma_1d_1h[i] if len(volume_1d) > 0 else False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Volume confirmation on 1h: current volume > 1.2x average
-        vol_confirm = volume[i] > 1.2 * vol_ma_1h[i]
-        
-        # Hull MA direction
-        price_above_hull = close[i] > hull_ma[i]
-        price_below_hull = close[i] < hull_ma[i]
+        # Trend direction from EMA
+        uptrend = close[i] > ema_1d_12h[i]
+        downtrend = close[i] < ema_1d_12h[i]
         
         if position == 1:  # Long position
-            # Exit conditions
-            exit_long = False
-            # Exit if price crosses below Hull MA
-            if price_below_hull:
-                exit_long = True
-            # Exit if 4h RSI turns weak (< 40)
-            elif rsi_4h_1h[i] < 40:
-                exit_long = True
-            
-            if exit_long:
+            # Exit if price returns to Donchian midpoint
+            if close[i] <= donchian_mid_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_short = False
-            # Exit if price crosses above Hull MA
-            if price_above_hull:
-                exit_short = True
-            # Exit if 4h RSI turns strong (> 60)
-            elif rsi_4h_1h[i] > 60:
-                exit_short = True
-            
-            if exit_short:
+            # Exit if price returns to Donchian midpoint
+            if close[i] >= donchian_mid_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume regime and confirmation
-            if not (vol_regime and vol_confirm):
-                signals[i] = 0.0
-                continue
-            
-            # Long entry conditions
+            # Long entry: price breaks above Donchian high with uptrend and volume
             long_entry = False
-            # Price crosses above Hull MA with bullish 4h RSI (> 50)
-            if price_above_hull and close[i-1] <= hull_ma[i-1]:
-                if rsi_4h_1h[i] > 50:
+            if close[i] > donchian_high_12h[i] and close[i-1] <= donchian_high_12h[i-1]:
+                if uptrend and vol_confirm:
                     long_entry = True
             
-            # Short entry conditions
+            # Short entry: price breaks below Donchian low with downtrend and volume
             short_entry = False
-            # Price crosses below Hull MA with bearish 4h RSI (< 50)
-            if price_below_hull and close[i-1] >= hull_ma[i-1]:
-                if rsi_4h_1h[i] < 50:
+            if close[i] < donchian_low_12h[i] and close[i-1] >= donchian_low_12h[i-1]:
+                if downtrend and vol_confirm:
                     short_entry = True
             
             if long_entry:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
