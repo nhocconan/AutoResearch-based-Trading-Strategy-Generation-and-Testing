@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
-# Long when: price > 4h EMA50 (trend), RSI(14) > 55 (momentum), volume > 1.5x 4h avg volume (confirmation)
-# Short when: price < 4h EMA50 (trend), RSI(14) < 45 (momentum), volume > 1.5x 4h avg volume (confirmation)
-# Exit when trend reverses (price crosses 4h EMA50) or RSI crosses 50
-# Stoploss at 2.0 * ATR(14)
-# Position size: 0.20 (20% of capital)
-# Uses 4h EMA50 for trend filter and 4h volume average for confirmation
-# Target: 60-150 total trades over 4 years (15-37/year)
+# Hypothesis: 1-hour strategy using 4-hour Donchian(20) for trend direction, 1-hour for entry timing with volume confirmation and session filter.
+# Long when price breaks above 4h Donchian upper band during 08-20 UTC, volume > 1.5x 4h average volume.
+# Short when price breaks below 4h Donchian lower band during 08-20 UTC, volume > 1.5x 4h average volume.
+# Exit when price crosses back below/above the Donchian middle band or opposite breakout occurs.
+# Stoploss at 2.0 * ATR(14). Position size: 0.20.
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 
-name = "1h_momentum_4h_ema50_vol_v1"
+name = "1h_donchian20_4h_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -27,28 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for EMA50 trend filter
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h data for Donchian channels
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 4h Donchian(20) channels
+    high_series = pd.Series(high_4h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_4h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
+    
+    # Align Donchian bands to 1h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
     
     # 4h volume average for confirmation
     volume_4h = df_4h['volume'].values
     volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
-    
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -65,8 +69,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(volume_ma_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(middle_aligned[i]) or np.isnan(volume_ma_4h_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.20
             else:
@@ -79,8 +84,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (price below EMA50) or RSI < 50
-            elif close[i] < ema_4h_aligned[i] or rsi[i] < 50:
+            # Exit: price crosses below middle band or opposite breakout
+            elif close[i] < middle_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -92,26 +97,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (price above EMA50) or RSI > 50
-            elif close[i] > ema_4h_aligned[i] or rsi[i] > 50:
+            # Exit: price crosses above middle band or opposite breakout
+            elif close[i] > middle_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries with volume confirmation and trend alignment
-            # Long: price above EMA50 (uptrend), RSI > 55 (momentum), volume spike
-            if (close[i] > ema_4h_aligned[i] and
-                rsi[i] > 55 and
-                volume[i] > 1.5 * volume_ma_4h_aligned[i]):
+            # Look for entries with volume confirmation and session filter
+            # Long: price breaks above upper band, volume spike, in session
+            if (close[i] > upper_aligned[i] and
+                volume[i] > 1.5 * volume_ma_4h_aligned[i] and
+                in_session[i]):
                 signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
-            # Short: price below EMA50 (downtrend), RSI < 45 (momentum), volume spike
-            elif (close[i] < ema_4h_aligned[i] and
-                  rsi[i] < 45 and
-                  volume[i] > 1.5 * volume_ma_4h_aligned[i]):
+            # Short: price breaks below lower band, volume spike, in session
+            elif (close[i] < lower_aligned[i] and
+                  volume[i] > 1.5 * volume_ma_4h_aligned[i] and
+                  in_session[i]):
                 signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
