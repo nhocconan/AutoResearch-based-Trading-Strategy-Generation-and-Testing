@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Camarilla Pivot + Volume Spike + Choppiness Regime
-# Hypothesis: Camarilla pivot levels (from daily) act as strong support/resistance.
-# Enter long at S1/S2 on bounce with volume spike in choppy market (mean reversion).
-# Enter short at R1/R2 on rejection with volume spike in choppy market.
-# Choppiness filter avoids trending markets where reversals fail.
-# Designed for 4h timeframe with low trade frequency (20-50/year).
-# Works in bull via mean reversion at support, in bear via mean reversion at resistance.
+# Strategy: 6h Williams Alligator + Daily Trend Filter + Volume Spike
+# Hypothesis: Williams Alligator identifies trend phases with clear entry/exit rules.
+# Daily trend filter (EMA50) ensures alignment with higher-timeframe momentum.
+# Volume spike confirms institutional participation in the trend.
+# Designed for 6h timeframe with low trade frequency (12-37/year).
+# Works in bull via long signals when jaws-teeth-lips aligned up + daily uptrend + volume,
+# in bear via short signals when jaws-teeth-lips aligned down + daily downtrend + volume.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_camarilla_pivot_volume_chop_v1"
-timeframe = "4h"
+name = "6h_williams_alligator_1d_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,107 +27,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Formula: 
-    # H4 = C + ((H-L) * 1.1/2)
-    # H3 = C + ((H-L) * 1.1/4)
-    # H2 = C + ((H-L) * 1.1/6)
-    # H1 = C + ((H-L) * 1.1/12)
-    # L1 = C - ((H-L) * 1.1/12)
-    # L2 = C - ((H-L) * 1.1/6)
-    # L3 = C - ((H-L) * 1.1/4)
-    # L4 = C - ((H-L) * 1.1/2)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Williams Alligator (13,8,5) - Smoothed Moving Average (SMMA)
+    def smma(values, period):
+        """Smoothed Moving Average - Williams Alligator uses SMMA"""
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(values[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT_VALUE) / PERIOD
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
     
-    H4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    H3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    H2 = close_1d + ((high_1d - low_1d) * 1.1 / 6)
-    H1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    L1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
-    L2 = close_1d - ((high_1d - low_1d) * 1.1 / 6)
-    L3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    L4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
+    # Alligator lines: Jaw(13,8), Teeth(8,5), Lips(5,3)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Align levels to 4h time (use previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Daily trend filter: EMA(50) of daily close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Choppiness Index (14-period)
-    def true_range(high, low, prev_close):
-        tr1 = high - low
-        tr2 = np.abs(high - prev_close)
-        tr3 = np.abs(low - prev_close)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = true_range(high, low, prev_close)
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range14 = highest_high14 - lowest_low14
-    range14[range14 == 0] = 1e-10
-    
-    chop = 100 * np.log10(atr14 * 14 / range14) / np.log10(14)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if required data not available
-        if (np.isnan(chop[i]) or np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Chop regime: only trade in choppy markets (61.8 < chop < 100)
-        chop_ok = chop[i] > 61.8
         
         # Check volume confirmation
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches H1 (take profit) or closes below L2 (stop)
-            if close[i] >= H1_aligned[i] or close[i] <= L2_aligned[i]:
+            # Exit: Alligator lines cross in wrong order OR daily trend turns bearish
+            if not (jaw[i] > teeth[i] > lips[i]) or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price reaches L1 (take profit) or closes above H2 (stop)
-            if close[i] <= L1_aligned[i] or close[i] >= H2_aligned[i]:
+            # Exit: Alligator lines cross in wrong order OR daily trend turns bullish
+            if not (jaw[i] < teeth[i] < lips[i]) or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if chop_ok and vol_ok:
-                # Long: price touches or goes below L2 and closes back above it (bounce)
-                if low[i] <= L2_aligned[i] and close[i] > L2_aligned[i]:
+            if vol_ok:
+                # Long: Alligator aligned up (Jaw > Teeth > Lips) + price above daily EMA50
+                if jaw[i] > teeth[i] > lips[i] and close[i] > ema_50_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price touches or goes above H2 and closes back below it (rejection)
-                elif high[i] >= H2_aligned[i] and close[i] < H2_aligned[i]:
+                # Short: Alligator aligned down (Jaw < Teeth < Lips) + price below daily EMA50
+                elif jaw[i] < teeth[i] < lips[i] and close[i] < ema_50_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
