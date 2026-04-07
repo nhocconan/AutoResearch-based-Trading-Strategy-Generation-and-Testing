@@ -1,91 +1,101 @@
 #!/usr/bin/env python3
 """
-6h_triple_ema_reversion_v1
-Hypothesis: On 6-hour timeframe, price reverts to the mean during overextended moves.
-Uses triple EMA (8,21,50) alignment with RSI extreme and Bollinger Band width filter.
-Long when EMA8 > EMA21 > EMA50 (bullish alignment) AND RSI < 30 AND BB width < 0.05 (low volatility).
-Short when EMA8 < EMA21 < EMA50 (bearish alignment) AND RSI > 70 AND BB width < 0.05.
-Exit when EMA8 crosses back toward EMA21.
-Designed for low-frequency, high-conviction trades in ranging markets with volatility filter to avoid chop.
-Works in both bull/bear markets as it fades extremes during low volatility regardless of trend.
+1d_donchian_20_1w_trend_volume_v2
+Hypothesis: On 1-day timeframe, use Donchian channel breakouts with 1-week trend filter and volume confirmation.
+Long when price breaks above 20-day Donchian high with weekly EMA(50) trending up and volume > 1.5x 20-day average.
+Short when price breaks below 20-day Donchian low with weekly EMA(50) trending down and volume > 1.5x 20-day average.
+Exit when price returns to the Donchian midpoint.
+Designed for 10-30 trades/year to minimize fee dust while capturing strong trends with institutional validation.
+Works in both bull/bear markets as Donchian channels adapt to volatility and weekly trend filter avoids counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_triple_ema_reversion_v1"
-timeframe = "6h"
+name = "1d_donchian_20_1w_trend_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMAs
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate Bollinger Band width (20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
-    bb_width = (upper_bb - lower_bb) / sma20
+    # Calculate weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Determine weekly trend direction (using EMA slope)
+    weekly_trend_up = np.zeros(len(ema_50_1w_aligned), dtype=bool)
+    weekly_trend_down = np.zeros(len(ema_50_1w_aligned), dtype=bool)
+    for i in range(1, len(ema_50_1w_aligned)):
+        if not np.isnan(ema_50_1w_aligned[i]) and not np.isnan(ema_50_1w_aligned[i-1]):
+            weekly_trend_up[i] = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
+            weekly_trend_down[i] = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
+    
+    # Calculate Donchian Channel (20-period) on 1d timeframe
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume filter: 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(50, 20), n):
+    for i in range(max(20, 50), n):
         # Skip if data not available
-        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
-            np.isnan(rsi[i]) or np.isnan(bb_width[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Low volatility filter (avoid choppy markets)
-        vol_filter = bb_width[i] < 0.05
+        # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: EMA8 crosses back below EMA21 (mean reversion)
-            if ema8[i] < ema21[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] <= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA8 crosses back above EMA21 (mean reversion)
-            if ema8[i] > ema21[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] >= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with low volatility filter
-            if vol_filter:
-                # Bullish EMA alignment + RSI oversold
-                if (ema8[i] > ema21[i] > ema50[i] and rsi[i] < 30):
+            # Only enter with volume confirmation and weekly trend alignment
+            if vol_ok:
+                # Long: price breaks above Donchian high with weekly uptrend
+                if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1] and 
+                    weekly_trend_up[i]):
                     position = 1
                     signals[i] = 0.25
-                # Bearish EMA alignment + RSI overbought
-                elif (ema8[i] < ema21[i] < ema50[i] and rsi[i] > 70):
+                # Short: price breaks below Donchian low with weekly downtrend
+                elif (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1] and 
+                      weekly_trend_down[i]):
                     position = -1
                     signals[i] = -0.25
     
