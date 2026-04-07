@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout + Volume Spike + Choppiness Filter
-# Hypothesis: Donchian(20) breakouts capture momentum, volume spike confirms institutional participation,
-# and choppiness filter avoids false signals in sideways markets. Works in both bull and bear regimes.
-# 4h timeframe balances responsiveness and noise. Target: 20-50 trades/year (80-200 over 4 years).
-name = "4h_donchian_breakout_volume_chop_v1"
+# Strategy: 4h KAMA Trend + 1d Volume Filter + 1w Regime
+# Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
+# in ranging markets it stays flat. We use 1d volume to confirm institutional participation
+# and 1week trend filter (price > 50-period SMA) to avoid counter-trend trades.
+# Works in both bull and bear markets by only trading with the higher timeframe trend.
+# Target: 20-50 trades/year (80-200 over 4 years) to avoid fee drag.
+name = "4h_kama_1d_volume_1w_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -22,87 +24,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for choppiness filter
+    # Get 1-day data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_filter = volume > (vol_ma * 2.0)
+    # KAMA parameters
+    fast_sc = 2/(2+1)   # EMA constant for fastest EMA
+    slow_sc = 2/(30+1)  # EMA constant for slowest EMA
     
-    # Choppiness Index (14-period) on daily timeframe
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Efficiency Ratio and KAMA
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Handle first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
     
-    # True Range
-    tr1 = np.abs(daily_high - daily_low)
-    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
-    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low
-    tr[0] = daily_high[0] - daily_low[0]
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Chop calculation
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr14 / (highest_high - lowest_low)) / np.log10(14)
-    chop[0:13] = np.nan  # First 13 values invalid
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align chop to 4h timeframe
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
+    # 1-day volume filter: current volume > 1.5x 20-period average
+    daily_volume = df_1d['volume'].values
+    vol_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean()
+    vol_filter_1d = daily_volume > (vol_ma * 1.5)
+    vol_filter_1d_4h = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
+    
+    # 1-week trend filter: price > 50-period SMA
+    weekly_close = df_1w['close'].values
+    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    weekly_sma50_4h = align_htf_to_ltf(prices, df_1w, weekly_sma50)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop_4h[i])):
+        if (np.isnan(kama[i]) or np.isnan(vol_filter_1d_4h[i]) or 
+            np.isnan(weekly_sma50_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Choppiness filter: only trade when trending (CHOP < 38.2)
-        if chop_4h[i] > 38.2:
-            # In choppy market, flatten position
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        # Determine trend regime from 1w data
+        uptrend = close[i] > weekly_sma50_4h[i]  # Uptrend when price > weekly SMA50
+        downtrend = close[i] < weekly_sma50_4h[i]  # Downtrend when price < weekly SMA50
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band or volume spike fails
-            if close[i] < low_min[i]:
+            # Exit: price crosses below KAMA or trend turns down
+            if close[i] < kama[i] or downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band or volume spike fails
-            if close[i] > high_max[i]:
+            # Exit: price crosses above KAMA or trend turns up
+            if close[i] > kama[i] or uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
             # Require volume confirmation
-            if vol_filter[i]:
-                # Long breakout: price closes above Donchian upper band
-                if close[i] > high_max[i]:
+            if vol_filter_1d_4h[i]:
+                # Go long if price > KAMA and in uptrend
+                if close[i] > kama[i] and uptrend:
                     position = 1
-                    signals[i] = 0.30
-                # Short breakdown: price closes below Donchian lower band
-                elif close[i] < low_min[i]:
+                    signals[i] = 0.25
+                # Go short if price < KAMA and in downtrend
+                elif close[i] < kama[i] and downtrend:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
