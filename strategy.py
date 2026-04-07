@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Index (Bull/Bear Power) with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Bull Power > 0 (close > EMA13) + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when Bear Power < 0 (close < EMA13) + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when price crosses 13-period EMA in opposite direction
+# Hypothesis: 6-hour Elder Ray Index with 1-day volume confirmation and 1-week ADX trend filter
+# Long when Bull Power > 0 + volume > 1.5x 20-period average + weekly ADX > 25
+# Short when Bear Power < 0 + volume > 1.5x 20-period average + weekly ADX > 25
+# Exit when Bear Power > 0 (for long) or Bull Power < 0 (for short)
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
@@ -77,12 +77,10 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # 6-period EMA(13) for Elder Ray
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
     ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = low - ema_13   # Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # 6-period ATR(14) for stoploss
     tr1 = high - low
@@ -99,7 +97,7 @@ def generate_signals(prices):
     
     for i in range(13, n):
         # Skip if required data not available
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
@@ -114,8 +112,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 13-period EMA
-            elif close[i] < ema_13[i]:
+            # Exit: Bear Power > 0 (bullish momentum fading)
+            elif bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -127,8 +125,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 13-period EMA
-            elif close[i] > ema_13[i]:
+            # Exit: Bull Power < 0 (bearish momentum fading)
+            elif bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -141,12 +139,12 @@ def generate_signals(prices):
             # Trend filter: weekly ADX > 25
             trend_filter = adx_aligned[i] > 25
             
-            # Long: Bull Power > 0 (close > EMA13) + volume filter + trend filter
+            # Long: Bull Power > 0 + volume filter + trend filter
             if bull_power[i] > 0 and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Bear Power < 0 (close < EMA13) + volume filter + trend filter
+            # Short: Bear Power < 0 + volume filter + trend filter
             elif bear_power[i] < 0 and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
