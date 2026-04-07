@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_donchian_20_12h_trend_volume_v3
-Hypothesis: On 4-hour timeframe, buy breakouts above 20-period Donchian channel when 12h trend is up (close > EMA50) and volume confirms; sell breakdowns below 20-period Donchian channel when 12h trend is down (close < EMA50) and volume confirms. Uses volatility filter (ATR) to avoid choppy markets. Designed for 20-50 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
+12h_camarilla_pivot_1d_volume_v5
+Hypothesis: On 12-hour timeframe, trade reversals at daily Camarilla pivot levels (H3/L3, H4/L4) with volume confirmation.
+Long when price touches L3/L4 with volume > 1.5x average; short when touches H3/H4 with volume > 1.5x average.
+Exit on opposite touch or when price moves beyond H5/L5. Works in ranging markets (2025-2026) and captures mean reversion.
+Designed for 15-30 trades/year to minimize fee drag while capturing reversals in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_12h_trend_volume_v3"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v5"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -23,119 +26,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h close
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    # Calculate Camarilla levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 4h for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Camarilla multipliers
+    H4 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 2
+    H3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
+    L3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    L4 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 2
+    H5 = close_1d + 1.1 * (high_1d - low_1d) * 1.1
+    L5 = close_1d - 1.1 * (high_1d - low_1d) * 1.1
     
-    atr_period = 14
-    atr = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if np.isnan(tr[i]):
-            if i == 0:
-                atr[i] = np.nan
-            else:
-                atr[i] = atr[i-1]
-        else:
-            if i == 0 or np.isnan(atr[i-1]):
-                atr[i] = tr[i]
-            else:
-                atr[i] = atr[i-1] + (1/atr_period) * (tr[i] - atr[i-1])
+    # Align to 12h timeframe
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    H5_12h = align_htf_to_ltf(prices, df_1d, H5)
+    L5_12h = align_htf_to_ltf(prices, df_1d, L5)
     
-    # Calculate Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                res[i] = np.nan
-            else:
-                res[i] = np.max(arr[i-window+1:i+1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                res[i] = np.nan
-            else:
-                res[i] = np.min(arr[i-window+1:i+1])
-        return res
-    
-    donch_high = rolling_max(high, 20)
-    donch_low = rolling_min(low, 20)
-    
-    # Calculate average volume (20-period)
-    def rolling_mean(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                res[i] = np.nan
-            else:
-                res[i] = np.mean(arr[i-window+1:i+1])
-        return res
-    
-    avg_volume = rolling_mean(volume, 20)
-    
-    # Align 12h indicators to 4h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    atr_aligned = align_htf_to_ltf(prices, df_12h, atr)  # Use 12h ATR for volatility filter
+    # Volume filter: 1.5x average volume
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
-        # Skip if any data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr_aligned[i]) or
-            np.isnan(avg_volume[i])):
+    for i in range(20, n):
+        # Skip if pivot data not available
+        if np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]):
             signals[i] = 0.0
             continue
+            
+        # Long conditions: touch L3 or L4 with volume confirmation
+        long_signal = (
+            (low[i] <= L3_12h[i] * 1.001 or low[i] <= L4_12h[i] * 1.001) and
+            vol_filter[i]
+        )
         
-        # Volatility filter: avoid extremely low volatility (choppy) markets
-        if atr_aligned[i] < 0.5 * np.nanmean(atr_aligned[max(0, i-50):i+1]):
-            signals[i] = 0.0
-            continue
+        # Short conditions: touch H3 or H4 with volume confirmation
+        short_signal = (
+            (high[i] >= H3_12h[i] * 0.999 or high[i] >= H4_12h[i] * 0.999) and
+            vol_filter[i]
+        )
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Exit conditions: opposite touch or beyond H5/L5
+        exit_long = (
+            high[i] >= H3_12h[i] * 0.999 or  # Touch H3 on long
+            high[i] >= H5_12h[i] * 0.999     # Beyond H5
+        )
+        
+        exit_short = (
+            low[i] <= L3_12h[i] * 1.001 or   # Touch L3 on short
+            low[i] <= L5_12h[i] * 1.001      # Beyond L5
+        )
         
         if position == 1:  # Long position
-            # Exit: price re-enters Donchian channel or trend changes
-            if close[i] <= donch_high[i] or close[i] < ema50_12h_aligned[i]:
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price re-enters Donchian channel or trend changes
-            if close[i] >= donch_low[i] or close[i] > ema50_12h_aligned[i]:
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: breakout above Donchian high with up trend and volume
-            if (close[i] > donch_high[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                volume_confirmed):
+            if long_signal:
                 position = 1
                 signals[i] = 0.25
-            # Short: breakdown below Donchian low with down trend and volume
-            elif (close[i] < donch_low[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  volume_confirmed):
+            elif short_signal:
                 position = -1
                 signals[i] = -0.25
     
