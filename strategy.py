@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_ema_crossover_4h1d_trend_volume_v1
-Hypothesis: On 1-hour timeframe, use EMA(12/26) crossover for entry timing, with trend filter from 4-hour EMA50 and 1-day EMA200. Enter long when fast EMA crosses above slow EMA in uptrend (price > 4h EMA50 and > 1d EMA200) with volume > 1.5x average, short when fast EMA crosses below slow EMA in downtrend with volume confirmation. Exit on opposite crossover. Uses 4h/1d for trend direction, 1h only for entry timing to reduce whipsaw. Designed for 15-37 trades/year to avoid fee drag while capturing trends in both bull and bear markets.
+1d_donchian_20_1w_trend_volume_v4
+Hypothesis: On daily timeframe, use Donchian(20) breakouts with trend filter from weekly EMA50 and volume confirmation. Enter long on upper band breakout in uptrend with volume > 1.5x average, short on lower band breakdown in downtrend with volume > 1.5x average. Exit on opposite band touch. Designed for low frequency (7-25 trades/year) to avoid fee drag while capturing trend continuation. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) by using weekly trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_ema_crossover_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "1d_donchian_20_1w_trend_volume_v4"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,79 +23,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for intermediate trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    c_4h = df_4h['close'].values
-    ema4h_50 = pd.Series(c_4h).ewm(span=50, adjust=False).mean().values
-    ema4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema4h_50)
+    w_close = df_1w['close'].values
+    w_ema50 = pd.Series(w_close).ewm(span=50, adjust=False).mean().values
+    w_ema50_aligned = align_htf_to_ltf(prices, df_1w, w_ema50)
     
-    # Get 1d data for long-term trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    c_1d = df_1d['close'].values
-    ema1d_200 = pd.Series(c_1d).ewm(span=200, adjust=False).mean().values
-    ema1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema1d_200)
-    
-    # 1h EMA crossover signals
-    ema_fast = pd.Series(close).ewm(span=12, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=26, adjust=False).mean().values
-    
-    # Volume confirmation: 20-period average
+    # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for volatility filter (14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR ratio (current ATR / 50-period average ATR) to detect low volatility
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma  # High ratio = high volatility, good for breakouts
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
-        # Skip if trend filters not available
-        if np.isnan(ema4h_50_aligned[i]) or np.isnan(ema1d_200_aligned[i]):
+    for i in range(50, n):  # Start after EMA50 warmup
+        # Skip if weekly EMA50 not available
+        if np.isnan(w_ema50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend: need both 4h and 1d uptrend/downtrend
-        uptrend_4h = close[i] > ema4h_50_aligned[i]
-        uptrend_1d = close[i] > ema1d_200_aligned[i]
-        downtrend_4h = close[i] < ema4h_50_aligned[i]
-        downtrend_1d = close[i] < ema1d_200_aligned[i]
+        # Determine trend based on price vs weekly EMA50
+        uptrend = close[i] > w_ema50_aligned[i]
+        downtrend = close[i] < w_ema50_aligned[i]
         
-        uptrend = uptrend_4h and uptrend_1d
-        downtrend = downtrend_4h and downtrend_1d
-        
-        # Volume confirmation
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
-        # EMA crossover signals
-        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
+        # Volatility filter: require ATR ratio > 0.8 (avoid extremely low volatility periods)
+        vol_filter = atr_ratio[i] > 0.8 if not np.isnan(atr_ratio[i]) else False
         
         if position == 1:  # Long position
-            # Exit when EMA crosses down
-            if ema_cross_down:
-                position = 0
-                signals[i] = 0.0
+            # Exit when price touches or goes below lower Donchian(20)
+            # Calculate Donchian lower band for last 20 periods
+            if i >= 20:
+                donchian_low = np.min(low[i-20:i])
+                if close[i] <= donchian_low:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when EMA crosses up
-            if ema_cross_up:
-                position = 0
-                signals[i] = 0.0
+            # Exit when price touches or goes above upper Donchian(20)
+            if i >= 20:
+                donchian_high = np.max(high[i-20:i])
+                if close[i] >= donchian_high:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA crosses up in uptrend with volume confirmation
-            if ema_cross_up and uptrend and vol_confirm:
-                position = 1
-                signals[i] = 0.20
-            # Short entry: EMA crosses down in downtrend with volume confirmation
-            elif ema_cross_down and downtrend and vol_confirm:
-                position = -1
-                signals[i] = -0.20
+            # Need at least 20 periods for Donchian calculation
+            if i >= 20:
+                donchian_high = np.max(high[i-20:i])
+                donchian_low = np.min(low[i-20:i])
+                
+                # Long entry: price breaks above upper Donchian(20) in uptrend with volume confirmation and volatility filter
+                long_entry = (close[i] > donchian_high) and uptrend and vol_confirm and vol_filter
+                # Short entry: price breaks below lower Donchian(20) in downtrend with volume confirmation and volatility filter
+                short_entry = (close[i] < donchian_low) and downtrend and vol_confirm and vol_filter
+                
+                if long_entry:
+                    position = 1
+                    signals[i] = 0.25
+                elif short_entry:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
