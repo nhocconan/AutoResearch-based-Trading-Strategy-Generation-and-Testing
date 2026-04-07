@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Daily ATR Breakout with Volume and Trend Filter
-# Hypothesis: Price breaking out of daily ATR-based channels with volume confirmation
-# and trend filter (price vs 200 EMA) works in both bull and bear markets.
-# In bull markets: buy on upward breakouts, sell on downward breakdowns.
-# In bear markets: sell on downward breakdowns, buy on upward breakouts.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# Strategy: 4h Daily Donchian Breakout with Volume and ADX Trend Filter
+# Hypothesis: Price breaking Donchian channels (20-period) with volume confirmation and ADX trend filter works in both bull and bear markets.
+# In bull markets: buy breakouts above upper band. In bear markets: sell breakdowns below lower band.
+# Uses daily Donchian for structure and 4h for execution, targeting 20-50 trades/year.
 
-name = "12h_daily_atr_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_daily_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,92 +23,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and ATR-based channels
+    # Get daily data for Donchian calculation
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 1:
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate daily Donchian channels (20-period)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
     
-    # True Range calculation
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Upper and lower bands
+    upper = np.full_like(daily_high, np.nan)
+    lower = np.full_like(daily_low, np.nan)
     
-    # ATR calculation
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
-    
-    # ATR-based channels (using previous day's data)
-    upper_channel = close_daily + (atr * 2.0)
-    lower_channel = close_daily - (atr * 2.0)
+    for i in range(20, len(daily_high)):
+        upper[i] = np.max(daily_high[i-20:i])
+        lower[i] = np.min(daily_low[i-20:i])
     
     # Shift by 1 to use previous day's data (avoid look-ahead)
-    upper_channel = np.roll(upper_channel, 1)
-    lower_channel = np.roll(lower_channel, 1)
-    atr = np.roll(atr, 1)
+    upper = np.roll(upper, 1)
+    lower = np.roll(lower, 1)
     
     # Handle first element
-    if len(upper_channel) > 1:
-        upper_channel[0] = upper_channel[1]
-        lower_channel[0] = lower_channel[1]
-        atr[0] = atr[1]
+    if len(upper) > 1:
+        upper[0] = upper[1]
+        lower[0] = lower[1]
     else:
-        upper_channel[0] = 0
-        lower_channel[0] = 0
-        atr[0] = 0
+        upper[0] = 0
+        lower[0] = 0
     
-    # Align to 12h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_daily, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_daily, lower_channel)
-    atr_aligned = align_htf_to_ltf(prices, df_daily, atr)
+    # Align to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower)
     
-    # Trend filter: price vs 200 EMA
+    # ADX filter: trend strength (14-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     close_series = pd.Series(close)
-    ema_200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Volume filter: volume > 1.8x 20-period average
+    # True Range
+    tr1 = high_series - low_series
+    tr2 = np.abs(high_series - close_series.shift(1))
+    tr3 = np.abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    
+    # Directional Movement
+    up_move = high_series - high_series.shift(1)
+    down_move = low_series.shift(1) - low_series
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    plus_di = 100 * (pd.Series(plus_dm).ewm(span=14, min_periods=14).mean() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).ewm(span=14, min_periods=14).mean() / atr)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(span=14, min_periods=14).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(ema_200[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in trending markets (ADX > 25)
+        if adx[i] <= 25:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit conditions: breakdown below lower channel or trend change
-            if low[i] <= lower_channel_aligned[i] or close[i] < ema_200[i] or not vol_filter[i]:
+            # Exit: price below lower band or volume filter fails
+            if close[i] < lower_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit conditions: breakout above upper channel or trend change
-            if high[i] >= upper_channel_aligned[i] or close[i] > ema_200[i] or not vol_filter[i]:
+            # Exit: price above upper band or volume filter fails
+            if close[i] > upper_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: breakout above upper channel with volume
-            if high[i] > upper_channel_aligned[i] and close[i] > ema_200[i] and vol_filter[i]:
+            # Long entry: breakout above upper band with volume
+            if close[i] > upper_aligned[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakdown below lower channel with volume
-            elif low[i] < lower_channel_aligned[i] and close[i] < ema_200[i] and vol_filter[i]:
+            # Short entry: breakdown below lower band with volume
+            elif close[i] < lower_aligned[i] and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
