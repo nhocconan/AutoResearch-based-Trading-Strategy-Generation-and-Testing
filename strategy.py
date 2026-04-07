@@ -32,7 +32,7 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-week data for ADX filter
+    # 1-week data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
