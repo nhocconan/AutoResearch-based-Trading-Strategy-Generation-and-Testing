@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Index with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Bull Power > 0 (close > EMA13) + Bear Power < 0 + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when Bear Power < 0 (close < EMA13) + Bull Power > 0 + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when Elder Ray signals reverse (Bull Power crosses below 0 for long, Bear Power crosses above 0 for short)
-# Stoploss at 2.5 * ATR(22)
+# Hypothesis: 6-hour Bollinger squeeze breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Long when price breaks above upper Bollinger band + volume > 1.5x 20-period average + weekly ADX > 25
+# Short when price breaks below lower Bollinger band + volume > 1.5x 20-period average + weekly ADX > 25
+# Exit when price crosses middle Bollinger band (20-period SMA) in opposite direction
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
+# Uses Bollinger Bands (20,2) for squeeze detection and breakout signals
 # Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "6h_elder_ray_1d_vol_1w_adx_v1"
+name = "6h_bb_squeeze_breakout_1d_vol_1w_adx_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -76,29 +77,28 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 6-period Bollinger Bands (20,2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Elder Ray Components
-    bull_power = high - ema13  # High minus EMA13
-    bear_power = low - ema13   # Low minus EMA13
-    
-    # 6-period ATR(22) for stoploss
+    # 6-period ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=22, adjust=False, min_periods=22).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(22, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(sma_20[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
@@ -108,45 +108,45 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Bull Power crosses below 0 (momentum fading)
-            elif bull_power[i] <= 0:
+            # Exit: price crosses below middle Bollinger band (SMA20)
+            elif close[i] < sma_20[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Bear Power crosses above 0 (momentum fading)
-            elif bear_power[i] >= 0:
+            # Exit: price crosses above middle Bollinger band (SMA20)
+            elif close[i] > sma_20[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray signals with volume confirmation and ADX trend filter
+            # Look for entries: Bollinger Band breakout with volume confirmation and ADX trend filter
             # Volume filter: volume > 1.5x 20-period average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
             # Trend filter: weekly ADX > 25
             trend_filter = adx_aligned[i] > 25
             
-            # Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) + filters
-            if bull_power[i] > 0 and bear_power[i] < 0 and volume_filter and trend_filter:
+            # Long: price breaks above upper Bollinger band + volume filter + trend filter
+            if close[i] > upper_bb[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Bear Power < 0 AND Bull Power > 0 (bearish momentum) + filters
-            elif bear_power[i] < 0 and bull_power[i] > 0 and volume_filter and trend_filter:
+            # Short: price breaks below lower Bollinger band + volume filter + trend filter
+            elif close[i] < lower_bb[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
