@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with weekly volume confirmation and ADX trend filter
-# Uses Donchian(20) breakouts for entry, weekly volume spike for confirmation, and weekly ADX(14) for trend strength
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag
-# Works in bull markets via breakout momentum and in bear markets via fade of false breakouts in chop
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Uses Donchian breakouts for trend entry, 1d EMA50 for trend filter, and 1d volume spike for confirmation.
+# Designed for medium trade frequency (target: 20-50 trades/year) to balance signal quality and frequency.
+# Works in bull markets via breakout continuation and in bear markets via filtered reversals.
 
-name = "12h_donchian20_weekly_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for volume and ADX filters
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily data for trend filter and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Donchian channels (20-period)
+    # Calculate Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly average volume (20-period)
-    vol_1w = df_1w['volume'].values
-    avg_vol_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Weekly ADX (14-period) for trend strength
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM and ATR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm_smooth / atr_1w
-    minus_di = 100 * minus_dm_smooth / atr_1w
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align weekly indicators to 12h timeframe
-    avg_vol_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_vol_1w)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate 1d average volume for confirmation
+    volume_1d = df_1d['volume'].values
+    avg_volume_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(avg_vol_1w_aligned[i]) or np.isnan(adx_1w_aligned[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x weekly average volume
-        vol_confirmed = volume[i] > 1.5 * avg_vol_1w_aligned[i]
+        # Volume confirmation: current volume > 1.5x average daily volume
+        volume_spike = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_1w_aligned[i] > 25
-        
-        # Long: Donchian breakout above upper band
-        if close[i] > highest_high[i] and vol_confirmed and strong_trend:
+        # Long: price breaks above Donchian upper band + above 1d EMA50 + volume spike
+        if (close[i] > highest_high[i] and 
+            close[i] > ema_1d_aligned[i] and 
+            volume_spike):
             signals[i] = 0.25
-        # Short: Donchian breakout below lower band
-        elif close[i] < lowest_low[i] and vol_confirmed and strong_trend:
+        # Short: price breaks below Donchian lower band + below 1d EMA50 + volume spike
+        elif (close[i] < lowest_low[i] and 
+              close[i] < ema_1d_aligned[i] and 
+              volume_spike):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
