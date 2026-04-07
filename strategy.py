@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) Breakout + 1d Trend + Volume Spike
+# Strategy: 12h Donchian(20) Breakout + 1d Trend + Volume Spike
 # Hypothesis: Donchian breakouts capture strong directional moves. 1d trend filter ensures
 # alignment with higher-timeframe momentum. Volume spikes confirm institutional participation.
 # Works in bull markets via breakouts above upper band + uptrend, in bear via breakouts
 # below lower band + downtrend. Designed for low trade frequency to minimize fee drag.
-# Target: 19-50 trades/year (75-200 total over 4 years) for 4h timeframe.
+# Target: 12-37 trades/year (50-150 total over 4 years) for 12h timeframe.
 
-name = "4h_donchian20_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
