@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d KAMA Direction with RSI Filter and Volume Confirmation
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
-# RSI filter avoids overextended entries, volume confirms institutional participation.
-# Works in both bull and bear markets by following adaptive trend.
-# Targets 10-25 trades/year with disciplined entries to minimize fee drag.
+# Strategy: 12h Camarilla Pivot Reversal with 1d Trend Filter and Volume Confirmation
+# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
+# Price reversals at these levels with volume confirmation and trend alignment capture mean reversion moves.
+# Works in both bull and bear markets by trading in direction of 1d EMA50 trend.
+# Targets 12-37 trades/year with disciplined entries to avoid overtrading.
 
-name = "1d_kama_rsi_volume_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,97 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    abs_change = np.abs(np.diff(close, n=1))  # 1-period absolute change
-    # Pad arrays for rolling sum
-    change_padded = np.concatenate([np.full(9, np.nan), change])
-    abs_change_padded = np.concatenate([np.full(0, np.nan), abs_change])
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 10-period ER
-    er = np.zeros(n)
-    er[:9] = np.nan
-    for i in range(9, n):
-        if np.isnan(change_padded[i]) or np.isnan(np.nansum(abs_change_padded[i-9:i+1])):
-            er[i] = np.nan
-        else:
-            sum_abs = np.nansum(abs_change_padded[i-9:i+1])
-            er[i] = np.abs(change_padded[i]) / sum_abs if sum_abs != 0 else 0
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros(n)
-    kama[:9] = np.nan
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 1d OHLC for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla levels for each day
+    # Camarilla: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
+    # Using simplified version: S1 = Close - 1.1*(High-Low)/12, R1 = Close + 1.1*(High-Low)/12
+    # These are the most commonly used levels for intraday reversals
+    camarilla_range = 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - camarilla_range  # Support level 1
+    camarilla_r1 = close_1d + camarilla_range  # Resistance level 1
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align Camarilla levels to 12h timeframe
+    camarilla_s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume 20-period average
-    vol_ma = np.zeros(n)
-    vol_ma[:19] = np.nan
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
+    # 20-period SMA for volume average
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup for volume SMA
         # Skip if required data not available
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h[i]) or 
+            np.isnan(camarilla_s1_12h[i]) or 
+            np.isnan(camarilla_r1_12h[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        vol_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below KAMA OR RSI > 70 (overbought)
-            if close[i] < kama[i] or rsi[i] > 70:
+            # Exit: price reaches resistance OR trend turns down
+            if close[i] >= camarilla_r1_12h[i] or close[i] < ema50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price crosses above KAMA OR RSI < 30 (oversold)
-            if close[i] > kama[i] or rsi[i] < 30:
+            # Exit: price reaches support OR trend turns up
+            if close[i] <= camarilla_s1_12h[i] or close[i] > ema50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price above KAMA + RSI < 50 (not overbought) + volume confirmation
-            if (close[i] > kama[i] and 
-                rsi[i] < 50 and 
-                vol_confirm):
+            # Long: price touches support + volume confirmation + uptrend
+            if (close[i] <= camarilla_s1_12h[i] and 
+                vol_confirm and 
+                close[i] > ema50_12h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price below KAMA + RSI > 50 (not oversold) + volume confirmation
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 50 and 
-                  vol_confirm):
+            # Short: price touches resistance + volume confirmation + downtrend
+            elif (close[i] >= camarilla_r1_12h[i] and 
+                  vol_confirm and 
+                  close[i] < ema50_12h[i]):
                 position = -1
                 signals[i] = -0.25
     
