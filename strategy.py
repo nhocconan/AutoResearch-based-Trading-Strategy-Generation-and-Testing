@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: Uses Camarilla pivot levels from 1-day timeframe for entry/exit, filtered by 1-week EMA trend direction and volume confirmation. 
-In uptrend (price > weekly EMA50), long at S1 (support 1) with target at R1 (resistance 1); in downtrend (price < weekly EMA50), short at R1 with target at S1.
-Designed for 12h timeframe to capture swing moves with low trade frequency (<30/year) to minimize fee drag. Works in both bull and bear markets by following higher timeframe trend.
+4h_momentum_volume_trap_v1
+Hypothesis: Combines momentum (MACD crossover) with volume spike (>2x average) and 12h trend filter to capture strong moves in both bull and bear markets. Uses tight RSI filters to avoid whipsaws and discrete position sizing (0.25) to minimize churn. Designed for low trade frequency (<30/year) with high win rate by requiring multiple confirmations.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_momentum_volume_trap_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,82 +19,77 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # MACD (12,26,9)
+    fast = pd.Series(close).ewm(span=12, adjust=False).mean()
+    slow = pd.Series(close).ewm(span=26, adjust=False).mean()
+    macd = fast - slow
+    signal_line = pd.Series(macd).ewm(span=9, adjust=False).mean()
+    macd_hist = macd - signal_line
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Camarilla levels from previous 1-day OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous day's OHLC (shifted by 1 for completed day)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    # S1 = C - (H-L)*1.08/2
-    s1 = prev_close - (range_ * 1.08 / 2)
-    # R1 = C + (H-L)*1.08/2
-    r1 = prev_close + (range_ * 1.08 / 2)
-    
-    # Align to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Volume confirmation: > 1.3x average volume (20-period)
+    # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # RSI(14) for entry filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):  # Start after first bar for prev day data
+    for i in range(30, n):  # Start after MACD warmup
         # Skip if data not available
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(macd_hist[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_ok = volume[i] > (vol_ma[i] * 1.3)
+        # Volume confirmation: > 2x average volume (strict to reduce trades)
+        vol_ok = volume[i] > (vol_ma[i] * 2.0)
         
         if position == 1:  # Long position
-            # Exit: price reaches R1 or trend changes
-            if high[i] >= r1_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit: MACD histogram turns negative or trend changes
+            if macd_hist[i] < 0 or close[i] < ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches S1 or trend changes
-            if low[i] <= s1_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit: MACD histogram turns positive or trend changes
+            if macd_hist[i] > 0 or close[i] > ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: price at S1 in uptrend (price above weekly EMA50)
-                if (low[i] <= s1_aligned[i] and 
-                    close[i] > ema_50_1w_aligned[i]):
+                # Long: MACD bullish crossover + RSI > 50 (momentum) + uptrend
+                if (macd_hist[i] > 0 and macd_hist[i-1] <= 0 and  # bullish cross
+                    rsi[i] > 50 and 
+                    close[i] > ema_50_12h_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price at R1 in downtrend (price below weekly EMA50)
-                elif (high[i] >= r1_aligned[i] and 
-                      close[i] < ema_50_1w_aligned[i]):
+                # Short: MACD bearish crossover + RSI < 50 (momentum) + downtrend
+                elif (macd_hist[i] < 0 and macd_hist[i-1] >= 0 and  # bearish cross
+                      rsi[i] < 50 and 
+                      close[i] < ema_50_12h_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
