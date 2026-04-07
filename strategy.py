@@ -1,90 +1,108 @@
 #!/usr/bin/env python3
 """
-1d_rsi_200ma_breakout_v1
-Hypothesis: On daily timeframe, go long when RSI(14) crosses above 50 while price > EMA200, short when RSI crosses below 50 while price < EMA200, with volume > 1.5x 20-day average for confirmation. Uses weekly EMA200 trend filter to avoid counter-trend trades. Target: 15-30 trades/year to minimize fee dust.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 6h timeframe, enter long when price breaks above Camarilla R4 with volume > 1.5x average during uptrend (price above 1d EMA200), enter short when price breaks below Camarilla S4 with volume > 1.5x average during downtrend (price below 1d EMA200). Uses 1d EMA200 trend filter to avoid counter-trend trades. Target: 15-35 trades/year to minimize fee decay while capturing strong momentum moves in trending markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_rsi_200ma_breakout_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate daily EMA200 for trend filter
-    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Calculate weekly EMA200 for higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Calculate 1d EMA200 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(200, n):
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_200[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(vol_ma[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
+        
+        # Calculate Camarilla levels using previous day's OHLC
+        prev_close = close_1d[i-1] if i-1 >= 0 else close_1d[0]
+        prev_high = high_1d[i-1] if i-1 >= 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i-1 >= 0 else low_1d[0]
+        
+        # We need 1d OHLC arrays
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d_arr = df_1d['close'].values
+        
+        # Ensure we have valid data for Camarilla calculation
+        if i-1 < 0:
+            signals[i] = 0.0
+            continue
+            
+        prev_close = close_1d_arr[i-1]
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        
+        # Camarilla levels
+        range_val = prev_high - prev_low
+        if range_val <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # Resistance levels
+        r3 = prev_close + (range_val * 1.1 / 2)
+        r4 = prev_close + (range_val * 1.1)
+        # Support levels
+        s3 = prev_close - (range_val * 1.1 / 2)
+        s4 = prev_close - (range_val * 1.1)
         
         # Volume confirmation: > 1.5x average volume
         vol_ok = volume[i] > (vol_ma[i] * 1.5)
         
-        # Trend filter: price above/below weekly EMA200
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: RSI crosses below 50 or trend changes to downtrend
-            if rsi[i] < 50 or not uptrend:
+            # Exit: price closes below R3 or trend changes
+            if close[i] < r3 or close[i] < ema_200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 50 or trend changes to uptrend
-            if rsi[i] > 50 or not downtrend:
+            # Exit: price closes above S3 or trend changes
+            if close[i] > s3 or close[i] > ema_200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: RSI crosses above 50 in uptrend
-                if rsi[i] > 50 and rsi[i-1] <= 50 and uptrend:
+                # Long: price breaks above R4 in uptrend
+                if close[i] > r4 and close[i] > ema_200_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: RSI crosses below 50 in downtrend
-                elif rsi[i] < 50 and rsi[i-1] >= 50 and downtrend:
+                # Short: price breaks below S4 in downtrend
+                elif close[i] < s4 and close[i] < ema_200_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
