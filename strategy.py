@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_keltner_1w_trend_volume_v1
-Hypothesis: On 6-hour timeframe, use Keltner Channel breakouts with weekly trend filter and volume confirmation. Enter long on upper band breakout in weekly uptrend with volume > 1.5x average, short on lower band breakdown in weekly downtrend with volume > 1.5x average. Exit on opposite band touch. Designed for low frequency (12-37 trades/year) to avoid fee drift while capturing trend continuation. Uses weekly trend filter for better alignment with 6h timeframe. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) by using weekly trend filter.
+12h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from daily timeframe with EMA50 trend filter and volume confirmation. Enter long when price breaks above R4 in uptrend with volume > 1.5x average, short when price breaks below S4 in downtrend with volume > 1.5x average. Exit when price touches opposite pivot level (S4 for long, R4 for short). Camarilla levels provide institutional support/resistance that work in both bull/bear markets. Designed for low frequency (12-37 trades/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_1w_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,66 +23,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    w_close = df_1w['close'].values
-    w_ema50 = pd.Series(w_close).ewm(span=50, adjust=False).mean().values
-    w_ema50_aligned = align_htf_to_ltf(prices, df_1w, w_ema50)
+    # Calculate daily Camarilla pivot levels
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
+    
+    pivot = (d_high + d_low + d_close) / 3
+    range_val = d_high - d_low
+    
+    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
+    r4 = d_close + range_val * 1.1 / 2
+    s4 = d_close - range_val * 1.1 / 2
+    
+    # Align to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Get EMA50 from 12h for trend filter
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for Keltner Channel (10-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Keltner Channel: EMA20 ± 2*ATR
-    ema20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after EMA20 warmup
-        # Skip if weekly EMA50 not available
-        if np.isnan(w_ema50_aligned[i]):
+    for i in range(50, n):  # Start after EMA50 warmup
+        # Skip if daily data not available
+        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs weekly EMA50
-        uptrend = close[i] > w_ema50_aligned[i]
-        downtrend = close[i] < w_ema50_aligned[i]
+        # Determine trend based on price vs EMA50
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below lower Keltner Channel
-            if close[i] <= kc_lower[i]:
+            # Exit when price touches or goes below S4
+            if close[i] <= s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above upper Keltner Channel
-            if close[i] >= kc_upper[i]:
+            # Exit when price touches or goes above R4
+            if close[i] >= r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper Keltner Channel in weekly uptrend with volume confirmation
-            long_entry = (close[i] > kc_upper[i]) and uptrend and vol_confirm
-            # Short entry: price breaks below lower Keltner Channel in weekly downtrend with volume confirmation
-            short_entry = (close[i] < kc_lower[i]) and downtrend and vol_confirm
+            # Long entry: price breaks above R4 in uptrend with volume confirmation
+            long_entry = (close[i] > r4_aligned[i]) and uptrend and vol_confirm
+            # Short entry: price breaks below S4 in downtrend with volume confirmation
+            short_entry = (close[i] < s4_aligned[i]) and downtrend and vol_confirm
             
             if long_entry:
                 position = 1
