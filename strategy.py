@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian breakout with 12h trend filter and volume confirmation.
+Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation.
 In bull market (12h close > 12h EMA50): long on 20-bar high breakout.
 In bear market (12h close < 12h EMA50): short on 20-bar low breakout.
 Volume must be above 20-period average to confirm breakout strength.
 This combines price channel breakout with trend filter and volume confirmation.
-Target: 50-150 total trades over 4 years (12-37/year).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_12h_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
