@@ -1,74 +1,69 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from daily timeframe with volume confirmation.
-Long when price touches or breaks below S3 level with daily volume > 1.5x 20-day average and price above daily EMA(50).
-Short when price touches or breaks above R3 level with daily volume > 1.5x 20-day average and price below daily EMA(50).
-Exit when price returns to the daily pivot point (PP).
-Designed for 20-30 trades/year to minimize fee fade while capturing mean-reversion in ranging markets and breakouts in trends.
-Works in both bull/bear markets as Camarilla levels adapt to volatility and volume filter ensures institutional participation.
+1h_rsi_reversal_4h1d_volume_v1
+Hypothesis: On 1-hour timeframe, use RSI mean reversion with 4h/1d trend filter and volume confirmation.
+Long when RSI < 30 with price above 4h EMA(50) and 1d EMA(200) and volume > 1.5x 20-period average.
+Short when RSI > 70 with price below 4h EMA(50) and 1d EMA(200) and volume > 1.5x 20-period average.
+Exit when RSI returns to neutral zone (40-60).
+Uses 4h/1d for trend direction, 1h only for entry timing. Designed for 15-35 trades/year to minimize fee drag.
+Works in both bull/bear markets as RSI extremes occur in all regimes and volume filter ensures institutional participation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "1h_rsi_reversal_4h1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate RSI(14) on 1h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    if len(df_1d) < 20:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate daily OHLC for Camarilla pivot
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Camarilla levels using previous day's data
-    # PP = (H + L + C) / 3
-    # R3 = PP + (H - L) * 1.1/4
-    # S3 = PP - (H - L) * 1.1/4
-    
-    pp = (high_1d + low_1d + close_1d) / 3
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4
-    
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all 1d data to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: 20-period average on 4h timeframe
+    # Volume filter: 20-period average on 1h timeframe
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(20, 50), n):
+    for i in range(max(14, 50, 200, 20), n):
         # Skip if data not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
@@ -76,30 +71,32 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to daily pivot point
-            if close[i] >= pp_aligned[i]:
+            # Exit: RSI returns to neutral zone (>= 40)
+            if rsi[i] >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price returns to daily pivot point
-            if close[i] <= pp_aligned[i]:
+            # Exit: RSI returns to neutral zone (<= 60)
+            if rsi[i] <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             # Only enter with volume confirmation
             if vol_ok:
-                # Long: price touches or breaks below S3 with price above daily EMA(50)
-                if (low[i] <= s3_aligned[i] and close[i] > ema_50_1d_aligned[i]):
+                # Long: RSI oversold with price above both EMAs
+                if (rsi[i] < 30 and close[i] > ema_50_4h_aligned[i] and 
+                    close[i] > ema_200_1d_aligned[i]):
                     position = 1
-                    signals[i] = 0.25
-                # Short: price touches or breaks above R3 with price below daily EMA(50)
-                elif (high[i] >= r3_aligned[i] and close[i] < ema_50_1d_aligned[i]):
+                    signals[i] = 0.20
+                # Short: RSI overbought with price below both EMAs
+                elif (rsi[i] > 70 and close[i] < ema_50_4h_aligned[i] and 
+                      close[i] < ema_200_1d_aligned[i]):
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
