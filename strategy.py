@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, buy when price breaks above 20-period Donchian high with 1d uptrend (EMA50 > EMA200) and volume confirmation; sell when price breaks below 20-period Donchian low with 1d downtrend (EMA50 < EMA200) and volume confirmation. Exit on opposite Donchian breakout or trend reversal. This strategy captures medium-term trends with institutional volume confirmation, working in both bull and bear markets by following the 1d trend. Targets 15-30 trades/year to minimize fee drag.
+6h_camarilla_pivot_1d_ema_volume_v2
+Hypothesis: On 6h timeframe, use daily Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) with EMA trend filter and volume confirmation. Enter long when price crosses above R3 with EMA50 > EMA200 and volume > 1.5x average; enter short when price crosses below S3 with EMA50 < EMA200 and volume > 1.5x average. Exit when price reaches opposite H4/L4 level or EMA crossover reverses. This strategy combines mean reversion at extreme daily levels with breakout continuation, using volume to confirm institutional participation. Works in bull/bear via EMA trend filter and pivot level structure. Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "6h_camarilla_pivot_1d_ema_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -23,52 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend data (HTF)
+    # Calculate daily EMA50 and EMA200 for trend filter
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
+    
+    # Calculate daily Camarilla pivot levels from prior day
+    # Using daily high, low, close from 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate EMAs on 1d data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    ph = df_1d['high'].values  # previous day high
+    pl = df_1d['low'].values   # previous day low
+    pc = df_1d['close'].values # previous day close
     
-    # Align to 12h timeframe (with shift(1) for completed bars only)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate Camarilla levels for each day
+    camarilla_h4 = pc + 1.1 * (ph - pl) / 2
+    camarilla_l4 = pc - 1.1 * (ph - pl) / 2
+    camarilla_h3 = pc + 1.1 * (ph - pl) / 4
+    camarilla_l3 = pc - 1.1 * (ph - pl) / 4
+    camarilla_h2 = pc + 1.1 * (ph - pl) / 6
+    camarilla_l2 = pc - 1.1 * (ph - pl) / 6
+    camarilla_h1 = pc + 1.1 * (ph - pl) / 12
+    camarilla_l1 = pc - 1.1 * (ph - pl) / 12
     
-    # 1d trend: True if EMA50 > EMA200 (uptrend), False if EMA50 < EMA200 (downtrend)
-    trend_up = ema50_1d_aligned > ema200_1d_aligned
-    trend_down = ema50_1d_aligned < ema200_1d_aligned
+    # Align to 6h timeframe (shifted by 1 day for look-ahead prevention)
+    h4_6h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_6h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_6h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_6h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Donchian channels (20-period)
-    period = 20
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (24-period average on 6h = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(period, n):
+    for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
+        if (np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
+            np.isnan(h3_6h[i]) or np.isnan(l3_6h[i]) or
+            np.isnan(h4_6h[i]) or np.isnan(l4_6h[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.5x 24-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price breaks below Donchian low
-            if close[i] < lowest_low[i]:
+            # Exit if price reaches L4 level (opposite extreme)
+            if close[i] <= l4_6h[i]:
                 exit_long = True
-            # Exit if 1d trend turns down
-            elif trend_down[i]:
+            # Exit if EMA50 crosses below EMA200 (trend reversal)
+            elif ema50[i] < ema200[i] and ema50[i-1] >= ema200[i-1]:
                 exit_long = True
             
             if exit_long:
@@ -80,11 +90,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price breaks above Donchian high
-            if close[i] > highest_high[i]:
+            # Exit if price reaches H4 level (opposite extreme)
+            if close[i] >= h4_6h[i]:
                 exit_short = True
-            # Exit if 1d trend turns up
-            elif trend_up[i]:
+            # Exit if EMA50 crosses above EMA200 (trend reversal)
+            elif ema50[i] > ema200[i] and ema50[i-1] <= ema200[i-1]:
                 exit_short = True
             
             if exit_short:
@@ -93,16 +103,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry conditions
+            # Long entry: price crosses above H3 with EMA50 > EMA200 and volume confirmation
             long_entry = False
-            # Price breaks above Donchian high, 1d uptrend, and volume confirmation
-            if close[i] > highest_high[i] and trend_up[i] and vol_confirm:
+            if (close[i] > h3_6h[i] and close[i-1] <= h3_6h[i-1] and
+                ema50[i] > ema200[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry conditions
+            # Short entry: price crosses below L3 with EMA50 < EMA200 and volume confirmation
             short_entry = False
-            # Price breaks below Donchian low, 1d downtrend, and volume confirmation
-            if close[i] < lowest_low[i] and trend_down[i] and vol_confirm:
+            if (close[i] < l3_6h[i] and close[i-1] >= l3_6h[i-1] and
+                ema50[i] < ema200[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
