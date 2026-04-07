@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: Weekly Pivot Range Breakout with Volume Confirmation
-# Hypothesis: Price breaking out of weekly pivot ranges with volume confirmation
-# captures institutional moves. Weekly pivot points act as key support/resistance
-# levels where price often accelerates after breaking through. Works in both
-# bull and bear markets as breakouts occur in any regime. Volume filter ensures
-# only significant breaks are traded, reducing false signals. Target: 15-25 trades/year.
+# Strategy: 4h Donchian Breakout with 1d Trend and Volume Filter
+# Hypothesis: Breakouts of 20-period Donchian channels in direction of 1d EMA trend
+# with volume confirmation capture strong moves while avoiding false breakouts in chop.
+# Works in bull/bear by using 1d trend filter and volume to confirm momentum.
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 
-name = "1d_weekly_pivot_range_breakout_volume_v1"
-timeframe = "1d"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,71 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 5:
+    # Get 1d data for EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points and ranges
-    # Pivot = (H + L + C) / 3
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate EMA(50) on 1d close
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Align 1d EMA to 4h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate weekly range
-    weekly_range = weekly_high - weekly_low
+    # Donchian Channel (20-period) on 4h
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
     
-    # Calculate pivot support/resistance levels
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
     
-    # Align weekly levels to daily
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    weekly_range_aligned = align_htf_to_ltf(prices, df_weekly, weekly_range)
+    donchian_high = rolling_max(high, 20)
+    donchian_low = rolling_min(low, 20)
     
-    # Volume confirmation - 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 1.5x 20-period average
+    def rolling_mean(arr, window):
+        res = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window-1, len(arr)):
+            res[i] = np.mean(arr[i-window+1:i+1])
+        return res
+    
+    vol_ma = rolling_mean(volume, 20)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_avg[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot or below S1
-            if close[i] <= pivot_aligned[i] or close[i] < s1_aligned[i]:
+            # Exit: price breaks below Donchian low or trend changes
+            if close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price returns to pivot or above R1
-            if close[i] >= pivot_aligned[i] or close[i] > r1_aligned[i]:
+            # Exit: price breaks above Donchian high or trend changes
+            if close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average
-            vol_confirm = volume[i] > 1.5 * vol_avg[i]
-            
-            # Long breakout: price breaks above R1 with volume
-            if close[i] > r1_aligned[i] and vol_confirm:
-                position = 1
-                signals[i] = 0.25
-            # Short breakdown: price breaks below S1 with volume
-            elif close[i] < s1_aligned[i] and vol_confirm:
-                position = -1
-                signals[i] = -0.25
+            # Donchian breakout in direction of 1d trend with volume confirmation
+            if close[i] > ema_50_aligned[i]:  # Uptrend
+                if close[i] > donchian_high[i] and volume_filter[i]:
+                    position = 1
+                    signals[i] = 0.25
+            else:  # Downtrend
+                if close[i] < donchian_low[i] and volume_filter[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
