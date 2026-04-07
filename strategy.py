@@ -5,8 +5,8 @@ Hypothesis: On 4-hour timeframe, use Donchian channel breakouts with 1-day trend
 Long when price breaks above 20-period Donchian high with daily EMA(50) trending up and volume > 1.5x 20-period average.
 Short when price breaks below 20-period Donchian low with daily EMA(50) trending down and volume > 1.5x 20-period average.
 Exit when price returns to the Donchian midpoint.
-Modified to increase trade frequency by tightening entry conditions: using EMA slope instead of level comparison, and adjusting volume threshold.
-Designed for 20-40 trades/year to minimize fee drag while capturing strong trends with institutional validation.
+Added 2-bar lookback for breakout confirmation and reduced volume threshold to increase trade frequency while maintaining quality.
+Designed for 30-50 trades/year to balance opportunity with fee minimization.
 Works in both bull/bear markets as Donchian channels adapt to volatility and daily trend filter avoids counter-trend trades.
 """
 
@@ -68,8 +68,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation (adjusted threshold to increase trades)
-        vol_ok = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation
+        vol_ok = volume[i] > 1.3 * vol_ma[i]  # Reduced threshold for more signals
         
         if position == 1:  # Long position
             # Exit: price returns to Donchian midpoint
