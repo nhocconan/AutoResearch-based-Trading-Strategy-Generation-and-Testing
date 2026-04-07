@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Daily Range Breakout with Weekly Trend and Volume Filter
-# Hypothesis: On daily timeframe, price breaking above/below the prior day's high/low with
-# volume confirmation and weekly trend alignment captures momentum moves. Weekly trend filter
-# prevents counter-trend trades in strong trends. Works in both bull and bear markets by
-# following the weekly trend direction. Target: 15-25 trades/year (60-100 over 4 years).
-name = "1d_daily_range_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+# Strategy: 4h Donchian Breakout + 1d Trend + Volume Confirmation
+# Hypothesis: Donchian(20) breakouts capture strong trends in BTC/ETH/SOL.
+# In bull markets, we ride breakouts higher; in bear markets, we short breakdowns.
+# 1-day EMA filter ensures we only trade in the direction of the higher timeframe trend.
+# Volume confirmation ensures institutional participation, reducing false breakouts.
+# 4h timeframe balances responsiveness and noise reduction. Target: 20-50 trades/year (80-200 over 4 years).
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,60 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA(20) for trend filter
-    weekly_close = df_weekly['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False).mean().values
-    weekly_ema_1d = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Donchian Channel (20-period) on 4h timeframe
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max()
+    lower_channel = low_series.rolling(window=20, min_periods=20).min()
+    middle_channel = (upper_channel + lower_channel) / 2.0
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = np.nan  # First bar has no previous day
-    prev_low[0] = np.nan
+    # 1-day EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
+    daily_ema_4h = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or 
-            np.isnan(weekly_ema_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(daily_ema_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below previous day's low (stop/reversal)
-            if close[i] < prev_low[i]:
+            # Exit: price reaches middle channel (take profit) or breaks below lower channel with volume
+            if close[i] >= middle_channel[i] or (close[i] < lower_channel[i] and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.30  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above previous day's high (stop/reversal)
-            if close[i] > prev_high[i]:
+            # Exit: price reaches middle channel (take profit) or breaks above upper channel with volume
+            if close[i] <= middle_channel[i] or (close[i] > upper_channel[i] and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.30  # Maintain short position
         else:  # Flat, look for entry
             # Require volume confirmation
             if vol_filter[i]:
-                # Long: price breaks above previous day's high with weekly uptrend
-                if close[i] > prev_high[i] and close[i] > weekly_ema_1d[i]:
+                # Long: price breaks above upper channel with trend confirmation
+                if close[i] > upper_channel[i] and close[i] > daily_ema_4h[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short: price breaks below previous day's low with weekly downtrend
-                elif close[i] < prev_low[i] and close[i] < weekly_ema_1d[i]:
+                    signals[i] = 0.30
+                # Short: price breaks below lower channel with trend confirmation
+                elif close[i] < lower_channel[i] and close[i] < daily_ema_4h[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
