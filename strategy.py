@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4H RSI Pullback with 1D Trend Filter and Volume Confirmation
-Long when RSI(14) < 40, price > 1D EMA(50), and volume > 1.5x average
-Short when RSI(14) > 60, price < 1D EMA(50), and volume > 1.5x average
-Exit when RSI crosses 50 (mean reversion exit)
-Uses RSI mean reversion in trending markets with volume confirmation to avoid false signals.
+12h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+Long when price breaks above Donchian(20) high with expanding volume AND 1d EMA trend up
+Short when price breaks below Donchian(20) low with expanding volume AND 1d EMA trend down
+Exit when price crosses back to Donchian midpoint
+Designed for low-frequency trading to minimize fee drag in bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_pullback_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -26,61 +26,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === RSI (14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 1D trend filter (EMA 50) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === Donchian Channels (20-period) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    
+    # === 1d trend filter (EMA 21) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+    for i in range(20, n):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 (overbought)
-            if rsi[i] > 50:
+            # Exit: price crosses back below midpoint
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (oversold)
-            if rsi[i] < 50:
+            # Exit: price crosses back above midpoint
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: above average
-            if vol_ratio[i] < 1.5:
+            # Need expanding volume (above average)
+            if vol_ratio[i] < 1.2:
                 signals[i] = 0.0
                 continue
             
-            # Entry: RSI pullback with 1D trend filter and volume confirmation
-            if rsi[i] < 40 and close[i] > ema_1d_aligned[i]:
-                # Oversold in uptrend -> long
+            # Entry: Donchian breakout with volume confirmation AND 1d trend filter
+            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Breakout above upper channel with rising 1d EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif rsi[i] > 60 and close[i] < ema_1d_aligned[i]:
-                # Overbought in downtrend -> short
+            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Breakdown below lower channel with falling 1d EMA -> short
                 position = -1
                 signals[i] = -0.25
     
