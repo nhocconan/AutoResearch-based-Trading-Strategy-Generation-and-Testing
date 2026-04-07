@@ -1,19 +1,23 @@
+# 6H_CAMARILLA_PIVOT_1D_VOLUME_V1
+# Hypothesis: Camarilla pivot levels from daily timeframe act as key support/resistance levels.
+# At R3/S3 levels, price tends to reverse (mean reversion) with volume confirmation.
+# At R4/S4 levels, price breaks out with continuation (trend following).
+# Works in both bull and bear markets as pivots adapt to price action.
+# Volume confirmation filters false breakouts/reversals.
+# Target: 15-30 trades/year to minimize fee drift on 6h timeframe.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) Breakout with 1d Volume Confirmation and Choppiness Regime Filter
-# Hypothesis: Donchian breakouts capture trend continuation moves; daily volume confirms institutional participation.
-# Choppiness filter avoids whipsaws in ranging markets. Works in bull via upper band breakouts, in bear via lower band breakdowns.
-# Target: 25-40 trades/year to minimize fee drag.
-name = "4h_donchian20_1d_volume_chop_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -22,82 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume and choppiness
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Camarilla pivot levels from previous day
+    # Using formulas: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # where C = (H+L+C)/3 (typical price)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate 1d choppiness index
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = []
-    tr_1d = []
-    for i in range(len(df_1d)):
-        if i == 0:
-            tr = high_1d[i] - low_1d[i]
-        else:
-            tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        tr_1d.append(tr)
-        if i < 14:
-            atr_1d.append(np.nan)
-        else:
-            if i == 14:
-                atr = np.mean(tr_1d[0:15])
-            else:
-                atr = (atr_1d[-1] * 13 + tr_1d[i]) / 14
-            atr_1d.append(atr)
-    atr_1d = np.array(atr_1d)
-    highest_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10((atr_1d * 14) / (highest_1d - lowest_1d)) / np.log10(14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Typical price (pivot point)
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Range
+    range_hl = prev_high - prev_low
     
-    # Calculate Donchian Channels (20)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels
+    r4 = pp + range_hl * 1.1 / 2
+    r3 = pp + range_hl * 1.1 / 4
+    s3 = pp - range_hl * 1.1 / 4
+    s4 = pp - range_hl * 1.1 / 2
+    
+    # Align to 6h timeframe (shifted by 1 day for lookback)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: current 6h volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1d average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
-        # Choppiness filter: avoid ranging markets (chop > 61.8)
-        chop_filter = chop_1d_aligned[i] <= 61.8
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low (trend reversal)
-            if close[i] < donch_low[i]:
+            # Exit: price reaches S3 (mean reversion target) or closes below S4 (stop)
+            if close[i] <= s3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] < s4_aligned[i]:  # Stop loss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high (trend reversal)
-            if close[i] > donch_high[i]:
+            # Exit: price reaches R3 (mean reversion target) or closes above R4 (stop)
+            if close[i] >= r3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] > r4_aligned[i]:  # Stop loss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above Donchian high + volume confirmation + chop filter
-            if close[i] > donch_high[i] and vol_confirm and chop_filter:
+            # Enter long at S3 with volume confirmation (bounce from support)
+            if close[i] <= s3_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian low + volume confirmation + chop filter
-            elif close[i] < donch_low[i] and vol_confirm and chop_filter:
+            # Enter short at R3 with volume confirmation (rejection at resistance)
+            elif close[i] >= r3_aligned[i] and vol_confirm:
+                position = -1
+                signals[i] = -0.25
+            # Enter long breakout above R4 with volume confirmation
+            elif close[i] > r4_aligned[i] and vol_confirm:
+                position = 1
+                signals[i] = 0.25
+            # Enter short breakdown below S4 with volume confirmation
+            elif close[i] < s4_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
