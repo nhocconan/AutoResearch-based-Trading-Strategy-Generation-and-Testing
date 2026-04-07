@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly RSI Reversal with Volume and Volatility Filter
-# Hypothesis: RSI extremes on weekly timeframe indicate overextended moves
-# likely to reverse. Enter on daily close crossing RSI(50) with volume
-# confirmation and low volatility (ATR ratio) to avoid choppy markets.
-# Works in both bull/bear by fading extremes. Target: 15-25 trades/year.
+# Strategy: 6h Camarilla Pivot Reversal with Volume Confirmation
+# Hypothesis: Fade at extreme Camarilla levels (R4/S4) with volume confirmation captures
+# mean-reversion in ranging markets, while breakouts beyond R4/S4 with volume capture
+# momentum in trending markets. Works in both bull/bear regimes by adapting to price
+# action relative to daily pivot structure.
+# Target: 12-30 trades/year (50-120 total over 4 years) to minimize fee drag.
 
-name = "1d_weekly_rsi_reversal_volume_volatility_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_reversal_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,106 +25,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get daily data for Camarilla pivots
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Calculate RSI on weekly close
-    weekly_close = df_weekly['close'].values
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Camarilla levels
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Wilder's smoothing for RSI
-    def wilders_rsi(gain, loss, period):
-        rsi = np.full_like(weekly_close, np.nan, dtype=float)
-        if len(gain) < period:
-            return rsi
-        # Initial average gain/loss
-        avg_gain = np.mean(gain[1:period])
-        avg_loss = np.mean(loss[1:period])
-        if avg_loss == 0:
-            rsi[period-1] = 100
-        else:
-            rs = avg_gain / avg_loss
-            rsi[period-1] = 100 - (100 / (1 + rs))
-        # Subsequent values
-        for i in range(period, len(weekly_close)):
-            avg_gain = (avg_gain * (period-1) + gain[i]) / period
-            avg_loss = (avg_loss * (period-1) + loss[i]) / period
-            if avg_loss == 0:
-                rsi[i] = 100
-            else:
-                rs = avg_gain / avg_loss
-                rsi[i] = 100 - (100 / (1 + rs))
-        return rsi
+    # Previous day's values (shift by 1 for proper alignment)
+    prev_high = np.concatenate([[np.nan], daily_high[:-1]])
+    prev_low = np.concatenate([[np.nan], daily_low[:-1]])
+    prev_close = np.concatenate([[np.nan], daily_close[:-1]])
     
-    rsi_weekly = wilders_rsi(gain, loss, 14)
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Align weekly RSI to daily timeframe
-    rsi_weekly_aligned = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
+    # Camarilla levels
+    r4 = pivot + (range_val * 1.1 / 2)
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
+    s4 = pivot - (range_val * 1.1 / 2)
     
-    # Daily volume filter: volume > 1.3x 20-day average
+    # Align daily levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
+    
+    # Volume filter: volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.3 * vol_ma)
     
-    # Daily volatility filter: ATR(10) / ATR(30) < 1.2 (low volatility)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    def wilders_atr(data, period):
-        atr = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return atr
-        atr[period-1] = np.nanmean(data[1:period])
-        for i in range(period, len(data)):
-            if not np.isnan(atr[i-1]):
-                atr[i] = (atr[i-1] * (period-1) + data[i]) / period
-        return atr
-    
-    atr10 = wilders_atr(tr, 10)
-    atr30 = wilders_atr(tr, 30)
-    atr_ratio = np.where(atr30 > 0, atr10 / atr30, 1.0)
-    vol_filter_low = atr_ratio < 1.2
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(rsi_weekly_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses below 50 or volatility increases
-            if rsi_weekly_aligned[i] < 50 or atr_ratio[i] >= 1.2:
+            # Exit: price reaches S3 (take profit) or breaks below S4 (stop)
+            if close[i] <= s3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 50 or volatility increases
-            if rsi_weekly_aligned[i] > 50 or atr_ratio[i] >= 1.2:
+            # Exit: price reaches R3 (take profit) or breaks above R4 (stop)
+            if close[i] >= r3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Require low volatility environment
-            if vol_filter_low[i]:
-                # Long entry: RSI > 60 (bullish extreme) with volume
-                if rsi_weekly_aligned[i] > 60 and vol_filter[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short entry: RSI < 40 (bearish extreme) with volume
-                elif rsi_weekly_aligned[i] < 40 and vol_filter[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Fade at extreme levels with volume
+            if (close[i] <= s4_aligned[i] and vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            elif (close[i] >= r4_aligned[i] and vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
+            # Breakout continuation with volume (strong momentum)
+            elif (close[i] > r4_aligned[i] and vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            elif (close[i] < s4_aligned[i] and vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
