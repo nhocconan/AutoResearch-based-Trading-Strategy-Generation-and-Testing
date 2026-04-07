@@ -1,121 +1,133 @@
 #!/usr/bin/env python3
 """
-6h_adx_aroon_1d_trend_v1
-Hypothesis: On 6h timeframe, use daily ADX for trend strength and Aroon for trend direction to capture strong trending moves while avoiding choppy markets. Enter long when ADX > 25 and Aroon Up > Aroon Down; enter short when ADX > 25 and Aroon Down > Aroon Up. Exit when ADX falls below 20 (trend weakness). This strategy targets strong trending moves with ADX filter to reduce false signals and trade frequency. Works in bull/bear via trend strength filter and direction from Aroon.
+12h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, use daily Camarilla pivot levels for mean-reversion entries in ranging markets, with 1d EMA for trend filter and volume confirmation to avoid false signals. Enter long when price touches S3 level in uptrend with volume spike; enter short when price touches R3 level in downtrend with volume spike. Exit when price reaches opposite pivot level or CCI crosses zero. This strategy targets mean-reversion in ranging markets while avoiding counter-trend moves, working in both bull and bear via trend filter. Uses tight entry conditions to limit trades and reduce fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adx_aroon_1d_trend_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d data for ADX and Aroon
+    # 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period)
-    period = 14
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])],
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]),
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]),
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    # Smoothed TR, DM+
-    tr_period = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    dm_plus_period = pd.Series(dm_plus).rolling(window=period, min_periods=period).sum().values
-    dm_minus_period = pd.Series(dm_minus).rolling(window=period, min_periods=period).sum().values
-    # Avoid division by zero
-    tr_period_safe = np.where(tr_period == 0, 1e-10, tr_period)
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_period / tr_period_safe
-    di_minus = 100 * dm_minus_period / tr_period_safe
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+    # Previous day's values (shifted by 1 for lookback)
+    ph = np.roll(high_1d, 1)
+    pl = np.roll(low_1d, 1)
+    pc = np.roll(close_1d, 1)
+    ph[0] = ph[1] if len(ph) > 1 else 0
+    pl[0] = pl[1] if len(pl) > 1 else 0
+    pc[0] = pc[1] if len(pc) > 1 else 0
     
-    # Calculate Aroon (14-period)
-    # Aroon Up: ((period - periods since highest high) / period) * 100
-    # Aroon Down: ((period - periods since lowest low) / period) * 100
-    def calculate_aroon(arr, period):
-        n_arr = len(arr)
-        aroon_up = np.full(n_arr, np.nan)
-        aroon_down = np.full(n_arr, np.nan)
-        for i in range(period-1, n_arr):
-            window_high = arr[i-period+1:i+1]
-            window_low = arr[i-period+1:i+1]
-            highest_high_idx = np.argmax(window_high)
-            lowest_low_idx = np.argmin(window_low)
-            periods_since_high = period - 1 - highest_high_idx
-            periods_since_low = period - 1 - lowest_low_idx
-            aroon_up[i] = ((period - periods_since_high) / period) * 100
-            aroon_down[i] = ((period - periods_since_low) / period) * 100
-        return aroon_up, aroon_down
+    # Camarilla levels
+    range_ = ph - pl
+    s1 = pc + (range_ * 1.1 / 12)
+    s2 = pc + (range_ * 1.1 / 6)
+    s3 = pc + (range_ * 1.1 / 4)
+    r1 = pc - (range_ * 1.1 / 12)
+    r2 = pc - (range_ * 1.1 / 6)
+    r3 = pc - (range_ * 1.1 / 4)
     
-    aroon_up, aroon_down = calculate_aroon(high_1d, period)
-    aroon_down = calculate_aroon(low_1d, period)[1]  # Recalculate for lows
+    # 1d EMA for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # Align indicators to 6h timeframe
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx)
-    aroon_up_6h = align_htf_to_ltf(prices, df_1d, aroon_up)
-    aroon_down_6h = align_htf_to_ltf(prices, df_1d, aroon_down)
+    # Align indicators to 12h timeframe
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    ema_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation (20-period average on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(adx_6h[i]) or np.isnan(aroon_up_6h[i]) or np.isnan(aroon_down_6h[i])):
+        if (np.isnan(s3_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(ema_12h[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        
+        # Trend direction from EMA
+        uptrend = close[i] > ema_12h[i]
+        downtrend = close[i] < ema_12h[i]
+        
         if position == 1:  # Long position
-            # Exit if trend weakens (ADX < 20)
-            if adx_6h[i] < 20:
+            # Exit conditions
+            exit_long = False
+            # Exit if price reaches R3 (opposite level)
+            if close[i] >= r3_12h[i]:
+                exit_long = True
+            # Exit if trend turns down
+            elif downtrend:
+                exit_long = True
+            
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if trend weakens (ADX < 20)
-            if adx_6h[i] < 20:
+            # Exit conditions
+            exit_short = False
+            # Exit if price reaches S3 (opposite level)
+            if close[i] <= s3_12h[i]:
+                exit_short = True
+            # Exit if trend turns up
+            elif uptrend:
+                exit_short = True
+            
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: strong trend (ADX > 25) and bullish direction (Aroon Up > Aroon Down)
-            if adx_6h[i] > 25 and aroon_up_6h[i] > aroon_down_6h[i]:
+            # Long entry conditions
+            long_entry = False
+            # Price touches S3 level in uptrend with volume confirmation
+            if close[i] <= s3_12h[i] * 1.002:  # Allow 0.2% slippage
+                if uptrend and vol_confirm:
+                    long_entry = True
+            
+            # Short entry conditions
+            short_entry = False
+            # Price touches R3 level in downtrend with volume confirmation
+            if close[i] >= r3_12h[i] * 0.998:  # Allow 0.2% slippage
+                if downtrend and vol_confirm:
+                    short_entry = True
+            
+            if long_entry:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: strong trend (ADX > 25) and bearish direction (Aroon Down > Aroon Up)
-            elif adx_6h[i] > 25 and aroon_down_6h[i] > aroon_up_6h[i]:
+            elif short_entry:
                 position = -1
                 signals[i] = -0.25
     
