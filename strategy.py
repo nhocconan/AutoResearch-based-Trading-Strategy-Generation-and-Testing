@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla Pivot from 1d + Volume Confirmation + ADX Trend Filter
-# Hypothesis: Camarilla levels from daily chart provide strong intraday support/resistance.
-# In trending markets (ADX > 25), breakouts beyond R4/S4 with volume continue the trend.
-# In ranging markets (ADX < 25), reversals at R3/S3 with volume capture mean reversion.
-# Uses 6h timeframe for execution, 1d for pivot calculation and trend filter.
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+# Strategy: 4h Daily Donchian Breakout with Volume and ADX Filter
+# Hypothesis: Donchian(10) breakouts in direction of daily ADX > 20 trend with volume
+# confirmation capture momentum moves while avoiding whipsaws. Uses daily trend for
+# robustness across bull/bear markets, volume filter to reduce false breakouts.
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
 
-name = "6h_camarilla_pivot_1d_volume_adx_v1"
-timeframe = "6h"
+name = "4h_daily_donchian_breakout_volume_adx_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +24,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and ADX
+    # Get daily data for ADX and breakout levels
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_daily['high'].shift(1).values
-    prev_low = df_daily['low'].shift(1).values
-    prev_close = df_daily['close'].shift(1).values
-    
-    # Camarilla pivot levels (based on previous day)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    
-    # Resistance levels
-    r1 = pivot + (range_ * 1.1 / 12)
-    r2 = pivot + (range_ * 1.1 / 6)
-    r3 = pivot + (range_ * 1.1 / 4)
-    r4 = pivot + (range_ * 1.1 / 2)
-    
-    # Support levels
-    s1 = pivot - (range_ * 1.1 / 12)
-    s2 = pivot - (range_ * 1.1 / 6)
-    s3 = pivot - (range_ * 1.1 / 4)
-    s4 = pivot - (range_ * 1.1 / 2)
-    
-    # Calculate ADX on daily data for trend filter
+    # Calculate ADX on daily data
     daily_high = df_daily['high'].values
     daily_low = df_daily['low'].values
     daily_close = df_daily['close'].values
@@ -95,58 +73,57 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align daily indicators to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    # Daily breakout levels (10-period high/low)
+    high_series = pd.Series(daily_high)
+    low_series = pd.Series(daily_low)
+    daily_high_10 = high_series.rolling(window=10, min_periods=10).max().values
+    daily_low_10 = low_series.rolling(window=10, min_periods=10).min().values
     
-    # Volume filter on 6h: volume > 1.3x 20-period average
+    # Align daily indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    high_10_aligned = align_htf_to_ltf(prices, df_daily, daily_high_10)
+    low_10_aligned = align_htf_to_ltf(prices, df_daily, daily_low_10)
+    
+    # Volume filter on 4h: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(40, n):
         # Skip if required data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(high_10_aligned[i]) or
+            np.isnan(low_10_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls back below S3 or ADX weakens significantly
-            if close[i] < s3_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price falls back below 10-day low or ADX weakens
+            if close[i] < low_10_aligned[i] or adx_aligned[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises back above R3 or ADX weakens significantly
-            if close[i] > r3_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price rises back above 10-day high or ADX weakens
+            if close[i] > high_10_aligned[i] or adx_aligned[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            if adx_aligned[i] >= 25:  # Trending market
-                # Breakout continuation: beyond R4/S4 with volume
-                if (high[i] > r4_aligned[i] and close[i] > r4_aligned[i] and vol_filter[i]):
+            # Moderate trend required
+            if adx_aligned[i] >= 20:
+                # Long entry: breakout above 10-day high with volume
+                if (high[i] > high_10_aligned[i] and close[i] > high_10_aligned[i] and
+                    vol_filter[i]):
                     position = 1
                     signals[i] = 0.25
-                elif (low[i] < s4_aligned[i] and close[i] < s4_aligned[i] and vol_filter[i]):
-                    position = -1
-                    signals[i] = -0.25
-            else:  # Ranging market (ADX < 25)
-                # Mean reversion at R3/S3 with volume
-                if (low[i] < s3_aligned[i] and close[i] > s3_aligned[i] and vol_filter[i]):
-                    position = 1
-                    signals[i] = 0.25
-                elif (high[i] > r3_aligned[i] and close[i] < r3_aligned[i] and vol_filter[i]):
+                # Short entry: breakdown below 10-day low with volume
+                elif (low[i] < low_10_aligned[i] and close[i] < low_10_aligned[i] and
+                      vol_filter[i]):
                     position = -1
                     signals[i] = -0.25
     
