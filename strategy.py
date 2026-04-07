@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout + Volume + 1d EMA Trend Filter
-# Hypothesis: Breakouts of 4h Donchian channels with volume confirmation and
-# daily EMA trend filter work in both bull and bear markets by capturing
-# momentum in the direction of higher timeframe trend. Daily EMA filter
-# avoids counter-trend trades during reversals.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Strategy: 1D Donchian Breakout + Weekly EMA Trend + Volume Confirmation
+# Hypothesis: Buy breakouts above 20-day high in weekly uptrend, sell breakdowns below 20-day low in weekly downtrend.
+# Uses weekly EMA(20) as trend filter to align with higher timeframe direction, reducing whipsaws in sideways markets.
+# Volume confirmation ensures breakouts have conviction. Works in bull/bear by trading with weekly trend.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 
-name = "4h_donchian20_volume_1d_ema_trend_v1"
-timeframe = "4h"
+name = "1d_donchian_breakout_weekly_ema_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    # Get weekly data for EMA trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    donch_len = 20
-    donch_high = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
-    donch_low = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
+    # Calculate weekly EMA(20) for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
     
-    # Daily EMA(20) for trend filter
-    close_daily = df_daily['close'].values
-    ema_20_daily = pd.Series(close_daily).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h = align_htf_to_ltf(prices, df_daily, ema_20_daily)
+    # Daily Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: 4h volume > 20-period average
+    # Volume filter: daily volume > 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(donch_len, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_20_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -57,29 +55,29 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low or trend changes
-            if low[i] <= donch_low[i] or close[i] < ema_20_4h[i]:
+            # Exit: price breaks below 20-day low or trend changes
+            if low[i] < low_20[i] or close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or trend changes
-            if high[i] >= donch_high[i] or close[i] > ema_20_4h[i]:
+            # Exit: price breaks above 20-day high or trend changes
+            if high[i] > high_20[i] or close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout in direction of daily EMA trend with volume
+            # Breakout in direction of weekly EMA trend with volume
             if vol_ok:
-                if close[i] > ema_20_4h[i]:  # Uptrend
-                    if high[i] > donch_high[i]:  # Break above Donchian high
+                if close[i] > ema_20_aligned[i]:  # Weekly uptrend
+                    if high[i] > high_20[i]:  # Breakout above 20-day high
                         position = 1
-                        signals[i] = 0.30
-                else:  # Downtrend
-                    if low[i] < donch_low[i]:  # Break below Donchian low
+                        signals[i] = 0.25
+                else:  # Weekly downtrend
+                    if low[i] < low_20[i]:  # Breakdown below 20-day low
                         position = -1
-                        signals[i] = -0.30
+                        signals[i] = -0.25
     
     return signals
