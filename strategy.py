@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian Breakout with Volume Filter and Daily Trend Filter
-# Hypothesis: 12h Donchian channel breakouts (20-period) capture momentum.
-# Volume confirmation filters false breakouts. Daily trend filter (price vs 50 EMA)
-# ensures trades align with higher timeframe direction, reducing whipsaws in
-# both bull and bear markets. Target: 20-40 trades/year (80-160 over 4 years).
-# Tight entry conditions to avoid overtrading and fee drag.
+# Strategy: 4h Daily Pivot Breakout with Volume and Trend Filter
+# Hypothesis: Daily pivot levels (S2/R2) act as strong support/resistance.
+# Breakouts above R2 with volume and trend confirmation indicate bullish continuation.
+# Breakdowns below S2 with volume and trend confirmation indicate bearish continuation.
+# Uses 1d trend filter (price above/below 50 EMA) to avoid counter-trend trades.
+# Volume filter ensures institutional participation. Works in bull/bear markets by
+# aligning with trend: in bull, only long breakouts; in bear, only short breakdowns.
+# Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "12h_donchian20_volume_trend_v1"
-timeframe = "12h"
+name = "4h_daily_pivot_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,57 +27,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for pivot calculation
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate daily data (previous day's OHLC)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Daily trend filter: price above/below 50 EMA
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    prev_daily_high = np.roll(daily_high, 1)
+    prev_daily_low = np.roll(daily_low, 1)
+    prev_daily_close = np.roll(daily_close, 1)
+    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
+    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
+    prev_daily_close[0] = prev_daily_close[1] if len(prev_daily_close) > 1 else 0
+    
+    # Calculate daily pivot points
+    daily_range = prev_daily_high - prev_daily_low
+    daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
+    daily_r1 = daily_pivot + (daily_range * 1.0 / 2)
+    daily_s1 = daily_pivot - (daily_range * 1.0 / 2)
+    daily_r2 = daily_pivot + daily_range
+    daily_s2 = daily_pivot - daily_range
+    
+    # Align to 4h timeframe (use previous day's levels)
+    daily_r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
+    daily_s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
+    
+    # 1d trend filter: price above/below 50 EMA
     close_series = pd.Series(close)
     ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Volume filter: volume > 1.8x 30-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(daily_r2_aligned[i]) or np.isnan(daily_s2_aligned[i]) or 
             np.isnan(ema_50[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below Donchian low or trend turns bearish or volume drops
-            if (close[i] < donchian_low[i] or close[i] < ema_50[i] or not vol_filter[i]):
+            # Exit: price falls to S1 or trend turns bearish or volume drops
+            if (close[i] <= daily_s2_aligned[i] or close[i] < ema_50[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian high or trend turns bullish or volume drops
-            if (close[i] > donchian_high[i] or close[i] > ema_50[i] or not vol_filter[i]):
+            # Exit: price rises to R1 or trend turns bullish or volume drops
+            if (close[i] >= daily_r2_aligned[i] or close[i] > ema_50[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high with volume and bullish trend
-            if (high[i] > donchian_high[i] and close[i] > ema_50[i] and vol_filter[i]):
+            # Long: price breaks above R2 with volume and bullish trend
+            if ((high[i] > daily_r2_aligned[i] or close[i] > daily_r2_aligned[i]) and 
+                close[i] > ema_50[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low with volume and bearish trend
-            elif (low[i] < donchian_low[i] and close[i] < ema_50[i] and vol_filter[i]):
+            # Short: price breaks below S2 with volume and bearish trend
+            elif ((low[i] < daily_s2_aligned[i] or close[i] < daily_s2_aligned[i]) and 
+                  close[i] < ema_50[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
