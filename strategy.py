@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Elder Ray with 1d Trend Filter and Volume Confirmation
-# Hypothesis: Elder Ray (Bull Power/Bear Power) identifies trend strength.
+# Strategy: 4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+# Hypothesis: Donchian channel breakouts capture strong momentum moves.
 # Combined with 1d EMA50 trend filter to ensure trades align with higher timeframe trend.
 # Volume confirmation ensures moves have institutional participation.
 # Works in both bull and bear markets by only taking trades in direction of 1d trend.
-# Targets 15-30 trades/year with disciplined entries to avoid overtrading.
+# Targets 20-50 trades/year with disciplined entries to avoid overtrading.
 
-name = "6h_elder_ray_1d_trend_volume_v2"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,14 +31,23 @@ def generate_signals(prices):
         return np.zeros(n)
     
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 13-period EMA for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    # Donchian channel (20-period) on 4h data
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate 20-period high and low for Donchian channels
+    high_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_4h, high_max)
+    donchian_low = align_htf_to_ltf(prices, df_4h, low_min)
     
     # 20-period SMA for volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,11 +55,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup for EMA and volume SMA
+    for i in range(20, n):  # Start after warmup for Donchian and volume SMA
         # Skip if required data not available
-        if (np.isnan(ema50_6h[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(ema50_4h[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
             np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
@@ -59,30 +68,30 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.3 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: bear power becomes positive (selling pressure gone) OR trend turns down
-            if bear_power[i] > 0 or close[i] < ema50_6h[i]:
+            # Exit: price breaks below Donchian low OR trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: bull power becomes negative (buying pressure gone) OR trend turns up
-            if bull_power[i] < 0 or close[i] > ema50_6h[i]:
+            # Exit: price breaks above Donchian high OR trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: bull power positive (buying pressure) + volume confirmation + uptrend
-            if (bull_power[i] > 0 and 
+            # Long: price breaks above Donchian high + volume confirmation + uptrend
+            if (close[i] > donchian_high[i] and 
                 vol_confirm and 
-                close[i] > ema50_6h[i]):
+                close[i] > ema50_4h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: bear power negative (selling pressure) + volume confirmation + downtrend
-            elif (bear_power[i] < 0 and 
+            # Short: price breaks below Donchian low + volume confirmation + downtrend
+            elif (close[i] < donchian_low[i] and 
                   vol_confirm and 
-                  close[i] < ema50_6h[i]):
+                  close[i] < ema50_4h[i]):
                 position = -1
                 signals[i] = -0.25
     
