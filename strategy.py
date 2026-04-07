@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_keltner_channel_1d_trend_volume_v1
-Hypothesis: Keltner Channel breakouts on 6h with 1d trend filter and volume confirmation. 
-Long when price breaks above upper KC in uptrend (price > 1d EMA50). 
-Short when price breaks below lower KC in downtrend (price < 1d EMA50).
-Uses ATR-based channels to adapt to volatility. Target: 15-25 trades/year.
-Works in bull/bear by following higher timeframe trend.
+12h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Camarilla pivot levels from weekly data act as strong support/resistance. 
+Long when price breaks above R4 with volume confirmation and weekly trend up (price > weekly EMA50).
+Short when price breaks below S4 with volume confirmation and weekly trend down (price < weekly EMA50).
+Uses 12h timeframe for execution with weekly trend filter to reduce false breaks.
+Target: 20-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_channel_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,69 +27,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for Camarilla pivots and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    # Weekly EMA50 for trend filter
+    weekly_close = df_1w['close'].values
+    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Keltner Channel (20, 2.0) on 6h
-    # Typical price
-    tp = (high + low + close) / 3
-    # EMA of typical price (middle line)
-    kc_middle = pd.Series(tp).ewm(span=20, adjust=False).mean().values
-    # ATR(20)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Upper and lower bands
-    kc_upper = kc_middle + 2.0 * atr
-    kc_lower = kc_middle - 2.0 * atr
+    # Calculate Camarilla levels from previous weekly bar
+    # Formula: based on previous week's high, low, close
+    prev_high = df_1w['high'].shift(1).values  # Previous week high
+    prev_low = df_1w['low'].shift(1).values    # Previous week low
+    prev_close = df_1w['close'].shift(1).values # Previous week close
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Camarilla multipliers
+    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    R2 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    S2 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align weekly levels to 12h timeframe (use previous week's levels)
+    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    
+    # Volume confirmation (24-period average on 12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if required data not available
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.2x average volume
-        vol_confirm = volume[i] > 1.2 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below middle line or trend changes
-            if close[i] < kc_middle[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price breaks below R3 or weekly trend turns down
+            if close[i] < R3_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above middle line or trend changes
-            if close[i] > kc_middle[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price breaks above S3 or weekly trend turns up
+            if close[i] > S3_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper KC with volume and uptrend
-            if (close[i] > kc_upper[i] and vol_confirm and 
+            # Long entry: price breaks above R4 with volume and weekly trend up
+            if (close[i] > R4_aligned[i] and vol_confirm and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower KC with volume and downtrend
-            elif (close[i] < kc_lower[i] and vol_confirm and 
+            # Short entry: price breaks below S4 with volume and weekly trend down
+            elif (close[i] < S4_aligned[i] and vol_confirm and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
