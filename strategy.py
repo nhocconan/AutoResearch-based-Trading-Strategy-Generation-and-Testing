@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_12h_trend_volume_v2
-Hypothesis: 4-hour Donchian breakout with 12-hour EMA trend filter and volume confirmation.
-Buy when price breaks above Donchian upper band with volume surge and price above 12h EMA50.
-Sell when price breaks below Donchian lower band with volume surge and price below 12h EMA50.
-Designed to capture trend continuation with momentum confirmation while avoiding false breakouts.
-Works in bull markets (buying strength) and bear markets (selling weakness).
-Target: 20-30 trades/year (80-120 total over 4 years).
+1h_vwap_rsi_pullback_4h1d_trend
+Hypothesis: On 1h timeframe, enter long when price pulls back to VWAP with RSI < 40 and 4h/1d trend bullish; enter short when price pulls back to VWAP with RSI > 60 and 4h/1d trend bearish. Use 4h EMA50 and 1d EMA50 for trend filter. Designed for 15-35 trades/year with strict entry conditions to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v2"
-timeframe = "4h"
+name = "1h_vwap_rsi_pullback_4h1d_trend"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,65 +23,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 4h
-    donchian_window = 20
-    donchian_upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Calculate VWAP (typical price * volume cumulative / volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den > 0, vwap_num / vwap_den, 0)
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(donchian_window, n):
+    for i in range(14, n):
         # Skip if data not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(vwap[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average (at least 1.5x)
-        vol_confirmed = volume[i] > vol_ma[i] * 1.5
+        # Session filter
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        # Price breakout conditions
-        breakout_up = close[i] > donchian_upper[i]
-        breakout_down = close[i] < donchian_lower[i]
+        # Trend filters
+        bullish_trend = close[i] > ema50_4h_aligned[i] and close[i] > ema50_1d_aligned[i]
+        bearish_trend = close[i] < ema50_4h_aligned[i] and close[i] < ema50_1d_aligned[i]
         
-        # 12h trend filter
-        above_12h_ema50 = close[i] > ema50_12h_aligned[i]
-        below_12h_ema50 = close[i] < ema50_12h_aligned[i]
+        # VWAP proximity (within 0.3%)
+        near_vwap = abs(close[i] - vwap[i]) / vwap[i] < 0.003
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower or trend turns bearish
-            if close[i] < donchian_lower[i] or below_12h_ema50:
+            # Exit: trend turns bearish or price moves above VWAP
+            if not bullish_trend or close[i] > vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper or trend turns bullish
-            if close[i] > donchian_upper[i] or above_12h_ema50:
+            # Exit: trend turns bullish or price moves below VWAP
+            if not bearish_trend or close[i] < vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long: breakout above upper band with volume confirmation and bullish trend
-            if breakout_up and vol_confirmed and above_12h_ema50:
-                position = 1
-                signals[i] = 0.25
-            # Short: breakout below lower band with volume confirmation and bearish trend
-            elif breakout_down and vol_confirmed and below_12h_ema50:
-                position = -1
-                signals[i] = -0.25
+            if in_session:
+                # Long: price near VWAP, RSI < 40, bullish trend
+                if near_vwap and rsi[i] < 40 and bullish_trend:
+                    position = 1
+                    signals[i] = 0.20
+                # Short: price near VWAP, RSI > 60, bearish trend
+                elif near_vwap and rsi[i] > 60 and bearish_trend:
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
