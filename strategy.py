@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Breakouts on 12h with volume confirmation capture strong trends; volatility filter avoids choppy markets.
-# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 12-37 trades/year to minimize fee drag.
-name = "12h_donchian20_1d_volume_atr_v1"
-timeframe = "12h"
+# Strategy: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
+# Hypothesis: Breakouts aligned with higher timeframe trend capture strong moves; volume confirms institutional interest.
+# Works in bull via trend-following breakouts, in bear via volatility-filtered mean reversion at bands.
+# Target: 20-50 trades/year to minimize fee drag.
+name = "4h_donchian20_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,6 +21,16 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA(50) for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -49,11 +59,11 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
+        # Volume confirmation: current 4h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
@@ -75,12 +85,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Enter long: price breaks above upper band + 12h trend up + volume confirmation + volatility filter
+            if close[i] > highest_high[i] and close[i] > ema_12h_aligned[i] and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+            # Enter short: price breaks below lower band + 12h trend down + volume confirmation + volatility filter
+            elif close[i] < lowest_low[i] and close[i] < ema_12h_aligned[i] and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
