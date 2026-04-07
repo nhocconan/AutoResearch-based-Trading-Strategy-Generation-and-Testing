@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
-# Long when price breaks above Donchian upper(20) and weekly pivot shows bullish bias (price > weekly pivot)
-# Short when price breaks below Donchian lower(20) and weekly pivot shows bearish bias (price < weekly pivot)
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Donchian upper(20) and 1d EMA > EMA(50) (uptrend)
+# Short when price breaks below Donchian lower(20) and 1d EMA < EMA(50) (downtrend)
 # Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
-# Volume confirmation: current volume > 1.3 * average volume of last 20 periods
+# Volume confirmation: current volume > 1.5 * average volume of last 20 periods
 # Position size: 0.25 (25% of capital)
-# Target: 75-150 total trades over 4 years (19-38/year)
+# Target: 50-150 total trades over 4 years (12-37/year)
+# Works in bull: captures breakouts; works in bear: filters with 1d trend and stoploss
 
-name = "6h_donchian20_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,26 +27,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot and trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's data)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    
-    # Weekly pivot point = (H + L + C) / 3
-    pp_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    # Weekly R1 = 2*P - L, S1 = 2*P - H
-    r1_weekly = 2 * pp_weekly - low_weekly
-    s1_weekly = 2 * pp_weekly - high_weekly
-    
-    # Align weekly data to 6h timeframe
-    pp_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pp_weekly)
-    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    # Calculate 1-day EMA(20) and EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -65,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(pp_weekly_aligned[i]) or np.isnan(r1_weekly_aligned[i]) or 
-            np.isnan(s1_weekly_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -79,8 +71,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below weekly pivot or stoploss
-            elif close[i] < pp_weekly_aligned[i]:
+            # Exit: price crosses below Donchian lower(20)
+            elif close[i] < low[i-20]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -92,8 +84,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above weekly pivot or stoploss
-            elif close[i] > pp_weekly_aligned[i]:
+            # Exit: price crosses above Donchian upper(20)
+            elif close[i] > high[i-20]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -104,20 +96,20 @@ def generate_signals(prices):
             highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
             lowest_low = low[i-20:i].min() if i >= 20 else low[:i].min()
             
-            # Weekly pivot bias: price > PP = bullish, price < PP = bearish
-            bullish_bias = close[i] > pp_weekly_aligned[i]
-            bearish_bias = close[i] < pp_weekly_aligned[i]
+            # Trend filter: 1d EMA(20) > EMA(50) for uptrend, < for downtrend
+            uptrend = ema_20_1d_aligned[i] > ema_50_1d_aligned[i]
+            downtrend = ema_20_1d_aligned[i] < ema_50_1d_aligned[i]
             
-            # Volume confirmation: current volume > 1.3 * average volume
-            volume_confirm = volume[i] > 1.3 * vol_avg[i]
+            # Volume confirmation: current volume > 1.5 * average volume
+            volume_confirm = volume[i] > 1.5 * vol_avg[i]
             
-            # Long: price breaks above Donchian upper(20) with bullish bias and volume
-            if close[i] > highest_high and bullish_bias and volume_confirm:
+            # Long: price breaks above Donchian upper(20) in uptrend with volume
+            if close[i] > highest_high and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian lower(20) with bearish bias and volume
-            elif close[i] < lowest_low and bearish_bias and volume_confirm:
+            # Short: price breaks below Donchian lower(20) in downtrend with volume
+            elif close[i] < lowest_low and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
