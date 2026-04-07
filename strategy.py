@@ -1,19 +1,21 @@
+# SPDX-FileCopyrightText: 2025 Alpaca Wong
+# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Daily Donchian Breakout with Volume Confirmation
+# Strategy: 4h Daily Donchian Breakout with Volume Confirmation
 # Hypothesis: Price breaking out of daily Donchian channels (20-period high/low) 
-# with volume confirmation and daily trend filter (price vs daily 50 EMA) captures 
-# strong momentum moves in both bull and bear markets. 
-# In bull markets: buy breakouts above daily high with volume. 
-# In bear markets: sell breakouts below daily low with volume. 
-# Daily timeframe reduces noise, volume confirms institutional participation.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# with volume confirmation (>2x 50-period average) captures strong momentum moves.
+# Trend filter: price above/below daily 20 EMA to align with intermediate trend.
+# Works in bull markets (buy breakouts above daily high with volume) and 
+# bear markets (sell breakdowns below daily low with volume).
+# Daily timeframe reduces noise vs 4h, volume confirms institutional participation.
+# Target: 25-50 trades/year (100-200 over 4 years).
 
-name = "12h_daily_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_daily_donchian_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,19 +57,19 @@ def generate_signals(prices):
         donchian_high[0] = 0
         donchian_low[0] = 0
     
-    # Daily trend filter: price vs 50 EMA
+    # Daily trend filter: price vs 20 EMA
     daily_close_series = pd.Series(daily_close)
-    daily_ema_50 = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema_50 = np.roll(daily_ema_50, 1)
-    if len(daily_ema_50) > 1:
-        daily_ema_50[0] = daily_ema_50[1]
+    daily_ema_20 = daily_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    daily_ema_20 = np.roll(daily_ema_20, 1)
+    if len(daily_ema_20) > 1:
+        daily_ema_20[0] = daily_ema_20[1]
     else:
-        daily_ema_50[0] = 0
+        daily_ema_20[0] = 0
     
-    # Align daily data to 12h timeframe
+    # Align daily data to 4h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_daily, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_daily, donchian_low)
-    daily_ema_50_aligned = align_htf_to_ltf(prices, df_daily, daily_ema_50)
+    daily_ema_20_aligned = align_htf_to_ltf(prices, df_daily, daily_ema_20)
     
     # Volume filter: volume > 2.0x 50-period average (institutional participation)
     vol_series = pd.Series(volume)
@@ -80,20 +82,20 @@ def generate_signals(prices):
     for i in range(200, n):
         # Skip if required data not available
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(daily_ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(daily_ema_20_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price falls below daily Donchian low or trend fails
-            if close[i] < donchian_low_aligned[i] or close[i] < daily_ema_50_aligned[i] or not vol_filter[i]:
+            if close[i] < donchian_low_aligned[i] or close[i] < daily_ema_20_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
             # Exit: price rises above daily Donchian high or trend fails
-            if close[i] > donchian_high_aligned[i] or close[i] > daily_ema_50_aligned[i] or not vol_filter[i]:
+            if close[i] > donchian_high_aligned[i] or close[i] > daily_ema_20_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,12 +103,12 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Long entry: breakout above daily Donchian high with volume and trend filter
             if (high[i] > donchian_high_aligned[i] and close[i] > donchian_high_aligned[i] and
-                close[i] > daily_ema_50_aligned[i] and vol_filter[i]):
+                close[i] > daily_ema_20_aligned[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
             # Short entry: breakdown below daily Donchian low with volume and trend filter
             elif (low[i] < donchian_low_aligned[i] and close[i] < donchian_low_aligned[i] and
-                  close[i] < daily_ema_50_aligned[i] and vol_filter[i]):
+                  close[i] < daily_ema_20_aligned[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
