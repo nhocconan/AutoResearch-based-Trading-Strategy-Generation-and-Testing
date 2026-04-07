@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend and Volume Confirmation
-Long when price breaks above Donchian(20) high with weekly uptrend and volume surge
-Short when price breaks below Donchian(20) low with weekly downtrend and volume surge
-Exit when price crosses back through Donchian midpoint or trend reverses
-Designed for low-frequency, high-conviction trades to minimize fee drag
+6h Camarilla Pivot + Volume + 1d EMA Trend
+Long when price breaks above S3 with volume and 1d EMA up
+Short when price breaks below R3 with volume and 1d EMA down
+Exit when price crosses back through S3/R3 or EMA trend fails
+Camarilla levels work well in ranging markets while EMA filter adapts to trend
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_volume_ema_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +26,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # === 1d EMA for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Weekly Trend (EMA 21) ===
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_close = df_weekly['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
-    
-    # === Volume Confirmation (20-period average) ===
+    # === Volume ratio ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
@@ -45,39 +40,58 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
-        if position == 1:  # Long position
-            # Exit: price crosses below midpoint OR weekly trend turns down
-            if close[i] < donch_mid[i] or close[i] < weekly_ema_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Exit: price crosses above midpoint OR weekly trend turns up
-            if close[i] > donch_mid[i] or close[i] > weekly_ema_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat, look for entry
-            # Need volume surge (above average)
-            if vol_ratio[i] < 1.5:
+        # Daily pivot points (using previous day's OHLC)
+        if i >= 4:  # Need at least 4 periods back for 6h data (1 day = 4 periods)
+            # Get previous day's OHLC (4 periods back)
+            prev_high = high[i-4]
+            prev_low = low[i-4]
+            prev_close = close[i-4]
+            
+            # Calculate Camarilla levels
+            range_val = prev_high - prev_low
+            if range_val <= 0:
                 signals[i] = 0.0
                 continue
+                
+            # Camarilla levels
+            s3 = prev_close - (range_val * 1.1000 / 6)
+            s4 = prev_close - (range_val * 1.5000 / 6)
+            r3 = prev_close + (range_val * 1.1000 / 6)
+            r4 = prev_close + (range_val * 1.5000 / 6)
             
-            # Entry: Donchian breakout with weekly trend alignment
-            if close[i] > donch_high[i] and close[i] > weekly_ema_aligned[i]:
-                # Break above upper band with weekly uptrend -> long
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < donch_low[i] and close[i] < weekly_ema_aligned[i]:
-                # Break below lower band with weekly downtrend -> short
-                position = -1
-                signals[i] = -0.25
+            if position == 1:  # Long position
+                # Exit: price crosses below S3 or EMA trend turns down
+                if close[i] < s3 or ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
+            elif position == -1:  # Short position
+                # Exit: price crosses above R3 or EMA trend turns up
+                if close[i] > r3 or ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:  # Flat, look for entry
+                # Need expanding volume
+                if vol_ratio[i] < 1.5:
+                    signals[i] = 0.0
+                    continue
+                
+                # Entry: Camarilla breakout with volume and trend
+                if close[i] > s3 and close[i-1] <= s3 and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                    # Break above S3 with rising EMA -> long
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < r3 and close[i-1] >= r3 and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                    # Break below R3 with falling EMA -> short
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
