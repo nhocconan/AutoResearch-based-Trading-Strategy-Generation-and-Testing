@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from 1-day for mean reversion entry in ranging markets.
-Long when price touches S3 support with volume confirmation in low volatility regime.
-Short when price touches R3 resistance with volume confirmation in low volatility regime.
-Exit on opposite touch or volatility expansion.
-Designed for 20-40 trades/year to minimize fee drag while capturing mean reversion in both bull and bear markets.
+4h_donchian_20_12h_trend_volume_v3
+Hypothesis: On 4-hour timeframe, buy breakouts above 20-period Donchian channel when 12h trend is up (close > EMA50) and volume confirms; sell breakdowns below 20-period Donchian channel when 12h trend is down (close < EMA50) and volume confirms. Uses volatility filter (ATR) to avoid choppy markets. Designed for 20-50 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
+name = "4h_donchian_20_12h_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,137 +23,120 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 2:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA50 on 12h close
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # Previous day's values (shifted by 1 for no look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Camarilla calculations
-    range_ = prev_high - prev_low
-    r3 = prev_close + range_ * 1.1 / 2
-    s3 = prev_close - range_ * 1.1 / 2
-    
-    # Align to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate ATR for volatility regime filter
+    # Calculate ATR(14) on 4h for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     atr_period = 14
-    alpha = 1.0 / atr_period
-    
-    def wilders_smoothing(arr):
-        smoothed = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if np.isnan(arr[i]):
-                if i == 0:
-                    smoothed[i] = np.nan
-                else:
-                    smoothed[i] = smoothed[i-1]
+    atr = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if np.isnan(tr[i]):
+            if i == 0:
+                atr[i] = np.nan
             else:
-                if i == 0 or np.isnan(smoothed[i-1]):
-                    smoothed[i] = arr[i]
-                else:
-                    smoothed[i] = smoothed[i-1] + alpha * (arr[i] - smoothed[i-1])
-        return smoothed
-    
-    atr = wilders_smoothing(tr)
-    
-    # Calculate ATR percentile for regime (20-period lookback)
-    atr_ma = np.full_like(atr, np.nan)
-    for i in range(len(atr)):
-        if i < 20:
-            atr_ma[i] = np.nan
+                atr[i] = atr[i-1]
         else:
-            window = atr[max(0, i-19):i+1]
-            valid = window[~np.isnan(window)]
-            if len(valid) > 0:
-                atr_ma[i] = np.mean(valid)
+            if i == 0 or np.isnan(atr[i-1]):
+                atr[i] = tr[i]
+            else:
+                atr[i] = atr[i-1] + (1/atr_period) * (tr[i] - atr[i-1])
     
-    atr_ratio = np.full_like(atr, np.nan)
-    for i in range(len(atr)):
-        if np.isnan(atr[i]) or np.isnan(atr_ma[i]) or atr_ma[i] == 0:
-            atr_ratio[i] = np.nan
-        else:
-            atr_ratio[i] = atr[i] / atr_ma[i]
+    # Calculate Donchian channels (20-period)
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                res[i] = np.nan
+            else:
+                res[i] = np.max(arr[i-window+1:i+1])
+        return res
     
-    # Volume moving average for confirmation
-    vol_ma = np.full_like(volume, np.nan, dtype=np.float64)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.nan
-        else:
-            window = volume[max(0, i-19):i+1]
-            valid = window[~np.isnan(window)]
-            if len(valid) > 0:
-                vol_ma[i] = np.mean(valid)
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                res[i] = np.nan
+            else:
+                res[i] = np.min(arr[i-window+1:i+1])
+        return res
     
-    volume_ratio = np.full_like(volume, np.nan)
-    for i in range(len(volume)):
-        if np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0:
-            volume_ratio[i] = np.nan
-        else:
-            volume_ratio[i] = volume[i] / vol_ma[i]
+    donch_high = rolling_max(high, 20)
+    donch_low = rolling_min(low, 20)
+    
+    # Calculate average volume (20-period)
+    def rolling_mean(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                res[i] = np.nan
+            else:
+                res[i] = np.mean(arr[i-window+1:i+1])
+        return res
+    
+    avg_volume = rolling_mean(volume, 20)
+    
+    # Align 12h indicators to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    atr_aligned = align_htf_to_ltf(prices, df_12h, atr)  # Use 12h ATR for volatility filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
-        # Skip if data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(atr_ratio[i]) or np.isnan(volume_ratio[i])):
+    for i in range(50, n):  # Start after warmup
+        # Skip if any data not available
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr_aligned[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
-            
-        # Volatility regime filter: only trade in low volatility (mean reversion works better)
-        low_vol = atr_ratio[i] < 1.2
         
-        # Volume confirmation: above average volume
-        vol_confirm = volume_ratio[i] > 1.1
+        # Volatility filter: avoid extremely low volatility (choppy) markets
+        if atr_aligned[i] < 0.5 * np.nanmean(atr_aligned[max(0, i-50):i+1]):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price touches R3 or volatility expands
-            if close[i] >= r3_aligned[i] or not low_vol:
+            # Exit: price re-enters Donchian channel or trend changes
+            if close[i] <= donch_high[i] or close[i] < ema50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches S3 or volatility expands
-            if close[i] <= s3_aligned[i] or not low_vol:
+            # Exit: price re-enters Donchian channel or trend changes
+            if close[i] >= donch_low[i] or close[i] > ema50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter in low volatility with volume confirmation
-            if low_vol and vol_confirm:
-                # Long at S3 support
-                if close[i] <= s3_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short at R3 resistance
-                elif close[i] >= r3_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Long: breakout above Donchian high with up trend and volume
+            if (close[i] > donch_high[i] and 
+                close[i] > ema50_12h_aligned[i] and 
+                volume_confirmed):
+                position = 1
+                signals[i] = 0.25
+            # Short: breakdown below Donchian low with down trend and volume
+            elif (close[i] < donch_low[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
+                  volume_confirmed):
+                position = -1
+                signals[i] = -0.25
     
     return signals
