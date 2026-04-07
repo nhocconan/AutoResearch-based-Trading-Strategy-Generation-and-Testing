@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Daily Pivot Breakout with Volume Filter
-# Hypothesis: Daily pivot levels act as strong intraday support/resistance. Price breaking above R1 with volume indicates institutional buying, leading to continuation. Price breaking below S1 with volume indicates institutional selling, leading to continuation. Works in both bull and bear markets because: In bull, breaks above R1 continue up; breaks below S1 get bought (mean reversion). In bear, breaks below S1 continue down; breaks above R1 get sold (mean reversion). Volume filter ensures only institutional participation triggers entries.
-# Target: 12-30 trades/year (48-120 over 4 years).
+# Strategy: 4h Daily Pivot Breakout with Volume and Choppiness Filter
+# Hypothesis: Daily pivot levels act as strong support/resistance. Price breaking above R1 or below S1 with high volume indicates institutional participation, leading to continuation. Choppiness filter avoids whipsaws in ranging markets. Works in bull/bear: in bull, breaks above R1 continue up; in bear, breaks below S1 continue down. Volume confirms real breakouts; chop filter avoids false signals.
+# Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "6h_daily_pivot_breakout_volume_v2"
-timeframe = "6h"
+name = "4h_daily_pivot_breakout_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -41,28 +41,31 @@ def generate_signals(prices):
     prev_daily_close[0] = prev_daily_close[1] if len(prev_daily_close) > 1 else 0
     
     # Calculate daily pivot points
-    # Pivot = (High + Low + Close) / 3
-    # R1 = (2 * Pivot) - Low
-    # S1 = (2 * Pivot) - High
-    # R2 = Pivot + (High - Low)
-    # S2 = Pivot - (High - Low)
     daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
     daily_r1 = (2 * daily_pivot) - prev_daily_low
     daily_s1 = (2 * daily_pivot) - prev_daily_high
-    daily_r2 = daily_pivot + (prev_daily_high - prev_daily_low)
-    daily_s2 = daily_pivot - (prev_daily_high - prev_daily_low)
     
-    # Align to 6h timeframe (use previous day's levels)
+    # Align to 4h timeframe (use previous day's levels)
     pivot_aligned = align_htf_to_ltf(prices, df_daily, daily_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_daily, daily_r1)
     s1_aligned = align_htf_to_ltf(prices, df_daily, daily_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.8 * vol_ma)
+    
+    # Choppiness filter: avoid ranging markets
+    hl_range = np.maximum(high, low) - np.minimum(high, low)
+    atr = pd.Series(hl_range).rolling(window=14, min_periods=14).mean().values
+    hl_prev_close = np.roll(close, 1)
+    hl_prev_close[0] = close[0]
+    true_range = np.maximum(high - low, np.maximum(np.abs(high - hl_prev_close), np.abs(low - hl_prev_close)))
+    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    chop = 100 * np.log14(sum(pd.Series(true_range).rolling(14).sum()) / (atr * 14)) / np.log14(14)
+    chop_series = pd.Series(chop)
+    chop_values = chop_series.fillna(50).values
+    chop_filter = chop_values < 61.8  # Trending market
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
@@ -70,32 +73,31 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop_values[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls to pivot or volume drops
-            if close[i] <= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price falls to S1 or volatility drops or chop increases
+            if close[i] <= s1_aligned[i] or not vol_filter[i] or chop_values[i] >= 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises to pivot or volume drops
-            if close[i] >= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price rises to R1 or volatility drops or chop increases
+            if close[i] >= r1_aligned[i] or not vol_filter[i] or chop_values[i] >= 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above R1 with volume (continuation in bull, mean reversion in bear)
-            if high[i] > r1_aligned[i] and close[i] > r1_aligned[i] and vol_filter[i]:
+            # Long: price breaks above R1 with volume in trending market
+            if high[i] > r1_aligned[i] and close[i] > r1_aligned[i] and vol_filter[i] and chop_values[i] < 61.8:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below S1 with volume (continuation in bear, mean reversion in bull)
-            elif low[i] < s1_aligned[i] and close[i] < s1_aligned[i] and vol_filter[i]:
+            # Short: price breaks below S1 with volume in trending market
+            elif low[i] < s1_aligned[i] and close[i] < s1_aligned[i] and vol_filter[i] and chop_values[i] < 61.8:
                 position = -1
                 signals[i] = -0.25
     
