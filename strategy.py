@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
-In bull market (1d close > 1d EMA50): long on 20-bar high breakout.
-In bear market (1d close < 1d EMA50): short on 20-bar low breakout.
-Volume must be above 20-period average to confirm breakout strength.
-This combines price channel breakout with trend filter and volume confirmation.
-Target: 75-200 total trades over 4 years (19-50/year).
+Hypothesis: Daily RSI reversal with weekly trend filter and volume confirmation.
+In bull market (weekly close > weekly EMA10): look for long on RSI(14) < 30 reversal.
+In bear market (weekly close < weekly EMA10): look for short on RSI(14) > 70 reversal.
+Volume must be above 20-day average to confirm reversal strength.
+Target: 20-60 total trades over 4 years (5-15/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v4"
-timeframe = "4h"
+name = "daily_rsi_reversal_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,18 +26,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D TREND FILTER (HTF) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # === WEEKLY TREND FILTER (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
-    one_d_close = df_1d['close'].values
-    one_d_ema = pd.Series(one_d_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    one_d_ema_aligned = align_htf_to_ltf(prices, df_1d, one_d_ema)  # already shifted
+    one_w_close = df_1w['close'].values
+    one_w_ema = pd.Series(one_w_close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)  # already shifted
     
-    # === DONCHIAN CHANNEL (LTF) ===
-    lookback = 20
-    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === DAILY RSI (14) ===
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     # === VOLUME CONFIRMATION (LTF) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,25 +51,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
-        if np.isnan(one_d_ema_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+    for i in range(rsi_period, n):
+        if np.isnan(one_w_ema_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(rsi_values[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1d EMA
-        bull_trend = close[i] > one_d_ema_aligned[i]
+        # Determine trend direction from weekly EMA
+        bull_trend = close[i] > one_w_ema_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR trend turns bearish
-            if close[i] < low_min[i] or not bull_trend:
+            # Exit: RSI > 70 (overbought) OR trend turns bearish
+            if rsi_values[i] > 70 or not bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR trend turns bullish
-            if close[i] > high_max[i] or bull_trend:
+            # Exit: RSI < 30 (oversold) OR trend turns bullish
+            if rsi_values[i] < 30 or bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -75,15 +80,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry logic based on 1d trend
+            # Entry logic based on weekly trend
             if bull_trend:
-                # In bull market: long on breakout above Donchian high
-                if high[i] > high_max[i-1]:  # Use previous bar's high to avoid look-ahead
+                # In bull market: long on RSI < 30 (oversold bounce)
+                if rsi_values[i] < 30 and rsi_values[i-1] >= 30:
                     position = 1
                     signals[i] = 0.25
             else:
-                # In bear market: short on breakdown below Donchian low
-                if low[i] < low_min[i-1]:  # Use previous bar's low to avoid look-ahead
+                # In bear market: short on RSI > 70 (overbought rejection)
+                if rsi_values[i] > 70 and rsi_values[i-1] <= 70:
                     position = -1
                     signals[i] = -0.25
     
