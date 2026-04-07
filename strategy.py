@@ -3,89 +3,84 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h RSI Pullback with 12h EMA Trend Filter
-# Hypothesis: RSI(14) pullbacks in direction of 12h EMA(50) trend capture mean reversion within trends.
-# Uses 12h EMA for trend filter (works in bull/bear) and RSI for precise entries.
-# Target: 20-35 trades/year (80-140 total over 4 years) to minimize fee drag.
+# Strategy: 1d Weekly Donchian Breakout with Volume and Volume Spike Confirmation
+# Hypothesis: Weekly Donchian(20) breakouts on 1d timeframe, confirmed by volume spike and 1w EMA trend,
+# capture strong momentum moves in both bull and bear markets. Weekly EMA filter ensures we only
+# trade in the direction of the higher timeframe trend, reducing false breakouts.
+# Volume spike ensures breakouts have institutional participation. Target: 15-25 trades/year.
 
-name = "4h_rsi_pullback_12h_ema_trend_v1"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 12h close
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    # Calculate EMA(20) on weekly close
+    close_1w = df_1w['close'].values
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
     
-    # Align 12h EMA to 4h
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Align weekly EMA to daily
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # RSI(14) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Donchian channels (20-period)
+    # Highest high of past 20 days
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
-    # Wilder's smoothing for RSI
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        result[period-1] = np.mean(data[1:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    avg_gain = wilders_smoothing(gain, 14)
-    avg_loss = wilders_smoothing(loss, 14)
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume spike detection: current volume > 2.0 * 20-day average volume
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI reaches overbought or trend changes
-            if rsi[i] >= 70 or close[i] < ema_50_aligned[i]:
+            # Exit: price closes below Donchian lower band or trend changes
+            if close[i] < lowest_low[i] or close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: RSI reaches oversold or trend changes
-            if rsi[i] <= 30 or close[i] > ema_50_aligned[i]:
+            # Exit: price closes above Donchian upper band or trend changes
+            if close[i] > highest_high[i] or close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # RSI pullback in direction of 12h trend
-            if close[i] > ema_50_aligned[i]:  # Uptrend
-                if rsi[i] <= 40:  # Pullback to buy
-                    position = 1
-                    signals[i] = 0.25
-            else:  # Downtrend
-                if rsi[i] >= 60:  # Pullback to sell
-                    position = -1
-                    signals[i] = -0.25
+            # Long: price breaks above Donchian upper band + volume spike + uptrend
+            if close[i] > highest_high[i] and volume_spike[i] and close[i] > ema_20_aligned[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short: price breaks below Donchian lower band + volume spike + downtrend
+            elif close[i] < lowest_low[i] and volume_spike[i] and close[i] < ema_20_aligned[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
