@@ -1,83 +1,102 @@
 #!/usr/bin/env python3
 """
-12h_turtle_soup_with_volume_confirmation
-Hypothesis: Turtle Soup pattern (false breakout reversal) on 12h timeframe. Enter long when price breaks below 20-period low then reverses above it with volume confirmation; enter short when price breaks above 20-period high then reverses below it. Uses 1d trend filter (price above/below 200-period EMA) to align with higher timeframe trend. Designed for 15-30 trades/year to minimize fee drag while capturing reversal moves in both bull and bear markets.
+4h_river_2_bank_v1
+Hypothesis: Price moves between support/resistance "banks" (prior session high/low) with mean-reversion tendency. Enter long when price touches prior 12h low with bullish rejection (close > open) and volume > 1.3x average, short when touches prior 12h high with bearish rejection (close < open) and volume > 1.3x average. Uses 12h trend filter (price above/below 50-period EMA) to avoid counter-trend trades. Designed for ~25-40 trades/year to minimize fee drag while capturing mean-reversion in ranging markets and pullbacks in trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_turtle_soup_with_volume_confirmation"
-timeframe = "12h"
+name = "4h_river_2_bank_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 50-period EMA for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 12h data for reference levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(high[i]) or np.isnan(low[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(ema_50[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]) or np.isnan(open_price[i]) or
+            np.isnan(high_12h[-1]) or np.isnan(low_12h[-1])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: > 1.5x average volume
-        vol_ok = volume[i] > (vol_ma[i] * 1.5)
+        # Get prior completed 12h bar levels
+        idx_12h = (i // 48) - 1  # 48 = 4h bars in 12h (shifted by 1 for completed bar)
+        if idx_12h < 0:
+            signals[i] = 0.0
+            continue
+            
+        prior_12h_high = high_12h[idx_12h]
+        prior_12h_low = low_12h[idx_12h]
+        
+        # Volume confirmation: > 1.3x average volume
+        vol_ok = volume[i] > (vol_ma[i] * 1.3)
+        
+        # Candlestick rejection: bullish = close > open, bearish = close < open
+        bullish_rejection = close[i] > open_price[i]
+        bearish_rejection = close[i] < open_price[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below 20-period low (stop loss)
-            if close[i] < low_20[i]:
+            # Exit: price closes below prior 12h low (break of support)
+            if close[i] < prior_12h_low:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 20-period high (stop loss)
-            if close[i] > high_20[i]:
+            # Exit: price closes above prior 12h high (break of resistance)
+            if close[i] > prior_12h_high:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: price breaks below 20-period low then reverses above it (bullish trap)
-                if (low[i] < low_20[i] and close[i] > low_20[i] and 
-                    close[i] > ema_200_1d_aligned[i]):
+                # Long: touch prior 12h low with bullish rejection + price > 12h EMA50
+                if (low[i] <= prior_12h_low * 1.001 and  # Allow small tolerance for touch
+                    bullish_rejection and 
+                    close[i] > ema_50_12h_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks above 20-period high then reverses below it (bearish trap)
-                elif (high[i] > high_20[i] and close[i] < high_20[i] and 
-                      close[i] < ema_200_1d_aligned[i]):
+                # Short: touch prior 12h high with bearish rejection + price < 12h EMA50
+                elif (high[i] >= prior_12h_high * 0.999 and  # Allow small tolerance for touch
+                      bearish_rejection and 
+                      close[i] < ema_50_12h_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
