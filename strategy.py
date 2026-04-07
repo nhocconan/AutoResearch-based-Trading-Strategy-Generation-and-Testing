@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Donchian channel breakout with weekly trend filter and volume confirmation.
-In bull markets (price > weekly EMA200): long on upper band breakout.
-In bear markets (price < weekly EMA200): short on lower band breakout.
+Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
+Uses 12h EMA for trend direction (bull/bear filter) and 4h Donchian channels for entry.
+In bull markets (price > 12h EMA): long on breakout above upper band.
+In bear markets (price < 12h EMA): short on breakdown below lower band.
 Volume must be above 20-period average to confirm breakout.
-Uses 12h Donchian(20) for breakout signals, weekly EMA200 for trend filter.
-Target: 50-150 total trades over 4 years with low frequency to avoid fee drag.
+Exit on opposite Donchian band touch or trend reversal.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,18 +28,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # === 12H TREND FILTER (HTF) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) == 0:
         return np.zeros(n)
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)  # already shifted
     
-    # === 12H DONCHIAN CHANNEL (LTF) ===
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # === 4H DONCHIAN CHANNELS (LTF) ===
+    # Donchian(20): upper = max(high, 20), lower = min(low, 20)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === VOLUME CONFIRMATION (LTF) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,27 +47,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after warmup
-        if np.isnan(weekly_ema_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]):
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from weekly EMA
-        bull_trend = close[i] > weekly_ema_aligned[i]
+        # Determine trend direction from 12h EMA
+        bull_trend = close[i] > ema_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below midpoint OR weekly trend turns bearish
-            midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < midpoint or not bull_trend:
+            # Exit: price touches lower Donchian band OR trend turns bearish
+            if close[i] <= low_20[i] or not bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above midpoint OR weekly trend turns bullish
-            midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > midpoint or bull_trend:
+            # Exit: price touches upper Donchian band OR trend turns bullish
+            if close[i] >= high_20[i] or bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -77,15 +76,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry logic based on weekly trend
+            # Entry logic based on 12h trend
             if bull_trend:
-                # In bull market: long on upper band breakout
-                if high[i] > highest_high[i]:
+                # In bull market: long on breakout above upper band
+                if close[i] > high_20[i]:
                     position = 1
                     signals[i] = 0.25
             else:
-                # In bear market: short on lower band breakout
-                if low[i] < lowest_low[i]:
+                # In bear market: short on breakdown below lower band
+                if close[i] < low_20[i]:
                     position = -1
                     signals[i] = -0.25
     
