@@ -1,18 +1,19 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and 1d Trend Filter
-Long when price breaks above Donchian upper (20-bar high) with expanding volume AND 1d EMA trend up
-Short when price breaks below Donchian lower (20-bar low) with expanding volume AND 1d EMA trend down
-Exit when price crosses back to Donchian middle (10-bar median)
-Designed for 12h timeframe with controlled trade frequency (target: 50-150 trades over 4 years)
+1D Donchian Breakout with Volume Confirmation and Weekly Trend Filter
+Long when price breaks above Donchian upper channel (20-day high) with expanding volume AND weekly trend up
+Short when price breaks below Donchian lower channel (20-day low) with expanding volume AND weekly trend down
+Exit when price crosses back to Donchian midpoint
+Uses weekly EMA 13 for trend filter to capture long-term direction while reducing whipsaw.
+Target: 30-100 total trades over 4 years (7-25/year) with focus on high-probability breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "12h"
+name = "1d_donchian_breakout_volume_weekly_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,45 +27,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-bar high/low, 10-bar mid) ===
-    # Upper: 20-period high
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower: 20-period low  
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Middle: 10-period median of high/low (more responsive than average)
-    median_high = pd.Series(high).rolling(window=10, min_periods=10).median().values
-    median_low = pd.Series(low).rolling(window=10, min_periods=10).median().values
-    donchian_mid = (median_high + median_low) / 2
-    
-    # === ATR (14) for volatility filter ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === Donchian Channels (20-period high/low) ===
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
     
-    # === 1d trend filter (EMA 21) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === Weekly trend filter (EMA 13) ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if any NaN values
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below middle
+            # Exit: price crosses back below midpoint
             if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
@@ -72,7 +60,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above middle
+            # Exit: price crosses back above midpoint
             if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
@@ -84,13 +72,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation AND 1d trend filter
-            if close[i] > highest_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper channel with rising 1d EMA -> long
+            # Entry: Donchian breakout with volume confirmation AND weekly trend filter
+            if close[i] > donchian_upper[i] and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+                # Breakout above upper channel with rising weekly EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < lowest_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower channel with falling 1d EMA -> short
+            elif close[i] < donchian_lower[i] and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+                # Breakdown below lower channel with falling weekly EMA -> short
                 position = -1
                 signals[i] = -0.25
     
