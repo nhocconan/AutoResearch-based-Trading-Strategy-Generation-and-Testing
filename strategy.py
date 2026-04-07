@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly Volatility Breakout with Volume Filter
-# Hypothesis: Weekly volatility compression (narrow range) followed by expansion
-# with volume confirms institutional breakout. Works in bull/bear markets:
-# - Bull: breakout above weekly high with volume = continuation
-# - Bear: breakdown below weekly low with volume = continuation
-# - Range: false breakouts filtered by volume requirement
-# Target: 15-25 trades/year (60-100 over 4 years)
+# Strategy: 6h Daily Pivot Reversion with Volume Filter
+# Hypothesis: Daily pivot points (R1/S1, R2/S2) act as short-term reversal zones.
+# Price reaching R1/S1 with high volume often reverses due to profit-taking or institutional defense.
+# Works in both bull and bear markets: In bull, pullbacks to S1 get bought; in bear, bounces to R1 get sold.
+# Volume filter ensures only institutional participation triggers entries.
+# Target: 12-37 trades/year (50-150 over 4 years) by using strict reversal conditions.
 
-name = "1d_weekly_volatility_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_daily_pivot_reversion_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -26,83 +25,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for volatility calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get daily data for pivot calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Calculate weekly range (high-low) - use previous week to avoid look-ahead
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate daily data (previous day's OHLC)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Shift by 1 to use previous week's completed data
-    prev_weekly_high = np.roll(weekly_high, 1)
-    prev_weekly_low = np.roll(weekly_low, 1)
-    prev_weekly_close = np.roll(weekly_close, 1)
-    # Handle first element
-    if len(prev_weekly_high) > 1:
-        prev_weekly_high[0] = prev_weekly_high[1]
-        prev_weekly_low[0] = prev_weekly_low[1]
-        prev_weekly_close[0] = prev_weekly_close[1]
-    else:
-        prev_weekly_high[0] = 0
-        prev_weekly_low[0] = 0
-        prev_weekly_close[0] = 0
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    prev_daily_high = np.roll(daily_high, 1)
+    prev_daily_low = np.roll(daily_low, 1)
+    prev_daily_close = np.roll(daily_close, 1)
+    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
+    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
+    prev_daily_close[0] = prev_daily_close[1] if len(prev_daily_close) > 1 else 0
     
-    # Weekly range and position within range
-    weekly_range = prev_weekly_high - prev_weekly_low
-    # Avoid division by zero
-    weekly_range = np.where(weekly_range == 0, 1e-10, weekly_range)
-    weekly_position = (prev_weekly_close - prev_weekly_low) / weekly_range  # 0=at low, 1=at high
+    # Calculate daily pivot points
+    daily_range = prev_daily_high - prev_daily_low
+    daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
+    daily_r1 = daily_pivot + (daily_range * 1.0)
+    daily_s1 = daily_pivot - (daily_range * 1.0)
+    daily_r2 = daily_pivot + (daily_range * 2.0)
+    daily_s2 = daily_pivot - (daily_range * 2.0)
     
-    # Align to daily timeframe
-    weekly_position_aligned = align_htf_to_ltf(prices, df_weekly, weekly_position)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, prev_weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, prev_weekly_low)
+    # Align to 6h timeframe (use previous day's levels)
+    daily_r1_aligned = align_htf_to_ltf(prices, df_daily, daily_r1)
+    daily_s1_aligned = align_htf_to_ltf(prices, df_daily, daily_s1)
+    daily_r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
+    daily_s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
     
-    # Volume filter: volume > 2.0x 20-day average for institutional participation
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(weekly_position_aligned[i]) or np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(daily_r1_aligned[i]) or np.isnan(daily_s1_aligned[i]) or 
+            np.isnan(daily_r2_aligned[i]) or np.isnan(daily_s2_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to weekly midpoint or volume drops
-            weekly_mid = (weekly_low_aligned[i] + weekly_high_aligned[i]) / 2.0
-            if (close[i] <= weekly_mid or not vol_filter[i]):
+            # Exit: price reaches R1 or volume drops
+            if (high[i] >= daily_r1_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price returns to weekly midpoint or volume drops
-            weekly_mid = (weekly_low_aligned[i] + weekly_high_aligned[i]) / 2.0
-            if (close[i] >= weekly_mid or not vol_filter[i]):
+            # Exit: price reaches S1 or volume drops
+            if (low[i] <= daily_s1_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: weekly position shows strength (>0.7) and breaks above weekly high with volume
-            if (weekly_position_aligned[i] > 0.7 and 
-                high[i] > weekly_high_aligned[i] and 
-                vol_filter[i]):
+            # Long: price touches or goes below S1 with volume (bounce expected)
+            if (low[i] <= daily_s1_aligned[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: weekly position shows weakness (<0.3) and breaks below weekly low with volume
-            elif (weekly_position_aligned[i] < 0.3 and 
-                  low[i] < weekly_low_aligned[i] and 
-                  vol_filter[i]):
+            # Short: price touches or goes above R1 with volume (reversal expected)
+            elif (high[i] >= daily_r1_aligned[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
