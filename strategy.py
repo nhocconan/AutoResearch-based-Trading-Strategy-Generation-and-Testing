@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend and Volume Filter
-Long when price breaks above 20-day Donchian high with above-average volume and weekly uptrend
-Short when price breaks below 20-day Donchian low with above-average volume and weekly downtrend
-Exit when price crosses opposite Donchian boundary or weekly trend flips
+6h Donchian Breakout + 1D Trend Filter + Volume Confirmation
+Breakout strategy using Donchian channels (20) on 6h, filtered by 1D EMA trend direction,
+and confirmed by volume spike (>1.5x average). Works in both bull and bear markets
+by only taking breakouts in the direction of the higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20)
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20)
-    donchian_high = high_roll.max().values
-    donchian_low = low_roll.min().values
+    # === 6h Donchian Channel (20) ===
+    # Calculate rolling max/min with proper min_periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === Weekly Trend (HMA 21) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # === 1D EMA Trend Filter ===
+    # Get 1D data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    hma_21 = calculate_hma(close_1w, 21)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
-    # === Volume Filter ===
+    # Calculate EMA21 on 1D close
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_1d = close_1d.ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # === Volume Confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
@@ -47,72 +51,46 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio[i]):
+        # Skip if any data is NaN
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
+        # Determine trend direction from 1D EMA
+        # Uptrend: price above EMA21, Downtrend: price below EMA21
+        trend_up = close[i] > ema_1d_aligned[i]
+        trend_down = close[i] < ema_1d_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian low OR weekly trend turns down
-            if close[i] < donchian_low[i] or hma_21_aligned[i] < np.nan_to_num(hma_21_aligned[i-1], nan=0):
+            # Exit: price breaks below Donchian low (contrarian exit)
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian high OR weekly trend turns up
-            if close[i] > donchian_high[i] or hma_21_aligned[i] > np.nan_to_num(hma_21_aligned[i-1], nan=0):
+            # Exit: price breaks above Donchian high (contrarian exit)
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need expanding volume (above average)
+            # Need volume confirmation (above average)
             if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation and weekly trend alignment
-            if close[i] > donchian_high[i] and hma_21_aligned[i] > np.nan_to_num(hma_21_aligned[i-1], nan=0):
-                # Price above Donchian high with rising weekly trend -> long
+            # Entry logic: breakout in direction of 1D trend
+            # Long: break above Donchian high in uptrend
+            if close[i] > donchian_high[i] and trend_up:
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donchian_low[i] and hma_21_aligned[i] < np.nan_to_num(hma_21_aligned[i-1], nan=0):
-                # Price below Donchian low with falling weekly trend -> short
+            # Short: break below Donchian low in downtrend
+            elif close[i] < donchian_low[i] and trend_down:
                 position = -1
                 signals[i] = -0.25
     
     return signals
-
-def calculate_hma(arr, period):
-    """Calculate Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = np.full_like(arr, np.nan)
-    for i in range(half_period - 1, len(arr)):
-        start = i - half_period + 1
-        weights = np.arange(1, half_period + 1)
-        wma_half[i] = np.dot(arr[start:i+1], weights) / weights.sum()
-    
-    # WMA of full period
-    wma_full = np.full_like(arr, np.nan)
-    for i in range(period - 1, len(arr)):
-        start = i - period + 1
-        weights = np.arange(1, period + 1)
-        wma_full[i] = np.dot(arr[start:i+1], weights) / weights.sum()
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw_hma with sqrt_period
-    hma = np.full_like(arr, np.nan)
-    for i in range(sqrt_period - 1, len(arr)):
-        start = i - sqrt_period + 1
-        weights = np.arange(1, sqrt_period + 1)
-        hma[i] = np.dot(raw_hma[start:i+1], weights) / weights.sum()
-    
-    return hma
