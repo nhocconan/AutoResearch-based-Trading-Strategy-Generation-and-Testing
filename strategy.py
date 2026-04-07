@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Williams %R with 1-week EMA trend filter
-# Long when Williams %R < -80 (oversold) + price > weekly EMA50 (uptrend)
-# Short when Williams %R > -20 (overbought) + price < weekly EMA50 (downtrend)
-# Exit when Williams %R crosses -50 (mean reversion)
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above 20-day high + weekly close > weekly open (bullish weekly candle) + volume > 1.5x 20-day avg volume
+# Short when price breaks below 20-day low + weekly close < weekly open (bearish weekly candle) + volume > 1.5x 20-day avg volume
+# Exit when price crosses 10-day EMA or ATR-based stoploss (2.5 * ATR)
 # Position size: 0.25 (25% of capital)
-# Uses Williams %R for mean reversion entries and weekly EMA for trend filter
-# Target: 30-100 total trades over 4 years (7-25/year)
+# Target: 50-100 total trades over 4 years (12-25/year)
 
-name = "1d_williamsr_1w_ema_trend_v1"
+name = "1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -25,22 +23,37 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1-week data for EMA trend filter
+    # 1-week data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1-week EMA50
-    close_1w = df_1w['close'].values
-    close_1w_s = pd.Series(close_1w)
-    ema50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Weekly trend: bullish if close > open, bearish if close < open
+    weekly_close = df_1w['close'].values
+    weekly_open = df_1w['open'].values
+    weekly_bullish = weekly_close > weekly_open
+    weekly_bearish = weekly_close < weekly_open
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Align weekly trend to daily
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    
+    # 20-day Donchian channels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # 10-day EMA for exit
+    close_series = pd.Series(close)
+    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Volume filter: current volume > 1.5x 20-day average volume
+    volume_series = pd.Series(volume)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -55,9 +68,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_10[i]) or np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i]) or np.isnan(volume_filter[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -66,40 +81,40 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R crosses -50 (mean reversion)
-            elif williams_r[i] >= -50:
+            # Exit: price crosses below 10-day EMA
+            elif close[i] < ema_10[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R crosses -50 (mean reversion)
-            elif williams_r[i] <= -50:
+            # Exit: price crosses above 10-day EMA
+            elif close[i] > ema_10[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Williams %R extremes with trend filter
-            # Long: Williams %R oversold + price above weekly EMA50 (uptrend)
-            if williams_r[i] < -80 and close[i] > ema50_1w_aligned[i]:
+            # Look for entries: Donchian breakout with weekly trend and volume confirmation
+            # Long: price breaks above 20-day high + weekly bullish + volume filter
+            if close[i] > donchian_high[i] and weekly_bullish_aligned[i] > 0.5 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R overbought + price below weekly EMA50 (downtrend)
-            elif williams_r[i] > -20 and close[i] < ema50_1w_aligned[i]:
+            # Short: price breaks below 20-day low + weekly bearish + volume filter
+            elif close[i] < donchian_low[i] and weekly_bearish_aligned[i] > 0.5 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
