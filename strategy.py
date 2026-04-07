@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Camarilla Pivot Reversal + Daily Trend + Volume Spike
-# Hypothesis: Camarilla pivot levels (L3, L4, H3, H4) act as strong support/resistance.
-# In ranging markets, price reverses at these levels with volume confirmation.
-# Daily trend filter (EMA50) ensures trades align with higher-timeframe momentum.
-# Designed for 12h timeframe with low trade frequency (12-37/year).
-# Works in bull via long at L3/L4 in uptrend, short at H3/H4 in downtrend.
-# Works in bear via short at H3/H4 in downtrend, long at L3/L4 in uptrend retracements.
+# Strategy: 1h RSI Pullback + 4h EMA Trend + Daily Volume Spike
+# Hypothesis: RSI pullbacks in the direction of 4h trend with daily volume confirmation
+# provide high-probability entries in both bull and bear markets.
+# 4h EMA establishes trend, daily volume confirms institutional interest,
+# 1h RSI provides precise entry timing during pullbacks.
+# Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "1h_rsi_pullback_4h_trend_daily_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,79 +25,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Formula: 
-    # H4 = close + 1.5*(high - low)
-    # H3 = close + 1.1*(high - low)
-    # L3 = close - 1.1*(high - low)
-    # L4 = close - 1.5*(high - low)
-    # Using previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate pivot levels
-    hl_range = prev_high - prev_low
-    H4 = prev_close + 1.5 * hl_range
-    H3 = prev_close + 1.1 * hl_range
-    L3 = prev_close - 1.1 * hl_range
-    L4 = prev_close - 1.5 * hl_range
+    # 4h EMA(20) for trend
+    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Align pivot levels to 12h timeframe (shifted by 1 day to avoid look-ahead)
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    # 1d volume average
+    vol_avg_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Daily trend filter: EMA(50) of daily close
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=15).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    # 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check volume confirmation
-        vol_ok = vol_spike[i]
+        # Daily volume confirmation: volume > 1.5x 20-day average
+        vol_ok = volume[i] > (1.5 * vol_avg_1d_aligned[i])
         
         if position == 1:  # Long position
-            # Exit: price crosses below L3 OR daily trend turns bearish
-            if close[i] < L3_12h[i] or close[i] < ema_50_12h[i]:
+            # Exit: RSI > 70 (overbought) or trend turns bearish
+            if rsi[i] > 70 or close[i] < ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # Short position
-            # Exit: price crosses above H3 OR daily trend turns bullish
-            if close[i] > H3_12h[i] or close[i] > ema_50_12h[i]:
+            # Exit: RSI < 30 (oversold) or trend turns bullish
+            if rsi[i] < 30 or close[i] > ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: price touches L4 with daily uptrend (bullish reversal)
-                if (close[i] <= L4_12h[i] * 1.002) and (i == 50 or close[i-1] > L4_12h[i-1] * 1.002) and close[i] > ema_50_12h[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price touches H4 with daily downtrend (bearish reversal)
-                elif (close[i] >= H4_12h[i] * 0.998) and (i == 50 or close[i-1] < H4_12h[i-1] * 0.998) and close[i] < ema_50_12h[i]:
-                    position = -1
-                    signals[i] = -0.25
+                # Long: RSI < 30 (oversold) and price above 4h EMA (uptrend)
+                if rsi[i] < 30 and close[i] > ema_20_4h_aligned[i]:
+                    # Additional confirmation: RSI turning up from oversold
+                    if i == 20 or rsi[i] > rsi[i-1]:
+                        position = 1
+                        signals[i] = 0.20
+                # Short: RSI > 70 (overbought) and price below 4h EMA (downtrend)
+                elif rsi[i] > 70 and close[i] < ema_20_4h_aligned[i]:
+                    # Additional confirmation: RSI turning down from overbought
+                    if i == 20 or rsi[i] < rsi[i-1]:
+                        position = -1
+                        signals[i] = -0.20
     
     return signals
