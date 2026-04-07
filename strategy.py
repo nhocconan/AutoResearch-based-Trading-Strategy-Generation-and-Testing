@@ -1,16 +1,17 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Donchian(20) breakouts capture institutional momentum. 
-# Volume confirms participation, ADX>25 filters for trending markets.
-# Works in bull (breakouts continue) and bear (breakdowns continue).
-# Target: 20-50 trades/year (80-200 over 4 years).
+# Strategy: 12h Donchian 20 with Weekly Trend Filter and Volume Confirmation
+# Hypothesis: Price breaking above/below 20-period Donchian channel on 12h timeframe,
+# confirmed by weekly trend (price above/below 50-period EMA) and volume spike,
+# captures institutional breakouts that persist. Works in bull (breakouts continue)
+# and bear (breakdowns continue) as institutional activity drives trends.
+# Target: 15-30 trades/year (60-120 over 4 years) to avoid fee drag.
 
-name = "4h_donchian20_volume_adx_v1"
-timeframe = "4h"
+name = "12h_donchian20_weekly_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,68 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
+    # Get weekly data for trend filter (EMA50)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA50 for trend filter
+    weekly_close = df_weekly['close'].values
+    ema50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    
+    # Calculate 12h Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    dc_high = high_series.rolling(window=20, min_periods=20).max().values
-    dc_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / atr)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2.0x 20-period average (strict to reduce trades)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_weekly_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls to Donchian low or ADX weakens or volume drops
-            if (close[i] <= dc_low[i] or adx[i] < 20 or not vol_filter[i]):
+            # Exit: price falls below Donchian low or weekly trend turns bearish
+            if (close[i] <= donchian_low[i] or 
+                close[i] < ema50_weekly_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises to Donchian high or ADX weakens or volume drops
-            if (close[i] >= dc_high[i] or adx[i] < 20 or not vol_filter[i]):
+            # Exit: price rises above Donchian high or weekly trend turns bullish
+            if (close[i] >= donchian_high[i] or 
+                close[i] > ema50_weekly_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high with volume and ADX>25
-            if (high[i] > dc_high[i] and close[i] > dc_high[i] and 
-                vol_filter[i] and adx[i] > 25):
+            # Long: price breaks above Donchian high with volume and bullish weekly trend
+            if (high[i] > donchian_high[i] and 
+                close[i] > donchian_high[i] and 
+                vol_filter[i] and 
+                close[i] > ema50_weekly_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low with volume and ADX>25
-            elif (low[i] < dc_low[i] and close[i] < dc_low[i] and 
-                  vol_filter[i] and adx[i] > 25):
+            # Short: price breaks below Donchian low with volume and bearish weekly trend
+            elif (low[i] < donchian_low[i] and 
+                  close[i] < donchian_low[i] and 
+                  vol_filter[i] and 
+                  close[i] < ema50_weekly_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
