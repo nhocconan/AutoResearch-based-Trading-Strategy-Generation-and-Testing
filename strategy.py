@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Williams %R + 1w Trend + Volume Confirmation
-# Hypothesis: Williams %R identifies overbought/oversold conditions on daily timeframe.
-# In oversold (%R < -80) with weekly uptrend, go long. In overbought (%R > -20) with weekly downtrend, go short.
-# Volume confirms institutional participation. Williams %R is effective in both ranging and trending markets.
-# 1d timeframe balances responsiveness and noise reduction. Target: 7-25 trades/year (30-100 over 4 years).
-name = "1d_williams_r_1w_trend_volume_v1"
-timeframe = "1d"
+# Strategy: 6h Keltner Channel Breakout + 12h RSI Filter + Volume Confirmation
+# Hypothesis: Keltner Channel (KC) breakouts capture volatility expansion, especially when aligned
+# with higher timeframe momentum (12h RSI > 50 for longs, < 50 for shorts) and volume confirmation.
+# In strong trends, KC breakouts continue; in ranging markets, false breakouts are filtered by
+# 12h RSI and volume. Works in both bull/bear by following momentum on 12h.
+# Target: 15-40 trades/year (60-160 over 4 years).
+name = "6h_keltner_12h_rsi_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -23,46 +24,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12-hour data for RSI filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Williams %R on 1d timeframe (14 period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Keltner Channel on 6h (20, 1.5)
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    ema_center = close_s.ewm(span=20, adjust=False, min_periods=20).mean()
+    atr = (high_s.rolling(20, min_periods=20).max() - low_s.rolling(20, min_periods=20).min())  # Simple range-based ATR approximation
+    atr = atr.ewm(span=20, adjust=False, min_periods=20).mean()  # Smoothed ATR
+    upper_keltner = ema_center + (atr * 1.5)
+    lower_keltner = ema_center - (atr * 1.5)
     
-    # 1-week EMA(20) for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False).mean().values
-    weekly_ema_1d = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # 12-hour RSI(14) for trend filter
+    rsi_period = 14
+    delta = pd.Series(df_12h['close'].values).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h = rsi_12h.fillna(50).values  # Neutral when undefined
+    rsi_12h_6h = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
     # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
     vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if required data not available
-        if (np.isnan(williams_r[i]) or np.isnan(weekly_ema_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(rsi_12h_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -50 (momentum fading) or weekly trend turns down
-            if williams_r[i] > -50 or close[i] < weekly_ema_1d[i]:
+            # Exit: price re-enters Keltner Channel (mean reversion) or RSI turns bearish
+            if close[i] <= upper_keltner[i] and close[i] >= lower_keltner[i] or rsi_12h_6h[i] < 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -50 (momentum fading) or weekly trend turns up
-            if williams_r[i] < -50 or close[i] > weekly_ema_1d[i]:
+            # Exit: price re-enters Keltner Channel or RSI turns bullish
+            if close[i] <= upper_keltner[i] and close[i] >= lower_keltner[i] or rsi_12h_6h[i] > 60:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -70,12 +82,12 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Require volume confirmation
             if vol_filter[i]:
-                # Oversold with weekly uptrend: go long
-                if williams_r[i] < -80 and close[i] > weekly_ema_1d[i]:
+                # Long: break above upper Keltner with bullish 12h RSI
+                if close[i] > upper_keltner[i] and rsi_12h_6h[i] > 50:
                     position = 1
                     signals[i] = 0.25
-                # Overbought with weekly downtrend: go short
-                elif williams_r[i] > -20 and close[i] < weekly_ema_1d[i]:
+                # Short: break below lower Keltner with bearish 12h RSI
+                elif close[i] < lower_keltner[i] and rsi_12h_6h[i] < 50:
                     position = -1
                     signals[i] = -0.25
     
