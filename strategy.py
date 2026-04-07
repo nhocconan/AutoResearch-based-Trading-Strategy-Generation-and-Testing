@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Bollinger Band Squeeze Breakout with Volume Filter
-# Hypothesis: Bollinger Band squeeze (low volatility) precedes explosive moves.
-# Breakout direction confirmed by volume surge. Works in bull/bear as volatility
-# expansion is regime-independent. Targets 15-25 trades/year with 0.25 position size.
+# Strategy: 12h Donchian Breakout with Volume and Trend Filter
+# Hypothesis: Donchian channel breakouts capture strong momentum moves.
+# Volume confirmation ensures breakout strength, while 1w EMA trend filter
+# avoids counter-trend trades. Works in both bull and bear markets by
+# following the dominant weekly trend. Targets 15-25 trades/year.
 
-name = "6h_bb_squeeze_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,55 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Donchian Channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Band Squeeze: width < 20-period average width
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=10).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
+    
+    # 1-week EMA trend filter (higher timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_width_ma[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below middle band OR volatility contraction
-            if close[i] < bb_middle[i] or squeeze[i]:
+            # Exit: price closes below Donchian low OR trend turns bearish
+            if close[i] < donchian_low[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price crosses above middle band OR volatility contraction
-            if close[i] > bb_middle[i] or squeeze[i]:
+            # Exit: price closes above Donchian high OR trend turns bullish
+            if close[i] > donchian_high[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade on volatility expansion after squeeze
-            if not squeeze[i] and vol_spike[i]:
-                # Breakout up: close above upper band
-                if close[i] > bb_upper[i] and (i == 20 or close[i-1] <= bb_upper[i-1]):
+            # Only trade in direction of weekly trend with volume confirmation
+            if vol_filter[i]:
+                # Breakout up: close above Donchian high AND above weekly EMA
+                if close[i] > donchian_high[i] and close[i] > ema_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Breakout down: close below lower band
-                elif close[i] < bb_lower[i] and (i == 20 or close[i-1] >= bb_lower[i-1]):
+                # Breakout down: close below Donchian low AND below weekly EMA
+                elif close[i] < donchian_low[i] and close[i] < ema_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
