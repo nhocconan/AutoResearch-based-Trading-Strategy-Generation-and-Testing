@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour strategy using 4-hour Donchian(20) for trend direction, 1-hour for entry timing with volume confirmation and session filter.
-# Long when price breaks above 4h Donchian upper band during 08-20 UTC, volume > 1.5x 4h average volume.
-# Short when price breaks below 4h Donchian lower band during 08-20 UTC, volume > 1.5x 4h average volume.
-# Exit when price crosses back below/above the Donchian middle band or opposite breakout occurs.
-# Stoploss at 2.0 * ATR(14). Position size: 0.20.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with 1-week EMA13 trend filter and volume confirmation
+# Elder Ray Power = Close - EMA13 (Bull Power) or EMA13 - Close (Bear Power)
+# Long when Bull Power > 0, weekly EMA13 slope > 0 (uptrend), and volume > 1.5x 6s average volume
+# Short when Bear Power > 0, weekly EMA13 slope < 0 (downtrend), and volume > 1.5x 6s average volume
+# Exit when power reverses sign or opposite signal occurs
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "1h_donchian20_4h_vol_session_v1"
-timeframe = "1h"
+name = "6h_elder_ray_1w_ema13_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +27,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # 6s data for EMA13 calculation (Elder Ray)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 13:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_6h = df_6h['close'].values
+    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False).mean().values
+    ema_13_6h_aligned = align_htf_to_ltf(prices, df_6h, ema_13_6h)
     
-    # 4h Donchian(20) channels
-    high_series = pd.Series(high_4h)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    low_series = pd.Series(low_4h)
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Bull Power = Close - EMA13, Bear Power = EMA13 - Close
+    bull_power = close - ema_13_6h_aligned
+    bear_power = ema_13_6h_aligned - close
     
-    # Align Donchian bands to 1h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
+    # 1w data for EMA13 trend filter (slope)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
+        return np.zeros(n)
     
-    # 4h volume average for confirmation
-    volume_4h = df_4h['volume'].values
-    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
+    close_1w = df_1w['close'].values
+    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False).mean().values
+    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
+    
+    # Calculate slope of weekly EMA13 (change over 1 period)
+    ema_13_1w_slope = np.diff(ema_13_1w_aligned, prepend=ema_13_1w_aligned[0])
+    
+    # 6s volume average for confirmation
+    volume_6h = df_6h['volume'].values
+    volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -69,11 +72,11 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(middle_aligned[i]) or np.isnan(volume_ma_4h_aligned[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_13_1w_slope[i]) or np.isnan(volume_ma_6h_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -84,40 +87,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below middle band or opposite breakout
-            elif close[i] < middle_aligned[i] or close[i] < lower_aligned[i]:
+            # Exit: Bull Power <= 0 or weekly EMA13 slope <= 0 (trend weakness)
+            elif bull_power[i] <= 0 or ema_13_1w_slope[i] <= 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above middle band or opposite breakout
-            elif close[i] > middle_aligned[i] or close[i] > upper_aligned[i]:
+            # Exit: Bear Power <= 0 or weekly EMA13 slope >= 0 (trend weakness)
+            elif bear_power[i] <= 0 or ema_13_1w_slope[i] >= 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and session filter
-            # Long: price breaks above upper band, volume spike, in session
-            if (close[i] > upper_aligned[i] and
-                volume[i] > 1.5 * volume_ma_4h_aligned[i] and
-                in_session[i]):
-                signals[i] = 0.20
+            # Look for entries with volume confirmation and trend alignment
+            # Long: Bull Power > 0, weekly EMA13 slope > 0 (uptrend), volume spike
+            if (bull_power[i] > 0 and
+                ema_13_1w_slope[i] > 0 and
+                volume[i] > 1.5 * volume_ma_6h_aligned[i]):
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower band, volume spike, in session
-            elif (close[i] < lower_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_4h_aligned[i] and
-                  in_session[i]):
-                signals[i] = -0.20
+            # Short: Bear Power > 0, weekly EMA13 slope < 0 (downtrend), volume spike
+            elif (bear_power[i] > 0 and
+                  ema_13_1w_slope[i] < 0 and
+                  volume[i] > 1.5 * volume_ma_6h_aligned[i]):
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
