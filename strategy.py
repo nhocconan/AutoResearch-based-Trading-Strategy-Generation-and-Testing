@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(14) mean reversion with 4-hour EMA(50) trend filter and 1-day volume confirmation
-# Long when RSI < 30 (oversold) + price > 4h EMA(50) (uptrend) + volume > 1.5x 20-period average
-# Short when RSI > 70 (overbought) + price < 4h EMA(50) (downtrend) + volume > 1.5x 20-period average
-# Exit when RSI crosses 50 in opposite direction
+# Hypothesis: 6-hour Elder Ray with 1-day volume confirmation and 1-week ADX trend filter
+# Long when Bull Power > 0 + Bear Power < 0 + volume > 1.5x 20-period average + weekly ADX > 20
+# Short when Bull Power < 0 + Bear Power > 0 + volume > 1.5x 20-period average + weekly ADX > 20
+# Exit when Bull Power and Bear Power cross (Elder Ray signal reversal)
 # Stoploss at 2.0 * ATR(14)
-# Position size: 0.20 (20% of capital)
-# Uses 4h EMA for trend direction and 1d volume for confirmation
-# Target: 80-160 total trades over 4 years (20-40/year) for 1h timeframe
+# Position size: 0.25 (25% of capital)
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1h_rsi14_4h_ema50_1d_vol_v1"
-timeframe = "1h"
+name = "6h_elder_ray_1d_vol_1w_adx_v5"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -27,20 +26,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4-hour data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
     # 1-day data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(50)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1-week data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
     # Calculate 1-day volume average (20-period)
     volume_1d = df_1d['volume'].values
@@ -48,16 +42,44 @@ def generate_signals(prices):
     volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1-week ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Elder Ray components (13-period EMA for consistency)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -72,12 +94,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(atr[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -88,42 +111,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: RSI crosses above 50
-            elif rsi[i] > 50:
+            # Exit: Elder Ray signal reversal (bull power <= 0 or bear power >= 0)
+            elif bull_power[i] <= 0 or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: RSI crosses below 50
-            elif rsi[i] < 50:
+            # Exit: Elder Ray signal reversal (bull power >= 0 or bear power <= 0)
+            elif bull_power[i] >= 0 or bear_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: RSI extreme + trend filter + volume confirmation
-            # Trend filter: price vs 4h EMA(50)
-            uptrend = close[i] > ema_50_4h_aligned[i]
-            downtrend = close[i] < ema_50_4h_aligned[i]
+            # Look for entries: Elder Ray alignment with volume confirmation and ADX filter
             # Volume filter: volume > 1.5x 20-period average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
+            # Trend filter: weekly ADX > 20
+            trend_filter = adx_aligned[i] > 20
             
-            # Long: RSI < 30 (oversold) + uptrend + volume filter
-            if rsi[i] < 30 and uptrend and volume_filter:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 AND Bear Power < 0 + filters
+            if bull_power[i] > 0 and bear_power[i] < 0 and volume_filter and trend_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: RSI > 70 (overbought) + downtrend + volume filter
-            elif rsi[i] > 70 and downtrend and volume_filter:
-                signals[i] = -0.20
+            # Short: Bull Power < 0 AND Bear Power > 0 + filters
+            elif bull_power[i] < 0 and bear_power[i] > 0 and volume_filter and trend_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
