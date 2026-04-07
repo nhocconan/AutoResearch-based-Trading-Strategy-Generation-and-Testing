@@ -3,75 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Weekly Pivot Range Breakout with Volume Confirmation
-# Hypothesis: Price breaking above weekly R4 or below S4 with volume surge continues in breakout direction.
-# Uses weekly pivot levels for structural support/resistance and volume to filter false breakouts.
-# Works in bull/bear markets by trading breakouts in direction of weekly trend.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Strategy: 6h RSI Pullback with 12h EMA Trend Filter
+# Hypothesis: RSI(14) pullbacks (RSI<30 in uptrend, RSI>70 in downtrend) aligned with 12h EMA(50) trend capture mean reversion within trends.
+# Uses 12h EMA for trend filter (works in bull/bear) and RSI for precise entries.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 
-name = "6h_weekly_pivot_range_breakout_volume_v1"
+name = "6h_rsi_pullback_12h_ema_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 5:
+    # Get 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week's data)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate EMA(50) on 12h close
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # Pivot point calculations
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
-    r4 = weekly_high + 3 * (pivot - weekly_low)
-    s4 = weekly_low - 3 * (weekly_high - pivot)
+    # Align 12h EMA to 6h
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Align weekly pivot levels to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
-    
-    # Volume moving average (20-period)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI(14) on 6h close
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(14, n):
         # Skip if required data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(rsi[i]):
+            signals[i] = 0.0
             continue
         
-        # Volume surge condition (current volume > 1.5x average)
-        volume_surge = volume[i] > 1.5 * volume_ma[i]
-        
-        # Breakout conditions
-        bullish_breakout = close[i] > r4_aligned[i] and volume_surge
-        bearish_breakout = close[i] < s4_aligned[i] and volume_surge
-        
-        if bullish_breakout:
-            signals[i] = 0.25
-        elif bearish_breakout:
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        if position == 1:  # Long position
+            # Exit: RSI reaches overbought or trend changes
+            if rsi[i] >= 70 or close[i] < ema_50_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25  # Maintain long
+        elif position == -1:  # Short position
+            # Exit: RSI reaches oversold or trend changes
+            if rsi[i] <= 30 or close[i] > ema_50_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25  # Maintain short
+        else:  # Flat, look for entry
+            # RSI pullback in direction of 12h trend
+            if close[i] > ema_50_aligned[i]:  # Uptrend
+                if rsi[i] <= 30:  # Pullback to buy (oversold)
+                    position = 1
+                    signals[i] = 0.25
+            else:  # Downtrend
+                if rsi[i] >= 70:  # Pullback to sell (overbought)
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
