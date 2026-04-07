@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation
+# Uses tighter volume threshold (2.0x) and ATR stoploss (1.5x) to reduce trade frequency
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
 # Designed to work in both bull and bear markets via trend filter and volatility-adjusted stops
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Uses price channel structure + trend + volume for high-conviction entries
 
-name = "12h_donchian20_daily_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,17 +23,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    # 12-hour data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(25) and EMA(50) for trend filter
-    close_daily = df_daily['close'].values
-    ema_25_daily = pd.Series(close_daily).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema_50_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_25_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_25_daily)
-    ema_50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
+    # Calculate 12h EMA(25) and EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -53,7 +53,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_25_daily_aligned[i]) or np.isnan(ema_50_daily_aligned[i]) or 
+        if (np.isnan(ema_25_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -62,8 +62,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 1.5 * ATR (tighter than previous version)
+            if close[i] < entry_price - 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -75,8 +75,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 1.5 * ATR (tighter than previous version)
+            if close[i] > entry_price + 1.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -92,11 +92,11 @@ def generate_signals(prices):
             highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
             lowest_low = low[i-20:i].min() if i >= 20 else low[:i].min()
             
-            # Trend filter: daily EMA(25) > EMA(50) for uptrend, < for downtrend
-            uptrend = ema_25_daily_aligned[i] > ema_50_daily_aligned[i]
-            downtrend = ema_25_daily_aligned[i] < ema_50_daily_aligned[i]
+            # Trend filter: 12h EMA(25) > EMA(50) for uptrend, < for downtrend
+            uptrend = ema_25_12h_aligned[i] > ema_50_12h_aligned[i]
+            downtrend = ema_25_12h_aligned[i] < ema_50_12h_aligned[i]
             
-            # Volume confirmation: current volume > 2.0 * average volume
+            # Volume confirmation: current volume > 2.0 * average volume (stricter than before)
             volume_confirm = volume[i] > 2.0 * vol_avg[i]
             
             # Long: price breaks above Donchian upper(20) in uptrend with volume
