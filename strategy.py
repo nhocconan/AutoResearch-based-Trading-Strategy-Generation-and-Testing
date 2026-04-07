@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: Daily KAMA Trend with Weekly RSI Filter
-# Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both bull and bear markets.
-# Weekly RSI filter ensures we only trade when momentum is aligned with higher timeframe.
-# Long when KAMA upward and weekly RSI > 50; short when KAMA downward and weekly RSI < 50.
-# Volatility filter (ATR) prevents whipsaws in ranging markets.
-# Target: 15-25 trades/year (60-100 over 4 years).
+# Strategy: 12h Donchian Channel Breakout with Volume and ADX Filter
+# Hypothesis: Price breaking out of 20-period Donchian channel with volume confirmation and
+# trending conditions (ADX > 25) captures institutional moves. Works in bull/bear by
+# going long on upper breakouts and short on lower breakouts. Uses 1-day trend filter
+# to avoid counter-trend trades. Target: 15-25 trades/year (60-100 over 4 years).
 
-name = "daily_kama_trend_weekly_rsi_v1"
-timeframe = "1d"
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,106 +22,107 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for RSI filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 14:
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    weekly_close = df_weekly['close'].values
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 50-period EMA on daily close for trend filter
+    daily_close = df_daily['close'].values
+    daily_close_series = pd.Series(daily_close)
+    daily_ema50 = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align daily EMA to 12h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_daily, daily_ema50)
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate 20-period Donchian channels on 12h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    weekly_rsi = np.where(avg_loss == 0, 100, 0)
-    weekly_rsi = np.where((avg_gain != 0) & (avg_loss != 0), 100 - (100 / (1 + rs)), weekly_rsi)
+    # Calculate ADX (14) for trend strength
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr1 = high - low
+    tr2 = np.abs(high - prev_close)
+    tr3 = np.abs(low - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align weekly RSI to daily
-    weekly_rsi_aligned = align_htf_to_ltf(prices, df_weekly, weekly_rsi)
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    dm_plus = np.where((high - prev_high) > (prev_low - low), np.maximum(high - prev_high, 0), 0)
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    dm_minus = np.where((prev_low - low) > (high - prev_high), np.maximum(prev_low - low, 0), 0)
     
-    # Calculate KAMA(10, 2, 30) on daily
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # needs correction
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/14)
+    def Wilder_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Proper ER calculation
-    er = np.zeros(n)
-    for i in range(10, n):
-        if i >= 10:
-            price_change = np.abs(close[i] - close[i-10])
-            sum_abs_change = 0
-            for j in range(1, 11):
-                sum_abs_change += np.abs(close[i-j+1] - close[i-j])
-            if sum_abs_change > 0:
-                er[i] = price_change / sum_abs_change
+    atr = Wilder_smoothing(tr, 14)
+    dm_plus_smooth = Wilder_smoothing(dm_plus, 14)
+    dm_minus_smooth = Wilder_smoothing(dm_minus, 14)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
     
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = Wilder_smoothing(dx, 14)
     
-    # ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Volatility filter: ATR > 50-day average ATR
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr > (0.5 * atr_ma)  # Only trade when volatility is above half its MA
+    # Volume filter: volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(weekly_rsi_aligned[i]) or 
-            np.isnan(atr_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: KAMA turns down or volatility drops
-            if kama[i] < kama[i-1] or not vol_filter[i]:
+            # Exit: price touches lower Donchian or trend turns bearish
+            if close[i] <= donchian_low[i] or ema50_aligned[i] > close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: KAMA turns up or volatility drops
-            if kama[i] > kama[i-1] or not vol_filter[i]:
+            # Exit: price touches upper Donchian or trend turns bullish
+            if close[i] >= donchian_high[i] or ema50_aligned[i] < close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: KAMA upward and weekly RSI > 50
-            if kama[i] > kama[i-1] and weekly_rsi_aligned[i] > 50 and vol_filter[i]:
+            # Long: price breaks above upper Donchian with volume, ADX > 25, and price above daily EMA50
+            if (high[i] > donchian_high[i] and close[i] > donchian_high[i] and 
+                vol_filter[i] and adx[i] > 25 and close[i] > ema50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: KAMA downward and weekly RSI < 50
-            elif kama[i] < kama[i-1] and weekly_rsi_aligned[i] < 50 and vol_filter[i]:
+            # Short: price breaks below lower Donchian with volume, ADX > 25, and price below daily EMA50
+            elif (low[i] < donchian_low[i] and close[i] < donchian_low[i] and 
+                  vol_filter[i] and adx[i] > 25 and close[i] < ema50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
