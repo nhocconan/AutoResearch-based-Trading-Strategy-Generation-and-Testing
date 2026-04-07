@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v3
+12h_camarilla_pivot_1d_volume_v1
 Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
 Long when price breaks above R4 with volume confirmation (bullish continuation).
 Short when price breaks below S4 with volume confirmation (bearish continuation).
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v3"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -57,7 +57,7 @@ def generate_signals(prices):
     s3 = prev_close - range_1d * 1.1 / 4
     s4 = prev_close - range_1d * 1.1 / 2
     
-    # Align to 4h timeframe (previous day's levels are valid for current day)
+    # Align to 12h timeframe (previous day's levels are valid for current day)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -68,7 +68,7 @@ def generate_signals(prices):
     
     # Cooldown counter to prevent overtrading
     cooldown = 0
-    cooldown_period = 8  # 8 bars = 32 hours minimum between trades
+    cooldown_period = 4  # 4 bars = 48 hours minimum between trades
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
