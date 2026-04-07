@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_ema_volume_v1
-Hypothesis: Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4 with volume confirmation and daily EMA20 trend filter.
-In ranging markets, price tends to revert from R3/S3. In trending markets, breaks of R4/S4 with volume indicate continuation.
-Works in both bull and bear by adapting to market structure via volume and trend filters.
-Target: 12-37 trades/year on 6h with strict entry conditions.
+12h_camarilla_pivot_1d_ema_volume_v3
+Hypothesis: Camarilla pivot levels from 1d: fade at R3/S3 in ranging markets, breakout continuation at R4/S4 with volume and EMA20 trend confirmation. Uses 12h primary timeframe to reduce trade frequency and avoid fee drag. Designed to work in both bull and bear markets by adapting to market structure via volume and trend filters.
+Target: 12-37 trades/year on 12h with strict entry conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_ema_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,7 +45,7 @@ def generate_signals(prices):
     r4 = pivot + (range_hl * 1.1)
     s4 = pivot - (range_hl * 1.1)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -85,7 +83,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price reaches R3 (mean reversion) or trend turns bullish with volume
@@ -93,26 +91,26 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Fade at R3/S3: sell at R3, buy at S3 in ranging markets
             # But only if volume confirms and trend is not strong
             if close[i] >= r3_aligned[i] and vol_spike and not above_ema20:
                 # Potential short at R3 rejection
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             elif close[i] <= s3_aligned[i] and vol_spike and not below_ema20:
                 # Potential long at S3 bounce
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Breakout continuation at R4/S4 with volume and trend
             elif close[i] > r4_aligned[i] and vol_spike and above_ema20:
                 # Bullish breakout with volume and trend
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif close[i] < s4_aligned[i] and vol_spike and below_ema20:
                 # Bearish breakout with volume and trend
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
