@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Bollinger Band Width + 1d Trend + Volume Confirmation
-# Hypothesis: Bollinger Band Width (BBW) identifies low volatility regimes (squeeze) on 6h timeframe.
-# In squeeze conditions (BBW < 20th percentile), we mean-revert at Bollinger Band edges.
-# In expansion conditions (BBW > 80th percentile), we trend-follow with 1d EMA filter.
+# Strategy: 6h Williams %R + 1d Trend + Volume Confirmation
+# Hypothesis: Williams %R identifies overbought/oversold conditions on 6h timeframe.
+# In ranging markets (Williams %R between -20 and -80), we mean-revert at extremes.
+# In trending markets (confirmed by 1d EMA), we follow breakouts when Williams %R exits extremes.
 # Volume confirms institutional participation. This adapts to both ranging and trending markets.
 # 6h timeframe balances responsiveness and noise reduction. Target: 12-37 trades/year (50-150 over 4 years).
-name = "6b_bollinger_width_1d_trend_volume_v1"
+name = "6h_williams_r_1d_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -29,20 +29,12 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Bollinger Bands on 6h timeframe (20, 2.0)
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean()
-    dev = close_s.rolling(window=20, min_periods=20).std()
-    upper_band = basis + (dev * 2.0)
-    lower_band = basis - (dev * 2.0)
-    
-    # Bollinger Band Width
-    bb_width = (upper_band - lower_band) / basis
-    # Percentile rank of BBW over 50 periods (adaptive regime detection)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Williams %R on 6h timeframe (14 periods)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # 1-day EMA(50) for trend filter
     daily_close = df_1d['close'].values
@@ -58,21 +50,20 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(daily_ema_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(daily_ema_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches middle band (take profit) or breaks below lower band with volume
-            if close[i] >= basis[i] or (close[i] < lower_band[i] and vol_filter[i]):
+            # Exit: Williams %R returns above -50 (mean reversion) or breaks below -80 with volume (stop)
+            if williams_r[i] > -50 or (williams_r[i] < -80 and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price reaches middle band (take profit) or breaks above upper band with volume
-            if close[i] <= basis[i] or (close[i] > upper_band[i] and vol_filter[i]):
+            # Exit: Williams %R returns below -50 (mean reversion) or breaks above -20 with volume (stop)
+            if williams_r[i] < -50 or (williams_r[i] > -20 and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,24 +71,24 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Require volume confirmation
             if vol_filter[i]:
-                # Squeeze regime (low volatility): mean reversion at bands
-                if bb_width_percentile[i] < 30:  # Low BBW = squeeze
-                    # Long: price touches/bounces off lower band
-                    if close[i] <= lower_band[i] * 1.001 and close[i] > lower_band[i] * 0.999:
+                # Ranging market: Williams %R between -80 and -20, mean revert at extremes
+                if -80 <= williams_r[i] <= -20:
+                    # Long: Williams %R crosses above -80 from below (oversold bounce)
+                    if williams_r[i] > -80 and williams_r[i-1] <= -80:
                         position = 1
                         signals[i] = 0.25
-                    # Short: price touches/bounces off upper band
-                    elif close[i] >= upper_band[i] * 0.999 and close[i] <= upper_band[i] * 1.001:
+                    # Short: Williams %R crosses below -20 from above (overbought rejection)
+                    elif williams_r[i] < -20 and williams_r[i-1] >= -20:
                         position = -1
                         signals[i] = -0.25
-                # Expansion regime (high volatility): trend following
-                elif bb_width_percentile[i] > 70:  # High BBW = expansion
-                    # Long: price above upper band with trend confirmation
-                    if close[i] > upper_band[i] and close[i] > daily_ema_6h[i]:
+                # Trending market: Williams %R outside normal range, follow momentum with trend filter
+                else:
+                    # Strong oversold (< -80) with uptrend: potential breakout long
+                    if williams_r[i] < -80 and close[i] > daily_ema_6h[i]:
                         position = 1
                         signals[i] = 0.25
-                    # Short: price below lower band with trend confirmation
-                    elif close[i] < lower_band[i] and close[i] < daily_ema_6h[i]:
+                    # Strong overbought (> -20) with downtrend: potential breakdown short
+                    elif williams_r[i] > -20 and close[i] < daily_ema_6h[i]:
                         position = -1
                         signals[i] = -0.25
     
