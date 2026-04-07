@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_ema_volume_v1
-Hypothesis: On 6h timeframe, use daily Camarilla pivot levels for mean-reversion entries and breakout confirmations, with daily EMA for trend filter and volume confirmation. Fade at R3/S3 levels in ranging markets, breakout continuation at R4/S4 in trending markets. Works in bull/bear via trend filter and adaptive logic.
+1d_cci_breakout_weekly_trend_volume_v1
+Hypothesis: On daily timeframe, use weekly CCI for trend strength and direction, with weekly EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic. Adjusted to reduce trade frequency by using weekly trend filter and daily entries, targeting 15-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "6h"
+name = "1d_cci_breakout_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,42 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for CCI and EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate CCI on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot point
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    # Range
-    range_1d = high_1d - low_1d
+    # Typical price
+    tp_1w = (high_1w + low_1w + close_1w) / 3
+    # SMA of typical price
+    sma_tp = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
+    # Mean deviation
+    md = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # CCI calculation
+    cci_1w = (tp_1w - sma_tp) / (0.015 * md)
     
-    # Camarilla levels
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    r2_1d = close_1d + range_1d * 1.1 / 6
-    r1_1d = close_1d + range_1d * 1.1 / 12
-    s1_1d = close_1d - range_1d * 1.1 / 12
-    s2_1d = close_1d - range_1d * 1.1 / 6
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    s4_1d = close_1d - range_1d * 1.1 / 2
+    # Weekly EMA for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
     
-    # Daily EMA for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # Align indicators to daily timeframe
+    cci_1w_1d = align_htf_to_ltf(prices, df_1w, cci_1w)
+    ema_1w_1d = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Align indicators to 6h timeframe
-    r4_1d_6h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_6h = align_htf_to_ltf(prices, df_1d, s4_1d)
-    ema_1d_6h = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume confirmation (20-period average on 6h)
+    # Volume confirmation (20-period average on daily)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -66,9 +57,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_1d_6h[i]) or np.isnan(s3_1d_6h[i]) or
-            np.isnan(r4_1d_6h[i]) or np.isnan(s4_1d_6h[i]) or
-            np.isnan(ema_1d_6h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(cci_1w_1d[i]) or np.isnan(ema_1w_1d[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -76,20 +66,20 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
         # Trend direction from EMA
-        uptrend = close[i] > ema_1d_6h[i]
-        downtrend = close[i] < ema_1d_6h[i]
+        uptrend = close[i] > ema_1w_1d[i]
+        downtrend = close[i] < ema_1w_1d[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price reaches R4 (take profit)
-            if close[i] >= r4_1d_6h[i]:
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_1w_1d[i]) < 10:
                 exit_long = True
-            # Exit if price crosses below S3 (stop/reversal)
-            elif close[i] <= s3_1d_6h[i]:
+            # Exit if CCI goes below -100 (strong reversal)
+            elif cci_1w_1d[i] < -100:
                 exit_long = True
-            # Exit if trend turns down and price below pivot
-            elif downtrend and close[i] < pivot_1d[i]:
+            # Exit if trend turns down
+            elif downtrend and cci_1w_1d[i] < 0:
                 exit_long = True
             
             if exit_long:
@@ -101,14 +91,14 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price reaches S4 (take profit)
-            if close[i] <= s4_1d_6h[i]:
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_1w_1d[i]) < 10:
                 exit_short = True
-            # Exit if price crosses above R3 (stop/reversal)
-            elif close[i] >= r3_1d_6h[i]:
+            # Exit if CCI goes above +100 (strong reversal)
+            elif cci_1w_1d[i] > 100:
                 exit_short = True
-            # Exit if trend turns up and price above pivot
-            elif uptrend and close[i] > pivot_1d[i]:
+            # Exit if trend turns up
+            elif uptrend and cci_1w_1d[i] > 0:
                 exit_short = True
             
             if exit_short:
@@ -117,43 +107,18 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Determine market regime: trending or ranging
-            # Using price position relative to R3/S3 as proxy
-            price_vs_r3 = close[i] > r3_1d_6h[i]
-            price_vs_s3 = close[i] < s3_1d_6h[i]
-            
             # Long entry conditions
             long_entry = False
-            if price_vs_s3 and not price_vs_r3:  # Between S3 and R3 (ranging)
-                # Fade at S3: long when price touches S3 with volume confirmation
-                if abs(close[i] - s3_1d_6h[i]) < (r3_1d_6h[i] - s3_1d_6h[i]) * 0.02:  # Within 2% of S3
-                    if vol_confirm:
-                        long_entry = True
-            elif not price_vs_s3:  # Below S3 (potential breakdown)
-                # Breakdown continuation: short when price breaks S4 with volume and trend
-                if close[i] <= s4_1d_6h[i] and downtrend and vol_confirm:
-                    # This would be a short entry, handled below
-                    pass
-            else:  # Above R3 (potential breakout)
-                # Breakout continuation: long when price breaks R4 with volume and trend
-                if close[i] >= r4_1d_6h[i] and uptrend and vol_confirm:
+            # CCI breaks above +100 with uptrend and volume confirmation
+            if cci_1w_1d[i] > 100 and cci_1w_1d[i-1] <= 100:
+                if uptrend and vol_confirm:
                     long_entry = True
             
             # Short entry conditions
             short_entry = False
-            if price_vs_r3 and not price_vs_s3:  # Between S3 and R3 (ranging)
-                # Fade at R3: short when price touches R3 with volume confirmation
-                if abs(close[i] - r3_1d_6h[i]) < (r3_1d_6h[i] - s3_1d_6h[i]) * 0.02:  # Within 2% of R3
-                    if vol_confirm:
-                        short_entry = True
-            elif price_vs_r3:  # Above R3 (potential breakout)
-                # Breakout continuation: short when price breaks R4 with volume and trend
-                if close[i] >= r4_1d_6h[i] and uptrend and vol_confirm:
-                    # This would be a long entry, handled above
-                    pass
-            else:  # Below S3 (potential breakdown)
-                # Breakdown continuation: short when price breaks S4 with volume and trend
-                if close[i] <= s4_1d_6h[i] and downtrend and vol_confirm:
+            # CCI breaks below -100 with downtrend and volume confirmation
+            if cci_1w_1d[i] < -100 and cci_1w_1d[i-1] >= -100:
+                if downtrend and vol_confirm:
                     short_entry = True
             
             if long_entry:
