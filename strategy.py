@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12h timeframe, enter long when price breaks above the 1d Camarilla R3 level with above-average volume, short when price breaks below S3 level with above-average volume. Use the 1d ATR percentile to filter for low volatility regimes where breakouts are more likely to succeed. Exit when price returns to the 1d Camarilla Pivot level. Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity with fee minimization. Works in both bull and bear markets by fading false breakouts in high volatility and capturing true breakouts in low volatility.
+4h_cci_trend_reversal_v1
+Hypothesis: On 4h timeframe, enter long when CCI crosses above -100 (bullish momentum) with above-average volume and price above 50-period EMA, enter short when CCI crosses below +100 (bearish momentum) with above-average volume and price below 50-period EMA. Exit when CCI crosses zero (momentum exhaustion). Uses 1d CCI trend filter to avoid counter-trend trades. Designed for 20-50 trades/year to minimize fee drag while capturing momentum reversals in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "4h_cci_trend_reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,92 +23,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
+    # Calculate 4h CCI (20-period)
+    if len(close) < 20:
+        return np.zeros(n)
+    
+    # Typical Price
+    tp = (high + low + close) / 3.0
+    
+    # Moving Average of TP
+    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    
+    # Mean Deviation
+    md = pd.Series(tp).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    
+    # CCI
+    cci = (tp - ma_tp) / (0.015 * md)
+    
+    # Calculate 50-period EMA for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Volume moving average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d CCI for trend filter (avoid counter-trend trades)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # 1d Typical Price
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    # Camarilla levels: H5 = close + 1.1*range/2, H4 = close + 1.1*range/4, H3 = close + 1.1*range/6
-    # L3 = close - 1.1*range/6, L4 = close - 1.1*range/4, L5 = close - 1.1*range/2
-    r3 = close_1d + 1.1 * range_1d / 6.0
-    s3 = close_1d - 1.1 * range_1d / 6.0
-    pivot_level = pivot
+    # 1d MA of TP
+    ma_tp_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_level)
-    
-    # Calculate 1d ATR for volatility regime filter
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
-    
-    # ATR(14)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # ATR percentile rank (252-day lookback for 1-year)
-    atr_percentile = pd.Series(atr_1d).rolling(window=252, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    # 1d Mean Deviation
+    md_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
     ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # Volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d CCI
+    cci_1d = (tp_1d - ma_tp_1d) / (0.015 * md_1d)
+    
+    # Align indicators to 4h timeframe
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(cci[i]) or np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
-        
-        # Low volatility regime: ATR percentile below 50th percentile
-        low_vol = atr_percentile_aligned[i] < 0.5
         
         # Volume confirmation: above average volume
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot level or volatility increases significantly
-            if close[i] <= pivot_aligned[i] or atr_percentile_aligned[i] > 0.8:
+            # Exit: CCI crosses below zero (momentum exhaustion)
+            if cci[i] < 0 and cci[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to pivot level or volatility increases significantly
-            if close[i] >= pivot_aligned[i] or atr_percentile_aligned[i] > 0.8:
+            # Exit: CCI crosses above zero (momentum exhaustion)
+            if cci[i] > 0 and cci[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if low_vol and vol_ok:
-                # Breakout above R3 with volume - go long
-                if close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1]:
+            if vol_ok:
+                # Long: CCI crosses above -100 with price above EMA50 and 1d CCI bullish
+                if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema_50[i] and cci_1d_aligned[i] > 0:
                     position = 1
                     signals[i] = 0.25
-                # Breakout below S3 with volume - go short
-                elif close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1]:
+                # Short: CCI crosses below +100 with price below EMA50 and 1d CCI bearish
+                elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema_50[i] and cci_1d_aligned[i] < 0:
                     position = -1
                     signals[i] = -0.25
     
