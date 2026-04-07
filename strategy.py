@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily price action filtered by weekly trend and volume confirmation
-# Long when price closes above daily 20-period high with volume > 1.5x average and weekly trend up
-# Short when price closes below daily 20-period low with volume > 1.5x average and weekly trend down
-# Exit on opposite 5-day close crossover
-# Stoploss at 2.5 * ATR(20)
+# Hypothesis: 6-hour Williams %R with 1-day EMA50 trend filter and 1-day volume confirmation
+# Long when Williams %R < -80 (oversold) + price > 1-day EMA50 + volume > 1.5x 20-period average
+# Short when Williams %R > -20 (overbought) + price < 1-day EMA50 + volume > 1.5x 20-period average
+# Exit when Williams %R crosses above -50 (long) or below -50 (short)
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses daily price/volume and weekly trend filter
-# Target: 50-100 total trades over 4 years (12-25/year) to minimize fee drag
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "1d_price_action_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_williamsr_1d_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,47 +26,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for price action and volume
+    # 1-day data for EMA50 and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate 1-day EMA50
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily 20-period high/low for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1-day volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Daily 20-period volume average for confirmation
-    volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low + 1e-10))
     
-    # Weekly trend: compare current close to close 5 periods ago
-    close_1w = df_1w['close'].values
-    weekly_trend = np.where(close_1w >= np.roll(close_1w, 5), 1, -1)
-    weekly_trend[0:5] = 0  # Not enough data
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # ATR(20) for volatility and stoploss
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(14, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(volume_20[i]) or np.isnan(weekly_trend_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -75,43 +71,42 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: close below 5-day low
-            elif close[i] < low_20[i]:
+            # Exit: Williams %R crosses above -50
+            elif williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: close above 5-day high
-            elif close[i] > high_20[i]:
+            # Exit: Williams %R crosses below -50
+            elif williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price breakout with volume confirmation and weekly trend
             # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_20[i]
+            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
             
-            # Long: price breaks above daily 20-period high + volume + weekly uptrend
-            if close[i] > high_20[i] and volume_filter and weekly_trend_aligned[i] == 1:
+            # Long: Williams %R < -80 (oversold) + price > EMA50 + volume filter
+            if williams_r[i] < -80 and close[i] > ema50_1d_aligned[i] and volume_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below daily 20-period low + volume + weekly downtrend
-            elif close[i] < low_20[i] and volume_filter and weekly_trend_aligned[i] == -1:
+            # Short: Williams %R > -20 (overbought) + price < EMA50 + volume filter
+            elif williams_r[i] > -20 and close[i] < ema50_1d_aligned[i] and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
