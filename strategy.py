@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50/200 trend filter and volume confirmation
-# Long when price breaks above Donchian upper(20), 1d EMA(50) > EMA(200), and volume > 1.8x average volume
-# Short when price breaks below Donchian lower(20), 1d EMA(50) < EMA(200), and volume > 1.8x average volume
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Donchian upper(20) and 1d EMA(50) > EMA(200) (uptrend)
+# Short when price breaks below Donchian lower(20) and 1d EMA(50) < EMA(200) (downtrend)
 # Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
-# Position size: 0.25 (25% of capital)
+# Volume confirmation: current volume > 1.8 * average volume of last 20 periods
+# Position size: 0.28 (28% of capital)
 # Target: 80-180 total trades over 4 years (20-45/year)
 # Uses daily trend to filter for stronger trends that work in both bull and bear markets
 
-name = "4h_donchian20_1d_trend_vol_v3"
+name = "4h_donchian20_1d_trend_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -59,7 +60,7 @@ def generate_signals(prices):
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_avg[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.28
             else:
                 signals[i] = 0.0
             continue
@@ -76,7 +77,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:  # short position
             # Stoploss: 2.5 * ATR
             if close[i] > entry_price + 2.5 * atr[i]:
@@ -89,7 +90,7 @@ def generate_signals(prices):
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:
             # Calculate Donchian channels (20-period)
             highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
@@ -104,12 +105,12 @@ def generate_signals(prices):
             
             # Long: price breaks above Donchian upper(20) in uptrend with volume
             if close[i] > highest_high and uptrend and volume_confirm:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian lower(20) in downtrend with volume
             elif close[i] < lowest_low and downtrend and volume_confirm:
-                signals[i] = -0.25
+                signals[i] = -0.28
                 position = -1
                 entry_price = close[i]
     
