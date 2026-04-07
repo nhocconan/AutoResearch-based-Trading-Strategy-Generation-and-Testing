@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d EMA50 Trend Filter and Volume Spike
-Hypothesis: Breakouts above/below Donchian channels capture momentum. 
-Using 1d EMA50 as trend filter provides stronger trend identification.
-Volume spikes confirm institutional participation.
-This should work in both bull and bear regimes by following the trend.
-Target: 19-50 trades/year per signal to minimize fee drag.
+1d Weekly Donchian Breakout with Monthly Trend Filter and Volume Spike
+Hypothesis: Weekly Donchian breakouts capture long-term trends. Using monthly EMA20 as trend filter ensures we only trade in the direction of the higher timeframe trend. Volume spikes confirm institutional participation. This strategy targets 10-25 trades per year to minimize fee drag and works in both bull and bear markets by following the trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_monthly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -27,54 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly Donchian Channel (20-period)
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_high_roll = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    weekly_low_roll = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high_roll)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low_roll)
     
-    # Volume Spike Detector
+    # Monthly EMA20 Trend Filter
+    df_monthly = get_htf_data(prices, '1M')
+    monthly_close = df_monthly['close'].values
+    monthly_ema20 = pd.Series(monthly_close).ewm(span=20, adjust=False).mean().values
+    monthly_ema20_aligned = align_htf_to_ltf(prices, df_monthly, monthly_ema20)
+    
+    # Volume Spike Detector (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
-    
-    # 1d EMA50 Trend Filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(ema_50_aligned[i]):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(monthly_ema20_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below 1d EMA50
-            if close[i] < ema_50_aligned[i]:
+            # Exit: price crosses below weekly Donchian low
+            if close[i] < weekly_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above 1d EMA50
-            if close[i] > ema_50_aligned[i]:
+            # Exit: price crosses above weekly Donchian high
+            if close[i] > weekly_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: breakout above Donchian high + price above 1d EMA50 + volume spike
-            if (close[i] > high_roll[i-1] and 
-                close[i] > ema_50_aligned[i] and 
+            # Long: breakout above weekly Donchian high + price above monthly EMA20 + volume spike
+            if (close[i] > weekly_high_aligned[i] and 
+                close[i] > monthly_ema20_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.30
-            # Short: breakout below Donchian low + price below 1d EMA50 + volume spike
-            elif (close[i] < low_roll[i-1] and 
-                  close[i] < ema_50_aligned[i] and 
+                signals[i] = 0.25
+            # Short: breakout below weekly Donchian low + price below monthly EMA20 + volume spike
+            elif (close[i] < weekly_low_aligned[i] and 
+                  close[i] < monthly_ema20_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
