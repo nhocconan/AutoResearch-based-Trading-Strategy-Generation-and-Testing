@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 12-hour EMA60 trend filter and volume confirmation
-# Long when price breaks above 6h Donchian upper band, 12h close > 12h EMA60 (uptrend), and volume > 1.5x 6h average volume
-# Short when price breaks below 6h Donchian lower band, 12h close < 12h EMA60 (downtrend), and volume > 1.5x 6h average volume
+# Hypothesis: 6h Donchian(20) breakout with 12h EMA60 trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band, 12h close > 12h EMA60 (uptrend), and volume > 2.0x 6h average volume
+# Short when price breaks below 6h Donchian lower band, 12h close < 12h EMA60 (downtrend), and volume > 2.0x 6h average volume
 # Exit when trend reverses (12h close crosses EMA60) or opposite breakout occurs
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
@@ -114,14 +114,14 @@ def generate_signals(prices):
             # Long: price breaks above upper band, price above EMA60 (uptrend), volume spike
             if (close[i] > upper_aligned[i] and
                 close[i] > ema_12h_aligned[i] and
-                volume[i] > 1.5 * volume_ma_6h_aligned[i]):
+                volume[i] > 2.0 * volume_ma_6h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below lower band, price below EMA60 (downtrend), volume spike
             elif (close[i] < lower_aligned[i] and
                   close[i] < ema_12h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_6h_aligned[i]):
+                  volume[i] > 2.0 * volume_ma_6h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
