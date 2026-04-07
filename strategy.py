@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v3
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from daily timeframe with volume confirmation. 
-Enter long when price breaks above R4 with volume > 1.5x average, short when price breaks below S4 with volume > 1.5x average. 
-Exit when price touches opposite pivot level (S4 for long, R4 for short). 
-Designed for low frequency (12-37 trades/year) to minimize fee drift while capturing strong breakouts.
+4h_donchian_20_12h_trend_volume_v1
+Hypothesis: On 4-hour timeframe, use 20-period Donchian channel breakout with 12-hour trend filter and volume confirmation. 
+Enter long when price breaks above upper band with 12h trend up and volume > 1.5x average, short when price breaks below lower band with 12h trend down and volume > 1.5x average.
+Exit when price touches opposite band or trend reverses. Designed for low frequency (20-50 trades/year) to minimize fee drag while capturing strong breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v3"
-timezone = "12h"
+name = "4h_donchian_20_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,36 +25,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate 12h EMA20 for trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    pivot = (d_high + d_low + d_close) / 3
-    range_val = d_high - d_low
+    # Calculate 20-period Donchian bands
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
-    r4 = d_close + range_val * 1.1 / 2
-    s4 = d_close - range_val * 1.1 / 2
-    
-    # Align to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate 20-period average volume for confirmation (lower period for 12h)
+    # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume average warmup
-        # Skip if daily data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+    for i in range(20, n):
+        # Skip if 12h trend data not available
+        if np.isnan(ema_12h_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if Donchian bands not available
+        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
             signals[i] = 0.0
             continue
         
@@ -63,31 +60,31 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below S4
-            if close[i] <= s4_aligned[i]:
+            # Exit when price touches lower band or 12h trend turns down
+            if close[i] <= lowest_20[i] or ema_12h_aligned[i] < close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above R4
-            if close[i] >= r4_aligned[i]:
+            # Exit when price touches upper band or 12h trend turns up
+            if close[i] >= highest_20[i] or ema_12h_aligned[i] > close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 with volume confirmation
-            long_entry = (close[i] > r4_aligned[i]) and vol_confirm
-            # Short entry: price breaks below S4 with volume confirmation
-            short_entry = (close[i] < s4_aligned[i]) and vol_confirm
+            # Long entry: price breaks above upper band with 12h trend up and volume confirmation
+            long_entry = (close[i] > highest_20[i]) and (ema_12h_aligned[i] > close[i]) and vol_confirm
+            # Short entry: price breaks below lower band with 12h trend down and volume confirmation
+            short_entry = (close[i] < lowest_20[i]) and (ema_12h_aligned[i] < close[i]) and vol_confirm
             
             if long_entry:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
