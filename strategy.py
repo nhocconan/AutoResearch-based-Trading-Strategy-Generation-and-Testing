@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla Pivot Reversal + Volume Spike
-# Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance on 6h timeframe.
-# Price rejection at these levels with volume confirmation provides high-probability reversal entries.
-# Works in both bull and bear markets by fading extremes and catching mean reversion.
-# Target: 20-30 trades/year to minimize fee drag on 6h timeframe.
-name = "6h_camarilla_pivot_reversal_v1"
-timeframe = "6h"
+# Strategy: 12h Donchian breakout + weekly trend + volume confirmation
+# Hypothesis: Donchian(20) breakouts on 12h capture strong directional moves.
+# Weekly EMA(21) filter ensures we only trade with the long-term trend.
+# Volume confirmation (volume > 1.5x average) filters false breakouts.
+# Works in both bull and bear markets by following the weekly trend direction.
+# Target: 15-25 trades/year to minimize fee drag on 12h timeframe.
+name = "12h_donchian20_weekly_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,49 +24,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily high/low/close for Camarilla calculation (using 1d timeframe)
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get daily trend filter (1d)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Align to 6h timeframe
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
-    
-    # Camarilla levels
-    R3 = daily_close_aligned + 1.1 * (daily_high_aligned - daily_low_aligned) / 6
-    S3 = daily_close_aligned - 1.1 * (daily_high_aligned - daily_low_aligned) / 6
-    R4 = daily_close_aligned + 1.1 * (daily_high_aligned - daily_low_aligned) / 2
-    S4 = daily_close_aligned - 1.1 * (daily_high_aligned - daily_low_aligned) / 2
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Daily EMA(21) for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=21, adjust=False).mean().values
+    daily_ema_12h = align_htf_to_ltf(prices, df_1d, daily_ema)
     
     signals = np.zeros(n)
+    position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(R4[i]) or np.isnan(S4[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(daily_ema_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Long setup: price rejects S3/S4 with volume spike
-        if (low[i] <= S3[i] and close[i] > S3[i]) or (low[i] <= S4[i] and close[i] > S4[i]):
-            if vol_spike[i]:
-                signals[i] = 0.25  # Long 25%
-        
-        # Short setup: price rejects R3/R4 with volume spike
-        elif (high[i] >= R3[i] and close[i] < R3[i]) or (high[i] >= R4[i] and close[i] < R4[i]):
-            if vol_spike[i]:
-                signals[i] = -0.25  # Short 25%
+        if position == 1:  # Long position
+            # Exit: price crosses below Donchian lower band or daily trend turns bearish
+            if close[i] < lowest_low[i] or close[i] < daily_ema_12h[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25  # Maintain long position
+        elif position == -1:  # Short position
+            # Exit: price crosses above Donchian upper band or daily trend turns bullish
+            if close[i] > highest_high[i] or close[i] > daily_ema_12h[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25  # Maintain short position
+        else:  # Flat, look for entry
+            # Volume confirmation: volume > 1.5x average
+            vol_confirm = volume[i] > 1.5 * vol_avg[i]
+            
+            # Enter long: price breaks above Donchian upper band + volume + bullish daily trend
+            if (close[i] > highest_high[i]) and vol_confirm and (close[i] > daily_ema_12h[i]):
+                position = 1
+                signals[i] = 0.25
+            # Enter short: price breaks below Donchian lower band + volume + bearish daily trend
+            elif (close[i] < lowest_low[i]) and vol_confirm and (close[i] < daily_ema_12h[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
