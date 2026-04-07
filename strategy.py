@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-1d_donchian_breakout_1w_trend_volume_v1
-Hypothesis: On daily timeframe, trade Donchian(20) breakouts with 1-week EMA trend filter and volume confirmation.
-Breakouts above upper band (long) or below lower band (short) only when aligned with weekly trend and confirmed by volume.
-In uptrend (price > weekly EMA50): long breakouts, short breakdowns.
-In downtrend (price < weekly EMA50): short breakdowns, long breakouts (counter-trend fade).
-Volume ensures genuine breakouts. Target: 20-50 total trades over 4 years (5-12/year).
+12h_donchian_breakout_1w_trend_volume_v1
+Hypothesis: On 12h timeframe, use weekly Donchian channel breakouts for entry signals, filtered by weekly trend and volume confirmation.
+- In uptrend (price > weekly EMA50): long when price breaks above upper Donchian(20) channel
+- In downtrend (price < weekly EMA50): short when price breaks below lower Donchian(20) channel
+Volume confirms genuine breakouts. Uses weekly timeframe for signal generation to reduce trade frequency and avoid overtrading.
+Target: 12-37 trades/year (~50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,29 +27,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
+    # Weekly data for Donchian channels and trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
     # Weekly EMA50 for trend filter
-    ema_50_1w = df_1w['close'].ewm(span=50, adjust=False).mean()
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
+    ema_50 = df_1w['close'].ewm(span=50, adjust=False).mean()
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align weekly EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50.values)
     
-    # Volume confirmation (20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly Donchian channels (20-period)
+    high_20 = df_1w['high'].rolling(window=20, min_periods=20).max()
+    low_20 = df_1w['low'].rolling(window=20, min_periods=20).min()
+    
+    # Align Donchian channels to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, high_20.values)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, low_20.values)
+    
+    # Volume confirmation (24-period average on 12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(40, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -57,42 +63,31 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian band
-            if close[i] < low_20[i]:
+            # Exit: price breaks below lower Donchian channel or trend turns bearish
+            if close[i] < lower_20_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian band
-            if close[i] > high_20[i]:
+            # Exit: price breaks above upper Donchian channel or trend turns bullish
+            if close[i] > upper_20_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: breakout above upper band with volume in uptrend
-            if (close[i] > high_20[i] and
+            # Long entry: price breaks above upper Donchian channel with volume in uptrend
+            if (close[i] > upper_20_aligned[i] and
                 vol_confirm and 
-                close[i] > ema_50_1w_aligned[i]):  # uptrend filter
+                close[i] > ema_50_aligned[i]):  # uptrend filter
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakdown below lower band with volume in downtrend
-            elif (close[i] < low_20[i] and
+            # Short entry: price breaks below lower Donchian channel with volume in downtrend
+            elif (close[i] < lower_20_aligned[i] and
                   vol_confirm and 
-                  close[i] < ema_50_1w_aligned[i]):  # downtrend filter
+                  close[i] < ema_50_aligned[i]):  # downtrend filter
                 position = -1
                 signals[i] = -0.25
-            # Counter-trend fade in ranging markets: fade extreme touches
-            elif (vol_confirm and
-                  abs(close[i] - high_20[i]) < 0.001 * high_20[i] and  # touching upper band
-                  close[i] < ema_50_1w_aligned[i]):  # in downtrend, fade upper touch
-                position = -1
-                signals[i] = -0.20
-            elif (vol_confirm and
-                  abs(close[i] - low_20[i]) < 0.001 * low_20[i] and  # touching lower band
-                  close[i] > ema_50_1w_aligned[i]):  # in uptrend, fade lower touch
-                position = 1
-                signals[i] = 0.20
     
     return signals
