@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Choppiness Index regime filter with 1-week Donchian breakout
-# Long when weekly price breaks above Donchian(20) high + daily Choppiness Index > 61.8 (ranging market)
-# Short when weekly price breaks below Donchian(20) low + daily Choppiness Index > 61.8
-# Exit when price crosses 10-day SMA in opposite direction
-# Stoploss at 2.5 * ATR(14)
+# Hypothesis: 6-hour Donchian(20) breakout with 12-hour volume confirmation and 1-day ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.8x 12-period average + daily ADX > 25
+# Short when price breaks below 20-period Donchian low + volume > 1.8x 12-period average + daily ADX > 25
+# Exit when price crosses 6-period EMA in opposite direction
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses daily Choppiness Index to identify ranging markets where mean reversion works
-# Weekly Donchian breakouts provide directional bias in ranging conditions
-# Target: 50-120 total trades over 4 years (12-30/year) - suitable for 1d timeframe
+# Uses 12-hour volume for confirmation and 1-day ADX for trend strength
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "1d_chop_ranging_weekly_donchian_v1"
-timeframe = "1d"
+name = "6h_donchian20_12h_vol_1d_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1-day data for Choppiness Index
+    # 12-hour data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # 1-day data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-week data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 12-hour volume average (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_12h_s = pd.Series(volume_12h)
+    volume_ma = volume_12h_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
     
-    # Calculate 1-day Choppiness Index (14-period)
+    # Calculate 1-day ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -50,36 +56,33 @@ def generate_signals(prices):
     tr3[0] = tr1[0]
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # invert to positive
     
-    # Highest high and lowest low over 14 periods
-    hh_14d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Avoid division by zero
-    range_14d = hh_14d - ll_14d
-    range_14d = np.where(range_14d == 0, 1e-10, range_14d)
+    # Smoothed values
+    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Choppiness Index: 100 * log10(tr_sum / range_14d) / log10(14)
-    chop_ratio = tr_sum / range_14d
-    chop_ratio = np.where(chop_ratio <= 0, 1e-10, chop_ratio)
-    chop = 100 * np.log10(chop_ratio) / np.log10(14)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 1-week Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 20-period Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    highest_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
-    
-    # 10-day SMA for exit
-    sma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    # 6-period EMA for exit
+    ema_6 = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -96,9 +99,9 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(chop_aligned[i]) or np.isnan(highest_high_aligned[i]) or 
-            np.isnan(lowest_low_aligned[i]) or np.isnan(sma_10[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_6[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -106,44 +109,49 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 10-day SMA
-            elif close[i] < sma_10[i]:
+            # Exit: price crosses below 6-period EMA
+            elif close[i] < ema_6[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 10-day SMA
-            elif close[i] > sma_10[i]:
+            # Exit: price crosses above 6-period EMA
+            elif close[i] > ema_6[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout in ranging market (Choppiness > 61.8)
-            chop_filter = chop_aligned[i] > 61.8  # Ranging market condition
+            # Look for entries: Donchian breakout with volume confirmation and ADX filter
+            # Volume filter: volume > 1.8x 20-period average
+            volume_filter = volume[i] > 1.8 * volume_ma_aligned[i]
+            # Trend filter: daily ADX > 25
+            trend_filter = adx_aligned[i] > 25
             
-            # Long: price breaks above weekly Donchian high + ranging market
-            if close[i] > highest_high_aligned[i] and chop_filter:
+            # Long: price breaks above Donchian high + volume filter + trend filter
+            if close[i] > highest_high[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below weekly Donchian low + ranging market
-            elif close[i] < lowest_low_aligned[i] and chop_filter:
+            # Short: price breaks below Donchian low + volume filter + trend filter
+            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
     return signals
+
+</think>
