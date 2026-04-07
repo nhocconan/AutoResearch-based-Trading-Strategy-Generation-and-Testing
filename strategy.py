@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_rsi_volume_v1
-Hypothesis: On 6-hour timeframe, use Camarilla pivot levels from 1-day timeframe to identify key support/resistance. 
-Enter long at S3/S4 with RSI < 30 and volume confirmation; enter short at R3/R4 with RSI > 70 and volume confirmation.
-Exit on opposite RSI crossover (RSI > 50 for longs, RSI < 50 for shorts). 
-Camarilla levels provide institutional reference points, RSI filters avoid false breakouts, and volume confirms participation.
-Designed for 50-150 total trades over 4 years (~12-37/year) to minimize fee drag while performing in both bull and bear regimes.
+4h_parabolic_sar_12h_adx_volume_v1
+Hypothesis: Parabolic SAR on 4h captures trend direction with built-in acceleration, while 12h ADX > 25 filters for strong trends and volume confirmation ensures institutional participation. This combination works in both bull (trend following) and bear (short trends) markets. Target: 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_rsi_volume_v1"
-timeframe = "6h"
+name = "4h_parabolic_sar_12h_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,85 +23,160 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if df_1d is None or len(df_1d) < 2:
+    # Parabolic SAR on 4h
+    def calculate_psar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+        n = len(high)
+        psar = np.zeros(n)
+        trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
+        af = np.zeros(n)
+        ep = np.zeros(n)  # extreme point
+        
+        # Initialize
+        psar[0] = low[0]
+        trend[0] = 1
+        af[0] = af_start
+        ep[0] = high[0]
+        
+        for i in range(1, n):
+            if trend[i-1] == 1:  # uptrend
+                psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+                # Ensure PSAR doesn't exceed prior two lows
+                if i >= 2:
+                    psar[i] = min(psar[i], low[i-1], low[i-2])
+                
+                # Trend reversal
+                if low[i] < psar[i]:
+                    trend[i] = -1
+                    psar[i] = ep[i-1]  # SAR becomes prior EP
+                    af[i] = af_start
+                    ep[i] = high[i]
+                else:
+                    trend[i] = 1
+                    if high[i] > ep[i-1]:
+                        ep[i] = high[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+            else:  # downtrend
+                psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+                # Ensure PSAR doesn't fall below prior two highs
+                if i >= 2:
+                    psar[i] = max(psar[i], high[i-1], high[i-2])
+                
+                # Trend reversal
+                if high[i] > psar[i]:
+                    trend[i] = 1
+                    psar[i] = ep[i-1]  # SAR becomes prior EP
+                    af[i] = af_start
+                    ep[i] = low[i]
+                else:
+                    trend[i] = -1
+                    if low[i] < ep[i-1]:
+                        ep[i] = low[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+        
+        return psar, trend
+    
+    psar, psar_trend = calculate_psar(high, low)
+    
+    # 12h ADX for trend strength
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1-day bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.max([high_12h[0] - low_12h[0], 
+                                   np.abs(high_12h[0] - close_12h[0]),
+                                   np.abs(low_12h[0] - close_12h[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Camarilla levels: H4/L4 = close ± range * 1.1/2, H3/L3 = close ± range * 1.1/4, etc.
-    # We use H3, L3, H4, L4 for entries
-    h3 = close_1d + range_1d * 1.1 / 4
-    l3 = close_1d - range_1d * 1.1 / 4
-    h4 = close_1d + range_1d * 1.1 / 2
-    l4 = close_1d - range_1d * 1.1 / 2
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align Camarilla levels to 6h timeframe (shifted by 1 day for completed bars only)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Smoothed values
+    def smooth_series(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.sum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Calculate RSI on 6h timeframe
-    rsi_period = 14
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    atr_12h = smooth_series(tr, 14)
+    dm_plus_smooth = smooth_series(dm_plus, 14)
+    dm_minus_smooth = smooth_series(dm_minus, 14)
     
-    # Volume filter: 20-period average on 6h timeframe
+    # DI+ and DI-
+    di_plus = np.where(atr_12h > 0, 100 * dm_plus_smooth / atr_12h, 0)
+    di_minus = np.where(atr_12h > 0, 100 * dm_minus_smooth / atr_12h, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_12h = smooth_series(dx, 14)
+    
+    # Align 12h ADX to 4h
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Volume filter: 20-period average on 4h
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(rsi_period, 20), n):
+    for i in range(30, n):  # Warmup for indicators
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i])):
+        if (np.isnan(psar[i]) or np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
         # Volume confirmation: require volume above average
         vol_ok = volume[i] > vol_ma[i]
         
+        # ADX filter: trend strength > 25
+        strong_trend = adx_12h_aligned[i] > 25
+        
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 (overbought)
-            if rsi[i] > 50 and rsi[i-1] <= 50:
+            # Exit: PSAR flip to downtrend
+            if psar_trend[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (oversold)
-            if rsi[i] < 50 and rsi[i-1] >= 50:
+            # Exit: PSAR flip to uptrend
+            if psar_trend[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Long entry: price at or below S3/L3 with RSI oversold (<30)
-                if close[i] <= l3_aligned[i] and rsi[i] < 30:
+            if vol_ok and strong_trend:
+                # Long entry: PSAR uptrend
+                if psar_trend[i] == 1:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price at or above R3/H3 with RSI overbought (>70)
-                elif close[i] >= h3_aligned[i] and rsi[i] > 70:
+                # Short entry: PSAR downtrend
+                elif psar_trend[i] == -1:
                     position = -1
                     signals[i] = -0.25
     
