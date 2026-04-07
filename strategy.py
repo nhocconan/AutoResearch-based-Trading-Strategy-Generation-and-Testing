@@ -1,12 +1,17 @@
-# 1d 20-period Donchian Breakout with 1-week MA Trend Filter and Volume Confirmation
-# Hypothesis: Donchian breakouts capture volatility expansion moves.
-# Combined with 1-week MA200 trend filter to avoid counter-trend trades.
-# Volume confirmation ensures breakouts have institutional participation.
-# Works in both bull and bear markets by only taking trades aligned with higher timeframe trend.
-# Targets 10-20 trades/year with disciplined entries to avoid overtrading.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+# Strategy: 6h Elder Ray with 1d Trend Filter and Volume Confirmation
+# Hypothesis: Elder Ray (Bull Power/Bear Power) identifies trend strength.
+# Combined with 1d EMA50 trend filter to ensure trades align with higher timeframe trend.
+# Volume confirmation ensures moves have institutional participation.
+# Works in both bull and bear markets by only taking trades in direction of 1d trend.
+# Targets 15-30 trades/year with disciplined entries to avoid overtrading.
+
+name = "6h_elder_ray_1d_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,17 +25,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week MA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ma200_1w = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
-    ma200_1d = align_htf_to_ltf(prices, df_1w, ma200_1w)
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 20-period Donchian channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 13-period EMA for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # 20-period SMA for volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -38,43 +46,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup for Donchian and volume SMA
+    for i in range(20, n):  # Start after warmup for EMA and volume SMA
         # Skip if required data not available
-        if (np.isnan(ma200_1d[i]) or 
-            np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or 
+        if (np.isnan(ema50_6h[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
             np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below 1-week MA200 OR Donchian exit (close below 20-period low)
-            if close[i] < ma200_1d[i] or close[i] < low_min[i]:
+            # Exit: bear power becomes positive (selling pressure gone) OR trend turns down
+            if bear_power[i] > 0 or close[i] < ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above 1-week MA200 OR Donchian exit (close above 20-period high)
-            if close[i] > ma200_1d[i] or close[i] > high_max[i]:
+            # Exit: bull power becomes negative (buying pressure gone) OR trend turns up
+            if bull_power[i] < 0 or close[i] > ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above 20-period high + volume confirmation + uptrend
-            if (close[i] > high_max[i] and 
+            # Long: bull power positive (buying pressure) + volume confirmation + uptrend
+            if (bull_power[i] > 0 and 
                 vol_confirm and 
-                close[i] > ma200_1d[i]):
+                close[i] > ema50_6h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below 20-period low + volume confirmation + downtrend
-            elif (close[i] < low_min[i] and 
+            # Short: bear power negative (selling pressure) + volume confirmation + downtrend
+            elif (bear_power[i] < 0 and 
                   vol_confirm and 
-                  close[i] < ma200_1d[i]):
+                  close[i] < ema50_6h[i]):
                 position = -1
                 signals[i] = -0.25
     
