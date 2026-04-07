@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d trend filter and volume confirmation
-Long when price breaks above Donchian upper band AND 1d EMA20 > EMA50 AND volume > 1.5x avg volume
-Short when price breaks below Donchian lower band AND 1d EMA20 < EMA50 AND volume > 1.5x avg volume
-Exit when price breaks opposite Donchian band (exit on opposite breakout)
-Designed for trending markets with volume confirmation, works in both bull and bear markets
+12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Long when price breaks above Donchian(20) high in uptrend (EMA50 > EMA200)
+Short when price breaks below Donchian(20) low in downtrend (EMA50 < EMA200)
+Exit on opposite breakout or trend reversal
+Volume filter: current volume > 1.5x 20-period average
+Designed for trend capture with low trade frequency
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,55 +27,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20) ===
+    # === Donchian Channels (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === Volume average (20) ===
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === Volume Filter (20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === 1d EMA Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
-    ema_20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False).mean().values
     ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(avg_volume[i]) or np.isnan(ema_20_aligned[i]) or np.isnan(ema_50_aligned[i]):
+           np.isnan(vol_ma[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian band
-            if close[i] < lowest_low[i]:
+            # Exit: price breaks below Donchian low OR trend turns down
+            if low[i] < lowest_low[i] or ema_50_aligned[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian band
-            if close[i] > highest_high[i]:
+            # Exit: price breaks above Donchian high OR trend turns up
+            if high[i] > highest_high[i] or ema_50_aligned[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            vol_confirm = volume[i] > 1.5 * avg_volume[i]
-            
-            # Long: breakout above upper band + 1d EMA20 > EMA50 + volume confirmation
-            if close[i] > highest_high[i] and ema_20_aligned[i] > ema_50_aligned[i] and vol_confirm:
-                position = 1
-                signals[i] = 0.25
-            # Short: breakout below lower band + 1d EMA20 < EMA50 + volume confirmation
-            elif close[i] < lowest_low[i] and ema_20_aligned[i] < ema_50_aligned[i] and vol_confirm:
-                position = -1
-                signals[i] = -0.25
+            # Uptrend: EMA50 > EMA200
+            if ema_50_aligned[i] > ema_200_aligned[i] and vol_ok:
+                # Long breakout
+                if high[i] > highest_high[i]:
+                    position = 1
+                    signals[i] = 0.30
+            # Downtrend: EMA50 < EMA200
+            elif ema_50_aligned[i] < ema_200_aligned[i] and vol_ok:
+                # Short breakdown
+                if low[i] < lowest_low[i]:
+                    position = -1
+                    signals[i] = -0.30
     
     return signals
