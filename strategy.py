@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend and Volume Confirmation.
-Long when price breaks above weekly Donchian high with expanding volume.
-Short when price breaks below weekly Donchian low with expanding volume.
-Exit when price crosses back to weekly Donchian midpoint.
-Uses weekly Donchian channels for trend direction and daily breakouts for entry timing.
+6H Keltner Breakout with Volume Confirmation and 12h Trend Filter
+Long when price breaks above upper Keltner channel (2*ATR) with expanding volume AND 12h EMA trend up
+Short when price breaks below lower Keltner channel with expanding volume AND 12h EMA trend down
+Exit when price crosses back to middle line
+Uses ATR-based bands that adapt to volatility, reducing false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_keltner_breakout_volume_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,65 +26,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Donchian Channels (20-period) ===
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
-        return np.zeros(n)
+    # === ATR (14) for Keltner channels ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # === Keltner Channels (20-period EMA ± 2*ATR) ===
+    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = ema_mid + 2 * atr
+    keltner_lower = ema_mid - 2 * atr
     
-    # Calculate weekly Donchian channels
-    weekly_donch_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    weekly_donch_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
-    weekly_donch_mid = (weekly_donch_high + weekly_donch_low) / 2
-    
-    # Align to daily timeframe
-    weekly_donch_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_donch_high)
-    weekly_donch_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_donch_low)
-    weekly_donch_mid_aligned = align_htf_to_ltf(prices, df_weekly, weekly_donch_mid)
-    
-    # === Volume confirmation (daily) ===
+    # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    
+    # === 12h trend filter (EMA 21) ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(weekly_donch_high_aligned[i]) or np.isnan(weekly_donch_low_aligned[i]) or
-            np.isnan(weekly_donch_mid_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below weekly midpoint
-            if close[i] < weekly_donch_mid_aligned[i]:
+            # Exit: price crosses back below middle line
+            if close[i] < ema_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above weekly midpoint
-            if close[i] > weekly_donch_mid_aligned[i]:
+            # Exit: price crosses back above middle line
+            if close[i] > ema_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Need expanding volume (above average)
-            if vol_ratio[i] < 1.5:
+            if vol_ratio[i] < 1.2:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Daily breakout of weekly Donchian channels with volume confirmation
-            if close[i] > weekly_donch_high_aligned[i]:
-                # Breakout above weekly Donchian high -> long
+            # Entry: Keltner breakout with volume confirmation AND 12h trend filter
+            if close[i] > keltner_upper[i] and ema_12h_aligned[i] > ema_12h_aligned[i-1]:
+                # Breakout above upper channel with rising 12h EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < weekly_donch_low_aligned[i]:
-                # Breakdown below weekly Donchian low -> short
+            elif close[i] < keltner_lower[i] and ema_12h_aligned[i] < ema_12h_aligned[i-1]:
+                # Breakdown below lower channel with falling 12h EMA -> short
                 position = -1
                 signals[i] = -0.25
     
