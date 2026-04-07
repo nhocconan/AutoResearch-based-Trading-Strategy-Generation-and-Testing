@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
-# Long when price breaks above 20-day Donchian high + volume > 1.8x 20-day average + weekly ADX > 22
-# Short when price breaks below 20-day Donchian low + volume > 1.8x 20-day average + weekly ADX > 22
-# Exit when price crosses 4-day EMA in opposite direction
+# Hypothesis: 1-day Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.8x 20-period average + weekly ADX > 22
+# Short when price breaks below 20-period Donchian low + volume > 1.8x 20-period average + weekly ADX > 22
+# Exit when price crosses 4-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
@@ -27,7 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume confirmation (same timeframe, just different lookback)
+    # 1-day data for volume confirmation (same timeframe as primary)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -89,7 +89,7 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
+    tr3[0] = t1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
