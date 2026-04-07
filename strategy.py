@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_kama_rsi_chop_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-RSI for mean reversion signals, and Choppiness Index to filter ranging vs trending markets.
-In ranging markets (CHOP > 61.8), fade extreme RSI with KAMA trend filter.
-In trending markets (CHOP < 38.2), follow KAMA direction with pullbacks.
-This adapts to both bull and bear regimes via dynamic trend and market state filters.
+6h_rsi_divergence_1d_trend_volume_v1
+Hypothesis: On 6h timeframe, detect RSI divergence (bullish/bearish) with price 
+to anticipate reversals. Use 1d EMA200 as trend filter to only take divergences 
+in direction of higher timeframe trend. Volume confirmation ensures momentum 
+behind the move. Works in bull markets (buy bullish div in uptrend) and bear 
+markets (sell bearish div in downtrend). Targets 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_rsi_divergence_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,106 +25,105 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly data for trend filter and regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly close for KAMA
-    close_1w = df_1w['close'].values
+    # Daily EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    ema200_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # KAMA parameters
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # 6h RSI(14) for divergence detection
+    def rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close_prices)
+        avg_loss = np.zeros_like(close_prices)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period + 1, len(close_prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = np.zeros_like(close_prices)
+        rsi_vals[period:] = 100 - (100 / (1 + rs[period:]))
+        return rsi_vals
     
-    # Calculate Efficiency Ratio and KAMA
-    change = np.abs(np.diff(close_1w, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)  # 10-period volatility
-    # Avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    rsi_vals = rsi(close, 14)
     
-    # Initialize KAMA
-    kama = np.full_like(close_1w, np.nan, dtype=float)
-    kama[9] = close_1w[9]  # Start after 10 periods
-    for i in range(10, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    
-    # Weekly RSI (14)
-    delta = np.diff(close_1w)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for first 14 values
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
-    
-    # Weekly Choppiness Index (14)
-    atr = np.zeros_like(close_1w)
-    tr1 = np.abs(np.diff(close_1w))
-    tr2 = np.abs(np.diff(df_1w['high'].values))
-    tr3 = np.abs(np.diff(df_1w['low'].values))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Prepend NaN for first 14 values
-    atr = np.concatenate([np.full(14, np.nan), atr])
-    
-    max_high = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    chop = np.where((max_high - min_low) > 0, 
-                    100 * np.log10(atr.sum() / (max_high - min_low)) / np.log10(14), 
-                    50)
-    # Prepend NaN for first 14 values
-    chop = np.concatenate([np.full(14, np.nan), chop])
-    
-    # Align weekly indicators to daily timeframe
-    kama_1d = align_htf_to_ltf(prices, df_1w, kama)
-    rsi_1d = align_htf_to_ltf(prices, df_1w, rsi)
-    chop_1d = align_htf_to_ltf(prices, df_1w, chop)
+    # 20-period volume average on 6h
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Warmup for indicators
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(kama_1d[i]) or np.isnan(rsi_1d[i]) or np.isnan(chop_1d[i])):
+        if (np.isnan(rsi_vals[i]) or np.isnan(ema200_6h[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_sma[i]
+        
+        # Check for RSI divergence over last 10 periods
+        lookback = 10
+        if i < lookback:
+            signals[i] = 0.0
+            continue
+            
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        price_low = low[i-lookback:i+1]
+        price_high = high[i-lookback:i+1]
+        rsi_low = rsi_vals[i-lookback:i+1]
+        rsi_high = rsi_vals[i-lookback:i+1]
+        
+        # Find local minima and maxima
+        price_min_idx = np.argmin(price_low)
+        price_max_idx = np.argmax(price_high)
+        rsi_min_idx = np.argmin(rsi_low)
+        rsi_max_idx = np.argmax(rsi_high)
+        
+        bullish_div = (price_min_idx == lookback and rsi_min_idx != lookback and 
+                      rsi_vals[i] > rsi_vals[i-lookback] and 
+                      close[i] < close[i-lookback])
+        bearish_div = (price_max_idx == lookback and rsi_max_idx != lookback and 
+                      rsi_vals[i] < rsi_vals[i-lookback] and 
+                      close[i] > close[i-lookback])
+        
         if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) OR chop > 61.8 and price < KAMA (trend fail in range)
-            if rsi_1d[i] > 70 or (chop_1d[i] > 61.8 and close[i] < kama_1d[i]):
+            # Exit: bearish divergence or price breaks below EMA200
+            if bearish_div or close[i] < ema200_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) OR chop > 61.8 and price > KAMA (trend fail in range)
-            if rsi_1d[i] < 30 or (chop_1d[i] > 61.8 and close[i] > kama_1d[i]):
+            # Exit: bullish divergence or price breaks above EMA200
+            if bullish_div or close[i] > ema200_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Chop > 61.8 = ranging market: mean reversion at RSI extremes
-            if chop_1d[i] > 61.8:
-                if rsi_1d[i] < 30 and close[i] > kama_1d[i]:  # Oversold + above trend
-                    position = 1
-                    signals[i] = 0.25
-                elif rsi_1d[i] > 70 and close[i] < kama_1d[i]:  # Overbought + below trend
-                    position = -1
-                    signals[i] = -0.25
-            # Chop < 38.2 = trending market: follow KAMA direction
-            elif chop_1d[i] < 38.2:
-                if close[i] > kama_1d[i]:  # Uptrend
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < kama_1d[i]:  # Downtrend
-                    position = -1
-                    signals[i] = -0.25
+            # Bullish divergence long in uptrend (price > EMA200)
+            if (bullish_div and 
+                vol_confirm and 
+                close[i] > ema200_6h[i]):
+                position = 1
+                signals[i] = 0.25
+            # Bearish divergence short in downtrend (price < EMA200)
+            elif (bearish_div and 
+                  vol_confirm and 
+                  close[i] < ema200_6h[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
