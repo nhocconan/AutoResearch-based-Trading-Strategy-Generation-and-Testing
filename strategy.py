@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Range Breakout with Volume and Trend Filter (Optimized)
-# Hypothesis: Price breaking above/below the previous day's high/low indicates
-# continuation of the previous day's trend. Volume confirms institutional participation.
-# Trend filter (price above/below 200 EMA) ensures alignment with higher timeframe trend.
+# Strategy: Daily Range Breakout with Volume and Trend Filter (1d)
+# Hypothesis: Price breaking above/below the previous day's high/low indicates continuation of the previous day's trend.
+# Volume confirms institutional participation. Trend filter (price above/below 200 EMA) ensures alignment with higher timeframe trend.
 # Works in both bull and bear markets: in bull, only long breakouts; in bear, only short breakdowns.
-# Target: 20-50 trades/year (80-200 over 4 years).
+# Target: 7-25 trades/year (30-100 over 4 years).
 
-name = "4h_daily_range_breakout_volume_trend_v3"
-timeframe = "4h"
+name = "1d_daily_range_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -40,7 +39,7 @@ def generate_signals(prices):
     prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
     prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
     
-    # Align to 4h timeframe (use previous day's levels)
+    # Align to 1d timeframe (use previous day's levels)
     daily_high_aligned = align_htf_to_ltf(prices, df_daily, prev_daily_high)
     daily_low_aligned = align_htf_to_ltf(prices, df_daily, prev_daily_low)
     
