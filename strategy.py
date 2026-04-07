@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h ATR Breakout with 1d Trend Filter and Volume Spike
-# Hypothesis: Breakouts above ATR-based channels on 4h, confirmed by 1d trend and volume spikes,
-# capture trending moves while avoiding false breakouts in choppy markets. Works in bull/bear
-# by filtering direction with higher timeframe trend.
-# Target: 20-50 trades/year (80-200 total over 4 years) for 4h timeframe.
+# Strategy: 1d Donchian Breakout + Weekly Trend + Volume Spike
+# Hypothesis: 1d breakouts in direction of weekly trend with volume capture strong moves
+# while avoiding false breakouts. Works in bull (breakouts continue) and bear (breakouts reverse quickly for shorts).
+# Target: 8-20 trades/year (32-80 total over 4 years) for 1d timeframe.
 
-name = "4h_atr_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,38 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate ATR(14) on 4h
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Weekly EMA(20) for trend filter
+    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
+    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
     
-    # Calculate upper and lower channels: close ± 2.0 * ATR
-    upper_channel = close + 2.0 * atr
-    lower_channel = close - 2.0 * atr
+    # Donchian(20) channels on 1d
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_20_weekly_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -64,27 +57,27 @@ def generate_signals(prices):
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below lower channel or trend turns bearish
-            if close[i] < lower_channel[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price closes below Donchian lower or weekly trend turns bearish
+            if close[i] < lowest_low[i] or close[i] < ema_20_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above upper channel or trend turns bullish
-            if close[i] > upper_channel[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price closes above Donchian upper or weekly trend turns bullish
+            if close[i] > highest_high[i] or close[i] > ema_20_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Strong uptrend on 1d
-                if close[i] > upper_channel[i] and close[i] > ema_50_1d_aligned[i]:
+                # Strong uptrend on weekly
+                if close[i] > highest_high[i] and close[i] > ema_20_weekly_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Strong downtrend on 1d
-                elif close[i] < lower_channel[i] and close[i] < ema_50_1d_aligned[i]:
+                # Strong downtrend on weekly
+                elif close[i] < lowest_low[i] and close[i] < ema_20_weekly_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
