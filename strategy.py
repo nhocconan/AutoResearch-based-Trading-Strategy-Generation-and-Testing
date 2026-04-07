@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal strategy with 1d trend filter and volume confirmation
-# Uses Camarilla pivot levels from daily timeframe to identify reversal zones: 
-# - Fade at R3/S3 (sell at resistance, buy at support) in ranging markets
-# - Breakout continuation at R4/S4 (buy break above R4, sell break below S4) in trending markets
-# - 1d EMA50 filter ensures trades align with higher timeframe trend
-# - Volume confirmation avoids false breakouts
-# Designed for low frequency (target: 15-30 trades/year) to minimize fee impact
-# Works in both bull/bear via adaptive logic: mean reversion in range, trend following in breakout
+# Hypothesis: 12h Donchian(20) breakout with daily ADX filter and volume confirmation
+# Uses daily ADX to filter trend strength (ADX > 25) and Donchian channel breakouts for entries
+# Volume confirmation ensures breakouts are genuine
+# Designed for low frequency (target: 12-37 trades/year) to minimize fee impact
+# Works in both bull/bear via trend filter: only trade in direction of daily trend
 
-name = "6h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_daily_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,41 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Camarilla pivot levels
+    # Daily data for ADX and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate ADX (14-period)
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(low_1d)
+    for i in range(1, len(high_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff and low_diff > 0 else 0
     
-    # Resistance levels
-    r1 = pivot + (range_1d * 1.0833 / 12)
-    r2 = pivot + (range_1d * 1.1666 / 6)
-    r3 = pivot + (range_1d * 1.2500 / 4)
-    r4 = pivot + (range_1d * 1.5000 / 2)
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(high_1d, 1)), 
+                               np.abs(low_1d - np.roll(low_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]  # First period TR
     
-    # Support levels
-    s1 = pivot - (range_1d * 1.0833 / 12)
-    s2 = pivot - (range_1d * 1.1666 / 6)
-    s3 = pivot - (range_1d * 1.2500 / 4)
-    s4 = pivot - (range_1d * 1.5000 / 2)
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
     
-    # Align Camarilla levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    plus_di = np.where(atr != 0, 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / atr, 0)
+    minus_di = np.where(atr != 0, 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # 1d trend filter (EMA50)
+    # Daily EMA50 for trend direction
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Donchian channel (20-period) on 12h timeframe
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,59 +76,50 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(adx_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma[i]
+        # Trend filter: strong trend (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
         
-        # Market regime: trending if price outside R3/S3, ranging if inside
-        price_above_r3 = close[i] > r3_aligned[i]
-        price_below_s3 = close[i] < s3_aligned[i]
-        price_inside = (close[i] >= s3_aligned[i]) & (close[i] <= r3_aligned[i])
-        
-        # Trend filter from 1d EMA
+        # Trend direction from daily EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Exit conditions
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_ma[i]
+        
+        # Donchian breakout conditions
+        breakout_long = close[i] > donchian_high[i-1]  # Break above previous high
+        breakout_short = close[i] < donchian_low[i-1]  # Break below previous low
+        
+        # Exit conditions: reverse Donchian breakout or trend weakening
+        exit_long = close[i] < donchian_low[i-1] or adx_aligned[i] < 20
+        exit_short = close[i] > donchian_high[i-1] or adx_aligned[i] < 20
+        
         if position == 1:  # Long position
-            # Exit on reverse signal or at opposite pivot level
-            if (close[i] < s3_aligned[i]) or (close[i] > r4_aligned[i] and not uptrend):
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on reverse signal or at opposite pivot level
-            if (close[i] > r3_aligned[i]) or (close[i] < s4_aligned[i] and not downtrend):
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Ranging market: mean reversion at S3/R3
-            if price_inside:
-                # Buy at S3 with uptrend and volume
-                if (close[i] <= s3_aligned[i] * 1.001) and uptrend and vol_confirm:  # Small buffer for entry
-                    position = 1
-                    signals[i] = 0.25
-                # Sell at R3 with downtrend and volume
-                elif (close[i] >= r3_aligned[i] * 0.999) and downtrend and vol_confirm:
-                    position = -1
-                    signals[i] = -0.25
-            # Trending market: breakout continuation at S4/R4
-            else:
-                # Buy breakout above R4 with uptrend and volume
-                if price_above_r3 and (close[i] > r4_aligned[i] * 1.001) and uptrend and vol_confirm:
-                    position = 1
-                    signals[i] = 0.25
-                # Sell breakdown below S4 with downtrend and volume
-                elif price_below_s3 and (close[i] < s4_aligned[i] * 0.999) and downtrend and vol_confirm:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long on Donchian breakout with uptrend, strong trend, and volume
+            if breakout_long and uptrend and strong_trend and vol_confirm:
+                position = 1
+                signals[i] = 0.25
+            # Enter short on Donchian breakdown with downtrend, strong trend, and volume
+            elif breakout_short and downtrend and strong_trend and vol_confirm:
+                position = -1
+                signals[i] = -0.25
     
     return signals
