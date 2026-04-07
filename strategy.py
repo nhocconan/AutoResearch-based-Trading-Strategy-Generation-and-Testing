@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_rolling_fractal_mean_reversion_v1
-Hypothesis: In 6h timeframe, price often reverts to the mean after fractal
-extremes (local highs/lows). We use a rolling fractal high/low (5-bar window)
-combined with 60-period SMA trend filter and volume confirmation. Works in
-both bull and bear markets by fading extremes against the trend direction.
+4h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: Donchian(20) breakout on 4h with daily trend filter and volume confirmation.
+In trending markets (price > daily EMA50), buy breakouts above 20-period high.
+In ranging markets (price < daily EMA50), sell breakdowns below 20-period low.
+Volume confirmation reduces false signals. Works in both bull and bear by adapting to daily trend.
 """
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_rolling_fractal_mean_reversion_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 70:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,33 +26,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Rolling fractal high/low (5-bar window: 2 bars each side)
-    # Fractal high: highest high in window, fractal low: lowest low in window
-    window = 5
-    half = window // 2  # 2
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    fractal_high = np.full(n, np.nan)
-    fractal_low = np.full(n, np.nan)
+    close_1d = df_1d['close'].values
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    for i in range(half, n - half):
-        window_high = np.max(high[i - half:i + half + 1])
-        window_low = np.min(low[i - half:i + half + 1])
-        fractal_high[i] = window_high
-        fractal_low[i] = window_low
+    # Donchian channels (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 60-period SMA for trend filter
-    sma60 = pd.Series(close).rolling(window=60, min_periods=60).mean().values
-    
-    # 20-period volume average
+    # 20-period volume average on 4h
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(fractal_high[i]) or np.isnan(fractal_low[i]) or 
-            np.isnan(sma60[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(ema50_4h[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
@@ -59,32 +57,30 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.3 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches fractal high (mean reversion complete) OR
-            # price breaks below fractal low with volume (breakdown)
-            if close[i] >= fractal_high[i] or (close[i] <= fractal_low[i] and vol_confirm):
+            # Exit: price breaks below Donchian low OR trend turns down
+            if close[i] < low_min[i] or close[i] < ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price reaches fractal low (mean reversion complete) OR
-            # price breaks above fractal high with volume (breakout)
-            if close[i] <= fractal_low[i] or (close[i] >= fractal_high[i] and vol_confirm):
+            # Exit: price breaks above Donchian high OR trend turns up
+            if close[i] > high_max[i] or close[i] > ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion long: price at/fractal low in uptrend (price > SMA60)
-            if (close[i] <= fractal_low[i] and 
+            # Trend-following long: breakout above Donchian high in uptrend
+            if (close[i] > high_max[i] and 
                 vol_confirm and 
-                close[i] > sma60[i]):
+                close[i] > ema50_4h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Mean reversion short: price at/fractal high in downtrend (price < SMA60)
-            elif (close[i] >= fractal_high[i] and 
+            # Trend-following short: breakdown below Donchian low in downtrend
+            elif (close[i] < low_min[i] and 
                   vol_confirm and 
-                  close[i] < sma60[i]):
+                  close[i] < ema50_4h[i]):
                 position = -1
                 signals[i] = -0.25
     
