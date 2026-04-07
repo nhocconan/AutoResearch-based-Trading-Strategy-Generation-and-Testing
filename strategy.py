@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: Daily Donchian breakout with weekly trend filter and volume confirmation.
-In bull market (weekly close > weekly EMA50): long on 20-day high breakout.
-In bear market (weekly close < weekly EMA50): short on 20-day low breakout.
-Volume must be above 20-day average to confirm breakout strength.
+Hypothesis: 6h Donchian breakout with 12h trend filter and volume confirmation.
+In bull market (12h close > 12h EMA50): long on 20-bar high breakout.
+In bear market (12h close < 12h EMA50): short on 20-bar low breakout.
+Volume must be above 20-period average to confirm breakout strength.
 This combines price channel breakout with trend filter and volume confirmation.
-Target: 30-100 total trades over 4 years (7-25/year).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,15 +27,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # === 12H TREND FILTER (HTF) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) == 0:
         return np.zeros(n)
-    one_w_close = df_1w['close'].values
-    one_w_ema = pd.Series(one_w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)  # already shifted
+    twelve_h_close = df_12h['close'].values
+    twelve_h_ema = pd.Series(twelve_h_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    twelve_h_ema_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_ema)  # already shifted
     
-    # === DAILY DONCHIAN CHANNEL (LTF) ===
+    # === DONCHIAN CHANNEL (LTF) ===
     lookback = 20
     high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -47,12 +47,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(lookback, n):
-        if np.isnan(one_w_ema_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+        if np.isnan(twelve_h_ema_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from weekly EMA
-        bull_trend = close[i] > one_w_ema_aligned[i]
+        # Determine trend direction from 12h EMA
+        bull_trend = close[i] > twelve_h_ema_aligned[i]
         
         if position == 1:  # Long position
             # Exit: price breaks below Donchian low OR trend turns bearish
@@ -75,7 +75,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry logic based on weekly trend
+            # Entry logic based on 12h trend
             if bull_trend:
                 # In bull market: long on breakout above Donchian high
                 if high[i] > high_max[i-1]:  # Use previous bar's high to avoid look-ahead
