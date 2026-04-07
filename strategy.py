@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with daily trend filter and volume confirmation.
-Bull Power = Close - EMA13, Bear Power = EMA13 - Low.
-In bull market (daily close > daily EMA50): long when Bull Power > 0 and rising.
-In bear market (daily close < daily EMA50): short when Bear Power > 0 and rising.
-Volume must be above 20-period average to confirm strength.
-Elder Ray measures bull/bear power behind moves, effective in both trends.
-Target: 50-150 total trades over 4 years.
+12h Camarilla Pivot with Daily Trend Filter and Volume Confirmation
+Based on proven patterns: Camarilla pivot levels from 1d + volume spike + choppiness regime.
+Uses 12h timeframe for lower trade frequency and 1d for pivot calculation.
+Hypothesis: Price tends to revert to mean around Camarilla pivot levels in ranging markets,
+and breakouts occur with volume confirmation in trending markets.
+Works in both bull and bear via daily trend filter.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,73 +28,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY TREND FILTER (HTF) ===
+    # === DAILY PIVOT CALCULATION (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla formulas:
+    # H4 = Close + 1.5 * (High - Low)
+    # H3 = Close + 1.0 * (High - Low)
+    # H2 = Close + 0.5 * (High - Low)
+    # H1 = Close + 0.25 * (High - Low)
+    # L1 = Close - 0.25 * (High - Low)
+    # L2 = Close - 0.5 * (High - Low)
+    # L3 = Close - 1.0 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
+    
+    # Calculate ranges
+    daily_range = daily_high - daily_low
+    
+    # Calculate Camarilla levels
+    H4 = daily_close + 1.5 * daily_range
+    H3 = daily_close + 1.0 * daily_range
+    H2 = daily_close + 0.5 * daily_range
+    H1 = daily_close + 0.25 * daily_range
+    L1 = daily_close - 0.25 * daily_range
+    L2 = daily_close - 0.5 * daily_range
+    L3 = daily_close - 1.0 * daily_range
+    L4 = daily_close - 1.5 * daily_range
+    
+    # Align levels to 12h timeframe (already shifted by 1 day in align_htf_to_ltf)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
+    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
+    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
+    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # === DAILY TREND FILTER (EMA50) ===
     daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)  # already shifted
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    bull_trend = close > daily_ema_aligned  # Pre-compute for efficiency
     
-    # === ELDER RAY (LTF) ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = close - ema13  # Close - EMA13
-    bear_power = ema13 - low    # EMA13 - Low
-    
-    # Smooth power for rising detection (3-period EMA)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
-    
-    # Rising detection: current > previous
-    bull_rising = bull_power_smooth > np.roll(bull_power_smooth, 1)
-    bear_rising = bear_power_smooth > np.roll(bear_power_smooth, 1)
-    bull_rising[0] = False
-    bear_rising[0] = False
-    
-    # === VOLUME CONFIRMATION (LTF) ===
+    # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
-        if np.isnan(daily_ema_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from daily EMA
-        bull_trend = close[i] > daily_ema_aligned[i]
+        # Current price levels
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
         
         if position == 1:  # Long position
-            # Exit: Bull Power <= 0 OR trend turns bearish
-            if bull_power[i] <= 0 or not bull_trend:
+            # Exit: Price reaches H3 (take profit) OR breaks below L1 (stop)
+            if curr_high >= H3_aligned[i] or curr_low <= L1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bear Power <= 0 OR trend turns bullish
-            if bear_power[i] <= 0 or bull_trend:
+            # Exit: Price reaches L3 (take profit) OR breaks above H1 (stop)
+            if curr_low <= L3_aligned[i] or curr_high >= H1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation
+            # Need volume confirmation (above average)
             if volume[i] <= vol_ma[i]:
                 signals[i] = 0.0
                 continue
             
             # Entry logic based on daily trend
-            if bull_trend:
-                # In bull market: long when Bull Power > 0 and rising
-                if bull_power[i] > 0 and bull_rising[i]:
+            if bull_trend[i]:
+                # In bull market: look for long entries at support
+                # Buy near L1-L2 with stop below L2, target at H1-H2
+                if curr_low <= L1_aligned[i] and curr_close > L1_aligned[i]:
+                    # Rejection of L1 level - potential long
                     position = 1
                     signals[i] = 0.25
             else:
-                # In bear market: short when Bear Power > 0 and rising
-                if bear_power[i] > 0 and bear_rising[i]:
+                # In bear market: look for short entries at resistance
+                # Sell near H1-H2 with stop above H2, target at L1-L2
+                if curr_high >= H1_aligned[i] and curr_close < H1_aligned[i]:
+                    # Rejection of H1 level - potential short
                     position = -1
                     signals[i] = -0.25
     
