@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Breakouts above/below 20-period high/low with volume >1.5x average and trend alignment.
-Works in bull/bear by requiring trend alignment - only takes breakouts in direction of 1d EMA50.
-Target: 15-35 trades/year on 12h with strict entry conditions.
+6h_trix_volume_regime_v1
+Hypothesis: TRIX (12-period) crossover with volume confirmation and regime filter (Choppiness Index < 61.8 = trending).
+TRIX filters out insignificant price movements and is effective in trending markets.
+Volume confirms breakout strength. Choppiness Index ensures we only trade in trending regimes,
+avoiding whipsaws in ranging markets. Works in bull and bear by adapting to trend strength.
+Target: 15-35 trades/year on 6h with strict entry conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "6h_trix_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +27,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Daily data for EMA50 trend filter
+    # Daily data for regime filter (Choppiness Index)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate TRIX on 6h close
+    # TRIX = EMA(EMA(EMA(close, period), period), period) - 1 period ago
+    ema1 = pd.Series(close).ewm(span=12, adjust=False).mean()
+    ema2 = ema1.ewm(span=12, adjust=False).mean()
+    ema3 = ema2.ewm(span=12, adjust=False).mean()
+    trix = ema3.pct_change() * 100  # Percentage change
+    
+    # Calculate Choppiness Index on daily data
+    # CHOP = 100 * log10(sum(ATR, n) / (max(high, n) - min(low, n))) / log10(n)
+    atr_list = []
+    for i in range(len(df_1d)):
+        if i == 0:
+            tr = df_1d['high'].iloc[i] - df_1d['low'].iloc[i]
+        else:
+            tr = max(
+                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+            )
+        atr_list.append(tr)
+    
+    atr = pd.Series(atr_list)
+    chop_period = 14
+    sum_atr = atr.rolling(window=chop_period, min_periods=chop_period).sum()
+    max_high = df_1d['high'].rolling(window=chop_period, min_periods=chop_period).max()
+    min_low = df_1d['low'].rolling(window=chop_period, min_periods=chop_period).min()
+    
+    chop = 100 * (np.log10(sum_atr) - np.log10(max_high - min_low)) / np.log10(chop_period)
+    chop_values = chop.values
+    
+    # Align TRIX and Chop to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix.values)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,42 +72,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x average
         vol_spike = volume[i] > (vol_ma[i] * 1.5)
         
-        # Trend filter
-        above_ema50 = close[i] > ema50_1d_aligned[i]
-        below_ema50 = close[i] < ema50_1d_aligned[i]
+        # Regime filter: Choppiness Index < 61.8 = trending market
+        trending_regime = chop_aligned[i] < 61.8
+        
+        # TRIX signal: zero line cross
+        trix_now = trix_aligned[i]
+        trix_prev = trix_aligned[i-1] if i > 0 else 0
+        
+        bullish_cross = trix_prev <= 0 and trix_now > 0
+        bearish_cross = trix_prev >= 0 and trix_now < 0
         
         if position == 1:  # Long position
-            # Exit: price reaches 12h Donchian low or trend turns bearish with volume
-            if close[i] <= low_roll[i] or (below_ema50 and vol_spike):
+            # Exit: TRIX turns bearish with volume or regime changes to ranging
+            if bearish_cross and vol_spike or not trending_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches 12h Donchian high or trend turns bullish with volume
-            if close[i] >= high_roll[i] or (above_ema50 and vol_spike):
+            # Exit: TRIX turns bullish with volume or regime changes to ranging
+            if bullish_cross and vol_spike or not trending_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout above Donchian high with volume and bullish trend
-            if close[i] > high_roll[i] and vol_spike and above_ema50:
+            # Enter long: TRIX bullish cross + volume + trending regime
+            if bullish_cross and vol_spike and trending_regime:
                 position = 1
                 signals[i] = 0.25
-            # Breakout below Donchian low with volume and bearish trend
-            elif close[i] < low_roll[i] and vol_spike and below_ema50:
+            # Enter short: TRIX bearish cross + volume + trending regime
+            elif bearish_cross and vol_spike and trending_regime:
                 position = -1
                 signals[i] = -0.25
     
