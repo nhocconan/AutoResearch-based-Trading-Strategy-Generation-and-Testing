@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-6d_momentum_breakout_1d_trend_volume_v1
-Hypothesis: Price breaking above/below 20-period high/low with volume confirmation
-and 1d trend filter captures momentum moves while avoiding whipsaws. Works in
-both bull and bear by following higher timeframe trend. Target: 15-30 trades/year.
+4h_camarilla_pivot_1d_trend_volume_v2
+Hypothesis: Camarilla pivot levels from 1d provide strong support/resistance. 
+Long when price touches S3 with volume spike and price above 1d EMA50.
+Short when price touches R3 with volume spike and price below 1d EMA50.
+Trend filter ensures we trade with higher timeframe direction. Volume confirms momentum.
+Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6d_momentum_breakout_1d_trend_volume_v1"
-timeframe = "6h"
+name = "4h_camarilla_pivot_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +27,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # 1d data for trend and pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA50 for trend filter
     ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
-    
-    # Align 1d EMA50 to 6h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
-    # 6h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for each 1d bar
+    # R4 = close + (high-low)*1.1/2
+    # R3 = close + (high-low)*1.1/4
+    # R2 = close + (high-low)*1.1/6
+    # R1 = close + (high-low)*1.1/12
+    # PP = (high+low+close)/3
+    # S1 = close - (high-low)*1.1/12
+    # S2 = close - (high-low)*1.1/6
+    # S3 = close - (high-low)*1.1/4
+    # S4 = close - (high-low)*1.1/2
     
-    # Volume confirmation (20-period average on 6h)
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
+    
+    # Calculate pivot levels
+    pp = (h_1d + l_1d + c_1d) / 3.0
+    r3 = c_1d + (h_1d - l_1d) * 1.1 / 4.0
+    s3 = c_1d - (h_1d - l_1d) * 1.1 / 4.0
+    
+    # Align pivot levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,8 +68,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -57,27 +77,29 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below 20-period low or trend changes
-            if close[i] < low_20[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price crosses above S3 or closes below EMA50
+            if close[i] > s3_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above 20-period high or trend changes
-            if close[i] > high_20[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price crosses below R3 or closes above EMA50
+            if close[i] < r3_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above 20-period high with volume and uptrend
-            if (close[i] > high_20[i] and vol_confirm and 
+            # Long entry: price touches S3 with volume and price above EMA50
+            if (abs(close[i] - s3_aligned[i]) < (high[i] - low[i]) * 0.1 and  # near S3
+                vol_confirm and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 20-period low with volume and downtrend
-            elif (close[i] < low_20[i] and vol_confirm and 
+            # Short entry: price touches R3 with volume and price below EMA50
+            elif (abs(close[i] - r3_aligned[i]) < (high[i] - low[i]) * 0.1 and  # near R3
+                  vol_confirm and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
