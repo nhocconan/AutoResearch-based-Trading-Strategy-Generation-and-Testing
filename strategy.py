@@ -1,19 +1,94 @@
 #!/usr/bin/env python3
 """
-4h_adaptive_ema_crossover_volatility_regime_v1
-Hypothesis: EMA crossover with volatility regime filter (ATR-based) to avoid whipsaws.
-In trending markets (high volatility), trade EMA(8)xEMA(21) crossovers.
-In ranging markets (low volatility), fade at Bollinger Bands with RSI filter.
-Volume confirmation reduces false signals. Designed to work in both bull and bear regimes.
+12h_market_profile_value_area_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, trade mean reversion from Value Area (VA) High/Low 
+calculated from prior day's TPO (Time Price Opportunity) profile, with trend filter 
+from daily EMA and volume confirmation. In ranging markets, price tends to revert 
+to the Point of Control (POC). In trending markets, trade pullbacks to VA in 
+direction of trend. Volume confirms institutional interest at key levels.
+Works in both bull and bear markets by adapting to trend via EMA filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_adaptive_ema_crossover_volatility_regime_v1"
-timeframe = "4h"
+name = "12h_market_profile_value_area_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_tpo_profile(high, low, close, tick_size=0.1):
+    """
+    Calculate Point of Control (POC) and Value Area (VA) from TPO profile.
+    Simplified: assumes uniform distribution within each bar's range.
+    Returns POC price and VA High/Low (70% of volume around POC).
+    """
+    # For each bar, create a simple price distribution
+    # In practice, this would use actual TPO data, but we approximate
+    # using the bar's range divided into price levels
+    
+    # Use a fixed number of price levels per bar for simplicity
+    n_levels = 10
+    
+    poc_values = []
+    va_high_values = []
+    va_low_values = []
+    
+    for h, l, c in zip(high, low, close):
+        if h == l:  # Avoid division by zero
+            poc_values.append(c)
+            va_high_values.append(c)
+            va_low_values.append(c)
+            continue
+            
+        # Create price levels from low to high
+        price_levels = np.linspace(l, h, n_levels)
+        
+        # Simple TPO: each level gets 1 unit of time
+        # In reality, would weight by actual time spent at each price
+        tpo_counts = np.ones(n_levels)
+        
+        # Find POC (price level with highest TPO)
+        poc_idx = np.argmax(tpo_counts)
+        poc = price_levels[poc_idx]
+        
+        # Calculate Value Area (70% of TPO around POC)
+        total_tpo = np.sum(tpo_counts)
+        target_tpo = 0.7 * total_tpo
+        
+        # Expand out from POC to find VA boundaries
+        cum_tpo = tpo_counts[poc_idx]
+        va_low_idx = poc_idx
+        va_high_idx = poc_idx
+        
+        while cum_tpo < target_tpo and (va_low_idx > 0 or va_high_idx < n_levels - 1):
+            # Expand to the side with more TPO
+            left_tpo = tpo_counts[va_low_idx - 1] if va_low_idx > 0 else 0
+            right_tpo = tpo_counts[va_high_idx + 1] if va_high_idx < n_levels - 1 else 0
+            
+            if left_tpo >= right_tpo and va_low_idx > 0:
+                va_low_idx -= 1
+                cum_tpo += tpo_counts[va_low_idx]
+            elif right_tpo > left_tpo and va_high_idx < n_levels - 1:
+                va_high_idx += 1
+                cum_tpo += tpo_counts[va_high_idx]
+            elif va_low_idx > 0:
+                va_low_idx -= 1
+                cum_tpo += tpo_counts[va_low_idx]
+            elif va_high_idx < n_levels - 1:
+                va_high_idx += 1
+                cum_tpo += tpo_counts[va_high_idx]
+            else:
+                break
+        
+        va_low = price_levels[va_low_idx]
+        va_high = price_levels[va_high_idx]
+        
+        poc_values.append(poc)
+        va_high_values.append(va_high)
+        va_low_values.append(va_low)
+    
+    return np.array(poc_values), np.array(va_high_values), np.array(va_low_values)
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,91 +101,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA crossover components
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily data for Market Profile and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ATR for volatility regime (14-period)
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.inf], tr2])  # First value inf to avoid look-ahead
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily OHLC for Market Profile
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Bands (20, 2) for ranging markets
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma20 + 2 * bb_std
-    bb_lower = sma20 - 2 * bb_std
+    # Calculate Point of Control (POC) and Value Area (VA) for each day
+    poc_1d, va_high_1d, va_low_1d = calculate_tpo_profile(high_1d, low_1d, close_1d)
     
-    # RSI for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # Volume confirmation
+    # Align daily levels to 12h timeframe
+    poc_12h = align_htf_to_ltf(prices, df_1d, poc_1d)
+    va_high_12h = align_htf_to_ltf(prices, df_1d, va_high_1d)
+    va_low_12h = align_htf_to_ltf(prices, df_1d, va_low_1d)
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # 20-period volume average on 12h
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility regime: high vol = trending, low vol = ranging
-    # Use ATR ratio to ATR moving average
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_ratio = atr / atr_ma  # >1 = high volatility (trending), <1 = low volatility (ranging)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_ma[i]) or
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(poc_12h[i]) or np.isnan(va_high_12h[i]) or 
+            np.isnan(va_low_12h[i]) or np.isnan(ema50_12h[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Volume confirmation: current volume > 1.3x average volume
         vol_confirm = volume[i] > 1.3 * vol_sma[i]
         
-        if vol_ratio[i] > 1.2:  # Trending regime (high volatility)
-            # EMA crossover signals
-            if ema8[i] > ema21[i] and ema8[i-1] <= ema21[i-1]:  # Golden cross
-                if vol_confirm and close[i] > sma20[i]:  # Additional filter: above SMA20
-                    position = 1
-                    signals[i] = 0.30
-            elif ema8[i] < ema21[i] and ema8[i-1] >= ema21[i-1]:  # Death cross
-                if vol_confirm and close[i] < sma20[i]:  # Additional filter: below SMA20
-                    position = -1
-                    signals[i] = -0.30
-            # Exit on opposite crossover
-            elif position == 1 and ema8[i] < ema21[i]:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and ema8[i] > ema21[i]:
+        if position == 1:  # Long position
+            # Exit: price breaks below VA Low OR price crosses below EMA in downtrend
+            if close[i] < va_low_12h[i] or (close[i] < ema50_12h[i] and ema50_12h[i] < va_low_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                # Hold position
-                signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
-        else:  # Ranging regime (low volatility)
-            # Mean reversion at Bollinger Bands with RSI filter
-            if close[i] <= bb_lower[i] and rsi[i] < 30 and vol_confirm:
+                signals[i] = 0.25
+        elif position == -1:  # Short position
+            # Exit: price breaks above VA High OR price crosses above EMA in uptrend
+            if close[i] > va_high_12h[i] or (close[i] > ema50_12h[i] and ema50_12h[i] > va_high_12h[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Mean reversion longs at VA Low in uptrend (price > EMA)
+            if (close[i] <= va_low_12h[i] * 1.001 and  # Small buffer to avoid exact equality
+                vol_confirm and 
+                close[i] > ema50_12h[i]):
                 position = 1
-                signals[i] = 0.20
-            elif close[i] >= bb_upper[i] and rsi[i] > 70 and vol_confirm:
+                signals[i] = 0.25
+            # Mean reversion shorts at VA High in downtrend (price < EMA)
+            elif (close[i] >= va_high_12h[i] * 0.999 and  # Small buffer to avoid exact equality
+                  vol_confirm and 
+                  close[i] < ema50_12h[i]):
                 position = -1
-                signals[i] = -0.20
-            # Exit when price returns to mean or RSI normalizes
-            elif position == 1 and (close[i] >= sma20[i] or rsi[i] > 50):
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and (close[i] <= sma20[i] or rsi[i] < 50):
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold position
-                signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+                signals[i] = -0.25
+            # Trend continuation longs pulling back to VA in uptrend
+            elif (close[i] >= va_low_12h[i] and 
+                  close[i] <= va_high_12h[i] and  # Inside VA
+                  vol_confirm and 
+                  close[i] > ema50_12h[i] and
+                  close[i] > close[i-1]):  # Price rising
+                position = 1
+                signals[i] = 0.20  # Smaller size for trend continuation
+            # Trend continuation shorts pulling back to VA in downtrend
+            elif (close[i] <= va_high_12h[i] and 
+                  close[i] >= va_low_12h[i] and  # Inside VA
+                  vol_confirm and 
+                  close[i] < ema50_12h[i] and
+                  close[i] < close[i-1]):  # Price falling
+                position = -1
+                signals[i] = -0.20  # Smaller size for trend continuation
     
     return signals
