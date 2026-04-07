@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Donchian(20) breakouts capture momentum, volume confirms institutional participation,
-# and ADX>25 filters for trending markets. Works in bull via upward breakouts, in bear via downward
-# breakdowns. Target: 20-40 trades/year to minimize fee drag.
-name = "4h_donchian20_volume_adx_v15"
-timeframe = "4h"
+# Strategy: Daily Donchian Breakout + Weekly Trend + Volume Confirmation
+# Hypothesis: Daily Donchian(20) breakouts with weekly trend filter and volume
+# confirmation capture institutional breakouts. Works in bull (breakouts up) and
+# bear (breakdowns down). Weekly trend prevents counter-trend trades. Volume
+# ensures legitimacy. Target: 15-25 trades/year to minimize fee drag.
+name = "daily_donchian20_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,27 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get daily data for Donchian channels (using previous day's data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # ADX calculation
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - low[:-1]), np.absolute(low[1:] - high[:-1]))
+    # Calculate Donchian channels from previous day's data
+    # Use 20-period high/low from previous days
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Pad arrays to match length
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
+    # 20-period rolling high/low of previous day's high/low
+    # This gives us the Donchian channel based on prior 20 days
+    high_series = pd.Series(prev_high)
+    low_series = pd.Series(prev_low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align Donchian levels to daily timeframe
+    donchian_high_d = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_d = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume confirmation: volume > 20-period average
+    # Get weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Weekly EMA(21) for trend
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=21, adjust=False).mean().values
+    weekly_ema_d = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    
+    # Volume confirmation: daily volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_d[i]) or np.isnan(donchian_low_d[i]) or
+            np.isnan(weekly_ema_d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -59,26 +71,26 @@ def generate_signals(prices):
         vol_confirm = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band or ADX weakens
-            if close[i] < low_20[i] or adx[i] < 20:
+            # Exit: price closes below Donchian low or weekly trend turns bearish
+            if close[i] < donchian_low_d[i] or close[i] < weekly_ema_d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band or ADX weakens
-            if close[i] > high_20[i] or adx[i] < 20:
+            # Exit: price closes above Donchian high or weekly trend turns bullish
+            if close[i] > donchian_high_d[i] or close[i] > weekly_ema_d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above Donchian upper band with volume and strong trend
-            if close[i] > high_20[i] and vol_confirm and adx[i] > 25:
+            # Enter long: price closes above Donchian high (breakout) with volume and bullish weekly trend
+            if close[i] > donchian_high_d[i] and vol_confirm and close[i] > weekly_ema_d[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian lower band with volume and strong trend
-            elif close[i] < low_20[i] and vol_confirm and adx[i] > 25:
+            # Enter short: price closes below Donchian low (breakdown) with volume and bearish weekly trend
+            elif close[i] < donchian_low_d[i] and vol_confirm and close[i] < weekly_ema_d[i]:
                 position = -1
                 signals[i] = -0.25
     
