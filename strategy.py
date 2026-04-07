@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with daily volume confirmation and ADX trend filter
-# Donchian breakouts capture strong trending moves. Volume confirms institutional participation.
-# ADX filter ensures we only trade in trending markets (ADX > 25), avoiding whipsaws in chop.
-# Designed for low frequency in 12h timeframe (12-37 trades/year).
-# Works in bull markets (breakouts to upside) and bear markets (breakouts to downside).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Donchian breakouts capture momentum in trending markets while avoiding whipsaws.
+# Daily trend filter ensures trades align with higher timeframe direction.
+# Volume confirmation filters for institutional participation.
+# Designed for low frequency: target 20-50 trades/year to minimize fee drag.
+# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 
-name = "12h_donchian20_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,43 +25,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily ADX(14)
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
+    # Calculate daily EMA(50) for trend filter
     close_1d = pd.Series(df_1d['close'].values)
+    ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = abs(high_1d - close_1d.shift(1))
-    tr3 = abs(low_1d - close_1d.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    up_move = high_1d - high_1d.shift(1)
-    down_move = low_1d.shift(1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    plus_dm_ma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean()
-    minus_dm_ma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean()
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(alpha=1/14, adjust=False).mean()
-    adx_values = adx.values
-    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    
-    # Calculate 12h Donchian(20) - using rolling window on 12h data
-    # We need to calculate this on the 12h data directly
+    # Calculate Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -72,45 +47,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_12h_aligned[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Entry conditions
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous period high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous period low
+        
+        # Daily trend filter: price above/below EMA(50)
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # ADX trend filter: only trade when trending (ADX > 25)
-        trending = adx_12h_aligned[i] > 25
+        # Exit conditions: opposite Donchian break
+        exit_long = close[i] < donchian_low[i-1]
+        exit_short = close[i] > donchian_high[i-1]
         
-        # Exit conditions: exit when opposite breakout occurs or trend weakens
         if position == 1:  # Long position
-            # Exit if breakdown occurs or ADX drops below 20 (trend weakening)
-            if breakout_down or adx_12h_aligned[i] < 20:
+            # Exit on breakdown or trend reversal
+            if exit_long or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit if breakout occurs or ADX drops below 20 (trend weakening)
-            if breakout_up or adx_12h_aligned[i] < 20:
+            # Exit on breakout or trend reversal
+            if exit_short or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: breakout up + volume confirmation + trending market
-            if breakout_up and vol_confirm and trending:
+            # Enter long: upward breakout + uptrend + volume confirmation
+            if breakout_up and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: breakdown down + volume confirmation + trending market
-            elif breakout_down and vol_confirm and trending:
+            # Enter short: downward breakout + downtrend + volume confirmation
+            elif breakout_down and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
