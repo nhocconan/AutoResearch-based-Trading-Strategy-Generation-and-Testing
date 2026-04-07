@@ -3,20 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA + RSI(14) + Choppiness Index regime filter
-# KAMA adapts to market efficiency - slow in ranging, fast in trending markets
-# RSI(14) provides mean reversion signals in ranging markets and momentum in trends
-# Choppiness Index filters regime: >61.8 = range (mean revert), <38.2 = trend (follow momentum)
-# Designed for 4h timeframe with target 20-50 trades/year to minimize fee drag
-# Works in both bull and bear markets via regime adaptation
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# Uses Donchian breakout on 1d timeframe for breakout signals:
+# - Buy when price breaks above 20-day high in 1w uptrend
+# - Sell when price breaks below 20-day low in 1w downtrend
+# - 1w EMA100 filter ensures trades align with higher timeframe trend
+# - Volume confirmation (current volume > 20-period average) avoids false signals
+# Designed for low frequency (target: 8-20 trades/year) to minimize fee drag
+# Donchian breakouts are effective in trending markets and capture strong moves
 
-name = "4h_kama_rsi_chop_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,50 +27,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Adaptive Moving Average) parameters
-    er_length = 10
-    fast_sc = 2
-    slow_sc = 30
+    # 1w EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close, prepend=close[0]))
-    sum_change = pd.Series(change).rolling(window=er_length, min_periods=1).sum().values
-    sum_abs_change = pd.Series(abs_change).rolling(window=er_length, min_periods=1).sum().values
-    er = np.where(sum_abs_change != 0, sum_change / sum_abs_change, 0)
+    close_1w = df_1w['close'].values
+    ema_100_1w = pd.Series(close_1w).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_100_1w)
     
-    # Calculate Smoothing Constants
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14-period)
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = np.where(sum_atr != 0, 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14), 50)
+    # Donchian channels (20-period) on 1d data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,56 +46,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_100_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Regime filter from Choppiness Index
-        ranging = chop[i] > 61.8
-        trending = chop[i] < 38.2
+        # Trend filter from 1w EMA
+        uptrend = close[i] > ema_100_1w_aligned[i]
+        downtrend = close[i] < ema_100_1w_aligned[i]
         
-        # KAMA trend
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # Break above previous period high
+        breakout_down = close[i] < lowest_low[i-1]   # Break below previous period low
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit when RSI overbought or trend changes against position
-            if rsi[i] > 70 or (ranging and not price_above_kama):
+            # Exit when price breaks below Donchian low or trend changes
+            if close[i] < lowest_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit when RSI oversold or trend changes against position
-            if rsi[i] < 30 or (ranging and not price_below_kama):
+            # Exit when price breaks above Donchian high or trend changes
+            if close[i] > highest_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Entry conditions based on regime
-            if ranging and vol_confirm:
-                # In ranging market: mean reversion at RSI extremes
-                if rsi[i] < 30 and price_above_kama and i > 0 and rsi[i-1] >= 30:
-                    position = 1
-                    signals[i] = 0.25
-                elif rsi[i] > 70 and price_below_kama and i > 0 and rsi[i-1] <= 70:
-                    position = -1
-                    signals[i] = -0.25
-            elif trending and vol_confirm:
-                # In trending market: momentum with KAMA
-                if rsi[i] > 50 and price_above_kama and i > 0 and rsi[i-1] <= 50:
-                    position = 1
-                    signals[i] = 0.25
-                elif rsi[i] < 50 and price_below_kama and i > 0 and rsi[i-1] >= 50:
-                    position = -1
-                    signals[i] = -0.25
+            # Entry conditions with trend and volume confirmation
+            # Buy when breaking out upward in uptrend
+            if breakout_up and uptrend and vol_confirm:
+                position = 1
+                signals[i] = 0.25
+            # Sell when breaking out downward in downtrend
+            elif breakout_down and downtrend and vol_confirm:
+                position = -1
+                signals[i] = -0.25
     
     return signals
