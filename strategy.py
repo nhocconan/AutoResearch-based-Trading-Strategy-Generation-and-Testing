@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Camarilla Pivot with 1d Trend and Volume Filter v1
-# Hypothesis: Camarilla pivot levels (L3, L4, H3, H4) from daily timeframe act as strong support/resistance.
-# In an uptrend (price > 1-day EMA), long at L3/H3 bounce; in downtrend, short at H3/L3 rejection.
-# Volume confirmation ensures institutional interest. Works in both bull (trend-following) and bear (mean reversion at extremes).
-# Target: 20-50 trades/year (80-200 over 4 years).
+# Strategy: 6h Weekly Pivot Breakout with Volume Filter
+# Hypothesis: Weekly pivot levels act as strong support/resistance. Breaking above R1 or below S1
+# with volume confirmation indicates institutional interest and momentum continuation.
+# Works in both bull/bear markets: breaks above R1 in bull, breaks below S1 in bear.
+# Target: 15-30 trades/year (60-120 over 4 years).
 
-name = "4h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_weekly_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA(20) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivots: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Using typical Camarilla formulas based on previous day's range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].shift(1).values  # Previous day close
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Avoid look-ahead: shift by 1 to use only completed daily bars
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    H3 = close_1d_prev + range_1d * 1.1 / 6
-    L3 = close_1d_prev - range_1d * 1.1 / 6
-    H4 = close_1d_prev + range_1d * 1.1 / 2
-    L4 = close_1d_prev - range_1d * 1.1 / 2
+    # Align weekly pivots to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # Align to 4h timeframe (already shifted by 1 in calculation)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Volume filter: current volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(H3_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below L3 or trend turns down
-            if close[i] < L3_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: price falls below weekly pivot or volume drops
+            if close[i] < pivot_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price crosses above H3 or trend turns up
-            if close[i] > H3_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: price rises above weekly pivot or volume drops
+            if close[i] > pivot_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Volume must be above average
-            if volume[i] <= vol_ma[i]:
-                signals[i] = 0.0
-                continue
-                
-            # Long: price > 1d EMA (uptrend) and price touches/bounces from L3
-            if close[i] > ema_1d_aligned[i]:
-                # Allow small buffer for entry: within 0.1% of L3
-                if abs(close[i] - L3_aligned[i]) / L3_aligned[i] < 0.001:
-                    position = 1
-                    signals[i] = 0.25
-            # Short: price < 1d EMA (downtrend) and price touches/rejects from H3
-            elif close[i] < ema_1d_aligned[i]:
-                # Allow small buffer for entry: within 0.1% of H3
-                if abs(close[i] - H3_aligned[i]) / H3_aligned[i] < 0.001:
-                    position = -1
-                    signals[i] = -0.25
+            # Long: price breaks above R1 with volume confirmation
+            if close[i] > r1_aligned[i] and vol_filter[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short: price breaks below S1 with volume confirmation
+            elif close[i] < s1_aligned[i] and vol_filter[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
