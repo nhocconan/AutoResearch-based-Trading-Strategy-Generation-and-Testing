@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h Camarilla pivot with 1d trend filter and volume confirmation.
-Uses daily EMA50 for trend direction and daily Camarilla levels for entry.
-In uptrend (price > daily EMA50): long at L3, short at H3.
-In downtrend (price < daily EMA50): short at H3, long at L3.
-Volume must be above 20-period average for confirmation.
-Target: 50-150 trades over 4 years.
+1h VWAP Reversion + Volume Spike + 4h Trend Filter
+- Trend: 4h EMA200 (bull/bear filter)
+- Entry: Price deviates >1.5% from 20-period VWAP with volume >1.5x average
+- Exit: Price returns to VWAP or trend reversal
+- Session filter: 08-20 UTC only
+- Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v2"
-timeframe = "12h"
-levereage = 1.0
+name = "1h_vwap_reversion_volume_spike_4h_trend_v1"
+timeframe = "1h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,83 +27,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY TREND FILTER ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Session filter: 08-20 UTC only
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # === 4H TREND FILTER (HTF) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) == 0:
         return np.zeros(n)
-    daily_close = df_1d['close'].values
-    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # === DAILY CAMARILLA PIVOTS ===
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # === 1H VWAP (20-period) ===
+    typical_price = (high + low + close) / 3
+    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
+    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
-    pivot = (d_high + d_low + d_close * 2) / 4
-    range_ = d_high - d_low
-    
-    # Camarilla levels
-    H3 = d_close + range_ * 1.1 / 4
-    L3 = d_close - range_ * 1.1 / 4
-    
-    # Align to 12h timeframe (use previous day's levels)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # === VOLUME CONFIRMATION ===
+    # Volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        if np.isnan(daily_ema_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]):
+    for i in range(200, n):
+        # Skip if not in session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
+        # Skip if any data is NaN
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from daily EMA
-        uptrend = close[i] > daily_ema_aligned[i]
+        # Determine 4h trend
+        bull_trend = close[i] > ema_4h_aligned[i]
         
-        if position == 1:  # Long
-            # Exit: price crosses below L3 OR trend turns down
-            if close[i] < L3_aligned[i] or not uptrend:
+        # Calculate VWAP deviation
+        vwap_dev = (close[i] - vwap[i]) / vwap[i] * 100
+        
+        if position == 1:  # Long position
+            # Exit: price returns to VWAP OR trend turns bearish
+            if vwap_dev >= -0.5 or not bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
-        elif position == -1:  # Short
-            # Exit: price crosses above H3 OR trend turns up
-            if close[i] > H3_aligned[i] or uptrend:
+        elif position == -1:  # Short position
+            # Exit: price returns to VWAP OR trend turns bullish
+            if vwap_dev <= 0.5 or bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
-        else:  # Flat
-            # Need volume confirmation
-            if volume[i] <= vol_ma[i]:
+                signals[i] = -0.20
+        else:  # Flat, look for entry
+            # Need volume spike (>1.5x average)
+            if volume[i] <= vol_ma[i] * 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry based on trend
-            if uptrend:
-                # Uptrend: long at L3 support, short at H3 resistance
-                if close[i] <= L3_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] >= H3_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
-            else:
-                # Downtrend: short at H3 resistance, long at L3 support
-                if close[i] >= H3_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
-                elif close[i] <= L3_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
+            # Entry: price deviates significantly from VWAP
+            if vwap_dev <= -1.5:  # Price below VWAP -> long
+                position = 1
+                signals[i] = 0.20
+            elif vwap_dev >= 1.5:  # Price above VWAP -> short
+                position = -1
+                signals[i] = -0.20
     
     return signals
-
-leverage = 1.0
