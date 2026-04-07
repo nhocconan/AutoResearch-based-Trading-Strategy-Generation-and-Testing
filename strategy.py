@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) with 4h ADX(14) trend filter and 1d Bollinger Band regime
-# Long when RSI(14) < 30 + price > SMA(200) + ADX(14) > 25 (trending) + 1d BB width > 50th percentile (volatile)
-# Short when RSI(14) > 70 + price < SMA(200) + ADX(14) > 25 (trending) + 1d BB width > 50th percentile
-# Exit when RSI crosses 50 (mean reversion) or BB width < 30th percentile (low volatility)
-# Stoploss at 2.0 * ATR(14)
-# Position size: 0.20 (20% of capital)
-# Target: 60-150 total trades over 4 years (15-37/year)
+# Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter
+# Long when TK crosses above Kijun + price above Cloud (from 1d) + Tenkan > Kijun (bullish bias)
+# Short when TK crosses below Kijun + price below Cloud + Tenkan < Kijun (bearish bias)
+# Exit when TK crosses back across Kijun or price enters Cloud
+# Uses 1-day Ichimoku for trend direction filter to avoid counter-trend trades
+# Target: 60-120 total trades over 4 years (15-30/year)
 
-name = "1h_rsi14_4h_adx_1d_bb_regime_v1"
-timeframe = "1h"
+name = "6h_ichimoku_1d_trend_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,166 +20,112 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # 4h data for ADX
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # 1d data for Bollinger Bands and regime
+    # 1-day data for Ichimoku trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 4h ADX(14)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1-day Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_10_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_10_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (high_10_9 + low_10_9) / 2
     
-    # Directional Movement
-    up_move = np.diff(high_4h, prepend=high_4h[0])
-    down_move = np.diff(low_4h, prepend=low_4h[0]) * -1
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_10_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_10_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (high_10_26 + low_10_26) / 2
     
-    # Smoothed values
-    tr_14 = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_10_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_10_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = (high_10_52 + low_10_52) / 2
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # Cloud (Kumo): between Senkou A and B
+    # For trend filter: price above cloud = bullish, price below cloud = bearish
+    cloud_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    cloud_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    bb_mid = close_1d_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_1d_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Align 1-day Ichimoku to 6-hour
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    cloud_top_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
+    cloud_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
     
-    # Calculate percentile of BB width for regime filter
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    # 6-hour Ichimoku for entry signals
+    # Tenkan-sen (Conversion Line)
+    high_6_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_6_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_6 = (high_6_9 + low_6_9) / 2
     
-    # Align BB levels to 1h
-    bb_mid_aligned = align_htf_to_ltf(prices, df_1d, bb_mid)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    # Kijun-sen (Base Line)
+    high_6_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_6_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_6 = (high_6_26 + low_6_26) / 2
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_s = pd.Series(gain)
-    loss_s = pd.Series(loss)
-    avg_gain = gain_s.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss_s.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # TK Cross signals
+    tk_cross_above = (tenkan_6 > kijun_6) & (np.roll(tenkan_6, 1) <= np.roll(kijun_6, 1))
+    tk_cross_below = (tenkan_6 < kijun_6) & (np.roll(tenkan_6, 1) >= np.roll(kijun_6, 1))
     
-    # 1h SMA(200)
-    close_s = pd.Series(close)
-    sma_200 = close_s.rolling(window=200, min_periods=200).mean().values
-    
-    # 1h ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Handle first value
+    tk_cross_above[0] = False
+    tk_cross_below[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(26, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(sma_200[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_width_percentile_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(tenkan_6[i]) or np.isnan(kijun_6[i]) or 
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(cloud_top_1d_aligned[i]) or np.isnan(cloud_bottom_1d_aligned[i])):
             if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: RSI crosses 50 (mean reversion) or low volatility regime
-            elif rsi[i] >= 50 or bb_width_percentile_aligned[i] < 30:
+            # Exit: TK cross below or price enters cloud
+            if tk_cross_below[i] or (close[i] >= cloud_bottom_1d_aligned[i] and close[i] <= cloud_top_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: RSI crosses 50 (mean reversion) or low volatility regime
-            elif rsi[i] <= 50 or bb_width_percentile_aligned[i] < 30:
+            # Exit: TK cross above or price enters cloud
+            if tk_cross_above[i] or (close[i] >= cloud_bottom_1d_aligned[i] and close[i] <= cloud_top_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: RSI extremes with trend and volatility filters
-            # Trend filter: ADX > 25 (trending market)
-            trending = adx_aligned[i] > 25
-            # Volatility filter: BB width > 50th percentile (volatile enough)
-            volatile_regime = bb_width_percentile_aligned[i] > 50
-            
-            # Long: RSI oversold + price above SMA200 + trending + volatile regime
-            if rsi[i] < 30 and close[i] > sma_200[i] and trending and volatile_regime:
-                signals[i] = 0.20
+            # Look for entries with 1-day trend filter
+            # Bullish: TK cross above + price above cloud + Tenkan > Kijun (1d)
+            if (tk_cross_above[i] and 
+                close[i] > cloud_top_1d_aligned[i] and 
+                tenkan_1d_aligned[i] > kijun_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: RSI overbought + price below SMA200 + trending + volatile regime
-            elif rsi[i] > 70 and close[i] < sma_200[i] and trending and volatile_regime:
-                signals[i] = -0.20
+            # Bearish: TK cross below + price below cloud + Tenkan < Kijun (1d)
+            elif (tk_cross_below[i] and 
+                  close[i] < cloud_bottom_1d_aligned[i] and 
+                  tenkan_1d_aligned[i] < kijun_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
