@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h ADX Trend Strength + Bollinger Squeeze Breakout
-Long when ADX > 25 (trending) and price breaks above upper BB after low volatility (BBW < 50th percentile)
-Short when ADX > 25 and price breaks below lower BB after low volatility
-Exit when ADX < 20 (trend weakening) or opposite breakout occurs
-Designed to capture strong trends after consolidation periods in both bull and bear markets
+4h Donchian Breakout + 1d Volume Confirmation + ADX Trend Filter
+Breakout of 20-period Donchian channel with volume spike and ADX>25
+Long on upper band breakout, short on lower band breakout
+Exit on opposite band touch or ADX<20
+Designed to capture trends with volume confirmation in both bull and bear markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_adx_bb_squeeze_breakout_v1"
+name = "4h_donchian_breakout_1d_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,71 +24,105 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === ADX (14) ===
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    # === Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 14 + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # === Bollinger Bands (20, 2) ===
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma + 2 * std
-    lower_bb = sma - 2 * std
-    bb_width = (upper_bb - lower_bb) / (sma + 1e-10)
-    
-    # Bollinger width percentile (20-period lookback)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    
-    # === 1d ADX Trend Filter (Higher Timeframe) ===
+    # === 1d Volume Average (20) ===
     df_1d = get_htf_data(prices, '1d')
-    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    
+    # === ADX (14) from 1d timeframe ===
+    # Calculate ADX using daily data
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    
+    # True Range
+    tr1 = df_1d_high - df_1d_low
+    tr2 = np.abs(df_1d_high - np.roll(df_1d_close, 1))
+    tr3 = np.abs(df_1d_low - np.roll(df_1d_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low), 
+                       np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0)
+    dm_minus = np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)), 
+                        np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_period = 14
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
+    
+    # Initial values
+    atr[tr_period-1] = np.mean(tr[:tr_period])
+    dm_plus_smooth[tr_period-1] = np.mean(dm_plus[:tr_period])
+    dm_minus_smooth[tr_period-1] = np.mean(dm_minus[:tr_period])
+    
+    # Wilder's smoothing
+    for i in range(tr_period, len(tr)):
+        atr[i] = (atr[i-1] * (tr_period-1) + tr[i]) / tr_period
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (tr_period-1) + dm_plus[i]) / tr_period
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (tr_period-1) + dm_minus[i]) / tr_period
+    
+    # DI and DX
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    
+    # ADX
+    adx = np.zeros_like(dx)
+    adx[2*tr_period-1] = np.mean(dx[tr_period:2*tr_period])
+    for i in range(2*tr_period, len(dx)):
+        adx[i] = (adx[i-1] * (tr_period-1) + dx[i]) / tr_period
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(adx[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(bb_width_percentile[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition: current volume > 1.5x average volume
+        volume_spike = volume[i] > 1.5 * vol_ma_aligned[i]
+        
+        # ADX trend filter: ADX > 25 for trending market
+        strong_trend = adx_aligned[i] > 25
+        
         if position == 1:  # Long position
-            # Exit: trend weakening or opposite breakout
-            if adx[i] < 20 or close[i] < lower_bb[i]:
+            # Exit: price touches lower Donchian band or trend weakens
+            if close[i] <= lowest_low[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend weakening or opposite breakout
-            if adx[i] < 20 or close[i] > upper_bb[i]:
+            # Exit: price touches upper Donchian band or trend weakens
+            if close[i] >= highest_high[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout after low volatility (squeeze) with trend confirmation
-            if (adx[i] > 25 and adx_1d_aligned[i] > 20 and 
-                bb_width_percentile[i] < 0.5):  # Low volatility environment
-                if close[i] > upper_bb[i]:  # Break above upper band
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < lower_bb[i]:  # Break below lower band
-                    position = -1
-                    signals[i] = -0.25
+            # Entry conditions: Donchian breakout + volume spike + strong trend
+            if close[i] > highest_high[i] and volume_spike and strong_trend:
+                position = 1
+                signals[i] = 0.25
+            elif close[i] < lowest_low[i] and volume_spike and strong_trend:
+                position = -1
+                signals[i] = -0.25
     
     return signals
