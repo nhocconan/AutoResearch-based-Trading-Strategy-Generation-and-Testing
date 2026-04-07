@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
-# Uses weekly trend filter to ensure trades align with higher timeframe direction
-# Donchian breakout provides clear entry/exit signals with low frequency
+# Hypothesis: 1d Donchian channel breakout with 1w trend filter and volume confirmation
+# Uses daily Donchian(20) breakouts for trend continuation, filtered by weekly EMA50 trend
 # Volume confirmation avoids false breakouts
-# Designed for low frequency (target: 12-37 trades/year) to minimize fee impact
+# Designed for low frequency (target: 10-25 trades/year) to minimize fee impact
 # Works in both bull/bear via trend filter: only trade in direction of weekly trend
 
-name = "12h_donchian20_1w_trend_volume_v1"
-timeframe = "12h"
+name = "1d_donchian20_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -34,9 +33,9 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d Donchian(20) channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,10 +43,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -58,32 +57,29 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1w_aligned[i]
         downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Exit conditions
-        if position == 1:  # Long position
-            # Exit on reverse signal or at lower Donchian band
-            if close[i] < low_20[i]:
+        # Entry and exit logic
+        if position == 0:  # Flat, look for entry
+            # Long breakout above upper Donchian with uptrend and volume
+            if (high[i] > high_roll[i-1]) and uptrend and vol_confirm:
+                position = 1
+                signals[i] = 0.25
+            # Short breakdown below lower Donchian with downtrend and volume
+            elif (low[i] < low_roll[i-1]) and downtrend and vol_confirm:
+                position = -1
+                signals[i] = -0.25
+        elif position == 1:  # Long position
+            # Exit on breakdown below lower Donchian or trend reversal
+            if (low[i] < low_roll[i-1]) or (close[i] < ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on reverse signal or at upper Donchian band
-            if close[i] > high_20[i]:
+            # Exit on breakout above upper Donchian or trend reversal
+            if (high[i] > high_roll[i-1]) or (close[i] > ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
-        else:  # Flat, look for entry
-            # Only trade in direction of weekly trend
-            if uptrend and vol_confirm:
-                # Buy breakout above upper Donchian band
-                if close[i] > high_20[i]:
-                    position = 1
-                    signals[i] = 0.25
-            elif downtrend and vol_confirm:
-                # Sell breakdown below lower Donchian band
-                if close[i] < low_20[i]:
-                    position = -1
-                    signals[i] = -0.25
     
     return signals
