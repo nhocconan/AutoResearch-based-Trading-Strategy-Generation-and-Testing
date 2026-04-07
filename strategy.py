@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_kama_trend_1d_volume_v1
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a reliable trend signal. On 12h timeframe, we use KAMA(10) for trend direction, confirmed by 1d EMA200 for higher timeframe alignment. Volume confirmation filters weak signals. This adapts to both trending and ranging markets, reducing false signals. Target: 12-30 trades/year.
+1d_rsi_pullback_1w_trend_volume_v1
+Hypothesis: RSI(14) pullbacks on 1d with weekly trend filter and volume confirmation capture medium-term reversals in both bull and bear markets. Weekly trend avoids counter-trend trades, volume filters weak signals, and RSI(14)<30/>70 provides oversold/overbought entries. Target: 10-20 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_kama_trend_1d_volume_v1"
-timeframe = "12h"
+name = "1d_rsi_pullback_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,73 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA200 for trend filter
-    ema_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200.values)
+    # 1w EMA50 for trend filter
+    ema_50 = df_1w['close'].ewm(span=50, adjust=False).mean()
     
-    # KAMA(10) on 12h: Kaufman Adaptive Moving Average
-    # Efficiency Ratio (ER) = |change| / volatility
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start with close at index 9
-    for i in range(10, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align 1w EMA50 to 1d timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50.values)
     
-    # Volume confirmation (20-period average on 12h)
+    # RSI(14) on 1d
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # Volume confirmation (20-period average on 1d)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(ema_200_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.2x average volume
+        vol_confirm = volume[i] > 1.2 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below KAMA or below 1d EMA200
-            if close[i] < kama[i] or close[i] < ema_200_aligned[i]:
+            # Exit: RSI rises above 50 or price breaks below weekly EMA50
+            if rsi[i] > 50 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price crosses above KAMA or above 1d EMA200
-            if close[i] > kama[i] or close[i] > ema_200_aligned[i]:
+            # Exit: RSI falls below 50 or price breaks above weekly EMA50
+            if rsi[i] < 50 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price above KAMA and above 1d EMA200, with volume
-            if (close[i] > kama[i] and close[i] > ema_200_aligned[i] and vol_confirm):
+            # Long entry: RSI < 30 (oversold), with volume and price above weekly EMA50
+            if (rsi[i] < 30 and vol_confirm and 
+                close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price below KAMA and below 1d EMA200, with volume
-            elif (close[i] < kama[i] and close[i] < ema_200_aligned[i] and vol_confirm):
+            # Short entry: RSI > 70 (overbought), with volume and price below weekly EMA50
+            elif (rsi[i] > 70 and vol_confirm and 
+                  close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
