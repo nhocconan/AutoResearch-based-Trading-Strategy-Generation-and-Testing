@@ -3,86 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA crossover (12/26) with 4h trend filter and daily volatility filter
-# Uses EMA(12)/EMA(26) crossover for entry timing on 1h, 4h EMA(50) for trend direction,
-# and daily ATR(14) for volatility filtering to avoid choppy markets.
-# Designed for low trade frequency (target: 15-37 trades/year) by requiring
-# alignment of 1h momentum with 4h trend and low volatility regime.
-# Works in bull markets via trend-following EMA crossovers and in bear markets
-# by filtering trades to only those aligned with higher timeframe trend.
+# Hypothesis: 6h Donchian channel breakout with daily pivot direction and volume confirmation
+# Uses Donchian(20) breakout for trend continuation, daily pivot points for directional bias,
+# and volume surge confirmation to filter false breakouts. Designed for low trade frequency
+# (target: 12-37 trades/year) with discrete position sizing to minimize fee drag.
+# Works in bull markets via breakout continuation and in bear markets via mean reversion at pivot levels.
 
-name = "ema_crossover_4h_trend_vol_filter_v1"
-timeframe = "1h"
+name = "6h_donchian20_daily_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Daily data for volatility filter
+    # Daily data for pivot points and volume average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # EMA(12) and EMA(26) for 1h momentum
-    ema12 = pd.Series(close).ewm(span=12, adjust=False).values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False).values
+    # Donchian(20) channel
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # 4h EMA(50) for trend direction
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Daily pivot points (using previous day's OHLC)
+    prev_open = df_1d['open'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False).values
-    atr_ma_50 = pd.Series(atr_14).ewm(span=50, adjust=False).values
-    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
+    # Calculate pivot and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
+    
+    # Align daily pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(atr_ma_50_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_surge[i])):
             signals[i] = 0.0
             continue
         
-        # EMA crossover signal
-        bullish_cross = ema12[i] > ema26[i]
-        bearish_cross = ema12[i] < ema26[i]
+        # Long conditions: Donchian breakout above upper band with volume surge
+        # AND price above daily pivot (bullish bias)
+        if (close[i] > donchian_high[i] and 
+            volume_surge[i] and 
+            close[i] > pivot_aligned[i]):
+            signals[i] = 0.25  # 25% position
         
-        # 4h trend filter
-        uptrend_4h = close[i] > ema50_4h_aligned[i]
-        downtrend_4h = close[i] < ema50_4h_aligned[i]
+        # Short conditions: Donchian breakdown below lower band with volume surge
+        # AND price below daily pivot (bearish bias)
+        elif (close[i] < donchian_low[i] and 
+              volume_surge[i] and 
+              close[i] < pivot_aligned[i]):
+            signals[i] = -0.25  # 25% short position
         
-        # Daily volatility filter: only trade when volatility is below average
-        low_volatility = atr_14[i] < atr_ma_50_aligned[i]
-        
-        # Entry conditions: EMA crossover aligned with 4h trend and low volatility
-        if bullish_cross and uptrend_4h and low_volatility:
-            signals[i] = 0.20
-        elif bearish_cross and downtrend_4h and low_volatility:
-            signals[i] = -0.20
-        else:
+        # Exit conditions: price crosses mid-band or reverses at pivot levels
+        elif (abs(close[i] - donchian_mid[i]) < 0.001 * close[i]):  # near mid-band
+            signals[i] = 0.0
+        elif (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]):  # resistance touch
+            signals[i] = 0.0
+        elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]):  # support touch
             signals[i] = 0.0
     
     return signals
