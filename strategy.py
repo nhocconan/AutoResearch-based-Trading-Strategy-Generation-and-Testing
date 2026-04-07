@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Williams %R(14) mean reversion with 1d EMA200 trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold), price > 1d EMA200 (uptrend), volume > 1.5x 6s average volume
-# Short when Williams %R > -20 (overbought), price < 1d EMA200 (downtrend), volume > 1.5x 6s average volume
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-# Position size: 0.25
-# Uses 1d EMA200 for trend filter and 6s volume average for confirmation
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA100 trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band, 1d close > 1d EMA100 (uptrend), and volume > 2.0x 6h average volume
+# Short when price breaks below 6h Donchian lower band, 1d close < 1d EMA100 (downtrend), and volume > 2.0x 6h average volume
+# Exit when trend reverses (1d close crosses EMA100) or opposite breakout occurs
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "6s_williamsr14_1d_ema200_vol_v1"
-timeframe = "6s"
+name = "6h_donchian20_1d_ema100_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +26,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6s data for Williams %R
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r[highest_high == lowest_low] = -50  # avoid division by zero
+    # 6h data for Donchian channels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
     
-    # 1d data for EMA200 trend filter
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    
+    # 6h Donchian(20) channels
+    high_series = pd.Series(high_6h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_6h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian bands to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
+    
+    # 1d data for EMA100 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=100, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 6s volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h volume average for confirmation
+    volume_6h = df_6h['volume'].values
+    volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
+    
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,8 +73,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(williams_r[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma_6h_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -59,16 +83,26 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: Williams %R crosses above -50
-            if williams_r[i] > -50:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: trend reverses (price below EMA100) or breaks below lower band
+            elif close[i] < ema_1d_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R crosses below -50
-            if williams_r[i] < -50:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: trend reverses (price above EMA100) or breaks above upper band
+            elif close[i] > ema_1d_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -76,17 +110,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: Williams %R < -80 (oversold), price above EMA200 (uptrend), volume spike
-            if (williams_r[i] < -80 and
+            # Long: price breaks above upper band, price above EMA100 (uptrend), volume spike
+            if (close[i] > upper_aligned[i] and
                 close[i] > ema_1d_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i]):
+                volume[i] > 2.0 * volume_ma_6h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R > -20 (overbought), price below EMA200 (downtrend), volume spike
-            elif (williams_r[i] > -20 and
+            # Short: price breaks below lower band, price below EMA100 (downtrend), volume spike
+            elif (close[i] < lower_aligned[i] and
                   close[i] < ema_1d_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i]):
+                  volume[i] > 2.0 * volume_ma_6h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
