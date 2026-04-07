@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: For 12h timeframe, use daily (1d) Camarilla pivot levels (S3/R3 for mean reversion, S4/R4 for breakout) 
-combined with daily EMA trend filter and volume confirmation. In ranging markets (price near EMA), 
-fade at S3/R3; in trending markets (price away from EMA), breakout at S4/R4. 
-Volume confirmation reduces false signals. Works in both bull and bear by adapting to trend via EMA.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_camarilla_pivot_1d_trend_volume_v4
+Hypothesis: Refined Camarilla strategy with tighter entry conditions to reduce trade count and improve robustness.
+Uses S3/R3 for mean reversion in trending markets and S4/R4 for breakouts in strong trends.
+Volume confirmation and EMA trend filter prevent false signals. Designed for 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1d_trend_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +35,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each day
+    # Calculate Camarilla pivot levels
     # R4 = C + ((H-L) * 1.1/2)
     # R3 = C + ((H-L) * 1.1/4)
     # S3 = C - ((H-L) * 1.1/4)
@@ -50,69 +48,67 @@ def generate_signals(prices):
     # Daily EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # Align daily levels to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align daily levels to 4h timeframe
+    r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 20-period volume average on 12h
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 30-period volume average on 4h (more stringent)
+    vol_sma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or 
-            np.isnan(ema50_12h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or 
+            np.isnan(ema50_4h[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 2.0x average volume (more stringent)
+        vol_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 (mean reversion fail) OR 
-            # price breaks above R4 and EMA turns down (breakout fail)
-            if close[i] < s3_12h[i] or (close[i] > r4_12h[i] and close[i] < ema50_12h[i]):
+            # Exit: price breaks below S3 OR price breaks above R4 with weak momentum
+            if close[i] < s3_4h[i] or (close[i] > r4_4h[i] and close[i] < ema50_4h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (mean reversion fail) OR
-            # price breaks below S4 and EMA turns up (breakout fail)
-            if close[i] > r3_12h[i] or (close[i] < s4_12h[i] and close[i] > ema50_12h[i]):
+            # Exit: price breaks above R3 OR price breaks below S4 with weak momentum
+            if close[i] > r3_4h[i] or (close[i] < s4_4h[i] and close[i] > ema50_4h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion longs at S3 in uptrend (price > EMA)
-            if (close[i] <= s3_12h[i] and 
+            # Mean reversion longs at S3 in uptrend (price > EMA) with volume
+            if (close[i] <= s3_4h[i] and 
                 vol_confirm and 
-                close[i] > ema50_12h[i]):
+                close[i] > ema50_4h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Mean reversion shorts at R3 in downtrend (price < EMA)
-            elif (close[i] >= r3_12h[i] and 
+            # Mean reversion shorts at R3 in downtrend (price < EMA) with volume
+            elif (close[i] >= r3_4h[i] and 
                   vol_confirm and 
-                  close[i] < ema50_12h[i]):
+                  close[i] < ema50_4h[i]):
                 position = -1
                 signals[i] = -0.25
-            # Breakout longs at R4 in uptrend
-            elif (close[i] >= r4_12h[i] and 
+            # Breakout longs at R4 in strong uptrend (price well above EMA)
+            elif (close[i] >= r4_4h[i] and 
                   vol_confirm and 
-                  close[i] > ema50_12h[i]):
+                  close[i] > ema50_4h[i] * 1.01):  # 1% above EMA
                 position = 1
                 signals[i] = 0.25
-            # Breakout shorts at S4 in downtrend
-            elif (close[i] <= s4_12h[i] and 
+            # Breakout shorts at S4 in strong downtrend (price well below EMA)
+            elif (close[i] <= s4_4h[i] and 
                   vol_confirm and 
-                  close[i] < ema50_12h[i]):
+                  close[i] < ema50_4h[i] * 0.99):  # 1% below EMA
                 position = -1
                 signals[i] = -0.25
     
