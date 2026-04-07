@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_camarilla_pivot_1w_trend_volume_v2
-Hypothesis: Daily Camarilla pivot levels with weekly trend filter and volume confirmation.
-In bull markets: buy near L3 support in uptrend. In bear markets: sell near H3 resistance in downtrend.
-Volume confirmation filters false breaks. Targets 10-25 trades/year by requiring pivot touch + volume spike + weekly trend alignment.
+4h_pullback_1d_trend_volume_v1
+Hypothesis: Pullback to EMA20 in direction of daily trend with volume confirmation captures high-probability momentum moves.
+Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend) by trading with daily trend.
+Targets 20-40 trades/year by requiring EMA20 pullback + volume spike + daily trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_pivot_1w_trend_volume_v2"
-timeframe = "1d"
+name = "4h_pullback_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,88 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 4h data for EMA20
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_4h = df_4h['close'].values
     
-    # Daily data for Camarilla pivots
+    # Daily data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each day (using previous day's OHLC)
-    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), H2 = close + 0.5*(high-low)
-    # L3 = close - 0.5*(high-low), L2 = close - 1.0*(high-low), L1 = close - 1.5*(high-low)
-    high_low = high_1d - low_1d
-    h4 = close_1d + 1.5 * high_low
-    h3 = close_1d + 1.0 * high_low
-    h2 = close_1d + 0.5 * high_low
-    l3 = close_1d - 0.5 * high_low
-    l2 = close_1d - 1.0 * high_low
-    l1 = close_1d - 1.5 * high_low
+    # Calculate EMA20 on 4h close
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
     
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    h4 = np.roll(h4, 1)
-    h3 = np.roll(h3, 1)
-    h2 = np.roll(h2, 1)
-    l3 = np.roll(l3, 1)
-    l2 = np.roll(l2, 1)
-    l1 = np.roll(l1, 1)
-    # First values will be incorrect but handled by validation
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # Align weekly trend to daily
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
-    ema20_1d = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 20-period volume average on 4h
+    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 20-day volume average
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align daily EMA50 to 4h timeframe (shifted by 1 for completed daily bar)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema20_1d[i]) or 
-            np.isnan(h3[i]) or np.isnan(l3[i]) or
-            np.isnan(vol_sma[i])):
+        if (np.isnan(ema20_4h[i]) or 
+            np.isnan(ema50_4h[i]) or 
+            np.isnan(vol_sma_4h[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        vol_confirm = volume[i] > 1.5 * vol_sma_4h[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below L3 OR trend turns down
-            if close[i] < l3[i] or close[i] < ema20_1d[i]:
+            # Exit: price closes below EMA20 OR trend turns down
+            if close[i] < ema20_4h[i] or close[i] < ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price crosses above H3 OR trend turns up
-            if close[i] > h3[i] or close[i] > ema20_1d[i]:
+            # Exit: price closes above EMA20 OR trend turns up
+            if close[i] > ema20_4h[i] or close[i] > ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price touches L3 (support) in uptrend with volume
-            if (abs(close[i] - l3[i]) < 0.001 * close[i] and  # Within 0.1% of L3
+            # Long: price closes above EMA20 (pullback long) + volume + uptrend
+            if (close[i] > ema20_4h[i] and 
                 vol_confirm and 
-                close[i] > ema20_1d[i]):  # Weekly uptrend
+                close[i] > ema50_4h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches H3 (resistance) in downtrend with volume
-            elif (abs(close[i] - h3[i]) < 0.001 * close[i] and  # Within 0.1% of H3
+            # Short: price closes below EMA20 (pullback short) + volume + downtrend
+            elif (close[i] < ema20_4h[i] and 
                   vol_confirm and 
-                  close[i] < ema20_1d[i]):  # Weekly downtrend
+                  close[i] < ema50_4h[i]):
                 position = -1
                 signals[i] = -0.25
     
