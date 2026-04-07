@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and daily ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period daily average + daily ADX > 20
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period daily average + daily ADX > 20
-# Exit when price crosses opposite Donchian level (long exits at Donchian low, short exits at Donchian high)
+# Hypothesis: 6-hour Elder Ray Index with 1-day trend filter and Bollinger Bands mean reversion
+# Elder Ray = Bull Power (High - EMA13) and Bear Power (EMA13 - Low)
+# Long when Bull Power > 0 and Bear Power < 0 (bullish momentum) + price below BB lower band (oversold)
+# Short when Bear Power > 0 and Bull Power < 0 (bearish momentum) + price above BB upper band (overbought)
+# Uses 1-day EMA trend filter: only long when price > daily EMA50, only short when price < daily EMA50
+# Exit when Elder Ray signals reverse or price crosses EMA13
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses daily volume for confirmation and daily ADX for trend strength
+# Combines momentum (Elder Ray) with mean reversion (BB) and trend filter (daily EMA)
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_vol_adx_v2"
-timeframe = "4h"
+name = "6h_elder_ray_bb_1d_ema_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +27,27 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1-day data for volume and ADX
+    # 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Calculate EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = t1[0]
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate Bollinger Bands (20, 2.0)
+    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2.0 * bb_std
+    bb_lower = bb_mid - 2.0 * bb_std
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 20-period Donchian channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ATR(14) for stoploss
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -85,15 +56,20 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
+    # 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -106,8 +82,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below Donchian low
-            elif close[i] < lowest_low[i]:
+            # Exit: Elder Ray turns bearish OR price crosses below EMA13
+            elif bull_power[i] <= 0 or bear_power[i] >= 0 or close[i] < ema13[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -119,27 +95,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above Donchian high
-            elif close[i] > highest_high[i]:
+            # Exit: Elder Ray turns bullish OR price crosses above EMA13
+            elif bear_power[i] <= 0 or bull_power[i] >= 0 or close[i] > ema13[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period daily average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: daily ADX > 20
-            trend_filter = adx_aligned[i] > 20
+            # Look for entries: Elder Ray signals with BB mean reversion and daily EMA trend filter
+            # Elder Ray bullish: Bull Power > 0 and Bear Power < 0
+            elder_bullish = bull_power[i] > 0 and bear_power[i] < 0
+            # Elder Ray bearish: Bear Power > 0 and Bull Power < 0
+            elder_bearish = bear_power[i] > 0 and bull_power[i] < 0
+            # BB oversold: price below lower band
+            bb_oversold = close[i] < bb_lower[i]
+            # BB overbought: price above upper band
+            bb_overbought = close[i] > bb_upper[i]
+            # Trend filter: price > daily EMA50 for long, price < daily EMA50 for short
+            uptrend = close[i] > ema50_1d_aligned[i]
+            downtrend = close[i] < ema50_1d_aligned[i]
             
-            # Long: price breaks above Donchian high + volume filter + trend filter
-            if close[i] > highest_high[i] and volume_filter and trend_filter:
+            # Long: Elder Ray bullish + BB oversold + uptrend
+            if elder_bullish and bb_oversold and uptrend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low + volume filter + trend filter
-            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
+            # Short: Elder Ray bearish + BB overbought + downtrend
+            elif elder_bearish and bb_overbought and downtrend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
