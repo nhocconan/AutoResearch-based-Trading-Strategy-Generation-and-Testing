@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_camarilla_pivot_1w_trend_volume_v1
-Hypothesis: On 1d timeframe, use Camarilla pivot levels from weekly timeframe (R3/S3) for entry/exit, with trend filter from weekly EMA200 and volume confirmation. Enter long when price crosses above S3 with weekly uptrend and volume > 1.5x average. Enter short when price crosses below R3 with weekly downtrend and volume > 1.5x average. Exit when price crosses opposite pivot level or trend reverses. Targets 10-25 trades/year to minimize fee drift.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 6h timeframe, use Camarilla pivot levels from 1d timeframe for mean reversion and breakout signals.
+Buy near S3/S4 support with bullish EMA alignment on 1d, sell near R3/R4 resistance with bearish EMA alignment.
+Volume confirmation required (>1.5x average). Targets 12-37 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_pivot_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,59 +25,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # EMA for trend filter on 6h
+    close_s = pd.Series(close)
+    ema20 = close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get weekly data for Camarilla pivots and trend filter (calculate once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla pivots (calculate once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from weekly OHLC
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We'll use R3 and S3 for entries
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Camarilla pivot levels from previous day's OHLC
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    # where C = (H+L+CLOSE)/3 of previous day
     
-    # Calculate pivot levels
-    cam_r3 = weekly_close + ((weekly_high - weekly_low) * 1.1 / 4)
-    cam_s3 = weekly_close - ((weekly_high - weekly_low) * 1.1 / 4)
+    # We need previous day's OHLC, so we shift by 1
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate weekly EMA200 for trend filter
-    weekly_close_s = pd.Series(weekly_close)
-    ema200_1w = weekly_close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Calculate pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Align to daily timeframe (shifted by 1 week to avoid look-ahead)
-    cam_r3_aligned = align_htf_to_ltf(prices, df_1w, cam_r3)
-    cam_s3_aligned = align_htf_to_ltf(prices, df_1w, cam_s3)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate Camarilla levels
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    
+    # Align to 6h timeframe (shifted by 1 day to avoid look-ahead)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # EMA trend filter on 1d (using previous day's EMA to avoid look-ahead)
+    daily_close = df_1d['close'].values
+    daily_close_s = pd.Series(daily_close)
+    ema20_1d = daily_close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50_1d = daily_close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align EMAs to 6h timeframe
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(50, n):  # Start after EMA50 warmup
         # Skip if required data not available
-        if (np.isnan(cam_r3_aligned[i]) or np.isnan(cam_s3_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
+            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter from weekly: up if close > EMA200, down if close < EMA200
-        trend_up = close[i] > ema200_1w_aligned[i]
-        trend_down = close[i] < ema200_1w_aligned[i]
+        # Trend filter from 1d: up if EMA20 > EMA50, down if EMA20 < EMA50
+        trend_up = ema20_1d_aligned[i] > ema50_1d_aligned[i]
+        trend_down = ema20_1d_aligned[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when price crosses below S3 (mean reversion)
-            if close[i] < cam_s3_aligned[i]:
+            # Exit on trend reversal (EMA20 < EMA50)
+            if ema20[i] < ema50[i]:
                 exit_long = True
-            # Exit on trend reversal (price below EMA200)
-            elif close[i] < ema200_1w_aligned[i]:
+            # Exit when price reaches R3 (take profit)
+            elif close[i] >= r3_aligned[i]:
+                exit_long = True
+            # Exit when volume drops below average
+            elif volume[i] < vol_ma[i]:
                 exit_long = True
             
             if exit_long:
@@ -87,11 +118,14 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when price crosses above R3 (mean reversion)
-            if close[i] > cam_r3_aligned[i]:
+            # Exit on trend reversal (EMA20 > EMA50)
+            if ema20[i] > ema50[i]:
                 exit_short = True
-            # Exit on trend reversal (price above EMA200)
-            elif close[i] > ema200_1w_aligned[i]:
+            # Exit when price reaches S3 (take profit)
+            elif close[i] <= s3_aligned[i]:
+                exit_short = True
+            # Exit when volume drops below average
+            elif volume[i] < vol_ma[i]:
                 exit_short = True
             
             if exit_short:
@@ -100,15 +134,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price crosses above S3, weekly uptrend, volume confirmation
-            long_entry = (close[i] > cam_s3_aligned[i] and 
-                         close[i-1] <= cam_s3_aligned[i-1] and  # crossed above
-                         trend_up and vol_confirm)
+            # Long entry: price near S3/S4 support, bullish trend, volume confirmation
+            near_support = (close[i] <= s3_aligned[i] * 1.02) and (close[i] >= s4_aligned[i] * 0.98)
+            long_entry = near_support and trend_up and vol_confirm
             
-            # Short entry: price crosses below R3, weekly downtrend, volume confirmation
-            short_entry = (close[i] < cam_r3_aligned[i] and 
-                          close[i-1] >= cam_r3_aligned[i-1] and  # crossed below
-                          trend_down and vol_confirm)
+            # Short entry: price near R3/R4 resistance, bearish trend, volume confirmation
+            near_resistance = (close[i] >= r3_aligned[i] * 0.98) and (close[i] <= r4_aligned[i] * 1.02)
+            short_entry = near_resistance and trend_down and vol_confirm
             
             if long_entry:
                 position = 1
