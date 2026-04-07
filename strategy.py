@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-6h_adaptive_ichimoku_trend_follower
-Hypothesis: On 6h timeframe, combine Ichimoku cloud (from daily) with Tenkan/Kijun crossover and price above/below cloud for trend direction. Add volume confirmation to filter false breakouts. The Ichimoku system provides dynamic support/resistance and trend identification, while the 6h timeframe reduces noise. Works in bull markets via cloud breakouts and in bear markets via cross-under of Tenkan/Kijun below cloud. Volume confirmation ensures institutional participation. Targets 15-35 trades/year to minimize fee drag.
+4h_ema_trend_reversal_v2
+Hypothesis: On 4h timeframe, use EMA trend filter with RSI divergence and volume confirmation.
+In bull markets: enter long when EMA20 > EMA50, RSI shows bullish divergence (higher low in RSI while price makes lower low), and volume > 1.3x average.
+In bear markets: enter short when EMA20 < EMA50, RSI shows bearish divergence (lower high in RSI while price makes higher high), and volume > 1.3x average.
+Exit when EMA crossover reverses or RSI reaches extreme levels (70 for long, 30 for short).
+This strategy captures trend reversals with confirmation, works in both bull/bear via EMA filter, and limits trades via strict divergence conditions.
+Target: 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adaptive_ichimoku_trend_follower"
-timeframe = "6h"
+name = "4h_ema_trend_reversal_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,73 +28,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Ichimoku components
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
-        return np.zeros(n)
+    # Calculate EMAs for trend filter
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min()
-    tenkan = ((high_9 + low_9) / 2).values
+    # Calculate RSI (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = (100 - (100 / (1 + rs))).values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min()
-    kijun = ((high_26 + low_26) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min()
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Chikou Span (Lagging Span): Current close shifted 26 periods back
-    chikou = pd.Series(df_1d['close']).shift(26).values
-    
-    # Align Ichimoku components to 6h timeframe (shifted by 1 day for look-ahead prevention)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    chikou_6h = align_htf_to_ltf(prices, df_1d, chikou)
-    
-    # Current day's close for Chikou comparison (aligned)
-    close_1d = pd.Series(df_1d['close']).values
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
-    # Volume confirmation (24-period average on 6h = 4 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(chikou_6h[i]) or np.isnan(close_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 24-period average
+        # Volume confirmation: current volume > 1.3x 20-period average
         vol_confirm = volume[i] > 1.3 * vol_ma[i]
-        
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if Tenkan crosses below Kijun (trend weakening)
-            if tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]:
+            # Exit if EMA20 crosses below EMA50 (trend reversal)
+            if ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1]:
                 exit_long = True
-            # Exit if price closes below cloud bottom
-            elif close[i] < cloud_bottom:
+            # Exit if RSI reaches overbought (70)
+            elif rsi[i] >= 70:
                 exit_long = True
             
             if exit_long:
@@ -101,11 +76,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if Tenkan crosses above Kijun (trend weakening)
-            if tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]:
+            # Exit if EMA20 crosses above EMA50 (trend reversal)
+            if ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1]:
                 exit_short = True
-            # Exit if price closes above cloud top
-            elif close[i] > cloud_top:
+            # Exit if RSI reaches oversold (30)
+            elif rsi[i] <= 30:
                 exit_short = True
             
             if exit_short:
@@ -114,20 +89,31 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Tenkan crosses above Kijun AND price above cloud AND Chikou above price from 26 periods ago AND volume confirmation
+            # Need at least 3 periods for divergence check
+            if i < 3:
+                signals[i] = 0.0
+                continue
+            
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            bull_div = False
+            if (low[i] < low[i-1] and low[i-1] < low[i-2] and  # price lower low
+                rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]):   # RSI higher low
+                bull_div = True
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            bear_div = False
+            if (high[i] > high[i-1] and high[i-1] > high[i-2] and  # price higher high
+                rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]):      # RSI lower high
+                bear_div = True
+            
+            # Long entry: EMA20 > EMA50, bullish divergence, volume confirmation
             long_entry = False
-            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1] and
-                close[i] > cloud_top and
-                close_1d_aligned[i] > chikou_6h[i] and
-                vol_confirm):
+            if (ema20[i] > ema50[i] and bull_div and vol_confirm):
                 long_entry = True
             
-            # Short entry: Tenkan crosses below Kijun AND price below cloud AND Chikou below price from 26 periods ago AND volume confirmation
+            # Short entry: EMA20 < EMA50, bearish divergence, volume confirmation
             short_entry = False
-            if (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and
-                close[i] < cloud_bottom and
-                close_1d_aligned[i] < chikou_6h[i] and
-                vol_confirm):
+            if (ema20[i] < ema50[i] and bear_div and vol_confirm):
                 short_entry = True
             
             if long_entry:
