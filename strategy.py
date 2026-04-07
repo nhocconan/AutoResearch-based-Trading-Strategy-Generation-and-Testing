@@ -1,142 +1,99 @@
 #!/usr/bin/env python3
 """
-1h_triple_ema_trend_4h1d_filter_v1
-Hypothesis: On 1h timeframe, use triple EMA (8,21,55) for trend direction and momentum, filtered by 4h and 1d EMA trends to avoid counter-trend trades. Enter long when short EMA > medium EMA > long EMA with bullish alignment on higher timeframes, and short when the reverse is true. Uses dynamic position sizing based on trend strength (ADX) to reduce whipsaws. Target: 60-150 trades over 4 years (15-37/year) with strict trend alignment filters to minimize fee drag in both bull and bear markets.
+12h_donchian_breakout_1d_trend_volume_v4
+Hypothesis: On 12h timeframe, buy when price breaks above 20-period Donchian upper band with 1d uptrend filter and volume confirmation; sell when price breaks below 20-period Donchian lower band with 1d downtrend filter and volume confirmation. Uses 1d EMA50 for trend filter and volume > 1.5x 20-period average for confirmation. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drift while capturing trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_triple_ema_trend_4h1d_filter_v1"
-timeframe = "1h"
+name = "12h_donchian_breakout_1d_trend_volume_v4"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMAs
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).values
-    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).values
+    # 12h Donchian channel (20-period)
+    donchian_len = 20
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
     
-    # Calculate ADX for trend strength
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] > minus_dm[i]:
-                minus_dm[i] = 0
-            elif minus_dm[i] > plus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-        
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-        
-        return adx
+    for i in range(donchian_len - 1, n):
+        window_high = high[i - donchian_len + 1:i + 1]
+        window_low = low[i - donchian_len + 1:i + 1]
+        upper_band[i] = np.max(window_high)
+        lower_band[i] = np.min(window_low)
     
-    adx = calculate_adx(high, low, close, 14)
+    # Volume average (20-period)
+    vol_avg = np.full(n, np.nan)
+    for i in range(donchian_len - 1, n):
+        vol_avg[i] = np.mean(volume[i - donchian_len + 1:i + 1])
     
-    # Load 4h EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 55:
+    # Load 1h data for EMA50 trend filter
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).values
-    ema55_4h = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).values
+    close_1h = df_1h['close'].values
+    ema_len = 50
+    ema_1h = np.full(len(close_1h), np.nan)
     
-    # 4h trend: bullish if EMA21 > EMA55
-    trend_4h_bullish = ema21_4h > ema55_4h
-    trend_4h_bullish_aligned = align_htf_to_ltf(prices, df_4h, trend_21_4h := ema21_4h > ema55_4h)
+    for i in range(ema_len - 1, len(close_1h)):
+        ema_1h[i] = np.mean(close_1h[i - ema_len + 1:i + 1])
     
-    # Load 1d EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 55:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).values
-    ema55_1d = pd.Series(close_1d).ewm(span=55, adjust=False, min_periods=55).values
-    
-    # 1d trend: bullish if EMA21 > EMA55
-    trend_1d_bullish = ema21_1d > ema55_1d
-    trend_1d_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_bullish)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    ema_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_1h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(55, n):
-        # Skip if not in session or data not ready
-        if not in_session[i] or np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema55[i]) or \
-           np.isnan(adx[i]) or np.isnan(trend_4h_bullish_aligned[i]) or np.isnan(trend_1d_bullish_aligned[i]):
+    for i in range(donchian_len - 1, n):
+        # Skip if data not available
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema_1h_aligned[i]) or 
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1h EMA alignment
-        ema_bullish = ema8[i] > ema21[i] > ema55[i]
-        ema_bearish = ema8[i] < ema21[i] < ema55[i]
-        
-        # Trend strength filter: require ADX > 20
-        strong_trend = adx[i] > 20
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
         if position == 1:  # Long position
-            # Exit: EMA alignment breaks or trend weakens
-            if not ema_bullish or not strong_trend:
+            # Exit: price breaks below Donchian lower band
+            if close[i] < lower_band[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                # Scale position by trend strength (0.2 to 0.4 based on ADX)
-                adx_factor = min(0.4, 0.2 + (adx[i] - 20) * 0.005)  # ADX 20-60 -> 0.2-0.4
-                signals[i] = adx_factor
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA alignment breaks or trend weakens
-            if not ema_bearish or not strong_trend:
+            # Exit: price breaks above Donchian upper band
+            if close[i] > upper_band[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                # Scale position by trend strength (0.2 to 0.4 based on ADX)
-                adx_factor = min(0.4, 0.2 + (adx[i] - 20) * 0.005)  # ADX 20-60 -> 0.2-0.4
-                signals[i] = -adx_factor
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter if higher timeframes align and strong trend
-            if trend_4h_bullish_aligned[i] and trend_1d_bullish_aligned[i] and ema_bullish and strong_trend:
+            # Long entry: price breaks above upper band + 1h EMA50 uptrend + volume
+            if (close[i] > upper_band[i] and 
+                close[i] > ema_1h_aligned[i] and 
+                vol_confirm):
                 position = 1
-                adx_factor = min(0.4, 0.2 + (adx[i] - 20) * 0.005)
-                signals[i] = adx_factor
-            elif (not trend_4h_bullish_aligned[i]) and (not trend_1d_bullish_aligned[i]) and ema_bearish and strong_trend:
+                signals[i] = 0.25
+            # Short entry: price breaks below lower band + 1h EMA50 downtrend + volume
+            elif (close[i] < lower_band[i] and 
+                  close[i] < ema_1h_aligned[i] and 
+                  vol_confirm):
                 position = -1
-                adx_factor = min(0.4, 0.2 + (adx[i] - 20) * 0.005)
-                signals[i] = -adx_factor
+                signals[i] = -0.25
     
     return signals
