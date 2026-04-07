@@ -3,96 +3,100 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band mean reversion with weekly Bollinger Band width regime filter
-# Uses Bollinger Band touches at 2 std dev for mean reversion entries
-# Weekly Bollinger Band width percentile determines regime: narrow = mean reversion mode, wide = trend mode
-# In narrow width regimes (low volatility), we fade BB touches; in wide width regimes (high volatility), we follow breakouts
-# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag
-# Works in ranging markets via BB mean reversion and in trending markets via breakout continuation
+# Hypothesis: 12h Donchian channel breakout with 1d ADX trend filter and volume confirmation
+# Uses Donchian(20) breakouts for entry, 1d ADX(14) > 25 to filter for trending markets,
+# and volume > 1.5x 20-period average for confirmation. Exits when price crosses the
+# opposite Donchian band. Designed for low trade frequency (12-37/year) to minimize fee drag.
+# Works in trending markets via breakouts and avoids choppy markets via ADX filter.
 
-name = "6h_bollinger_width_regime_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for Bollinger Band width regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 6h Bollinger Bands (20, 2)
-    bb_length = 20
-    bb_mult = 2.0
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate BB middle (SMA)
-    bb_middle = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    # Calculate BB standard deviation
-    bb_std = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    # Calculate upper and lower bands
-    bb_upper = bb_middle + bb_mult * bb_std
-    bb_lower = bb_middle - bb_mult * bb_std
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly Bollinger Band width for regime detection
-    close_1w = df_1w['close'].values
-    bb_length_w = 20
-    bb_mult_w = 2.0
+    # Calculate ADX (14-period) on 1d data
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    bb_middle_w = pd.Series(close_1w).rolling(window=bb_length_w, min_periods=bb_length_w).mean().values
-    bb_std_w = pd.Series(close_1w).rolling(window=bb_length_w, min_periods=bb_length_w).std().values
-    bb_width_w = (bb_middle_w + bb_mult_w * bb_std_w) - (bb_middle_w - bb_mult_w * bb_std_w)  # upper - lower = 2 * mult * std
-    bb_width_w = 2 * bb_mult_w * bb_std_w
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Percentile of BB width over 50 periods for regime classification
-    bb_width_percentile = pd.Series(bb_width_w).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    
+    # DX and ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where((plus_di + minus_di) > 0, dx, 0)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(bb_length, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(bb_middle[i]) or np.isnan(bb_std[i]) or 
-            np.isnan(bb_width_percentile_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime classification: narrow width = mean reversion mode, wide width = trend mode
-        width_percentile = bb_width_percentile_aligned[i]
-        is_narrow_width = width_percentile < 30  # Bottom 30% = low volatility ranging
-        is_wide_width = width_percentile > 70    # Top 30% = high volatility trending
-        
-        # Price position relative to bands
-        price_vs_upper = close[i] - bb_upper[i]
-        price_vs_lower = bb_lower[i] - close[i]
-        
-        # Mean reversion signals in narrow width regimes (fade extremes)
-        if is_narrow_width:
-            if price_vs_lower > 0:  # Price below lower band -> long
-                signals[i] = 0.25
-            elif price_vs_upper > 0:  # Price above upper band -> short
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-        # Breakout continuation signals in wide width regimes (follow breakouts)
-        elif is_wide_width:
-            if price_vs_upper > 0:  # Break above upper band -> long
-                signals[i] = 0.25
-            elif price_vs_lower > 0:  # Break below lower band -> short
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-        # Neutral regime: no signal
-        else:
+        # ADX trend filter: only trade when ADX > 25 (trending market)
+        if adx_1d_aligned[i] <= 25:
             signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: volume > 1.5x 20-period average
+        if volume[i] <= 1.5 * vol_ma[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Long entry: price breaks above Donchian high
+        if close[i] > donchian_high[i]:
+            signals[i] = 0.25
+        # Short entry: price breaks below Donchian low
+        elif close[i] < donchian_low[i]:
+            signals[i] = -0.25
+        # Exit: price crosses the opposite Donchian band
+        elif (signals[i-1] > 0 and close[i] < donchian_low[i]) or \
+             (signals[i-1] < 0 and close[i] > donchian_high[i]):
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            signals[i] = signals[i-1]
     
     return signals
