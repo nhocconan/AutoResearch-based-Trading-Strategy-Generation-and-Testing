@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_donchian_20_1w_trend_volume_v1
-Hypothesis: On 12h timeframe, use Donchian channel breakout (20) with 1-week trend filter (EMA25 > EMA100) and volume confirmation (>1.5x 20-bar average). 
-Enter long when price breaks above Donchian upper band and weekly trend is up with volume confirmation.
-Enter short when price breaks below Donchian lower band and weekly trend is down with volume confirmation.
-Exit when price crosses the Donchian middle (20-bar average) or volume drops below average.
-Targets 12-37 trades/year to minimize fee drag and works in both bull/bear via trend filter.
+4h_adx_trend_v1
+Hypothesis: On 4h timeframe, use ADX > 25 for trending market filter, with EMA crossover (12/26) for entry signals.
+Enter long when EMA12 > EMA26 and ADX > 25, short when EMA12 < EMA26 and ADX > 25.
+Exit when ADX drops below 20 or EMA crossover reverses. Uses ADX to avoid whipsaw in ranging markets.
+Targets 20-50 trades/year to minimize fee drag while capturing strong trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_20_1w_trend_volume_v1"
-timeframe = "12h"
+name = "4h_adx_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,59 +24,62 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # EMA crossover (fast=12, slow=26)
+    close_s = pd.Series(close)
+    ema12 = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema26 = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ADX calculation (14-period)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Get weekly data for trend filter (calculate once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate EMA25 and EMA100 on weekly close
-    weekly_close = df_1w['close'].values
-    weekly_close_s = pd.Series(weekly_close)
-    ema25_1w = weekly_close_s.ewm(span=25, min_periods=25, adjust=False).mean().values
-    ema100_1w = weekly_close_s.ewm(span=100, min_periods=100, adjust=False).mean().values
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Align to 12h timeframe (shifted by 1 week to avoid look-ahead)
-    ema25_1w_aligned = align_htf_to_ltf(prices, df_1w, ema25_1w)
-    ema100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema100_1w)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after Donchian20 warmup
+    for i in range(30, n):  # Start after ADX warmup
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(ema25_1w_aligned[i]) or np.isnan(ema100_1w_aligned[i])):
+        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
+            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter from 1w: up if EMA25 > EMA100, down if EMA25 < EMA100
-        trend_up = ema25_1w_aligned[i] > ema100_1w_aligned[i]
-        trend_down = ema25_1w_aligned[i] < ema100_1w_aligned[i]
+        # ADX trend strength filter
+        trending = adx[i] > 25
+        ranging = adx[i] < 20
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when price crosses below Donchian middle
-            if close[i] < donchian_mid[i]:
+            # Exit on trend weakening (ADX < 20)
+            if adx[i] < 20:
                 exit_long = True
-            # Exit when volume drops below average
-            elif volume[i] < vol_ma[i]:
+            # Exit on EMA crossover reversal
+            elif ema12[i] < ema26[i]:
                 exit_long = True
             
             if exit_long:
@@ -89,11 +91,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when price crosses above Donchian middle
-            if close[i] > donchian_mid[i]:
+            # Exit on trend weakening (ADX < 20)
+            if adx[i] < 20:
                 exit_short = True
-            # Exit when volume drops below average
-            elif volume[i] < vol_ma[i]:
+            # Exit on EMA crossover reversal
+            elif ema12[i] > ema26[i]:
                 exit_short = True
             
             if exit_short:
@@ -102,17 +104,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high, weekly trend up, volume confirmation
-            long_entry = (close[i] > donchian_high[i]) and trend_up and vol_confirm
-            
-            # Short entry: price breaks below Donchian low, weekly trend down, volume confirmation
-            short_entry = (close[i] < donchian_low[i]) and trend_down and vol_confirm
-            
-            if long_entry:
-                position = 1
-                signals[i] = 0.25
-            elif short_entry:
-                position = -1
-                signals[i] = -0.25
+            # Only enter in trending markets (ADX > 25)
+            if trending:
+                # Long entry: EMA12 > EMA26
+                if ema12[i] > ema26[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: EMA12 < EMA26
+                elif ema12[i] < ema26[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
