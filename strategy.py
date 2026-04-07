@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_daily_donchian_20_breakout_1w_trend_volume_v1
-Hypothesis: On 1d timeframe, use 20-day Donchian channel breakout with weekly trend filter (EMA20 > EMA50) and volume confirmation. Enter long when price breaks above upper band with bullish weekly trend and volume > 1.5x average; enter short when price breaks below lower band with bearish weekly trend and volume > 1.5x average. Exit on opposite band touch or trend reversal. Designed for low trade frequency (7-25/year) to minimize fee drag and work in both bull/bear markets via weekly trend filter.
+4h_volume_price_action_v1
+Hypothesis: On 4h timeframe, use price action near swing highs/lows with volume confirmation and ATR filter. Enter long when price makes higher low with volume > 1.5x average; enter short when price makes lower high with volume > 1.5x average. Exit on opposite signal or ATR-based stop. Works in bull/bear via price action structure. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_daily_donchian_20_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "4h_volume_price_action_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,48 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-day Donchian channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    weekly_close = df_1w['close'].values
-    ema20_weekly = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50_weekly = pd.Series(weekly_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Align weekly EMAs to daily timeframe
-    ema20w_aligned = align_htf_to_ltf(prices, df_1w, ema20_weekly)
-    ema50w_aligned = align_htf_to_ltf(prices, df_1w, ema50_weekly)
-    
-    # Volume confirmation (20-day average)
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Swing points: higher low and lower high
+    # Higher low: current low > previous low AND previous low < low before that
+    hl = np.zeros(n, dtype=bool)
+    hh = np.zeros(n, dtype=bool)  # lower high: current high < previous high AND previous high > high before that
+    
+    for i in range(2, n):
+        if low[i] > low[i-1] and low[i-1] < low[i-2]:
+            hl[i] = True
+        if high[i] < high[i-1] and high[i-1] > high[i-2]:
+            hh[i] = True
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after 50 for weekly EMA stability
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema20w_aligned[i]) or np.isnan(ema50w_aligned[i]) or
+        if (np.isnan(atr[i]) or atr[i] <= 0 or 
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price touches or breaks below lower Donchian band
-            if close[i] <= low_20[i]:
+            # Exit on short signal (lower high with volume)
+            if hh[i] and vol_confirm:
                 exit_long = True
-            # Exit if weekly EMA20 crosses below EMA50 (trend reversal)
-            elif ema20w_aligned[i] < ema50w_aligned[i] and ema20w_aligned[i-1] >= ema50w_aligned[i-1]:
+            # Exit on ATR-based stop: price drops 2*ATR from entry
+            # Track entry price implicitly through position holding
+            elif i > 20 and close[i] < close[i-1] - 2.0 * atr[i]:
                 exit_long = True
             
             if exit_long:
@@ -76,11 +77,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price touches or breaks above upper Donchian band
-            if close[i] >= high_20[i]:
+            # Exit on long signal (higher low with volume)
+            if hl[i] and vol_confirm:
                 exit_short = True
-            # Exit if weekly EMA20 crosses above EMA50 (trend reversal)
-            elif ema20w_aligned[i] > ema50w_aligned[i] and ema20w_aligned[i-1] <= ema50w_aligned[i-1]:
+            # Exit on ATR-based stop: price rises 2*ATR from entry
+            elif i > 20 and close[i] > close[i-1] + 2.0 * atr[i]:
                 exit_short = True
             
             if exit_short:
@@ -89,17 +90,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band with bullish weekly trend and volume confirmation
-            long_entry = False
-            if (close[i] > high_20[i] and close[i-1] <= high_20[i-1] and
-                ema20w_aligned[i] > ema50w_aligned[i] and vol_confirm):
-                long_entry = True
+            # Long entry: higher low with volume confirmation
+            long_entry = hl[i] and vol_confirm
             
-            # Short entry: price breaks below lower band with bearish weekly trend and volume confirmation
-            short_entry = False
-            if (close[i] < low_20[i] and close[i-1] >= low_20[i-1] and
-                ema20w_aligned[i] < ema50w_aligned[i] and vol_confirm):
-                short_entry = True
+            # Short entry: lower high with volume confirmation
+            short_entry = hh[i] and vol_confirm
             
             if long_entry:
                 position = 1
