@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h RSI Pullback with 4h Trend and 1d Volume Confirmation
-# Hypothesis: In trending markets (4h), pullbacks to RSI(30) on 1h offer high-probability
-# entries when confirmed by above-average 1d volume. Works in bull/bear by following 4h trend.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Uses 4h for trend direction, 1d for volume filter, 1h for entry timing.
+# Strategy: 6h Weekly Pivot Range Breakout + Volume
+# Hypothesis: Breakouts beyond weekly pivot R4/S4 levels with volume confirmation
+# capture strong momentum moves. Works in both bull and bear by trading breakouts
+# in either direction. Weekly pivots provide robust support/resistance levels.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "1h_rsi_pullback_4h_trend_1d_volume_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_range_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,73 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Get 1d data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate weekly pivot points
+    close_weekly = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # 4h EMA(20) for trend filter
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Previous week's data for pivot calculation
+    prev_close = np.roll(close_weekly, 1)
+    prev_high = np.roll(high_weekly, 1)
+    prev_low = np.roll(low_weekly, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Weekly pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    width = prev_high - prev_low
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Weekly R4 and S4 (strong breakout levels)
+    R4 = pivot + width * 1.1
+    S4 = pivot - width * 1.1
+    
+    # Align weekly levels to 6h
+    R4_6h = align_htf_to_ltf(prices, df_weekly, R4)
+    S4_6h = align_htf_to_ltf(prices, df_weekly, S4)
+    
+    # Volume filter: 6h volume > 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: 1d volume > 20-day average
-        vol_ok = volume[i] > vol_avg_20_1d_aligned[i]
+        # Volume confirmation
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit: RSI > 70 or trend changes
-            if rsi[i] >= 70 or close[i] < ema_20_4h_aligned[i]:
+            # Exit: price returns below R4 or volume drops
+            if high[i] < R4_6h[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: RSI < 30 or trend changes
-            if rsi[i] <= 30 or close[i] > ema_20_4h_aligned[i]:
+            # Exit: price returns above S4 or volume drops
+            if low[i] > S4_6h[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Pullback entries in direction of 4h trend with volume confirmation
+            # Breakout beyond weekly R4/S4 with volume confirmation
             if vol_ok:
-                if close[i] > ema_20_4h_aligned[i]:  # Uptrend
-                    if rsi[i] <= 30:  # Pullback to oversold
-                        position = 1
-                        signals[i] = 0.20
-                else:  # Downtrend
-                    if rsi[i] >= 70:  # Pullback to overbought
-                        position = -1
-                        signals[i] = -0.20
+                if high[i] >= R4_6h[i] and close[i] > R4_6h[i]:  # Break above R4
+                    position = 1
+                    signals[i] = 0.25
+                elif low[i] <= S4_6h[i] and close[i] < S4_6h[i]:  # Break below S4
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
