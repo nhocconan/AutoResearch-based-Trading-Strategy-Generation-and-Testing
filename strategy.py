@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) + Daily EMA(50) Trend + Volume Spike
-# Hypothesis: Capture momentum by entering on Donchian breakouts aligned with daily trend and elevated volume.
-# Works in bull/bear by filtering false breakouts with trend + volume. Target: 20-40 trades/year (80-160 total).
-# Position size: 0.30 to balance risk and return. Uses discrete levels to minimize churn.
+# Strategy: 6h Donchian(20) Breakout + Daily Trend + Volume Spike
+# Hypothesis: 6h Donchian breakouts aligned with daily EMA(50) trend and volume spikes
+# capture momentum in both bull and bear markets. Works by filtering breakouts with trend
+# and volume to avoid false signals. Target: 20-40 trades/year (80-160 total).
 
-name = "4h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "4h"
+name = "6h_donchian_breakout_daily_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h Donchian(20) - use 20 lookback for 4h period
+    # 6h Donchian(20) - use 20 lookback for 6h period
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
