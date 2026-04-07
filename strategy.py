@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4d_vortex_volume_regime_v1
-Hypothesis: Vortex indicator identifies trend direction, volume confirms strength,
-and a chop regime filter avoids whipsaws in ranging markets. Works in bull via
-strong upward trends (VI+ > VI-), in bear via strong downward trends (VI- > VI+).
-Volume surge filters weak moves, chop filter (>61.8) avoids ranging markets.
-Targets ~25-35 trades/year by requiring trend + volume + non-chop confluence.
+4h_dual_ema_crossover_12h_volume_filter_v1
+Hypothesis: Dual EMA crossover (9/21) on 4h with volume confirmation and 12h EMA50 trend filter.
+Enters long when fast EMA crosses above slow EMA with volume > 20-period average and price above 12h EMA50.
+Enters short when fast EMA crosses below slow EMA with volume > 20-period average and price below 12h EMA50.
+Uses dual EMA for reduced whipsaw vs single EMA, volume filter ensures momentum confirmation,
+and 12h trend filter prevents counter-trend trades. Designed for 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4d_vortex_volume_regime_v1"
+name = "4h_dual_ema_crossover_12h_volume_filter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,88 +21,72 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
+    # Price and volume data
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Vortex indicator (14-period)
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    tr = np.maximum(np.abs(high - low), 
-                    np.maximum(np.abs(high - np.roll(close, 1)),
-                               np.abs(low - np.roll(close, 1))))
-    
-    # Handle first element
-    vm_plus[0] = np.abs(high[0] - low[-1]) if n > 1 else 0
-    vm_minus[0] = np.abs(low[0] - high[-1]) if n > 1 else 0
-    tr[0] = np.abs(high[0] - low[0])
-    
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
-              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
-               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Dual EMA: fast 9, slow 21
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Daily data for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Chopiness index (14-period) on daily
-    atr_daily = np.maximum(np.abs(df_1d['high'].values - df_1d['low'].values),
-                           np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
-                                      np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))))
-    atr_daily[0] = np.abs(df_1d['high'].values[0] - df_1d['low'].values[0])
-    sum_atr = pd.Series(atr_daily).rolling(window=14, min_periods=14).sum().values
-    highest = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (highest - lowest)) / np.log10(14)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean().values
     
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 12h EMA50 to 4h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(21, n):
         # Skip if data not available
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(chop_aligned[i])):
+            np.isnan(ema50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Volume confirmation: current volume above average
         vol_confirmed = volume[i] > vol_ma[i]
         
-        # Regime filter: avoid choppy markets (chop > 61.8 = ranging)
-        non_chop = chop_aligned[i] <= 61.8
+        # EMA crossover signals
+        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
+        
+        # 12h trend filter
+        above_12h_ema50 = close[i] > ema50_12h_aligned[i]
+        below_12h_ema50 = close[i] < ema50_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: trend weakens or chop increases
-            if vi_plus[i] <= vi_minus[i] or not non_chop:
+            # Exit: EMA cross down or price below 12h EMA50
+            if ema_cross_down or below_12h_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend weakens or chop increases
-            if vi_minus[i] <= vi_plus[i] or not non_chop:
+            # Exit: EMA cross up or price above 12h EMA50
+            if ema_cross_up or above_12h_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Strong uptrend + volume + non-chop
-            if vi_plus[i] > vi_minus[i] and vol_confirmed and non_chop:
+            # Long: EMA cross up with volume confirmation and above 12h EMA50
+            if ema_cross_up and vol_confirmed and above_12h_ema50:
                 position = 1
                 signals[i] = 0.25
-            # Strong downtrend + volume + non-chop
-            elif vi_minus[i] > vi_plus[i] and vol_confirmed and non_chop:
+            # Short: EMA cross down with volume confirmation and below 12h EMA50
+            elif ema_cross_down and vol_confirmed and below_12h_ema50:
                 position = -1
                 signals[i] = -0.25
     
