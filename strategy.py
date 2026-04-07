@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-1h_volume_breakout_mtf_v1
-Hypothesis: On 1h timeframe, enter long when price breaks above the 10-period high with volume > 1.5x average volume and 4h close > 1d close (bullish regime). Enter short when price breaks below the 10-period low with volume > 1.5x average volume and 4h close < 1d close (bearish regime). Exit when price breaks in opposite direction or volume dries up. Uses 4h/1d for trend regime filter and 1h for entry timing to reduce false signals. Target: 15-35 trades/year per symbol to minimize fee drag while capturing momentum bursts in both bull and bear markets.
+6h_alligator_elderray_v1
+Hypothesis: Combine Williams Alligator (trend detector) with Elder Ray (bull/bear power) on 6h timeframe.
+- Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs. Trend when Lips > Teeth > Jaw (bull) or Lips < Teeth < Jaw (bear).
+- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13). 
+- Entry: Bull Power > 0 and Bear Power < 0 with Alligator bullish alignment → long.
+         Bear Power < 0 and Bull Power > 0 with Alligator bearish alignment → short.
+- Exit: When Alligator alignment breaks (Lips crosses Teeth).
+- Use 1w trend filter: only trade in direction of weekly EMA(40) to avoid counter-trend trades.
+- Designed for 15-30 trades/year on 6h to minimize fee drag while capturing trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_breakout_mtf_v1"
-timeframe = "1h"
+name = "6h_alligator_elderray_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,79 +30,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 10-period high/low for breakout
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Williams Alligator on 6h
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values  # SMA(13,8)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values   # SMA(8,5)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values   # SMA(5,3)
     
-    # Volume average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Elder Ray components on 6h
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Get 4h and 1d data for regime filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Alligator alignment signals
+    lips_above_teeth = lips > teeth
+    teeth_above_jaw = teeth > jaw
+    lips_below_teeth = lips < teeth
+    teeth_below_jaw = teeth < jaw
     
-    if len(df_4h) < 2 or len(df_1d) < 2:
+    alligator_bullish = lips_above_teeth & teeth_above_jaw
+    alligator_bearish = lips_below_teeth & teeth_below_jaw
+    
+    # Weekly trend filter (1w EMA40)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # 4h and 1d close prices for regime
-    close_4h = df_4h['close'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema40_1w = pd.Series(close_1w).ewm(span=40, min_periods=40, adjust=False).mean().values
+    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
     
-    # Align HTF closes to 1h timeframe (with shift(1) for completed bars)
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
-    # Session filter: 8-20 UTC (already datetime64 index)
-    hours = prices.index.hour
+    # Weekly trend: price above/below EMA40
+    weekly_uptrend = close > ema40_1w_aligned
+    weekly_downtrend = close < ema40_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(high_10[i]) or np.isnan(low_10[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(close_4h_aligned[i]) or np.isnan(close_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema40_1w_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Session filter: only trade 8-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: >1.5x average volume
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below 10-period low OR volume dries up
-            if low[i] < low_10[i] or not vol_ok:
+            # Exit: Alligator bullish alignment breaks
+            if not (lips[i] > teeth[i] and teeth[i] > jaw[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 10-period high OR volume dries up
-            if high[i] > high_10[i] or not vol_ok:
+            # Exit: Alligator bearish alignment breaks
+            if not (lips[i] < teeth[i] and teeth[i] < jaw[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Bullish regime: 4h close > 1d close (bullish longer-term trend)
-                bullish_regime = close_4h_aligned[i] > close_1d_aligned[i]
-                # Bearish regime: 4h close < 1d close (bearish longer-term trend)
-                bearish_regime = close_4h_aligned[i] < close_1d_aligned[i]
-                
-                # Long: break above 10-period high in bullish regime
-                if high[i] > high_10[i] and bullish_regime:
-                    position = 1
-                    signals[i] = 0.20
-                # Short: break below 10-period low in bearish regime
-                elif low[i] < low_10[i] and bearish_regime:
-                    position = -1
-                    signals[i] = -0.20
+            # Long: Bull Power > 0, Bear Power < 0, Alligator bullish, weekly uptrend
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                alligator_bullish[i] and weekly_uptrend[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short: Bear Power < 0, Bull Power > 0, Alligator bearish, weekly downtrend
+            elif (bear_power[i] < 0 and bull_power[i] > 0 and 
+                  alligator_bearish[i] and weekly_downtrend[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
