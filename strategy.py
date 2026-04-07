@@ -1,126 +1,82 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-1h Volume-Weighted RSI with 4h Trend Filter
-Long when RSI(14) < 30 and 4h EMA(20) trending up with volume confirmation
-Short when RSI(14) > 70 and 4h EMA(20) trending down with volume confirmation
-Exit when RSI returns to neutral zone (40-60) or 4h trend flips
-Designed to capture mean reversion in trending markets with volume filter to avoid whipsaws
-Target: 15-37 trades/year on 1h timeframe
+6h 3-Day Range Breakout with Volume Confirmation
+Long when price breaks above 3-day high with above-average volume
+Short when price breaks below 3-day low with above-average volume
+Exit when price returns to middle of 3-day range
+Works in trending markets (both bull and bear) by capturing breakouts with volume confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_weighted_rsi_4h_trend_v1"
-timeframe = "1h"
+name = "6h_3day_range_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 50:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (already datetime64[ms] in index)
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Calculate 3-day lookback (12 bars for 6h timeframe: 3 days * 4 bars/day)
+    lookback = 12
     
-    # === RSI Calculation ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Rolling max/min for 3-day range
+    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Wilder's smoothing
-    alpha = 1.0 / 14
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Middle of range for exit signal
+    range_mid = (high_max + low_min) / 2.0
     
-    for i in range(14, n):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 4h Trend Filter (EMA20) ===
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate EMA20 on 4h close
-    ema_4h = np.zeros_like(close_4h)
-    ema_4h[19] = np.mean(close_4h[:20])
-    for i in range(20, len(close_4h)):
-        ema_4h[i] = (close_4h[i] * 2 / 21) + (ema_4h[i-1] * 19 / 21)
-    
-    # Align to 1h timeframe (shifted by 1 for no look-ahead)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Volume confirmation (20-period average)
-    vol_ma = np.zeros(n)
-    vol_ma[19] = np.mean(volume[:20])
-    for i in range(20, n):
-        vol_ma[i] = (volume[i] * 2 / 21) + (vol_ma[i-1] * 19 / 21)
+    # Volume confirmation - 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
-    # Generate signals
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if outside trading session
-        if not session_mask[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Skip if any data is NaN
-        if np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ratio[i]):
+    for i in range(lookback, n):
+        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral OR 4h trend turns down
-            if rsi[i] >= 40 or ema_4h_aligned[i] < close_4h[np.searchsorted(df_4h.index.values, prices.index[i]) // 16 if i >= 16 else 0]:
-                # Simplified: exit when RSI > 40 or 4h EMA < 4h close (trend weakening)
-                if rsi[i] >= 40 or ema_4h_aligned[i] < close[i]:  # Simplified trend check
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.20
-            else:
-                signals[i] = 0.20
-                
-        elif position == -1:  # Short position
-            # Exit: RSI returns to neutral OR 4h trend turns up
-            if rsi[i] <= 60 or ema_4h_aligned[i] > close[i]:
+            # Exit: price returns to middle of range
+            if close[i] <= range_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price returns to middle of range
+            if close[i] >= range_mid[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation
+            # Need expanding volume (above average)
             if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry conditions
-            # Long: RSI oversold AND 4h trend up
-            # Short: RSI overbought AND 4h trend down
-            if rsi[i] < 30 and ema_4h_aligned[i] > close[i]:
-                # 4h trend up (EMA > price)
+            # Entry: breakout of 3-day range with volume confirmation
+            if close[i] > high_max[i]:
+                # Break above 3-day high -> long
                 position = 1
-                signals[i] = 0.20
-            elif rsi[i] > 70 and ema_4h_aligned[i] < close[i]:
-                # 4h trend down (EMA < price)
+                signals[i] = 0.25
+            elif close[i] < low_min[i]:
+                # Break below 3-day low -> short
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
