@@ -1,51 +1,51 @@
 #!/usr/bin/env python3
 """
-1d_ema_trend_1w_volume_v1
-Hypothesis: On daily timeframe, use EMA(50) for trend direction and EMA(200) as long-term filter.
-Enter long when EMA(50) crosses above EMA(200) AND weekly EMA(50) is rising.
-Enter short when EMA(50) crosses below EMA(200) AND weekly EMA(50) is falling.
-Volume confirmation: daily volume > 1.5x 20-day average.
-This captures medium-term trends with institutional confirmation, reducing whipsaw.
-Target: 10-20 trades/year to minimize fee drag while capturing sustained moves.
+4h_donchian_20_1d_volume_v2
+Hypothesis: On 4-hour timeframe, enter long when price breaks above 20-period Donchian high with volume confirmation and 1d trend filter.
+Enter short when price breaks below 20-period Donchian low with volume confirmation and 1d trend filter.
+Exit when price crosses the 20-period Donchian midpoint.
+Uses 1d EMA50 as trend filter to avoid counter-trend trades. Volume > 1.5x 20-period average confirms institutional interest.
+Designed for low trade frequency (20-40/year) to minimize fee drag while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_ema_trend_1w_volume_v1"
-timeframe = "1d"
+name = "4h_donchian_20_1d_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    w_close = df_1w['close'].values
+    d_close = df_1d['close'].values
     
-    # Calculate EMA(50) and EMA(200) on daily
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False).mean().values
-    ema200 = close_series.ewm(span=200, adjust=False).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema50 = pd.Series(d_close).ewm(span=50, adjust=False).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Calculate EMA(50) on weekly for trend filter
-    w_close_series = pd.Series(w_close)
-    ema50_w = w_close_series.ewm(span=50, adjust=False).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=20, min_periods=20).max().values
+    donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Align weekly EMA(50) to daily timeframe
-    ema50_w_aligned = align_htf_to_ltf(prices, df_1w, ema50_w)
-    
-    # Volume filter: daily volume > 1.5x 20-day average
+    # Volume filter: 4h volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = vol_series / vol_ma
@@ -54,70 +54,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
-        # Skip if EMAs not available
-        if np.isnan(ema50[i]) or np.isnan(ema200[i]) or np.isnan(ema50_w_aligned[i]):
+    for i in range(20, n):  # Start after Donchian warmup
+        # Skip if any data not available
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Daily EMA crossover
-        ema50_above = ema50[i] > ema200[i]
-        ema50_below = ema50[i] < ema200[i]
-        
-        # Previous day's EMA positions for crossover detection
-        ema50_above_prev = ema50[i-1] > ema200[i-1]
-        ema50_below_prev = ema50[i-1] < ema200[i-1]
-        
-        # Weekly EMA trend
-        ema50_w_rising = ema50_w_aligned[i] > ema50_w_aligned[i-1]
-        ema50_w_falling = ema50_w_aligned[i] < ema50_w_aligned[i-1]
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_ratio[i] > 1.5
         
         if position == 1:  # Long position
-            # Exit conditions
-            exit_long = False
-            # Exit when EMA(50) crosses below EMA(200)
-            if ema50_below and ema50_above_prev:
-                exit_long = True
-            # Exit when weekly EMA(50) starts falling
-            elif ema50_w_falling:
-                exit_long = True
-            # Exit when volume drops below average
-            elif vol_ratio[i] < 1.0:
-                exit_long = True
-            
-            if exit_long:
+            # Exit when price crosses below Donchian midpoint
+            if close[i] < donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_short = False
-            # Exit when EMA(50) crosses above EMA(200)
-            if ema50_above and ema50_below_prev:
-                exit_short = True
-            # Exit when weekly EMA(50) starts rising
-            elif ema50_w_rising:
-                exit_short = True
-            # Exit when volume drops below average
-            elif vol_ratio[i] < 1.0:
-                exit_short = True
-            
-            if exit_short:
+            # Exit when price crosses above Donchian midpoint
+            if close[i] > donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA(50) crosses above EMA(200) AND weekly EMA rising AND volume confirmed
-            long_entry = ema50_above and ema50_below_prev and ema50_w_rising and vol_confirmed
+            # Long entry: price breaks above Donchian high + uptrend + volume
+            long_entry = (close[i] > donch_high[i]) and uptrend and vol_confirmed
             
-            # Short entry: EMA(50) crosses below EMA(200) AND weekly EMA falling AND volume confirmed
-            short_entry = ema50_below and ema50_above_prev and ema50_w_falling and vol_confirmed
+            # Short entry: price breaks below Donchian low + downtrend + volume
+            short_entry = (close[i] < donch_low[i]) and downtrend and vol_confirmed
             
             if long_entry:
                 position = 1
