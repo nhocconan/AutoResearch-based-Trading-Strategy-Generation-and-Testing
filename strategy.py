@@ -1,17 +1,16 @@
-# 12h_donchian20_1d_volume_regime_v1
-# Donchian breakout strategy with volume confirmation and regime filter
-# Uses daily timeframe for trend filter and 12h for entry timing
-# Long: Price breaks above Donchian(20) high + above daily EMA50 + volume > average
-# Short: Price breaks below Donchian(20) low + below daily EMA50 + volume > average
-# Designed for low frequency (target: 20-40 trades/year) to minimize fee impact
-# Works in both bull/bear via trend filter - only trades in direction of higher timeframe trend
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_volume_regime_v1"
+# Hypothesis: 12h Donchian breakout with volume confirmation and ADX trend filter
+# Uses Donchian channel breakouts (20-period) for trend continuation in both bull and bear markets
+# Volume confirmation ensures breakouts are genuine
+# ADX filter only allows trades when trend is strong (ADX > 25)
+# Designed for low frequency (target: 20-30 trades/year) to minimize fee impact
+# Works in bull markets via breakout continuation and bear markets via breakdown continuation
+
+name = "12h_donchian20_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -26,20 +25,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # ADX calculation (14-period)
+    # +DM, -DM, TR
+    high_diff = np.diff(high, prepend=high[0])
+    low_diff = np.diff(low, prepend=low[0])
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # 12h Donchian channels (20-period)
-    # We need to calculate Donchian on 12h data, but we can use the current prices directly
-    # since we're already on 12h timeframe
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,47 +53,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend filter from daily EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx[i] > 25
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > high_roll[i]
-        breakout_short = close[i] < low_roll[i]
+        # Breakout conditions
+        breakout_up = close[i] > high_20[i-1]  # Break above previous high
+        breakdown_down = close[i] < low_20[i-1]  # Break below previous low
         
-        # Exit conditions
+        # Exit conditions: reverse signal or opposite Donchian band touch
         if position == 1:  # Long position
-            # Exit on reverse breakout or trend change
-            if breakout_short or not uptrend:
+            if close[i] < low_20[i-1]:  # Reverse breakdown
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on reverse breakout or trend change
-            if breakout_long or not downtrend:
+            if close[i] > high_20[i-1]:  # Reverse breakout
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: Donchian breakout + uptrend + volume
-            if breakout_long and uptrend and vol_confirm:
-                position = 1
-                signals[i] = 0.25
-            # Short entry: Donchian breakdown + downtrend + volume
-            elif breakout_short and downtrend and vol_confirm:
-                position = -1
-                signals[i] = -0.25
+            # Only trade in strong trends with volume confirmation
+            if strong_trend and vol_confirm:
+                if breakout_up:
+                    position = 1
+                    signals[i] = 0.25  # Long breakout
+                elif breakdown_down:
+                    position = -1
+                    signals[i] = -0.25  # Short breakdown
     
     return signals
