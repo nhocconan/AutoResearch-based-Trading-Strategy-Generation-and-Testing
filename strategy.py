@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week trend filter and volume confirmation
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation
 # Long when price breaks above 1d Donchian upper band, 1w close > 1w EMA50 (uptrend), and volume > 1.5x 1d average volume
 # Short when price breaks below 1d Donchian lower band, 1w close < 1w EMA50 (downtrend), and volume > 1.5x 1d average volume
 # Exit when trend reverses (1w close crosses EMA50) or opposite breakout occurs
