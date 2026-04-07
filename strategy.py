@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and ADX trend filter
-# Long when price breaks above 4h Donchian high + daily volume > 1.3x 20-period daily average + ADX > 25
-# Short when price breaks below 4h Donchian low + daily volume > 1.3x 20-period daily average + ADX > 25
-# Exit when price crosses opposite Donchian level
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and daily RSI trend filter
+# Long when price breaks above 4h Donchian high + daily volume > 1.5x 20-day average + 4h RSI > 50
+# Short when price breaks below 4h Donchian low + daily volume > 1.5x 20-day average + 4h RSI < 50
+# Exit when price crosses opposite Donchian level or 2*ATR stoploss
 # Position size: 0.25 (25% of capital)
-# Uses daily volume for confirmation and ADX for trend strength
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_vol_adx_v2"
+name = "4h_donchian20_1d_vol_rsi_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume and ADX
+    # 1-day data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -38,38 +36,16 @@ def generate_signals(prices):
     volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Calculate ADX(14) from 1-day data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4-hour RSI (14-period) for trend filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_ma = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_ma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_ma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_ma / (tr_ma + 1e-10)
-    minus_di = 100 * minus_dm_ma / (tr_ma + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # 4-hour Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -91,7 +67,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -100,7 +76,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
+            # Stoploss: 2 * ATR
             if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
@@ -113,7 +89,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
+            # Stoploss: 2 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
@@ -126,19 +102,20 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with volume confirmation and ADX trend filter
-            # Volume filter: volume > 1.3x 20-period daily average
-            volume_filter = volume[i] > 1.3 * volume_ma_aligned[i]
-            # Trend filter: ADX > 25
-            adx_filter = adx_aligned[i] > 25
+            # Look for entries: Donchian breakout with volume confirmation and RSI trend filter
+            # Volume filter: volume > 1.5x 20-day average
+            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
+            # Trend filter: 4h RSI > 50 for long, < 50 for short
+            rsi_filter_long = rsi[i] > 50
+            rsi_filter_short = rsi[i] < 50
             
-            # Long: price breaks above Donchian high + volume filter + ADX filter
-            if close[i] > highest_high[i] and volume_filter and adx_filter:
+            # Long: price breaks above Donchian high + volume filter + RSI filter
+            if close[i] > highest_high[i] and volume_filter and rsi_filter_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low + volume filter + ADX filter
-            elif close[i] < lowest_low[i] and volume_filter and adx_filter:
+            # Short: price breaks below Donchian low + volume filter + RSI filter
+            elif close[i] < lowest_low[i] and volume_filter and rsi_filter_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
