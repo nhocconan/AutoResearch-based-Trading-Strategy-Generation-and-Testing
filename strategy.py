@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Williams Alligator + 1D Trend + Volume Confirmation
-# Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trends on 4h timeframe.
-# We trade in direction of 1-day EMA(50) when Alligator aligns (teeth > lips for long,
-# teeth < lips for short), with volume confirmation. This avoids whipsaw in ranging markets.
-# Target: 20-50 trades/year to minimize fee drag on 4h timeframe.
-name = "4h_williams_alligator_1d_trend_volume_v1"
-timeframe = "4h"
+# Strategy: 1d Donchian Breakout + 1w Trend + Volume Confirmation
+# Hypothesis: Daily Donchian(20) breakouts capture trends. Weekly EMA(20) filters direction to avoid counter-trend trades.
+# Volume > 1.5x 20-day average confirms breakout strength. Works in bull (catch breakouts) and bear (avoid false breakdowns via trend filter).
+# Target: 15-25 trades/year to minimize fee drag on daily timeframe.
+name = "1d_donchian20_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +22,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Williams Alligator on 4h timeframe
-    # Jaw: SMA(13, 8) - median price smoothed
-    # Teeth: SMA(8, 5) - median price smoothed
-    # Lips: SMA(5, 3) - median price smoothed
-    median_price = (high + low) / 2
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)  # shift forward 8 bars
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)  # shift forward 5 bars
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)  # shift forward 3 bars
+    # Daily Donchian(20)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1-day EMA(50) for trend filter
-    daily_close = df_1d['close'].values
-    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
-    daily_ema_4h = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # Weekly EMA(20) for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False).mean().values
+    weekly_ema_1d = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
@@ -54,34 +45,34 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(daily_ema_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(weekly_ema_1d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Alligator reverses (teeth < lips) or trend turns bearish
-            if teeth[i] < lips[i] or close[i] < daily_ema_4h[i]:
+            # Exit: price breaks below Donchian low or trend turns bearish
+            if close[i] < low_20[i] or close[i] < weekly_ema_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: Alligator reverses (teeth > lips) or trend turns bullish
-            if teeth[i] > lips[i] or close[i] > daily_ema_4h[i]:
+            # Exit: price breaks above Donchian high or trend turns bullish
+            if close[i] > high_20[i] or close[i] > weekly_ema_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume confirmation and Alligator alignment
+            # Require volume confirmation
             if vol_filter[i]:
-                # Long: teeth > lips (bullish alignment) + price above 1D EMA
-                if teeth[i] > lips[i] and close[i] > daily_ema_4h[i]:
+                # Long: break above Donchian high + price above weekly EMA
+                if close[i] > high_20[i] and close[i] > weekly_ema_1d[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: teeth < lips (bearish alignment) + price below 1D EMA
-                elif teeth[i] < lips[i] and close[i] < daily_ema_4h[i]:
+                # Short: break below Donchian low + price below weekly EMA
+                elif close[i] < low_20[i] and close[i] < weekly_ema_1d[i]:
                     position = -1
                     signals[i] = -0.25
     
