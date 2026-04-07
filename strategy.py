@@ -1,24 +1,22 @@
-# 12h_volatility_breakout_atr_v1
-# Hypothesis: ATR-based volatility breakout on 12h with volume confirmation.
-# Uses ATR(14) to detect volatility expansion (ATR > 1.2x 50-period MA).
-# Breakout occurs when price closes beyond ATR-based bands (close ± 2*ATR).
-# Volume confirmation requires volume > 1.5x 20-period MA.
-# Volatility breakouts capture momentum bursts in both bull and bear markets.
-# Low trade frequency expected due to strict volatility + volume + breakout confluence.
-# Position size: 0.25 when conditions met, scaled by volatility regime (0.5-1.5x).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_volatility_breakout_atr_v1"
-timeframe = "12h"
+# Hypothesis: 6h Donchian channel breakout with 1d Camarilla pivot confluence and volume confirmation
+# Long when price breaks above 6h Donchian high (20) AND trades above 1d Camarilla H3 with volume > 1.5x average
+# Short when price breaks below 6h Donchian low (20) AND trades below 1d Camarilla L3 with volume > 1.5x average
+# Uses volume filter to avoid false breakouts and Camarilla levels for institutional support/resistance
+# Designed for low trade frequency (12-37/year) to minimize fee drift while capturing strong trending moves
+# Works in bull markets via breakout continuation and in bear markets via breakdown continuation
+
+name = "6h_donchian20_1d_camarilla_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,54 +25,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ATR(14) for volatility measurement and breakout bands
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 6h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volatility expansion: ATR > 1.2x 50-period MA
-    vol_expansion = atr > (1.2 * atr_ma)
+    # 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ATR-based breakout bands: close ± 2*ATR
-    upper_band = close + (2.0 * atr)
-    lower_band = close - (2.0 * atr)
+    # Calculate Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Breakout conditions
-    breakout_up = close > upper_band
-    breakout_down = close < lower_band
+    # Camarilla formula: based on previous day's range
+    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), L3 = close - 1.0*(high-low), L4 = close - 1.5*(high-low)
+    camarilla_h3 = np.zeros(len(df_1d))
+    camarilla_l3 = np.zeros(len(df_1d))
     
-    # Volume confirmation: volume > 1.5x 20-period MA
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    for i in range(1, len(df_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        camarilla_h3[i] = prev_close + 1.0 * range_val
+        camarilla_l3[i] = prev_close - 1.0 * range_val
+    # First day has no previous data
+    camarilla_h3[0] = camarilla_h3[1] if len(df_1d) > 1 else close_1d[0]
+    camarilla_l3[0] = camarilla_l3[1] if len(df_1d) > 1 else close_1d[0]
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume average (50-period)
+    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(atr_ma[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime scaling: scale position size inversely with volatility
-        vol_ratio = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
-        vol_scale = np.clip(1.0 / vol_ratio, 0.5, 1.5)  # scale between 0.5 and 1.5
-        base_size = 0.25
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * volume_ma[i]
         
-        # Entry conditions: volatility expansion + breakout + volume confirmation
-        if vol_expansion[i] and vol_confirm[i]:
-            if breakout_up[i]:
-                signals[i] = base_size * vol_scale  # long
-            elif breakout_down[i]:
-                signals[i] = -base_size * vol_scale  # short
-            else:
-                signals[i] = 0.0
+        # Long: Donchian breakout above H3 with volume
+        if close[i] > donchian_high[i] and close[i] > camarilla_h3_aligned[i] and volume_confirm:
+            signals[i] = 0.25
+        # Short: Donchian breakdown below L3 with volume
+        elif close[i] < donchian_low[i] and close[i] < camarilla_l3_aligned[i] and volume_confirm:
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
