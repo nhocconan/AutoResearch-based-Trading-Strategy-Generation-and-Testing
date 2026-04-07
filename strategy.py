@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_volume_v2
-Hypothesis: Donchian channel breakouts with volume confirmation provide edge in both bull and bear markets.
-Long when price breaks above 20-period Donchian high with volume > 1.5x average, short when breaks below
-Donchian low with volume confirmation. Use 1-day trend filter to avoid counter-trend trades.
-Target: 20-40 trades/year to minimize fee drag.
+6h_camarilla_pivot_12h_ema_volume_v1
+Hypothesis: Camarilla pivot levels on 12h timeframe provide high-probability reversal/fade zones,
+while 12h EMA trend filter ensures we trade with the higher timeframe trend. Volume confirmation
+reduces false signals. Designed for 6h timeframe to target 15-30 trades/year, minimizing fee drag.
+Works in both bull and bear markets by following the 12h trend and using Camarilla levels for
+mean reversion in ranging conditions or breakout confirmation in trending markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_v2"
-timeframe = "4h"
+name = "6h_camarilla_pivot_12h_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -26,65 +27,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    def calculate_donchian(high, low, window):
-        upper = np.full(len(high), np.nan)
-        lower = np.full(len(high), np.nan)
-        for i in range(window-1, len(high)):
-            upper[i] = np.max(high[i-window+1:i+1])
-            lower[i] = np.min(low[i-window+1:i+1])
-        return upper, lower
-    
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Daily trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for Camarilla pivots and EMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_50d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
-    ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d)
+    
+    # Calculate typical price for 12h
+    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
+    
+    # Calculate Camarilla pivot levels (using previous day's typical price)
+    # For each 12h bar, use the previous 12h bar's high, low, close
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Camarilla levels: based on previous period's range
+    camarilla_S1 = np.zeros(len(df_12h))
+    camarilla_S2 = np.zeros(len(df_12h))
+    camarilla_S3 = np.zeros(len(df_12h))
+    camarilla_S4 = np.zeros(len(df_12h))
+    camarilla_R1 = np.zeros(len(df_12h))
+    camarilla_R2 = np.zeros(len(df_12h))
+    camarilla_R3 = np.zeros(len(df_12h))
+    camarilla_R4 = np.zeros(len(df_12h))
+    
+    for i in range(1, len(df_12h)):
+        # Previous period's high, low, close
+        ph = high_12h[i-1]
+        pl = low_12h[i-1]
+        pc = close_12h[i-1]
+        
+        range_val = ph - pl
+        if range_val > 0:
+            camarilla_S1[i] = pc - (range_val * 1.0833 / 6)
+            camarilla_S2[i] = pc - (range_val * 1.0833 / 4)
+            camarilla_S3[i] = pc - (range_val * 1.0833 / 3)
+            camarilla_S4[i] = pc - (range_val * 1.0833 / 2)
+            camarilla_R1[i] = pc + (range_val * 1.0833 / 6)
+            camarilla_R2[i] = pc + (range_val * 1.0833 / 4)
+            camarilla_R3[i] = pc + (range_val * 1.0833 / 3)
+            camarilla_R4[i] = pc + (range_val * 1.0833 / 2)
+        else:
+            camarilla_S1[i] = camarilla_S2[i] = camarilla_S3[i] = camarilla_S4[i] = pc
+            camarilla_R1[i] = camarilla_R2[i] = camarilla_R3[i] = camarilla_R4[i] = pc
+    
+    # Align Camarilla levels to 6h timeframe
+    S1_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S1)
+    S2_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S2)
+    S3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S3)
+    S4_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_S4)
+    R1_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R1)
+    R2_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R2)
+    R3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R3)
+    R4_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_R4)
+    
+    # 12h EMA for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume confirmation: volume > 20-period average on 6h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or np.isnan(ema_50d_aligned[i])):
+        if (np.isnan(S1_12h_aligned[i]) or np.isnan(R1_12h_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Conditions
-        volume_confirmed = volume[i] > (vol_ma[i] * 1.5)
-        bullish_trend = ema_50d_aligned[i] > ema_50d_aligned[i-1] if i > 0 else False
-        bearish_trend = ema_50d_aligned[i] < ema_50d_aligned[i-1] if i > 0 else False
-        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower or trend reverses
-            if close[i] < donchian_lower[i] or (bullish_trend == False and bearish_trend == True):
+            # Exit: price reaches R3 or breaks below S1
+            if close[i] >= R3_12h_aligned[i] or close[i] <= S1_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper or trend reverses
-            if close[i] > donchian_upper[i] or (bullish_trend == True and bearish_trend == False):
+            # Exit: price reaches S3 or breaks above R1
+            if close[i] <= S3_12h_aligned[i] or close[i] >= R1_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: break above Donchian upper with volume confirmation and bullish daily trend
-            if close[i] > donchian_upper[i] and volume_confirmed and bullish_trend:
+            # Fade at extreme levels (S3/R3) when price is outside normal range
+            # Long: price touches or goes below S3, volume confirmed, and above 12h EMA (bullish bias)
+            if close[i] <= S3_12h_aligned[i] and volume[i] > vol_ma[i] and close[i] > ema_12h_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short: break below Donchian lower with volume confirmation and bearish daily trend
-            elif close[i] < donchian_lower[i] and volume_confirmed and bearish_trend:
+            # Short: price touches or goes above R3, volume confirmed, and below 12h EMA (bearish bias)
+            elif close[i] >= R3_12h_aligned[i] and volume[i] > vol_ma[i] and close[i] < ema_12h_aligned[i]:
+                position = -1
+                signals[i] = -0.25
+            # Breakout continuation at S4/R4 with volume
+            # Long: price breaks above R4 with volume (bullish breakout)
+            elif close[i] >= R4_12h_aligned[i] and volume[i] > vol_ma[i] and close[i] > ema_12h_aligned[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short: price breaks below S4 with volume (bearish breakout)
+            elif close[i] <= S4_12h_aligned[i] and volume[i] > vol_ma[i] and close[i] < ema_12h_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
