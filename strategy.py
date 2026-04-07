@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_pivot_volume_v2"
-timeframe = "4h"
+name = "1d_donchian20_1w_trend_volume_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,26 +18,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA(21) for trend
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)  # shift(1) applied
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate Donchian channels (20-period)
+    # Calculate daily Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -52,8 +43,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -64,36 +54,35 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Pivot levels for entry
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        # Trend filter: price vs weekly EMA
+        above_trend = close[i] > ema_1w_aligned[i]
+        below_trend = close[i] < ema_1w_aligned[i]
         
         # Exit conditions: opposite Donchian break
         exit_long = close[i] < donchian_low[i-1]
         exit_short = close[i] > donchian_high[i-1]
         
         if position == 1:  # Long position
-            # Exit on breakdown
-            if exit_long:
+            # Exit on breakdown or trend reversal
+            if exit_long or not above_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on breakout
-            if exit_short:
+            # Exit on breakout or trend reversal
+            if exit_short or not below_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: breakout above R1 + volume confirmation
-            if breakout_up and close[i] > r1_level and vol_confirm:
+            # Enter long: breakout above Donchian + volume + above weekly trend
+            if breakout_up and vol_confirm and above_trend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: breakout below S1 + volume confirmation
-            elif breakout_down and close[i] < s1_level and vol_confirm:
+            # Enter short: breakout below Donchian + volume + below weekly trend
+            elif breakout_down and vol_confirm and below_trend:
                 position = -1
                 signals[i] = -0.25
     
