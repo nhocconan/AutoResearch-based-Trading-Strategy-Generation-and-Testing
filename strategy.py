@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_ehlers_fisher_transform_1d_trend_volume_v1
-Hypothesis: Ehlers Fisher Transform on 1d timeframe identifies extreme turning points in trend, 
-while 6s timeframe provides entry timing with volume confirmation. Works in both bull and bear 
-markets by capturing reversals at extremes. Target: 15-35 trades/year.
+12h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Camarilla pivot levels on weekly timeframe identify key support/resistance zones, 
+while 12h timeframe provides entry signals with volume confirmation and trend filter. 
+Works in both bull and bear markets by fading extremes during ranging conditions and 
+following breakouts during trending periods. Target: 12-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ehlers_fisher_transform_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,36 +26,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Fisher Transform
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate Ehlers Fisher Transform (price normalized to [-1, 1] range)
-    hl2 = (df_1d['high'] + df_1d['low']) / 2
-    # Normalize price to [-1, 1] using 10-period min/max
-    min_val = hl2.rolling(window=10, min_periods=10).min()
-    max_val = hl2.rolling(window=10, min_periods=10).max()
-    # Avoid division by zero
-    range_val = max_val - min_val
-    price_norm = np.where(range_val > 0, 2 * ((hl2 - min_val) / range_val) - 1, 0)
-    # Smooth with 4-period EMA
-    price_smoothed = pd.Series(price_norm).ewm(span=4, adjust=False).mean()
-    # Fisher Transform
-    fish = 0.5 * np.log((1 + price_smoothed) / (1 - price_smoothed + 1e-10))
-    fish = np.clip(fish, -0.999, 0.999)  # Prevent extreme values
-    # Signal line (3-period EMA of Fisher)
-    fish_signal = pd.Series(fish).ewm(span=3, adjust=False).mean()
+    # Calculate Camarilla pivot levels (based on previous week)
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    # Camarilla levels based on previous week's range
+    high_prev = df_1w['high'].shift(1)
+    low_prev = df_1w['low'].shift(1)
+    close_prev = df_1w['close'].shift(1)
     
-    # Daily EMA for trend filter (50-period)
-    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
+    # Pivot point
+    pivot = (high_prev + low_prev + close_prev) / 3
+    # Range
+    range_val = high_prev - low_prev
     
-    # Align all daily data to 6h timeframe
-    fish_aligned = align_htf_to_ltf(prices, df_1d, fish.values)
-    fish_signal_aligned = align_htf_to_ltf(prices, df_1d, fish_signal.values)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    # Camarilla levels
+    # Resistance levels
+    r1 = close_prev + (range_val * 1.1 / 12)
+    r2 = close_prev + (range_val * 1.1 / 6)
+    r3 = close_prev + (range_val * 1.1 / 4)
+    r4 = close_prev + (range_val * 1.1 / 2)
+    # Support levels
+    s1 = close_prev - (range_val * 1.1 / 12)
+    s2 = close_prev - (range_val * 1.1 / 6)
+    s3 = close_prev - (range_val * 1.1 / 4)
+    s4 = close_prev - (range_val * 1.1 / 2)
     
-    # Volume confirmation (20-period average = 5 days on 6h)
+    # Trend filter: 50-period EMA on weekly
+    ema_50 = df_1w['close'].ewm(span=50, adjust=False).mean()
+    
+    # Align all weekly data to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3.values)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3.values)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4.values)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50.values)
+    
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -62,37 +79,39 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(fish_aligned[i]) or np.isnan(fish_signal_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Fisher crosses below signal line or trend turns bearish
-            if fish_aligned[i] < fish_signal_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price reaches R3 or trend turns bearish
+            if close[i] >= r3_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: Fisher crosses above signal line or trend turns bullish
-            if fish_aligned[i] > fish_signal_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price reaches S3 or trend turns bullish
+            if close[i] <= s3_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Fisher crosses above signal line with volume and bullish trend
-            if (fish_aligned[i] > fish_signal_aligned[i] and vol_confirm and 
-                close[i] > ema_50_aligned[i]):
+            # Long entry: price bounces off S1/S2 with volume and bullish trend
+            if (vol_confirm and close[i] > ema_50_aligned[i] and
+                (close[i] <= s1_aligned[i] * 1.005 or close[i] <= s2_aligned[i] * 1.005)):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Fisher crosses below signal line with volume and bearish trend
-            elif (fish_aligned[i] < fish_signal_aligned[i] and vol_confirm and 
-                  close[i] < ema_50_aligned[i]):
+            # Short entry: price rejects R1/R2 with volume and bearish trend
+            elif (vol_confirm and close[i] < ema_50_aligned[i] and
+                  (close[i] >= r1_aligned[i] * 0.995 or close[i] >= r2_aligned[i] * 0.995)):
                 position = -1
                 signals[i] = -0.25
     
