@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_donchian_20_1d_trend_volume_v2
-Hypothesis: On 4-hour timeframe, use Donchian channel breakouts with 1-day trend filter and volume confirmation.
+12h_weekly_donchian_20_1d_trend
+Hypothesis: On 12-hour timeframe, use Donchian channel breakouts with 1-day trend filter and volume confirmation.
 Long when price breaks above 20-period Donchian high with daily EMA(50) trending up and volume > 1.5x 20-period average.
 Short when price breaks below 20-period Donchian low with daily EMA(50) trending down and volume > 1.5x 20-period average.
 Exit when price returns to the Donchian midpoint.
-Designed for 20-40 trades/year to minimize fee drag while capturing strong trends with institutional validation.
+Designed for 12-37 trades/year to minimize fee drift while capturing strong trends with institutional validation.
 Works in both bull/bear markets as Donchian channels adapt to volatility and daily trend filter avoids counter-trend trades.
 """
 
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_1d_trend_volume_v2"
-timeframe = "4h"
+name = "12h_weekly_donchian_20_1d_trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,7 +47,7 @@ def generate_signals(prices):
             daily_trend_up[i] = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
             daily_trend_down[i] = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
     
-    # Calculate Donchian Channel (20-period) on 4h timeframe
+    # Calculate Donchian Channel (20-period) on 12h timeframe
     donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
