@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout + 12h Trend + Volume Filter
-# Hypothesis: Donchian channel breakouts capture strong momentum, filtered by
-# 12h trend direction and volume confirmation. Works in both bull and bear
-# markets by using trend filter to avoid counter-trend entries.
-# Target: 20-50 trades/year to minimize fee drag on 4h timeframe.
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+# Strategy: 1h RSI Reversal with 4h Trend + Volume Filter
+# Hypothesis: RSI mean reversion on 1h timeframe filtered by 4h trend direction
+# and volume confirmation provides high-probability entries. In bull markets,
+# we buy RSI pullbacks in uptrends; in bear markets, we sell RSI bounces in
+# downtrends. Volume filter ensures momentum behind moves. Session filter
+# (08-20 UTC) reduces noise. Target: 15-35 trades/year.
+name = "1h_rsi_reversal_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,59 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
+    # RSI(14) on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Donchian channel (20-period)
-    donchian_window = 20
-    high_roll = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    low_roll = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # 4h EMA(50) for trend
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 12h EMA(34) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(donchian_window, n):
-        # Skip if required data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+    for i in range(20, n):
+        # Skip if required data not available or outside session
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(vol_ma[i]) or not session_mask[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band or trend turns bearish
-            if close[i] < low_roll[i] or close[i] < ema_12h_aligned[i]:
+            # Exit: RSI > 70 (overbought) or trend turns bearish
+            if rsi[i] > 70 or close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band or trend turns bullish
-            if close[i] > high_roll[i] or close[i] > ema_12h_aligned[i]:
+            # Exit: RSI < 30 (oversold) or trend turns bullish
+            if rsi[i] < 30 or close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume confirmation
-            if vol_filter[i]:
-                # Long breakout: price breaks above Donchian upper band with bullish trend
-                if close[i] > high_roll[i] and close[i] > ema_12h_aligned[i]:
+            # Require volume confirmation and session
+            if vol_filter[i] and session_mask[i]:
+                # Long setup: RSI < 30 (oversold) in uptrend
+                if rsi[i] < 30 and close[i] > ema_4h_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short breakout: price breaks below Donchian lower band with bearish trend
-                elif close[i] < low_roll[i] and close[i] < ema_12h_aligned[i]:
+                    signals[i] = 0.20
+                # Short setup: RSI > 70 (overbought) in downtrend
+                elif rsi[i] > 70 and close[i] < ema_4h_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
