@@ -1,115 +1,97 @@
 #!/usr/bin/env python3
 """
-4h_cci_trend_reversal_v1
-Hypothesis: On 4h timeframe, enter long when CCI crosses above -100 (bullish momentum) with above-average volume and price above 50-period EMA, enter short when CCI crosses below +100 (bearish momentum) with above-average volume and price below 50-period EMA. Exit when CCI crosses zero (momentum exhaustion). Uses 1d CCI trend filter to avoid counter-trend trades. Designed for 20-50 trades/year to minimize fee drag while capturing momentum reversals in both bull and bear markets.
+1d_weekly_rsi_extreme_reversion_v1
+Hypothesis: On daily timeframe, enter long when weekly RSI(14) < 30 (oversold) with daily RSI < 50 and price above 200-day EMA, enter short when weekly RSI(14) > 70 (overbought) with daily RSI > 50 and price below 200-day EMA. Exit when weekly RSI returns to neutral zone (40-60). Uses weekly RSI to avoid counter-trend trades in strong trends. Designed for 7-25 trades/year (30-100 total) to minimize fee drag while capturing mean reversion in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_trend_reversal_v1"
-timeframe = "4h"
+name = "1d_weekly_rsi_extreme_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate 4h CCI (20-period)
-    if len(close) < 20:
+    # Calculate 200-day EMA for trend filter
+    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
+    
+    # Calculate daily RSI(14)
+    if len(close) < 15:
         return np.zeros(n)
     
-    # Typical Price
-    tp = (high + low + close) / 3.0
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Moving Average of TP
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Mean Deviation
-    md = pd.Series(tp).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_daily = 100 - (100 / (1 + rs))
     
-    # CCI
-    cci = (tp - ma_tp) / (0.015 * md)
-    
-    # Calculate 50-period EMA for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d CCI for trend filter (avoid counter-trend trades)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate weekly RSI(14) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 15:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d Typical Price
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    delta_1w = np.diff(close_1w, prepend=close_1w[0])
+    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
+    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
     
-    # 1d MA of TP
-    ma_tp_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False).mean().values
     
-    # 1d Mean Deviation
-    md_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
+    rs_1w = avg_gain_1w / (avg_loss_1w + 1e-10)
+    rsi_weekly = 100 - (100 / (1 + rs_1w))
     
-    # 1d CCI
-    cci_1d = (tp_1d - ma_tp_1d) / (0.015 * md_1d)
-    
-    # Align indicators to 4h timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Align weekly RSI to daily timeframe
+    rsi_weekly_aligned = align_htf_to_ltf(prices, df_1w, rsi_weekly)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(rsi_daily[i]) or np.isnan(rsi_weekly_aligned[i]) or 
+            np.isnan(ema_200[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: above average volume
-        vol_ok = volume[i] > vol_ma[i]
-        
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero (momentum exhaustion)
-            if cci[i] < 0 and cci[i-1] >= 0:
+            # Exit: weekly RSI returns to neutral zone (40-60)
+            if rsi_weekly_aligned[i] >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero (momentum exhaustion)
-            if cci[i] > 0 and cci[i-1] <= 0:
+            # Exit: weekly RSI returns to neutral zone (40-60)
+            if rsi_weekly_aligned[i] <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Long: CCI crosses above -100 with price above EMA50 and 1d CCI bullish
-                if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema_50[i] and cci_1d_aligned[i] > 0:
-                    position = 1
-                    signals[i] = 0.25
-                # Short: CCI crosses below +100 with price below EMA50 and 1d CCI bearish
-                elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema_50[i] and cci_1d_aligned[i] < 0:
-                    position = -1
-                    signals[i] = -0.25
+            # Long: weekly RSI < 30 (oversold) + daily RSI < 50 + price above EMA200
+            if (rsi_weekly_aligned[i] < 30 and rsi_daily[i] < 50 and 
+                close[i] > ema_200[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short: weekly RSI > 70 (overbought) + daily RSI > 50 + price below EMA200
+            elif (rsi_weekly_aligned[i] > 70 and rsi_daily[i] > 50 and 
+                  close[i] < ema_200[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
