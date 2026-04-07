@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-6h_keltner_channel_1d_trend_volume_v1
-Hypothesis: On 6-hour timeframe, use Keltner Channel breakouts with daily trend filter and volume confirmation.
-Long when price breaks above KC upper band with daily EMA(50) trending up and volume > 1.8x 20-period average.
-Short when price breaks below KC lower band with daily EMA(50) trending down and volume > 1.8x 20-period average.
-Exit when price returns to the KC middle line (EMA).
-Designed for 15-30 trades/year to minimize fee drag while capturing strong trends with institutional validation.
-Works in both bull/bear markets as Keltner Channels adapt to volatility and daily trend filter avoids counter-trend trades.
+12h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 12-hour timeframe, use daily Camarilla pivot levels for mean reversion in choppy markets.
+Long when price touches S3 level with volume > 2x average and closes above it.
+Short when price touches R3 level with volume > 2x average and closes below it.
+Exit when price reaches the opposite pivot level or closes at daily VWAP.
+Works in both bull/bear markets as Camarilla adapts to volatility and volume confirmation filters false signals.
+Designed for ~20-30 trades/year to minimize fee drag while capturing mean reversion moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_channel_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -28,93 +28,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
+    # Calculate daily VWAP for exit
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
+    
+    # Calculate Camarilla pivot levels for each day
+    # Camarilla: 
+    # H4 = Close + 1.5 * (High - Low)
+    # H3 = Close + 1.0 * (High - Low)
+    # H2 = Close + 0.5 * (High - Low)
+    # H1 = Close + 0.25 * (High - Low)
+    # L1 = Close - 0.25 * (High - Low)
+    # L2 = Close - 0.5 * (High - Low)
+    # L3 = Close - 1.0 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Determine daily trend direction (using EMA slope)
-    daily_trend_up = np.zeros(len(ema_50_1d_aligned), dtype=bool)
-    daily_trend_down = np.zeros(len(ema_50_1d_aligned), dtype=bool)
-    for i in range(1, len(ema_50_1d_aligned)):
-        if not np.isnan(ema_50_1d_aligned[i]) and not np.isnan(ema_50_1d_aligned[i-1]):
-            daily_trend_up[i] = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
-            daily_trend_down[i] = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
+    # Calculate pivot levels
+    hl_range_1d = high_1d - low_1d
+    r3_1d = close_1d + 1.0 * hl_range_1d  # H3
+    r2_1d = close_1d + 0.5 * hl_range_1d  # H2
+    r1_1d = close_1d + 0.25 * hl_range_1d  # H1
+    s1_1d = close_1d - 0.25 * hl_range_1d  # L1
+    s2_1d = close_1d - 0.5 * hl_range_1d  # L2
+    s3_1d = close_1d - 1.0 * hl_range_1d  # L3
     
-    # Calculate Keltner Channel (20-period, ATR multiplier 2.0) on 6h timeframe
-    kc_period = 20
-    atr_period = 20
+    # Align all levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    vwap_12h = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    # True Range components
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First element has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR calculation
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # EMA center
-    ema_center = pd.Series(close).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
-    
-    # Keltner Bands
-    kc_upper = ema_center + 2.0 * atr
-    kc_lower = ema_center - 2.0 * atr
-    
-    # Volume filter: 20-period average
+    # Volume filter: 24-period average (2 days of 12h bars)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(kc_period, atr_period, 50), n):
+    for i in range(24, n):
         # Skip if data not available
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(vwap_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation (higher threshold for fewer trades)
-        vol_ok = volume[i] > 1.8 * vol_ma[i]
+        # Volume confirmation: at least 2x average
+        vol_ok = volume[i] > 2.0 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to EMA center
-            if close[i] <= ema_center[i]:
+            # Exit: price reaches S1 level or closes at VWAP
+            if close[i] <= s1_12h[i] or close[i] >= vwap_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to EMA center
-            if close[i] >= ema_center[i]:
+            # Exit: price reaches R1 level or closes at VWAP
+            if close[i] >= r1_12h[i] or close[i] <= vwap_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume confirmation and daily trend alignment
+            # Only enter with volume confirmation
             if vol_ok:
-                # Long: price breaks above KC upper band with daily uptrend
-                if (close[i] > kc_upper[i] and close[i-1] <= kc_upper[i-1] and 
-                    daily_trend_up[i]):
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price breaks below KC lower band with daily downtrend
-                elif (close[i] < kc_lower[i] and close[i-1] >= kc_lower[i-1] and 
-                      daily_trend_down[i]):
-                    position = -1
-                    signals[i] = -0.25
+                # Long: price touches S3 level and closes above it
+                if close[i] <= s3_12h[i] and close[i] > s3_12h[i] * 0.999:  # touched S3
+                    # Additional confirmation: price must close above the touch point
+                    if close[i] > low[i]:  # closed above low of the bar
+                        position = 1
+                        signals[i] = 0.25
+                # Short: price touches R3 level and closes below it
+                elif close[i] >= r3_12h[i] and close[i] < r3_12h[i] * 1.001:  # touched R3
+                    # Additional confirmation: price must close below the touch point
+                    if close[i] < high[i]:  # closed below high of the bar
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
