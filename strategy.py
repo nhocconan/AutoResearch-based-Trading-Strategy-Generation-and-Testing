@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with daily volume confirmation and ADX trend filter
-# Uses Donchian(20) for breakout signals, daily volume > 1.5x 20-period average for confirmation,
-# and ADX(14) > 25 to ensure trending markets. Designed for low trade frequency (20-50/year)
-# to minimize fee drag while capturing strong trends in both bull and bear markets.
+# Hypothesis: 6h Donchian breakout with daily pivot direction and volume confirmation
+# Uses 6h Donchian channel (20) for breakout signals, daily pivot points (from 1d) for trend direction,
+# and 6h volume spike confirmation to filter false breakouts. Works in bull markets via breakout
+# continuation and in bear markets via mean reversion at extreme pivot levels.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
-name = "4h_donchian20_daily_volume_adx_v1"
-timeframe = "4h"
+name = "6h_donchian20_daily_pivot_volume_v4"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -23,76 +24,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for volume and ADX filters
+    # Daily data for pivot points and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 6h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily volume average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Daily ADX(14)
+    # Calculate daily pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align daily pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Smoothed values
-    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate 6h volume moving average and volume spike filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    vol_spike = vol_ratio > 1.5  # Volume 50% above average
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: daily volume > 1.5x 20-day average
-        vol_1d_current = df_1d['volume'].values[i // 24] if i // 24 < len(df_1d) else vol_1d[-1]
-        vol_ma_current = vol_ma_1d[i // 24] if i // 24 < len(vol_ma_1d) else vol_ma_1d[-1]
-        volume_confirm = vol_1d_current > 1.5 * vol_ma_current if vol_ma_current > 0 else False
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
         
-        # ADX trend filter: ADX > 25
-        trend_filter = adx_aligned[i] > 25
+        # Trend filter from daily pivot: price above/below pivot indicates trend
+        above_pivot = close[i] > pivot_aligned[i]
+        below_pivot = close[i] < pivot_aligned[i]
         
-        # Breakout signals
-        long_breakout = close[i] > highest_high[i]
-        short_breakout = close[i] < lowest_low[i]
+        # Mean reversion conditions at extreme pivot levels (S3/R3)
+        at_s3 = close[i] <= s3_aligned[i] * 1.005  # Near S3 with small buffer
+        at_r3 = close[i] >= r3_aligned[i] * 0.995  # Near R3 with small buffer
         
-        # Generate signals with confirmation
-        if long_breakout and volume_confirm and trend_filter:
-            signals[i] = 0.30
-        elif short_breakout and volume_confirm and trend_filter:
-            signals[i] = -0.30
+        # Volume confirmation
+        vol_ok = vol_spike[i]
+        
+        # Long signals: bullish breakout with trend OR mean reversion at S3
+        if (breakout_up and above_pivot and vol_ok) or (at_s3 and below_pivot and vol_ok):
+            signals[i] = 0.25
+        # Short signals: bearish breakout with trend OR mean reversion at R3
+        elif (breakout_down and below_pivot and vol_ok) or (at_r3 and above_pivot and vol_ok):
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
