@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Williams Alligator + Volume Spike + Chop Filter
-# Hypothesis: Williams Alligator (Jaw/Teeth/Lips SMAs) identifies trend direction and strength.
-# Combined with volume spikes to confirm momentum and Choppiness Index to filter ranging markets,
-# this strategy captures strong trends while avoiding whipsaws. The Alligator's convergence/divergence
-# provides clear entry/exit signals. Works in both bull and bear markets by following the dominant trend.
-# Target: 15-25 trades/year to minimize fee drag on daily timeframe.
-name = "1d_williams_alligator_volume_chop_v1"
-timeframe = "1d"
+# Strategy: 6h Camarilla Pivot Reversal with Volume Confirmation
+# Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance.
+# Price rejection at these levels with volume confirmation provides high-probability
+# reversal entries. Works in both bull and bear markets by fading extremes.
+# Uses 12h trend filter to avoid counter-trend trades. Target: 20-40 trades/year.
+name = "6h_camarilla_pivot_reversal_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +23,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: three SMAs with different periods and shifts
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMA, shifted 3 bars
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Camarilla levels from previous day
+    # Need daily high, low, close
+    # Group by day using date from open_time
+    dates = pd.to_datetime(prices['open_time']).date
+    unique_dates = np.unique(dates)
     
-    # Volume spike confirmation: volume > 1.5x 20-day average
+    # Arrays to store daily pivot levels for each bar
+    R3 = np.full(n, np.nan)
+    S3 = np.full(n, np.nan)
+    R4 = np.full(n, np.nan)
+    S4 = np.full(n, np.nan)
+    PP = np.full(n, np.nan)
+    
+    # Calculate for each day
+    for d in unique_dates:
+        mask = (dates == d)
+        if not np.any(mask):
+            continue
+        
+        # Get session high/low/close for the day
+        # Use first and last bar of the day for OHLC (simplified)
+        day_high = np.max(high[mask])
+        day_low = np.min(low[mask])
+        day_close = close[mask][-1]  # Last bar of the day
+        
+        # Camarilla calculations
+        range_val = day_high - day_low
+        if range_val <= 0:
+            continue
+            
+        PP_val = (day_high + day_low + day_close) / 3
+        R3_val = PP_val + (range_val * 1.1 / 4)
+        S3_val = PP_val - (range_val * 1.1 / 4)
+        R4_val = PP_val + (range_val * 1.1 / 2)
+        S4_val = PP_val - (range_val * 1.1 / 2)
+        
+        # Assign to all bars of this day
+        R3[mask] = R3_val
+        S3[mask] = S3_val
+        R4[mask] = R4_val
+        S4[mask] = S4_val
+        PP[mask] = PP_val
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    vol_filter = volume > (vol_ma * 1.5)
     
-    # Choppiness Index (14) - range detection
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.zeros(n)
-    for i in range(14, n):
-        if max_high[i] - min_low[i] > 0:
-            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when no range
-    
-    # Get weekly trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h trend filter (EMA 21)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=21, adjust=False).mean().values
-    weekly_ema_1d = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(chop[i]) or np.isnan(weekly_ema_1d[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(PP[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if position == 1:  # Long position
-            # Exit: Alligator lines converge (teeth < lips) or weekly trend turns bearish
-            if teeth[i] < lips[i] or close[i] < weekly_ema_1d[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25  # Maintain long position
-        elif position == -1:  # Short position
-            # Exit: Alligator lines converge (teeth > lips) or weekly trend turns bullish
-            if teeth[i] > lips[i] or close[i] > weekly_ema_1d[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25  # Maintain short position
-        else:  # Flat, look for entry
-            # Only trade in trending markets (CHOP < 61.8) with volume spike
-            if chop[i] < 61.8 and volume_spike[i]:
-                # Enter long: Lips > Teeth > Jaw (bullish alignment) and price above weekly EMA
-                if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > weekly_ema_1d[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Enter short: Lips < Teeth < Jaw (bearish alignment) and price below weekly EMA
-                elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < weekly_ema_1d[i]:
-                    position = -1
-                    signals[i] = -0.25
+        # Long setup: price rejects S3 with volume, bullish 12h trend
+        if (low[i] <= S3[i] and close[i] > S3[i] and  # Rejection from S3
+            vol_filter[i] and                         # Volume confirmation
+            close[i] > ema_12h_aligned[i]):           # Bullish 12h trend
+            signals[i] = 0.25
+        
+        # Short setup: price rejects R3 with volume, bearish 12h trend
+        elif (high[i] >= R3[i] and close[i] < R3[i] and  # Rejection from R3
+              vol_filter[i] and                          # Volume confirmation
+              close[i] < ema_12h_aligned[i]):            # Bearish 12h trend
+            signals[i] = -0.25
     
     return signals
