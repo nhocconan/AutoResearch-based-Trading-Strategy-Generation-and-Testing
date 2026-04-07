@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Williams %R + 1d EMA Trend + Volume Spike
-# Hypothesis: Williams %R identifies overbought/oversold conditions on 6h.
-# In trending markets (1d EMA slope), we take pullbacks in trend direction.
-# In ranging markets (flat 1d EMA), we fade extremes.
-# Volume spike confirms conviction. Works in bull/bear by following trend.
+# Strategy: 12h Camarilla Pivot + Daily Trend + Volume Spike
+# Hypothesis: Camarilla pivot levels on daily timeframe act as strong support/resistance.
+# Fade at R3/S3 levels when daily EMA confirms range-bound market; breakout continuation at R4/S4.
+# Works in both bull and bear by following daily trend direction for breakouts and fading extremes in ranges.
 # Target: 15-30 trades/year (60-120 total over 4 years).
 
-name = "6h_williams_r_1d_ema_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,42 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA(30) for trend filter
+    ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False).mean().values
+    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # 1d EMA slope for trend vs range detection
-    ema_slope = np.zeros_like(ema_50_1d_aligned)
-    ema_slope[1:] = (ema_50_1d_aligned[1:] - ema_50_1d_aligned[:-1]) / ema_50_1d_aligned[:-1]
+    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
+    prev_day_open = df_1d['open'].shift(1).values
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
     
-    # Williams %R on 6h (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range=0
-    )
+    # Align daily data to 12h
+    prev_day_open_12h = align_htf_to_ltf(prices, df_1d, prev_day_open)
+    prev_day_high_12h = align_htf_to_ltf(prices, df_1d, prev_day_high)
+    prev_day_low_12h = align_htf_to_ltf(prices, df_1d, prev_day_low)
+    prev_day_close_12h = align_htf_to_ltf(prices, df_1d, prev_day_close)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Camarilla levels calculation
+    range_1d = prev_day_high_12h - prev_day_low_12h
+    close_1d = prev_day_close_12h
+    
+    # Calculate levels
+    h4 = close_1d + range_1d * 1.1 / 2
+    h3 = close_1d + range_1d * 1.1 / 4
+    h2 = close_1d + range_1d * 1.1 / 6
+    h1 = close_1d + range_1d * 1.1 / 12
+    l1 = close_1d - range_1d * 1.1 / 12
+    l2 = close_1d - range_1d * 1.1 / 6
+    l3 = close_1d - range_1d * 1.1 / 4
+    l4 = close_1d - range_1d * 1.1 / 2
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    vol_spike = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(ema_slope[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(h4[i]) or np.isnan(l4[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(prev_day_close_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -68,42 +79,40 @@ def generate_signals(prices):
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: Williams %R exits overbought OR trend turns bearish
-            if williams_r[i] > -20 or ema_slope[i] < -0.001:
+            # Exit: price crosses below H3 or trend turns bearish
+            if close[i] < h3[i] or close[i] < ema_30_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: Williams %R exits oversold OR trend turns bullish
-            if williams_r[i] < -80 or ema_slope[i] > 0.001:
+            # Exit: price crosses above L3 or trend turns bullish
+            if close[i] > l3[i] or close[i] > ema_30_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Determine market regime: trending vs ranging
-                is_trending = abs(ema_slope[i]) > 0.0005  # significant slope
-                
-                if is_trending:
-                    # Trending market: pullback entry in trend direction
-                    # Long: pullback to oversold in uptrend
-                    if williams_r[i] < -80 and ema_slope[i] > 0.001:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short: pullback to overbought in downtrend
-                    elif williams_r[i] > -20 and ema_slope[i] < -0.001:
+                # Fade at extreme levels in ranging market (price near H3/L3 but not beyond H4/L4)
+                # Only fade if daily EMA is flat (range-bound) - check if price is near EMA
+                ema_distance = abs(close[i] - ema_30_1d_aligned[i]) / ema_30_1d_aligned[i]
+                if ema_distance < 0.02:  # Price near daily EMA suggests ranging market
+                    # Fade at H3 (sell) or L3 (buy)
+                    if close[i] > h3[i] and close[i] < h4[i]:
                         position = -1
                         signals[i] = -0.25
-                else:
-                    # Ranging market: fade extremes
-                    # Long at oversold
-                    if williams_r[i] < -85:
+                    elif close[i] < l3[i] and close[i] > l4[i]:
                         position = 1
                         signals[i] = 0.25
-                    # Short at overbought
-                    elif williams_r[i] > -15:
+                else:
+                    # Trending market: breakout continuation
+                    # Buy breakout above H4 in uptrend
+                    if close[i] > h4[i] and close[i] > ema_30_1d_aligned[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    # Sell breakdown below L4 in downtrend
+                    elif close[i] < l4[i] and close[i] < ema_30_1d_aligned[i]:
                         position = -1
                         signals[i] = -0.25
     
