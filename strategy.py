@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: 4h Donchian channel breakouts in the direction of the daily trend 
-with volume confirmation capture sustained moves in both bull and bear markets.
-Daily trend filter prevents counter-trend trades, reducing whipsaw in ranging markets.
-Volume ensures breakouts have institutional participation.
-Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
-Works in bull markets via breakout momentum and in bear markets via breakdowns.
+1d_weekly_rsi_momentum_v1
+Hypothesis: Weekly RSI with momentum confirmation on 1d timeframe captures intermediate-term trend reversals with high accuracy. 
+Enter long when weekly RSI crosses above 30 with bullish daily momentum (close > daily SMA20), 
+enter short when weekly RSI crosses below 70 with bearish daily momentum (close < daily SMA20). 
+Weekly timeframe filters out short-term noise and prevents counter-trend trades. 
+Target: 10-20 trades/year on 1d timeframe to minimize fee drag while maintaining signal quality.
+Works in both bull and bear markets by following weekly momentum extremes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_rsi_momentum_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,66 +23,69 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Daily EMA50 for trend direction
-    close_1d = df_1d['close'].values
-    ema_50d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
-    ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d)
+    # Weekly RSI(14) calculation
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Donchian channel (20-period) on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14w = 100 - (100 / (1 + rs))
+    
+    # Daily SMA20 for momentum confirmation
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     # Volume confirmation: volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Align weekly RSI to 1d timeframe
+    rsi_14w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14w)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(ema_50d_aligned[i]) or np.isnan(close[i]) or 
-            np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(rsi_14w_aligned[i]) or np.isnan(close[i]) or 
+            np.isnan(volume[i]) or np.isnan(sma_20[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        donchian_high = highest_20[i]
-        donchian_low = lowest_20[i]
-        daily_trend = ema_50d_aligned[i]
+        rsi_weekly = rsi_14w_aligned[i]
         vol_confirmed = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low or trend turns bearish
-            if close[i] < donchian_low or close[i] < daily_trend:
+            # Exit: weekly RSI falls below 50 or momentum turns bearish
+            if rsi_weekly < 50 or close[i] < sma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or trend turns bullish
-            if close[i] > donchian_high or close[i] > daily_trend:
+            # Exit: weekly RSI rises above 50 or momentum turns bullish
+            if rsi_weekly > 50 or close[i] > sma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high with bullish trend and volume
-            if close[i] > donchian_high and close[i] > daily_trend and vol_confirmed:
+            # Long: weekly RSI crosses above 30 with bullish momentum and volume
+            if i > 50 and rsi_14w_aligned[i-1] <= 30 and rsi_weekly > 30 and close[i] > sma_20[i] and vol_confirmed:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low with bearish trend and volume
-            elif close[i] < donchian_low and close[i] < daily_trend and vol_confirmed:
+            # Short: weekly RSI crosses below 70 with bearish momentum and volume
+            elif i > 50 and rsi_14w_aligned[i-1] >= 70 and rsi_weekly < 70 and close[i] < sma_20[i] and vol_confirmed:
                 position = -1
                 signals[i] = -0.25
     
