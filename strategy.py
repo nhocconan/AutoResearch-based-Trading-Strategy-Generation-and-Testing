@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1w_trend_volume_v1
-Hypothesis: On 12h timeframe, use weekly Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) with EMA trend filter and volume confirmation. Enter long when price crosses above R3 with EMA20 > EMA50 and volume > 1.5x average; enter short when price crosses below S3 with EMA20 < EMA50 and volume > 1.5x average. Exit when price reaches opposite R4/S4 level or EMA crossover reverses. Uses weekly pivot structure to capture multi-day moves, with EMA filter to avoid counter-trend trades. Targets 15-30 trades/year to minimize fee drift.
+1h_bollinger_squeeze_4h1d_trend_volume_v1
+Hypothesis: On 1h timeframe, use Bollinger Band squeeze (low volatility breakout) with 4h trend filter (EMA50/EMA200) and 1d volume confirmation. Enter long when price breaks above upper Bollinger Band with 4h EMA50 > EMA200 and 1d volume > 1.5x average; enter short when price breaks below lower Bollinger Band with 4h EMA50 < EMA200 and 1d volume > 1.5x average. Exit when price returns to middle Bollinger Band or trend reverses. Bollinger squeeze captures low volatility breakouts that work in both bull and bear markets, while 4h trend filter ensures we trade with the higher timeframe momentum. Volume confirmation avoids false breakouts. Targets 15-30 trades/year to minimize fee drag on 1h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1w_trend_volume_v1"
-timezone = "12h"
+name = "1h_bollinger_squeeze_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -23,99 +23,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA20 and EMA50 for trend filter
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Bollinger Bands (20, 2) on 1h
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean().values
+    dev = close_s.rolling(window=20, min_periods=20).std().values
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
     
-    # Calculate weekly Camarilla pivot levels from prior week
-    # Using weekly high, low, close from 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 4h EMA50 and EMA200 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
         return np.zeros(n)
     
-    ph = df_1w['high'].values  # previous week high
-    pl = df_1w['low'].values   # previous week low
-    pc = df_1w['close'].values # previous week close
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200_4h = pd.Series(df_4h['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # Calculate Camarilla levels for each week
-    camarilla_h4 = pc + 1.1 * (ph - pl) / 2
-    camarilla_l4 = pc - 1.1 * (ph - pl) / 2
-    camarilla_h3 = pc + 1.1 * (ph - pl) / 4
-    camarilla_l3 = pc - 1.1 * (ph - pl) / 4
+    # 1d volume average for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align to 12h timeframe (shifted by 1 week for look-ahead prevention)
-    h4_12h = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    h3_12h = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    
-    # Volume confirmation (24-period average on 12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or
+            np.isnan(vol_ma_1d_aligned[i]) or vol_ma_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 24-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current 1h volume > 1.5x 20-day average 1d volume
+        vol_confirm = volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price reaches L4 level (opposite extreme)
-            if close[i] <= l4_12h[i]:
+            # Exit if price returns to middle Bollinger Band (mean reversion)
+            if close[i] <= basis[i]:
                 exit_long = True
-            # Exit if EMA20 crosses below EMA50 (trend reversal)
-            elif ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1]:
+            # Exit if 4h trend reverses (EMA50 < EMA200)
+            elif ema50_4h_aligned[i] < ema200_4h_aligned[i]:
                 exit_long = True
             
             if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price reaches H4 level (opposite extreme)
-            if close[i] >= h4_12h[i]:
+            # Exit if price returns to middle Bollinger Band (mean reversion)
+            if close[i] >= basis[i]:
                 exit_short = True
-            # Exit if EMA20 crosses above EMA50 (trend reversal)
-            elif ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1]:
+            # Exit if 4h trend reverses (EMA50 > EMA200)
+            elif ema50_4h_aligned[i] > ema200_4h_aligned[i]:
                 exit_short = True
             
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price crosses above H3 with EMA20 > EMA50 and volume confirmation
+            # Long entry: price breaks above upper Bollinger Band with 4h uptrend and volume confirmation
             long_entry = False
-            if (close[i] > h3_12h[i] and close[i-1] <= h3_12h[i-1] and
-                ema20[i] > ema50[i] and vol_confirm):
+            if (close[i] > upper[i] and close[i-1] <= upper[i-1] and
+                ema50_4h_aligned[i] > ema200_4h_aligned[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: price crosses below L3 with EMA20 < EMA50 and volume confirmation
+            # Short entry: price breaks below lower Bollinger Band with 4h downtrend and volume confirmation
             short_entry = False
-            if (close[i] < l3_12h[i] and close[i-1] >= l3_12h[i-1] and
-                ema20[i] < ema50[i] and vol_confirm):
+            if (close[i] < lower[i] and close[i-1] >= lower[i-1] and
+                ema50_4h_aligned[i] < ema200_4h_aligned[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
