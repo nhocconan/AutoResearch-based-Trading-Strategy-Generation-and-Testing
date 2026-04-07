@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6H Weekly Pivot Breakout with Volume Confirmation
-Long when price breaks above weekly R1 with expanding volume
-Short when price breaks below weekly S1 with expanding volume
-Exit when price crosses back to weekly pivot point
-Weekly pivot levels provide key institutional levels that work in both bull and bear markets
+12h Parabolic SAR with Volume Filter
+Long when Parabolic SAR flips below price with above-average volume
+Short when Parabolic SAR flips above price with above-average volume
+Exit when SAR flips opposite direction
+Parabolic SAR works in trending markets (both bull and bear) and volume filter reduces whipsaws
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout_volume_1w_trend_v1"
-timeframe = "6h"
+name = "12h_parabolic_sar_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,26 +21,56 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly pivot levels from 1d data ===
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate weekly pivot using last 5 days (approximate week)
-    high_5d = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).mean().values
+    # === Parabolic SAR ===
+    # Initialize
+    psar = np.zeros(n)
+    bull = True  # True for long, False for short
+    af = 0.02    # acceleration factor
+    max_af = 0.2
+    ep = high[0] if bull else low[0]  # extreme point
+    psar[0] = low[0] if bull else high[0]
     
-    pivot = (high_5d + low_5d + close_5d) / 3
-    r1 = 2 * pivot - low_5d
-    s1 = 2 * pivot - high_5d
-    
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate SAR
+    for i in range(1, n):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is within prior period's range
+            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is within prior period's range
+            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+        
+        # Reverse if price crosses SAR
+        reverse = False
+        if bull and low[i] < psar[i]:
+            bull = False
+            reverse = True
+            ep = low[i]
+            af = 0.02
+        elif not bull and high[i] > psar[i]:
+            bull = True
+            reverse = True
+            ep = high[i]
+            af = 0.02
+        
+        if reverse:
+            psar[i] = ep  # SAR at reversal point is the extreme point
+        else:
+            # Update extreme point and acceleration factor
+            if bull:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,39 +80,38 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ratio[i])):
+        if np.isnan(psar[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below pivot
-            if close[i] < pivot_aligned[i]:
+            # Exit: SAR flips above price (trend reversal)
+            if psar[i] > close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above pivot
-            if close[i] > pivot_aligned[i]:
+            # Exit: SAR flips below price (trend reversal)
+            if psar[i] < close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Need expanding volume (above average)
-            if vol_ratio[i] < 1.5:
+            if vol_ratio[i] < 1.3:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Weekly pivot breakout with volume confirmation
-            if close[i] > r1_aligned[i]:
-                # Break above R1 -> long
+            # Entry: SAR flip with volume confirmation
+            if close[i] > psar[i]:
+                # Price above SAR -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < s1_aligned[i]:
-                # Break below S1 -> short
+            elif close[i] < psar[i]:
+                # Price below SAR -> short
                 position = -1
                 signals[i] = -0.25
     
