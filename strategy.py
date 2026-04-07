@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1d_trend_volume_v2
-Hypothesis: On 4-hour timeframe, use Donchian(20) breakouts with trend filter from 1-day EMA200 and volume confirmation. Enter long on upper band breakout in uptrend with volume > 1.5x average, short on lower band breakdown in downtrend with volume > 1.5x average. Exit on opposite band touch. Designed for low frequency (20-40 trades/year) to avoid fee drag while capturing trend continuation. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) by using 1-day trend filter.
+12h_donchian_20_1d_trend_volume_v2
+Hypothesis: On 12-hour timeframe, use Donchian(20) breakouts with trend filter from 1-day EMA200 and volume confirmation. Enter long on upper band breakout in uptrend with volume > 1.5x average, short on lower band breakdown in downtrend with volume > 1.5x average. Exit on opposite band touch. Designed for low frequency (12-37 trades/year) to avoid fee drift while capturing trend continuation. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) by using 1-day trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "12h_donchian_20_1d_trend_volume_v2"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
