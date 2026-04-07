@@ -3,96 +3,122 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI pullback with 4-hour EMA trend filter and volume confirmation
-# Uses 4-hour EMA for trend direction (avoids whipsaw in 1h), 1-hour RSI for entry timing
-# Volume filter ensures breakouts have conviction. Designed for low trade frequency (15-30/year)
-# Works in bull/bear via trend filter + oversold/overbought entries during pullbacks
+# Hypothesis: 1-day KAMA direction with weekly RSI filter and volatility-adjusted position sizing
+# Uses 1d KAMA for trend direction, 1w RSI for overbought/oversold extremes, and ATR-based sizing
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag
+# Works in bull markets (trend following) and bear markets (mean reversion via RSI extremes)
 
-name = "1h_rsi_pullback_4h_vol_v1"
-timeframe = "1h"
+name = "1d_kama_rsi_weekly_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4-hour data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1-day data for KAMA calculation
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    # Handle first 10 elements
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(1, np.nan), volatility[1:]])
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # 1-week data for RSI filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # 1-hour RSI(14)
-    delta = np.diff(close, prepend=close[0])
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
-    # Average volume for volume confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI calculation with Wilder's smoothing
+    avg_gain = np.full(len(close_1w), np.nan)
+    avg_loss = np.full(len(close_1w), np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Session filter: 8-20 UTC (avoid low-volume Asian session)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    for i in range(14, len(close_1w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w = np.concatenate([np.full(14, np.nan), rsi_1w[14:]])
+    
+    # Align 1w RSI to daily
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # ATR(14) for volatility assessment and position sizing
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade during active session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        if position == 1:  # long position
-            # Exit: RSI > 70 (overbought) or trend turns down
-            if rsi[i] > 70 or ema_50_4h_aligned[i] < close[i]:
-                signals[i] = 0.0
-                position = 0
+        # RSI extremes: oversold < 30, overbought > 70
+        rsi_oversold = rsi_1w_aligned[i] < 30
+        rsi_overbought = rsi_1w_aligned[i] > 70
+        
+        # Volatility normalization: size inversely proportional to volatility
+        # Base size 0.25, scaled by ATR relative to 50-period average
+        if i >= 50:
+            atr_avg = np.nanmean(atr[i-50:i])
+            if not np.isnan(atr_avg) and atr_avg > 0:
+                vol_scale = min(2.0, max(0.5, atr_avg / atr[i]))
             else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            # Exit: RSI < 30 (oversold) or trend turns up
-            if rsi[i] < 30 or ema_50_4h_aligned[i] > close[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
+                vol_scale = 1.0
         else:
-            # Trend filter: 4h EMA(50) slope
-            uptrend = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
-            downtrend = ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]
-            
-            # Volume confirmation
-            volume_confirm = volume[i] > 1.5 * vol_avg[i]
-            
-            # Long: RSI < 30 (oversold) in uptrend with volume
-            if rsi[i] < 30 and uptrend and volume_confirm:
-                signals[i] = 0.20
-                position = 1
-            # Short: RSI > 70 (overbought) in downtrend with volume
-            elif rsi[i] > 70 and downtrend and volume_confirm:
-                signals[i] = -0.20
-                position = -1
+            vol_scale = 1.0
+        
+        base_size = 0.25
+        size = base_size * vol_scale
+        
+        # Long conditions: price above KAMA AND RSI oversold (trend + mean reversion)
+        if price_above_kama and rsi_oversold:
+            signals[i] = size
+        # Short conditions: price below KAMA AND RSI overbought (trend + mean reversion)
+        elif price_below_kama and rsi_overbought:
+            signals[i] = -size
+        else:
+            signals[i] = 0.0
     
     return signals
