@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-6H Time-Weighted Average Price (TWAP) Pullback Strategy
-- Calculates 6h TWAP as volume-weighted average of last 4 periods (~24h)
-- Enters long when price pulls back to TWAP with bullish 1d candle and volume confirmation
-- Enters short when price pulls back to TWAP with bearish 1d candle and volume confirmation
-- Exits when price moves 1.5*ATR away from TWAP
-- Designed for mean reversion in ranging markets with trend filter from higher timeframe
+4H Donchian Breakout with Volume Confirmation and 12H Trend Filter
+Long when price breaks above Donchian(20) upper band with volume > 1.5x 20-period average AND 12H EMA(21) rising
+Short when price breaks below Donchian(20) lower band with volume > 1.5x 20-period average AND 12H EMA(21) falling
+Exit when price crosses back to Donchian midpoint
+Uses price channel breakouts that work in both trending and mean-reverting markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_twap_pullback_1d_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_12h_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -27,78 +26,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === ATR (20) for stop loss ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # === Donchian Channels (20-period) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
-    # === TWAP (6-period VWAP ~ 24 hours) ===
-    # Typical price * volume
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    # Sum of PV and volume over last 6 periods
-    sum_pv = pd.Series(pv).rolling(window=6, min_periods=6).sum().values
-    sum_vol = pd.Series(volume).rolling(window=6, min_periods=6).sum().values
-    twap = sum_pv / (sum_vol + 1e-10)
-    
-    # === 1d trend filter (close vs open) ===
-    df_1d = get_htf_data(prices, '1d')
-    # Daily bullish/bearish: close > open
-    daily_bullish = (df_1d['close'] > df_1d['open']).values
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    # Convert boolean to float for alignment
-    daily_bullish_aligned = daily_bullish_aligned.astype(float)
-    
-    # === Volume confirmation (20-period average) ===
+    # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    
+    # === 12H trend filter (EMA 21) ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(twap[i]) or np.isnan(atr[i]) or 
-            np.isnan(daily_bullish_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price moves 1.5*ATR above TWAP
-            if close[i] > twap[i] + 1.5 * atr[i]:
+            # Exit: price crosses back below midpoint
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves 1.5*ATR below TWAP
-            if close[i] < twap[i] - 1.5 * atr[i]:
+            # Exit: price crosses back above midpoint
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation
-            if vol_ratio[i] < 1.1:
+            # Need expanding volume (above average)
+            if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Calculate deviation from TWAP
-            dev_pct = (close[i] - twap[i]) / twap[i]
-            
-            # Entry conditions: pullback to TWAP with 1d trend alignment
-            # Long: price slightly below TWAP in bullish daily
-            if close[i] <= twap[i] and daily_bullish_aligned[i] > 0.5 and dev_pct >= -0.005:
-                # Allow small tolerance for entry
+            # Entry: Donchian breakout with volume confirmation AND 12H trend filter
+            if close[i] > highest_high[i] and ema_12h_aligned[i] > ema_12h_aligned[i-1]:
+                # Breakout above upper band with rising 12H EMA -> long
                 position = 1
                 signals[i] = 0.25
-            # Short: price slightly above TWAP in bearish daily
-            elif close[i] >= twap[i] and daily_bullish_aligned[i] < 0.5 and dev_pct <= 0.005:
+            elif close[i] < lowest_low[i] and ema_12h_aligned[i] < ema_12h_aligned[i-1]:
+                # Breakdown below lower band with falling 12H EMA -> short
                 position = -1
                 signals[i] = -0.25
     
