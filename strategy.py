@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_donchian_20_1d_trend_volume_v1
+4h_donchian_20_1d_trend_volume_v2
 Hypothesis: On 4-hour timeframe, use Donchian channel breakouts with 1-day trend filter and volume confirmation.
 Long when price breaks above 20-period Donchian high with daily EMA(50) trending up and volume > 1.5x 20-period average.
 Short when price breaks below 20-period Donchian low with daily EMA(50) trending down and volume > 1.5x 20-period average.
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_1d_trend_volume_v1"
+name = "4h_donchian_20_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
