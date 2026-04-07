@@ -1,16 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian breakout + volume + 1d trend filter
-# Hypothesis: Buy breakout above 20-period Donchian high in uptrend, sell breakdown below 20-period low in downtrend.
-# Uses 1-day EMA(50) for trend filter and volume confirmation to avoid false breakouts.
-# Works in bull by buying breakouts, works in bear by selling breakdowns.
+# Strategy: 6h Fibonacci Retracement + Volume Spike + Daily Trend
+# Hypothesis: Buy pullbacks to 0.618 Fib in uptrend, sell rallies to 0.382 Fib in downtrend,
+# confirmed by volume spike. Works in bull/bear by trading with daily trend.
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_fib_retracement_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,59 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for trend and swing points
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Daily EMA(50) for trend filter
+    # Daily close for trend filter
     close_daily = df_daily['close'].values
-    ema_50_daily = pd.Series(close_daily).ewm(span=50, adjust=False).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_daily, ema_50_daily)
     
-    # Volume filter: 4h volume > 20-period average
+    # Daily EMA(50) for trend filter (more stable than 20)
+    ema_50_daily = pd.Series(close_daily).ewm(span=50, adjust=False).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_daily, ema_50_daily)
+    
+    # Calculate daily swing high/low for Fibonacci retracement
+    # Use 20-day lookback for swing points
+    lookback = 20
+    highest_high = pd.Series(close_daily).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(close_daily).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Calculate Fibonacci levels
+    diff = highest_high - lowest_low
+    fib_0236 = lowest_low + diff * 0.236  # Shallow retracement
+    fib_0382 = lowest_low + diff * 0.382  # Medium retracement
+    fib_0500 = lowest_low + diff * 0.500  # Medium retracement
+    fib_0618 = lowest_low + diff * 0.618  # Deep retracement (golden zone)
+    fib_0786 = lowest_low + diff * 0.786  # Deep retracement
+    
+    # Align Fibonacci levels to 6h
+    fib_0236_6h = align_htf_to_ltf(prices, df_daily, fib_0236)
+    fib_0382_6h = align_htf_to_ltf(prices, df_daily, fib_0382)
+    fib_0500_6h = align_htf_to_ltf(prices, df_daily, fib_0500)
+    fib_0618_6h = align_htf_to_ltf(prices, df_daily, fib_0618)
+    fib_0786_6h = align_htf_to_ltf(prices, df_daily, fib_0786)
+    
+    # Volume filter: 6x average volume (strong spike)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_6h[i]) or np.isnan(fib_0382_6h[i]) or np.isnan(fib_0618_6h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma_20[i]
+        # Volume confirmation: at least 2x average volume
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend changes to downtrend
-            if close[i] < low_roll[i] or close[i] < ema_50_4h[i]:
+            # Exit: price reaches 0.236 Fib (take profit) or trend changes
+            if high[i] >= fib_0236_6h[i] or close[i] < ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend changes to uptrend
-            if close[i] > high_roll[i] or close[i] > ema_50_4h[i]:
+            # Exit: price reaches 0.786 Fib (take profit) or trend changes
+            if low[i] <= fib_0786_6h[i] or close[i] > ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout in direction of daily trend with volume confirmation
+            # Look for retracement entries in direction of daily trend
             if vol_ok:
-                if close[i] > ema_50_4h[i]:  # Uptrend
-                    if close[i] > high_roll[i]:  # Breakout above Donchian high
+                if close[i] > ema_50_6h[i]:  # Uptrend - buy retracements
+                    # Enter near 0.618 Fib (golden zone) with rejection
+                    if low[i] <= fib_0618_6h[i] and close[i] > fib_0618_6h[i]:
                         position = 1
                         signals[i] = 0.25
-                else:  # Downtrend
-                    if close[i] < low_roll[i]:  # Breakdown below Donchian low
+                else:  # Downtrend - sell retracements
+                    # Enter near 0.382 Fib with rejection
+                    if high[i] >= fib_0382_6h[i] and close[i] < fib_0382_6h[i]:
                         position = -1
                         signals[i] = -0.25
     
