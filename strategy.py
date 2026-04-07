@@ -3,57 +3,61 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with 1-day EMA200 trend filter and volume confirmation
-# Long when Williams %R crosses above -20 (exit oversold), 1d close > EMA200 (uptrend), volume > 1.5x 6h avg volume
-# Short when Williams %R crosses below -80 (exit overbought), 1d close < EMA200 (downtrend), volume > 1.5x 6h avg volume
-# Exit when Williams %R re-enters opposite zone or trend reverses
+# Hypothesis: 6-hour Camarilla pivot levels from 1-day data with volume confirmation
+# Fade at R3/S3 levels (mean reversion) and breakout continuation at R4/S4 levels
+# Uses 1-day Camarilla pivots calculated from previous day's OHLC
+# Long when price crosses above S3 with volume > 1.5x 6h average volume, targeting S4
+# Short when price crosses below R3 with volume > 1.5x 6h average volume, targeting R4
+# Exit when price reaches target level (S4 for longs, R4 for shorts) or reverses
 # Stoploss at 2.0 * ATR(14)
-# Position size: 0.25
-# Williams %R identifies momentum exhaustion; EMA200 filters trend direction; volume confirms conviction
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Position size: 0.25 (25% of capital)
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "6h_williamsr_1d_ema200_vol_v1"
+name = "6h_camarilla_1d_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    volume = volumes = prices['volume'].values
     
-    # 6h data for Williams %R
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
-        return np.zeros(n)
-    
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    
-    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_6h) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
-    
-    # 1d data for EMA200 trend filter
+    # 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Camarilla formula: 
+    # Resistance: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    # Support: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    rng = high_1d - low_1d
+    r4 = close_1d + rng * 1.1 / 2
+    r3 = close_1d + rng * 1.1 / 4
+    s3 = close_1d - rng * 1.1 / 4
+    s4 = close_1d - rng * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe (use previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # 6h volume average for confirmation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
     volume_6h = df_6h['volume'].values
     volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
@@ -70,10 +74,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    target_level = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(volume_ma_6h_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -87,11 +93,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R re-enters overbought (> -20) or trend reverses (price below EMA200)
-            elif williams_r_aligned[i] > -20 or close[i] < ema_1d_aligned[i]:
+                target_level = 0.0
+            # Exit: reached target (S4) or reversed below S3
+            elif close[i] >= s4_aligned[i] or close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                target_level = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
@@ -100,28 +108,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R re-enters oversold (< -80) or trend reverses (price above EMA200)
-            elif williams_r_aligned[i] < -80 or close[i] > ema_1d_aligned[i]:
+                target_level = 0.0
+            # Exit: reached target (R4) or reversed above R3
+            elif close[i] <= r4_aligned[i] or close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
+                target_level = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend alignment
-            # Long: Williams %R crosses above -80 (exiting oversold), price above EMA200 (uptrend), volume spike
-            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and
-                close[i] > ema_1d_aligned[i] and
+            # Look for entries with volume confirmation
+            # Long: price crosses above S3 with volume spike
+            if (close[i] > s3_aligned[i] and 
+                close[i-1] <= s3_aligned[i-1] and
                 volume[i] > 1.5 * volume_ma_6h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R crosses below -20 (exiting overbought), price below EMA200 (downtrend), volume spike
-            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and
-                  close[i] < ema_1d_aligned[i] and
+                target_level = s4_aligned[i]
+            # Short: price crosses below R3 with volume spike
+            elif (close[i] < r3_aligned[i] and 
+                  close[i-1] >= r3_aligned[i-1] and
                   volume[i] > 1.5 * volume_ma_6h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
+                target_level = r4_aligned[i]
     
     return signals
