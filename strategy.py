@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_volume_v1
+12h_camarilla_pivot_1d_volume_v1
 Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
 Long when price breaks above R4 with volume confirmation (bullish continuation).
 Short when price breaks below S4 with volume confirmation (bearish continuation).
 Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
 Works in both bull/bear markets by adapting to volatility and volume.
+Target: 50-150 trades over 4 years on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -26,6 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -56,19 +58,19 @@ def generate_signals(prices):
     s3 = prev_close - range_1d * 1.1 / 4
     s4 = prev_close - range_1d * 1.1 / 2
     
-    # Align to 6h timeframe (previous day's levels are valid for current day)
+    # Align to 12h timeframe (previous day's levels are valid for current day)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 20-period average (longer period for 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if data not available
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
@@ -105,13 +107,13 @@ def generate_signals(prices):
             # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
             elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
                 # Look for bullish rejection (close > open)
-                if close[i] > prices['open'].iloc[i]:
+                if close[i] > open_price[i]:
                     position = 1
                     signals[i] = 0.25
             # Mean reversion short: price rejects R3 with volume divergence
             elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
                 # Look for bearish rejection (close < open)
-                if close[i] < prices['open'].iloc[i]:
+                if close[i] < open_price[i]:
                     position = -1
                     signals[i] = -0.25
     
