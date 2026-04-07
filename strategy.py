@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Choppiness Index regime + 12h KAMA direction + volume confirmation
-# Hypothesis: Trade only in trending markets (Chop < 38.2) in direction of 12h KAMA
-# with volume confirmation. Avoids choppy markets and false breakouts.
-# Works in bull via trend following, in bear via avoiding false signals during consolidation.
-# Target: 20-50 trades/year to minimize fee drag.
-name = "4h_chop_kama_12h_volume_v1"
-timeframe = "4h"
+# Strategy: 1h RSI pullback with 4h trend filter and daily volume confirmation
+# Hypothesis: Pullbacks in strong trends with volume confirmation work in bull (continuation) and bear (mean reversion within trend).
+# Uses 4h EMA for trend direction, 1h RSI for entry timing, daily volume for confirmation.
+# Target: 15-30 trades/year to minimize fee drag.
+name = "1h_rsi_pullback_4h_trend_1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,93 +22,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA direction
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Get 1d data for volume confirmation
+    # Calculate 4h EMA(50) for trend
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
-    
-    # Calculate 12h KAMA (using close prices)
-    close_12h = df_12h['close'].values
-    # Calculate Efficiency Ratio for KAMA
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    volatility = np.abs(np.diff(close_12h))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    kama_12h = kama
-    
-    # Calculate 12h KAMA direction (1 if price > KAMA, -1 otherwise)
-    kama_dir = np.where(close_12h > kama_12h, 1, -1)
-    kama_dir_aligned = align_htf_to_ltf(prices, df_12h, kama_dir)
     
     # Calculate daily 20-period volume moving average
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate Choppiness Index (14-period) on 4h data
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Sum of True Range over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Absolute price change over 14 periods
-    price_change = np.abs(np.subtract(close[14:], close[:-14]))
-    price_change = np.concatenate([np.full(14, np.nan), price_change])
-    # Choppiness Index
-    chop = np.where(atr_sum != 0, 100 * np.log10(price_change / atr_sum) / np.log10(14), 50)
+    # Calculate RSI(14) on 1h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(kama_dir_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
+        # Volume confirmation: current 1h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
-        # Regime filter: only trade when market is trending (Chop < 38.2)
-        trending_regime = chop[i] < 38.2
-        
         if position == 1:  # Long position
-            # Exit: trend ends OR volatility increases (Chop > 61.8) OR volume confirmation lost
-            if kama_dir_aligned[i] != 1 or not trending_regime or not vol_confirm:
+            # Exit: RSI > 70 (overbought) or trend changes
+            if rsi[i] > 70 or close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: trend ends OR volatility increases (Chop > 61.8) OR volume confirmation lost
-            if kama_dir_aligned[i] != -1 or not trending_regime or not vol_confirm:
+            # Exit: RSI < 30 (oversold) or trend changes
+            if rsi[i] < 30 or close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: KAMA up + trending regime + volume confirmation
-            if kama_dir_aligned[i] == 1 and trending_regime and vol_confirm:
+            # Enter long: RSI < 30 (oversold) + uptrend + volume confirmation + session
+            if rsi[i] < 30 and close[i] > ema_4h_aligned[i] and vol_confirm and session_filter[i]:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: KAMA down + trending regime + volume confirmation
-            elif kama_dir_aligned[i] == -1 and trending_regime and vol_confirm:
+                signals[i] = 0.20
+            # Enter short: RSI > 70 (overbought) + downtrend + volume confirmation + session
+            elif rsi[i] > 70 and close[i] < ema_4h_aligned[i] and vol_confirm and session_filter[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
