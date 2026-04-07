@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_bollinger_bandwidth_regime_v1
-Hypothesis: Use 1d Bollinger Bandwidth percentile to detect market regime (trending vs ranging). In trending regime (BW > 60th percentile), trade 6h Donchian(20) breakouts in direction of 1d EMA50/EMA200 trend. In ranging regime (BW <= 60th), fade 6h Donchian(20) breaks with reversion to 6h VWAP. Volume confirmation required for all entries. This adapts to market conditions: trend following in strong moves, mean reversion in chop. Targets 15-25 trades/year via strict regime filter and volume confirmation.
+12h_supertrend_volume_breakout_v1
+Hypothesis: On 12h timeframe, use Supertrend (ATR-based trend filter) combined with Donchian channel breakouts and volume confirmation. Go long when price breaks above Donchian upper channel with Supertrend uptrend and volume > 1.5x average; go short when price breaks below Donchian lower channel with Supertrend downtrend and volume > 1.5x average. Exit when Supertrend reverses. This captures strong trending moves with volume confirmation while avoiding whipsaws in ranging markets. Works in both bull and bear via Supertrend's adaptive nature and volume confirmation. Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_bollinger_bandwidth_regime_v1"
-timeframe = "6h"
+name = "12h_supertrend_volume_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,130 +23,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h VWAP for mean reversion target
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
+    # Calculate ATR for Supertrend
+    atr_period = 10
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.zeros(n)
+    atr[:atr_period] = np.nan
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # 6h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Supertrend calculation
+    multiplier = 3.0
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    supertrend = np.zeros(n)
+    uptrend = np.ones(n, dtype=bool)
     
-    # 6h EMA20 for momentum filter in trending regime
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    for i in range(n):
+        if np.isnan(atr[i]):
+            upper_band[i] = np.nan
+            lower_band[i] = np.nan
+            supertrend[i] = np.nan
+            continue
+        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
+        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
+        
+        if i == 0:
+            supertrend[i] = upper_band[i]
+            uptrend[i] = True
+        else:
+            if close[i] <= upper_band[i-1]:
+                upper_band[i] = min(upper_band[i], upper_band[i-1])
+            else:
+                upper_band[i] = upper_band[i]
+                
+            if close[i] >= lower_band[i-1]:
+                lower_band[i] = max(lower_band[i], lower_band[i-1])
+            else:
+                lower_band[i] = lower_band[i]
+                
+            if supertrend[i-1] == upper_band[i-1]:
+                if close[i] <= upper_band[i]:
+                    supertrend[i] = upper_band[i]
+                    uptrend[i] = True
+                else:
+                    supertrend[i] = lower_band[i]
+                    uptrend[i] = False
+            else:
+                if close[i] >= lower_band[i]:
+                    supertrend[i] = lower_band[i]
+                    uptrend[i] = False
+                else:
+                    supertrend[i] = upper_band[i]
+                    uptrend[i] = True
     
-    # 1d Bollinger Bandwidth for regime detection (20, 2)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    donchian_period = 20
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
+    for i in range(n):
+        if i < donchian_period:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
+        else:
+            donchian_high[i] = np.max(high[i-donchian_period:i])
+            donchian_low[i] = np.min(low[i-donchian_period:i])
     
-    # Calculate Bollinger Bands on 1d close
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bandwidth = (upper_bb - lower_bb) / sma_20  # Normalized bandwidth
-    
-    # 50-period percentile rank of bandwidth (regime threshold)
-    bw_series = pd.Series(bandwidth)
-    bw_percentile = bw_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Align 1d indicators to 6h
-    sma_20_6h = align_htf_to_ltf(prices, df_1d, sma_20)
-    std_20_6h = align_htf_to_ltf(prices, df_1d, std_20)
-    upper_bb_6h = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_6h = align_htf_to_ltf(prices, df_1d, lower_bb)
-    bw_percentile_6h = align_htf_to_ltf(prices, df_1d, bw_percentile)
-    
-    # 1d EMA50/EMA200 for trend direction
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Volume confirmation (24-period average on 6h = 4 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation (24-period average on 12h = 12 days)
+    vol_ma = np.zeros(n)
+    for i in range(n):
+        if i < 24:
+            vol_ma[i] = np.nan
+        else:
+            vol_ma[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
-            np.isnan(ema20[i]) or np.isnan(vwap[i]) or
-            np.isnan(bw_percentile_6h[i]) or np.isnan(ema50_1d_6h[i]) or
-            np.isnan(ema200_1d_6h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(supertrend[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 24-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Regime: trending if bandwidth > 60th percentile
-        is_trending = bw_percentile_6h[i] > 60
-        
         if position == 1:  # Long position
-            # Exit conditions
-            exit_long = False
-            if is_trending:
-                # In trend: exit on Donchian lower band break or EMA20 cross down
-                if close[i] < low_roll[i]:
-                    exit_long = True
-                elif ema20[i] < close[i] and ema20[i-1] >= close[i-1]:
-                    exit_long = True
-            else:
-                # In range: exit at VWAP (mean reversion target)
-                if close[i] >= vwap[i]:
-                    exit_long = True
-            
-            if exit_long:
+            # Exit if Supertrend turns down
+            if not uptrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_short = False
-            if is_trending:
-                # In trend: exit on Donchian upper band break or EMA20 cross up
-                if close[i] > high_roll[i]:
-                    exit_short = True
-                elif ema20[i] > close[i] and ema20[i-1] <= close[i-1]:
-                    exit_short = True
-            else:
-                # In range: exit at VWAP (mean reversion target)
-                if close[i] <= vwap[i]:
-                    exit_short = True
-            
-            if exit_short:
+            # Exit if Supertrend turns up
+            if uptrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if is_trending:
-                # TRENDING REGIME: Donchian breakout with EMA20 filter
-                long_entry = (close[i] > high_roll[i] and 
-                             ema20[i] > close[i] and  # Price above EMA20 = uptrend
-                             ema50_1d_6h[i] > ema200_1d_6h[i] and  # 1d uptrend
-                             vol_confirm)
-                short_entry = (close[i] < low_roll[i] and 
-                              ema20[i] < close[i] and  # Price below EMA20 = downtrend
-                              ema50_1d_6h[i] < ema200_1d_6h[i] and  # 1d downtrend
-                              vol_confirm)
-            else:
-                # RANGING REGIME: Fade Donchian breaks with VWAP target
-                long_entry = (close[i] < low_roll[i] and  # Break below lower band
-                             close[i] < vwap[i] and      # Below VWAP = oversold
-                             vol_confirm)
-                short_entry = (close[i] > high_roll[i] and  # Break above upper band
-                              close[i] > vwap[i] and      # Above VWAP = overbought
-                              vol_confirm)
+            # Long entry: price breaks above Donchian high with Supertrend uptrend and volume confirmation
+            long_entry = False
+            if (close[i] > donchian_high[i] and uptrend[i] and vol_confirm):
+                long_entry = True
+            
+            # Short entry: price breaks below Donchian low with Supertrend downtrend and volume confirmation
+            short_entry = False
+            if (close[i] < donchian_low[i] and not uptrend[i] and vol_confirm):
+                short_entry = True
             
             if long_entry:
                 position = 1
