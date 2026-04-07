@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_ema_volume_v1
-Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
-combined with EMA trend filter and volume confirmation works on 6h timeframe.
-In ranging markets, fade at R3/S3 with EMA filter; in trending markets, breakout at R4/S4.
-Volume confirmation reduces false signals. Targets 12-37 trades/year (50-150 over 4 years).
-Works in both bull and bear markets by adapting to regime via EMA filter.
+12h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) on 12h timeframe using 1d pivots, with EMA trend filter and volume confirmation. Designed for 5-12 trades/year (20-50 over 4 years) to avoid fee drag. Works in both bull and bear markets by adapting to regime via EMA filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,10 +34,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla pivot levels for each day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
     camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
@@ -50,14 +42,14 @@ def generate_signals(prices):
     # Daily EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # Align daily levels to 6h timeframe
-    r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align daily levels to 12h timeframe
+    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 20-period volume average on 6h
+    # 20-period volume average on 12h
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,9 +57,9 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
-            np.isnan(ema50_6h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or 
+            np.isnan(ema50_12h[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
@@ -77,7 +69,7 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Exit: price breaks below S3 (mean reversion fail) OR 
             # price breaks above R4 and EMA turns down (breakout fail)
-            if close[i] < s3_6h[i] or (close[i] > r4_6h[i] and close[i] < ema50_6h[i]):
+            if close[i] < s3_12h[i] or (close[i] > r4_12h[i] and close[i] < ema50_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,34 +77,34 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit: price breaks above R3 (mean reversion fail) OR
             # price breaks below S4 and EMA turns up (breakout fail)
-            if close[i] > r3_6h[i] or (close[i] < s4_6h[i] and close[i] > ema50_6h[i]):
+            if close[i] > r3_12h[i] or (close[i] < s4_12h[i] and close[i] > ema50_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Mean reversion longs at S3 in uptrend (price > EMA)
-            if (close[i] <= s3_6h[i] and 
+            if (close[i] <= s3_12h[i] and 
                 vol_confirm and 
-                close[i] > ema50_6h[i]):
+                close[i] > ema50_12h[i]):
                 position = 1
                 signals[i] = 0.25
             # Mean reversion shorts at R3 in downtrend (price < EMA)
-            elif (close[i] >= r3_6h[i] and 
+            elif (close[i] >= r3_12h[i] and 
                   vol_confirm and 
-                  close[i] < ema50_6h[i]):
+                  close[i] < ema50_12h[i]):
                 position = -1
                 signals[i] = -0.25
             # Breakout longs at R4 in uptrend
-            elif (close[i] >= r4_6h[i] and 
+            elif (close[i] >= r4_12h[i] and 
                   vol_confirm and 
-                  close[i] > ema50_6h[i]):
+                  close[i] > ema50_12h[i]):
                 position = 1
                 signals[i] = 0.25
             # Breakout shorts at S4 in downtrend
-            elif (close[i] <= s4_6h[i] and 
+            elif (close[i] <= s4_12h[i] and 
                   vol_confirm and 
-                  close[i] < ema50_6h[i]):
+                  close[i] < ema50_12h[i]):
                 position = -1
                 signals[i] = -0.25
     
