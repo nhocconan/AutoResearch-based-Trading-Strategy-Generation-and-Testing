@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Breakouts on 12h with daily volume confirmation capture strong trends; volatility filter avoids choppy markets.
-# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 12-37 trades/year to minimize fee drag.
-name = "12h_donchian20_1d_volume_atr_v1"
-timeframe = "12h"
+# Strategy: 6h Camarilla Pivot from 1d + volume confirmation
+# Hypothesis: Fade at R3/S3 levels with strong volume confirmation captures mean reversion
+# during ranging markets while avoiding false breakouts. Works in both bull/bear by fading
+# extremes rather than following trends. Target: 50-150 total trades over 4 years.
+name = "6h_camarilla_pivot_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,65 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume confirmation
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate previous day's OHLC for Camarilla
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate ATR(14) for volatility filter and stop sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels (using previous day's range)
+    range_prev = prev_high - prev_low
+    camarilla_h5 = prev_close + 1.1 * range_prev * 1.1 / 2  # R4 equivalent
+    camarilla_h4 = prev_close + 1.1 * range_prev * 1.1 / 4  # R3
+    camarilla_h3 = prev_close + 1.1 * range_prev * 1.1 / 6  # R2
+    camarilla_l3 = prev_close - 1.1 * range_prev * 1.1 / 6  # S2
+    camarilla_l4 = prev_close - 1.1 * range_prev * 1.1 / 4  # S3
+    camarilla_l5 = prev_close - 1.1 * range_prev * 1.1 / 2  # S4
     
-    # Calculate Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 6h timeframe (shifted by 1 day for no look-ahead)
+    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    
+    # Calculate 6-period volume moving average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(6, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
-        
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
+        # Volume confirmation: current volume > 6-period average
+        vol_confirm = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] <= lowest_low[i] or not vol_filter:
+            # Exit: price reaches S3 level or volume drops
+            if close[i] <= l4_aligned[i] or not vol_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] >= highest_high[i] or not vol_filter:
+            # Exit: price reaches R3 level or volume drops
+            if close[i] >= h4_aligned[i] or not vol_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Enter long: price touches S3 level with volume confirmation
+            if close[i] <= l4_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+            # Enter short: price touches R3 level with volume confirmation
+            elif close[i] >= h4_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
