@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Donchian(20) breakouts capture strong momentum. Volume confirms institutional participation.
-# ADX > 25 filters for trending markets, avoiding false breakouts in ranging conditions.
-# Works in bull markets (breakouts continue up) and bear markets (breakouts continue down).
-# Uses discrete position sizing (0.25) to minimize churn. Target: 20-50 trades/year.
+# Strategy: 1h KAMA Trend with 4h/1d Confluence and Volume Filter
+# Hypothesis: KAMA adapts to market noise, reducing false signals in choppy markets.
+# Combined with 4h trend (EMA21) and 1d trend (EMA50) for directional bias.
+# Volume filter ensures institutional participation. Works in bull/bear via trend alignment.
+# Target: 15-35 trades/year (60-140 over 4 years).
 
-name = "4h_donchian20_volume_adx_v1"
-timeframe = "4h"
+name = "1h_kama_trend_4h1d_confluence_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,90 +24,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period high/low)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Get HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 50 or len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate ADX (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # First bar
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate KAMA (adaptive moving average)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = abs(close_s.diff(1)).rolling(10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 4h EMA21 for trend
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Smoothed values
-    def smoothed_avg(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.nansum(arr[1:period]) / (period-1) if period > 1 else arr[0]
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(arr)):
-            if np.isnan(result[i-1]):
-                result[i] = arr[i]
-            else:
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr = smoothed_avg(tr, 14)
-    plus_di = 100 * smoothed_avg(plus_dm, 14) / atr
-    minus_di = 100 * smoothed_avg(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smoothed_avg(dx, 14)
+    # Calculate 1d EMA50 for trend
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Apply session filter
+        if not session_filter[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: price falls to Donchian low or ADX weakens or volume drops
-            if (close[i] <= donchian_low[i] or adx[i] < 20 or not vol_filter[i]):
+            # Exit: price closes below KAMA or trend turns bearish
+            if (close[i] <= kama[i] or 
+                ema_4h_aligned[i] < ema_4h_aligned[i-1] or 
+                ema_1d_aligned[i] < ema_1d_aligned[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.20  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises to Donchian high or ADX weakens or volume drops
-            if (close[i] >= donchian_high[i] or adx[i] < 20 or not vol_filter[i]):
+            # Exit: price closes above KAMA or trend turns bullish
+            if (close[i] >= kama[i] or 
+                ema_4h_aligned[i] > ema_4h_aligned[i-1] or 
+                ema_1d_aligned[i] > ema_1d_aligned[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
+                signals[i] = -0.20  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high with volume and strong trend
-            if (high[i] > donchian_high[i] and close[i] > donchian_high[i] and 
-                vol_filter[i] and adx[i] > 25):
+            # Long: price above KAMA and both trends bullish with volume
+            if (close[i] > kama[i] and 
+                ema_4h_aligned[i] > ema_4h_aligned[i-1] and 
+                ema_1d_aligned[i] > ema_1d_aligned[i-1] and 
+                vol_filter[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: price breaks below Donchian low with volume and strong trend
-            elif (low[i] < donchian_low[i] and close[i] < donchian_low[i] and 
-                  vol_filter[i] and adx[i] > 25):
+                signals[i] = 0.20
+            # Short: price below KAMA and both trends bearish with volume
+            elif (close[i] < kama[i] and 
+                  ema_4h_aligned[i] < ema_4h_aligned[i-1] and 
+                  ema_1d_aligned[i] < ema_1d_aligned[i-1] and 
+                  vol_filter[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
