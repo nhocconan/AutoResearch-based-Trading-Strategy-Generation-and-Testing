@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian channel breakout with weekly ADX trend filter and volume confirmation
-# Uses Donchian(20) breakouts for trend following, weekly ADX(14) to filter ranging markets,
-# and volume spike confirmation to avoid false breakouts. Designed for low trade frequency
-# (target: 15-25 trades/year) to minimize fee drag. Works in trending markets via breakouts
-# and avoids ranging markets via ADX filter, suitable for both bull and bear regimes.
+# Hypothesis: 6h Donchian breakout with daily pivot reversal logic
+# Uses Donchian(20) channel for breakout direction and daily Camarilla pivot levels
+# for mean reversion entries. Goes long on breakouts above daily R3 and short on
+# breakdowns below daily S3, with continuation beyond R4/S4. Volume filter ensures
+# momentum confirmation. Designed for low frequency (target: 15-35 trades/year)
+# to minimize fee drift while capturing both trending and mean-reverting moves.
 
-name = "daily_donchian20_weekly_adx_volume_v1"
-timeframe = "1d"
+name = "6h_donchian20_daily_pivot_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,71 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
+    # Calculate Donchian(20) channel
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly ADX(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Camarilla levels: C = close, range = high - low
+    # R4 = C + (range * 1.1/2), R3 = C + (range * 1.1/4), R2 = C + (range * 1.1/6), R1 = C + (range * 1.1/12)
+    # S1 = C - (range * 1.1/12), S2 = C - (range * 1.1/6), S3 = C - (range * 1.1/4), S4 = C - (range * 1.1/2)
+    camarilla_r4 = close_1d + (range_1d * 1.1 / 2)
+    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
+    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
+    camarilla_s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align daily Camarilla levels to 6h
+    r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume average (50-period) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: volume > 1.5x average
-        volume_spike = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Breakout conditions with volume confirmation
+        bullish_breakout = (close[i] > highest_high[i]) and vol_filter[i]
+        bearish_breakout = (close[i] < lowest_low[i]) and vol_filter[i]
         
-        # Trend strength filter: ADX > 25
-        strong_trend = adx_1w_aligned[i] > 25
+        # Mean reversion conditions at extreme pivot levels
+        bullish_reversal = (close[i] <= s3_6h[i]) and vol_filter[i]
+        bearish_reversal = (close[i] >= r3_6h[i]) and vol_filter[i]
         
-        # Long breakout: price breaks above upper Donchian band
-        if close[i] > highest_high[i] and volume_spike and strong_trend:
+        # Strong continuation beyond R4/S4
+        strong_bullish = (close[i] > r4_6h[i]) and vol_filter[i]
+        strong_bearish = (close[i] < s4_6h[i]) and vol_filter[i]
+        
+        # Generate signals
+        if bullish_breakout or strong_bullish or bullish_reversal:
             signals[i] = 0.25
-        # Short breakdown: price breaks below lower Donchian band
-        elif close[i] < lowest_low[i] and volume_spike and strong_trend:
+        elif bearish_breakout or strong_bearish or bearish_reversal:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
