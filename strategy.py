@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4H Donchian channel breakout with volume confirmation and daily trend filter
-# Uses Donchian(20) for breakout signals, volume ratio for confirmation, and daily EMA(50) for trend filter.
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-# Works in bull markets via breakout momentum and in bear via mean reversion at channel extremes.
+# Hypothesis: 6h RSI mean reversion with 12h trend filter and volume confirmation
+# Uses RSI(14) for mean reversion signals, 12h EMA(50) for trend direction,
+# and volume spike (>1.5x 20-period average) for confirmation.
+# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
+# Works in bull markets via pullbacks in uptrend and in bear markets via bounces in downtrend.
 
-name = "4h_donchian20_volume_ema50_v1"
-timeframe = "4h"
+name = "6h_rsi_mean_reversion_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14) for mean reversion
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume ratio (current / 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    # 12h EMA(50) for trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        bullish_trend = close[i] > ema_50_aligned[i]
-        bearish_trend = close[i] < ema_50_aligned[i]
+        # Volume confirmation
+        vol_confirmed = vol_ratio[i] > 1.5
         
-        # Breakout conditions with volume confirmation
-        upper_breakout = close[i] > donch_high[i] and vol_ratio[i] > 1.5
-        lower_breakout = close[i] < donch_low[i] and vol_ratio[i] > 1.5
+        # Mean reversion conditions
+        oversold = rsi[i] < 30
+        overbought = rsi[i] > 70
         
-        # Mean reversion at channel extremes (for ranging markets)
-        channel_width = donch_high[i] - donch_low[i]
-        if channel_width > 0:
-            position_in_channel = (close[i] - donch_low[i]) / channel_width
-            oversold = position_in_channel < 0.2 and vol_ratio[i] > 1.2
-            overbought = position_in_channel > 0.8 and vol_ratio[i] > 1.2
-        else:
-            oversold = False
-            overbought = False
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Position sizing
-        base_size = 0.25
-        
-        # Long conditions: bullish breakout OR oversold mean reversion in uptrend
-        if (upper_breakout and bullish_trend) or (oversold and bullish_trend):
-            signals[i] = base_size
-        # Short conditions: bearish breakout OR overbought mean reversion in downtrend
-        elif (lower_breakout and bearish_trend) or (overbought and bearish_trend):
-            signals[i] = -base_size
+        # Long: oversold in uptrend OR oversold in downtrend (deep pullback)
+        if oversold and vol_confirmed:
+            signals[i] = 0.25
+        # Short: overbought in downtrend OR overbought in uptrend (failed bounce)
+        elif overbought and vol_confirmed:
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
