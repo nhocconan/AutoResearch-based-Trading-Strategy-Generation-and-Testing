@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h EMA Pullback with 4h Trend and 1d Filter
-# Hypothesis: In strong 4h/1d trends, 1h EMA(21) pullbacks offer high-probability entries.
-# Uses 4h EMA(50) for trend direction and 1d close > open as market regime filter.
-# Target: 15-30 trades/year (60-120 total) to minimize fee drag.
-# Works in bull/bear: trend filter prevents counter-trend trades.
+# Strategy: 6h Williams %R Reversal with 1d Trend Filter
+# Hypothesis: Williams %R overbought/oversold reversals in direction of 1d EMA(50) trend
+# capture mean reversion within trends. Works in both bull and bear markets by
+# filtering trades with the higher timeframe trend. Target: 15-35 trades/year.
 
-name = "1h_ema_pullback_4h1d_trend_filter_v1"
-timeframe = "1h"
+name = "6h_williamsr_reversal_1d_ema_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +22,66 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 4h data for EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA(50) on 4h close
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    
-    # Align 4h EMA to 1h
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for regime filter
+    # Get 1d data for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d bull regime: close > open
-    bull_regime_1d = (df_1d['close'].values > df_1d['open'].values).astype(float)
-    bull_regime_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_regime_1d)
+    # Calculate EMA(50) on 1d close
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     
-    # EMA(21) on 1h close
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False).mean().values
+    # Align 1d EMA to 6h
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Williams %R(14) on 6h
+    lookback = 14
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(n):
+        start_idx = max(0, i - lookback + 1)
+        highest_high[i] = np.max(high[start_idx:i+1])
+        lowest_low[i] = np.min(low[start_idx:i+1])
+    
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        -100 * (highest_high - close) / (highest_high - lowest_low),
+        -50  # neutral when range is zero
+    )
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(bull_regime_1d_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price below EMA(21) or trend change
-            if close[i] < ema_21[i] or close[i] < ema_50_4h_aligned[i]:
+            # Exit: Williams %R reaches oversold or trend changes
+            if williams_r[i] <= -80 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long
+                signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price above EMA(21) or trend change
-            if close[i] > ema_21[i] or close[i] > ema_50_4h_aligned[i]:
+            # Exit: Williams %R reaches overbought or trend changes
+            if williams_r[i] >= -20 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short
+                signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Only trade in direction of 4h trend and 1d bull regime
-            if bull_regime_1d_aligned[i] > 0.5:  # 1d bull regime
-                if close[i] > ema_50_4h_aligned[i]:  # Uptrend
-                    if close[i] <= ema_21[i]:  # Pullback to EMA
-                        position = 1
-                        signals[i] = 0.20
-            else:  # 1d bear regime
-                if close[i] < ema_50_4h_aligned[i]:  # Downtrend
-                    if close[i] >= ema_21[i]:  # Pullback to EMA
-                        position = -1
-                        signals[i] = -0.20
+            # Williams %R reversal in direction of 1d trend
+            if close[i] > ema_50_aligned[i]:  # Uptrend
+                if williams_r[i] >= -80 and williams_r[i] <= -50:  # Oversold reversal
+                    position = 1
+                    signals[i] = 0.25
+            else:  # Downtrend
+                if williams_r[i] <= -20 and williams_r[i] >= -50:  # Overbought reversal
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
