@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_cci_breakout_12h_trend_volume_v8
-Hypothesis: On 4h timeframe, use 12h CCI for trend strength and direction, with 12h EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic. Optimized for lower trade frequency (<50/year) by tightening volume confirmation threshold and increasing CCI exit thresholds.
+1d_weekly_pivot_reversion_v1
+Hypothesis: On 1d timeframe, trade reversals from weekly pivot support/resistance levels with volume confirmation and weekly trend filter. Go long when price touches weekly S1 with bullish weekly trend and volume spike; go short when price touches weekly R1 with bearish weekly trend and volume spike. Exit when price reaches opposite pivot level or weekly trend reverses. This strategy captures mean reversion in ranging markets and avoids trend-following whipsaws in strong trends. Weekly pivot levels provide institutional reference points, and volume confirmation ensures participation. Designed for low trade frequency (<25/year) to minimize fee drag and work in both bull/bear regimes via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_12h_trend_volume_v8"
-timeframe = "4h"
+name = "1d_weekly_pivot_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,33 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for CCI and EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Weekly data for pivot calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate CCI on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly pivot points (using prior week's data)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Typical price
-    tp_12h = (high_12h + low_12h + close_12h) / 3
-    # SMA of typical price
-    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
-    # Mean deviation
-    md = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # CCI calculation
-    cci_12h = (tp_12h - sma_tp) / (0.015 * md)
+    # Weekly pivot point
+    pp_1w = (high_1w + low_1w + close_1w) / 3
+    # Support and resistance levels
+    s1_1w = 2 * pp_1w - high_1w
+    r1_1w = 2 * pp_1w - low_1w
     
-    # 12h EMA for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    # Weekly EMA for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
     
-    # Align indicators to 4h timeframe
-    cci_12h_4h = align_htf_to_ltf(prices, df_12h, cci_12h)
-    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align weekly data to daily timeframe
+    pp_1w_1d = align_htf_to_ltf(prices, df_1w, pp_1w)
+    s1_1w_1d = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r1_1w_1d = align_htf_to_ltf(prices, df_1w, r1_1w)
+    ema_1w_1d = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation (20-period average on 4h)
+    # Volume confirmation (20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,29 +56,26 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(cci_12h_4h[i]) or np.isnan(ema_12h_4h[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(pp_1w_1d[i]) or np.isnan(s1_1w_1d[i]) or np.isnan(r1_1w_1d[i]) or
+            np.isnan(ema_1w_1d[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 3.0x 20-period average (tightened)
-        vol_confirm = volume[i] > 3.0 * vol_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-day average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
-        # Trend direction from EMA
-        uptrend = close[i] > ema_12h_4h[i]
-        downtrend = close[i] < ema_12h_4h[i]
+        # Weekly trend direction
+        uptrend = close[i] > ema_1w_1d[i]
+        downtrend = close[i] < ema_1w_1d[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if CCI returns to zero (trend weakening)
-            if abs(cci_12h_4h[i]) < 10:
+            # Exit if price reaches R1 (opposite pivot level)
+            if high[i] >= r1_1w_1d[i]:
                 exit_long = True
-            # Exit if CCI goes below -100 (strong reversal)
-            elif cci_12h_4h[i] < -100:
-                exit_long = True
-            # Exit if trend turns down
-            elif downtrend and cci_12h_4h[i] < 0:
+            # Exit if weekly trend turns bearish
+            elif downtrend:
                 exit_long = True
             
             if exit_long:
@@ -91,14 +87,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if CCI returns to zero (trend weakening)
-            if abs(cci_12h_4h[i]) < 10:
+            # Exit if price reaches S1 (opposite pivot level)
+            if low[i] <= s1_1w_1d[i]:
                 exit_short = True
-            # Exit if CCI goes above +100 (strong reversal)
-            elif cci_12h_4h[i] > 100:
-                exit_short = True
-            # Exit if trend turns up
-            elif uptrend and cci_12h_4h[i] > 0:
+            # Exit if weekly trend turns bullish
+            elif uptrend:
                 exit_short = True
             
             if exit_short:
@@ -107,17 +100,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry conditions
+            # Long entry: price touches S1 with bullish weekly trend and volume confirmation
             long_entry = False
-            # CCI breaks above +100 with uptrend and volume confirmation
-            if cci_12h_4h[i] > 100 and cci_12h_4h[i-1] <= 100:
+            if low[i] <= s1_1w_1d[i] * 1.002:  # Allow 0.2% tolerance for touch
                 if uptrend and vol_confirm:
                     long_entry = True
             
-            # Short entry conditions
+            # Short entry: price touches R1 with bearish weekly trend and volume confirmation
             short_entry = False
-            # CCI breaks below -100 with downtrend and volume confirmation
-            if cci_12h_4h[i] < -100 and cci_12h_4h[i-1] >= -100:
+            if high[i] >= r1_1w_1d[i] * 0.998:  # Allow 0.2% tolerance for touch
                 if downtrend and vol_confirm:
                     short_entry = True
             
