@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1h_atr_breakout_4h1d_trend_volume_v1
-Hypothesis: On 1h timeframe, use ATR breakout with 4h trend filter (EMA) and 1d volume confirmation to capture strong trending moves. Enter long when price breaks above ATR-based upper band with 4h uptrend and high volume; enter short when price breaks below ATR-based lower band with 4h downtrend and high volume. Exit when price reverses back through the ATR-based middle band. Uses 4h for trend direction, 1d for volume regime filter, and 1h for precise entry timing. Designed to work in both bull and bear markets by requiring strong trend alignment and volume confirmation, reducing false signals and controlling trade frequency to 15-37/year.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 6h timeframe, use daily Camarilla pivot levels for mean-reversion entries and breakout confirmations, with daily EMA for trend filter and volume confirmation. Fade at R3/S3 levels in ranging markets, breakout continuation at R4/S4 in trending markets. Works in bull/bear via trend filter and adaptive logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_atr_breakout_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,79 +23,144 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ATR calculation (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h EMA for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d volume average for regime filter (20-period)
+    # Daily data for Camarilla pivot and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
-    vol_20d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_20d)
     
-    # ATR-based bands (1.5 * ATR)
-    upper_band = close + 1.5 * atr
-    lower_band = close - 1.5 * atr
-    middle_band = close  # using close as midpoint for exit
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r4_1d = close_1d + range_1d * 1.1 / 2
+    r3_1d = close_1d + range_1d * 1.1 / 4
+    r2_1d = close_1d + range_1d * 1.1 / 6
+    r1_1d = close_1d + range_1d * 1.1 / 12
+    s1_1d = close_1d - range_1d * 1.1 / 12
+    s2_1d = close_1d - range_1d * 1.1 / 6
+    s3_1d = close_1d - range_1d * 1.1 / 4
+    s4_1d = close_1d - range_1d * 1.1 / 2
+    
+    # Daily EMA for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    
+    # Align indicators to 6h timeframe
+    r4_1d_6h = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_6h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    ema_1d_6h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation (20-period average on 6h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_20d_aligned[i]) or vol_20d_aligned[i] <= 0):
+        if (np.isnan(r3_1d_6h[i]) or np.isnan(s3_1d_6h[i]) or
+            np.isnan(r4_1d_6h[i]) or np.isnan(s4_1d_6h[i]) or
+            np.isnan(ema_1d_6h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x 20-day average
-        vol_filter = volume[i] > 1.5 * vol_20d_aligned[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        
+        # Trend direction from EMA
+        uptrend = close[i] > ema_1d_6h[i]
+        downtrend = close[i] < ema_1d_6h[i]
         
         if position == 1:  # Long position
-            # Exit when price crosses below middle band
-            if close[i] < middle_band[i]:
+            # Exit conditions
+            exit_long = False
+            # Exit if price reaches R4 (take profit)
+            if close[i] >= r4_1d_6h[i]:
+                exit_long = True
+            # Exit if price crosses below S3 (stop/reversal)
+            elif close[i] <= s3_1d_6h[i]:
+                exit_long = True
+            # Exit if trend turns down and price below pivot
+            elif downtrend and close[i] < pivot_1d[i]:
+                exit_long = True
+            
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price crosses above middle band
-            if close[i] > middle_band[i]:
+            # Exit conditions
+            exit_short = False
+            # Exit if price reaches S4 (take profit)
+            if close[i] <= s4_1d_6h[i]:
+                exit_short = True
+            # Exit if price crosses above R3 (stop/reversal)
+            elif close[i] >= r3_1d_6h[i]:
+                exit_short = True
+            # Exit if trend turns up and price above pivot
+            elif uptrend and close[i] > pivot_1d[i]:
+                exit_short = True
+            
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band + 4h uptrend + volume
-            long_entry = (close[i] > upper_band[i] and 
-                         close[i] > ema_4h_aligned[i] and 
-                         vol_filter)
+            # Determine market regime: trending or ranging
+            # Using price position relative to R3/S3 as proxy
+            price_vs_r3 = close[i] > r3_1d_6h[i]
+            price_vs_s3 = close[i] < s3_1d_6h[i]
             
-            # Short entry: price breaks below lower band + 4h downtrend + volume
-            short_entry = (close[i] < lower_band[i] and 
-                          close[i] < ema_4h_aligned[i] and 
-                          vol_filter)
+            # Long entry conditions
+            long_entry = False
+            if price_vs_s3 and not price_vs_r3:  # Between S3 and R3 (ranging)
+                # Fade at S3: long when price touches S3 with volume confirmation
+                if abs(close[i] - s3_1d_6h[i]) < (r3_1d_6h[i] - s3_1d_6h[i]) * 0.02:  # Within 2% of S3
+                    if vol_confirm:
+                        long_entry = True
+            elif not price_vs_s3:  # Below S3 (potential breakdown)
+                # Breakdown continuation: short when price breaks S4 with volume and trend
+                if close[i] <= s4_1d_6h[i] and downtrend and vol_confirm:
+                    # This would be a short entry, handled below
+                    pass
+            else:  # Above R3 (potential breakout)
+                # Breakout continuation: long when price breaks R4 with volume and trend
+                if close[i] >= r4_1d_6h[i] and uptrend and vol_confirm:
+                    long_entry = True
+            
+            # Short entry conditions
+            short_entry = False
+            if price_vs_r3 and not price_vs_s3:  # Between S3 and R3 (ranging)
+                # Fade at R3: short when price touches R3 with volume confirmation
+                if abs(close[i] - r3_1d_6h[i]) < (r3_1d_6h[i] - s3_1d_6h[i]) * 0.02:  # Within 2% of R3
+                    if vol_confirm:
+                        short_entry = True
+            elif price_vs_r3:  # Above R3 (potential breakout)
+                # Breakout continuation: short when price breaks R4 with volume and trend
+                if close[i] >= r4_1d_6h[i] and uptrend and vol_confirm:
+                    # This would be a long entry, handled above
+                    pass
+            else:  # Below S3 (potential breakdown)
+                # Breakdown continuation: short when price breaks S4 with volume and trend
+                if close[i] <= s4_1d_6h[i] and downtrend and vol_confirm:
+                    short_entry = True
             
             if long_entry:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
