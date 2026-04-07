@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_market_regime_adaptive_v1
-Hypothesis: Adaptive strategy that switches between trend-following in trending markets and mean-reversion in ranging markets, using weekly ADX and price position relative to weekly Bollinger Bands. In trending markets (ADX>25), trade breakouts of daily Donchian channels. In ranging markets (ADX<=25), fade extremes of daily Bollinger Bands. Uses 60-minute volume confirmation to avoid false signals. Designed for 60-120 trades/year to balance opportunity with fee drag.
+6h_camarilla_pivot_1d_ema_volume_v2
+Hypothesis: On 6h timeframe, enter long when price bounces from S3/S4 Camarilla levels (1d) with EMA(50) support and volume confirmation; enter short when price rejects R3/R4 with EMA(50) resistance. Uses 12h trend filter (EMA50 slope) to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee fade while capturing mean reversion at institutional pivot levels in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_market_regime_adaptive_v1"
+name = "6h_camarilla_pivot_1d_ema_volume_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,180 +23,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly ADX for regime detection (trend strength)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
+    # EMA(50) for dynamic support/resistance
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Volume moving average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Plus Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    
-    # Minus Directional Movement
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # Skip first NaN
-        for i in range(period, len(arr)):
-            if not np.isnan(arr[i]) and not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr_1w = wilders_smooth(tr, 14)
-    plus_di_1w = 100 * wilders_smooth(dm_plus, 14) / atr_1w
-    minus_di_1w = 100 * wilders_smooth(dm_minus, 14) / atr_1w
-    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = wilders_smooth(dx_1w, 14)
-    
-    # Weekly Bollinger Bands for ranging market detection
-    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb_1w = sma_20_1w + 2 * std_20_1w
-    lower_bb_1w = sma_20_1w - 2 * std_20_1w
-    
-    # Daily Donchian Channel for breakout signals
+    # Calculate 1d Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Donchian Channel (20-period)
-    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3.0
     
-    # Daily Bollinger Bands for mean reversion
-    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + 2 * std_20_1d
-    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    # Camarilla levels
+    s1 = pivot - (prev_high - prev_low) * 1.0 / 12
+    s2 = pivot - (prev_high - prev_low) * 2.0 / 12
+    s3 = pivot - (prev_high - prev_low) * 3.0 / 12
+    s4 = pivot - (prev_high - prev_low) * 4.0 / 12
+    r1 = pivot + (prev_high - prev_low) * 1.0 / 12
+    r2 = pivot + (prev_high - prev_low) * 2.0 / 12
+    r3 = pivot + (prev_high - prev_low) * 3.0 / 12
+    r4 = pivot + (prev_high - prev_low) * 4.0 / 12
     
-    # Align all indicators to 6h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    upper_bb_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_bb_1w)
-    lower_bb_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_bb_1w)
-    upper_dc_aligned = align_htf_to_ltf(prices, df_1d, upper_dc)
-    lower_dc_aligned = align_htf_to_ltf(prices, df_1d, lower_dc)
-    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    # Align Camarilla levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
     
-    # Volume confirmation (60-period average)
-    vol_ma = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
+    # 12h trend filter: EMA50 slope
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Slope of EMA50 (12h): positive = uptrend, negative = downtrend
+    ema_slope = np.diff(ema_50_12h_aligned, prepend=ema_50_12h_aligned[0])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(upper_bb_1w_aligned[i]) or 
-            np.isnan(lower_bb_1w_aligned[i]) or np.isnan(upper_dc_aligned[i]) or 
-            np.isnan(lower_dc_aligned[i]) or np.isnan(upper_bb_1d_aligned[i]) or 
-            np.isnan(lower_bb_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(close[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(pivot_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(ema_slope[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: above average volume
         vol_ok = volume[i] > vol_ma[i]
         
-        # Regime detection: ADX > 25 = trending, ADX <= 25 = ranging
-        is_trending = adx_1w_aligned[i] > 25
-        
         if position == 1:  # Long position
-            # Exit conditions
-            if is_trending:
-                # Exit trend long when price touches lower Donchian
-                if close[i] <= lower_dc_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit: price closes below EMA50 or touches S4
+            if close[i] < ema_50[i] or close[i] <= s4_6h[i]:
+                position = 0
+                signals[i] = 0.0
             else:
-                # Exit mean reversion long when price returns to mean
-                if close[i] >= sma_20_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit conditions
-            if is_trending:
-                # Exit trend short when price touches upper Donchian
-                if close[i] >= upper_dc_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit: price closes above EMA50 or touches R4
+            if close[i] > ema_50[i] or close[i] >= r4_6h[i]:
+                position = 0
+                signals[i] = 0.0
             else:
-                # Exit mean reversion short when price returns to mean
-                if close[i] <= sma_20_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                if is_trending:
-                    # Trending market: breakout entries
-                    # Long: price breaks above upper Donchian
-                    if close[i] > upper_dc_aligned[i] and close[i-1] <= upper_dc_aligned[i-1]:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short: price breaks below lower Donchian
-                    elif close[i] < lower_dc_aligned[i] and close[i-1] >= lower_dc_aligned[i-1]:
-                        position = -1
-                        signals[i] = -0.25
-                else:
-                    # Ranging market: mean reversion entries
-                    # Long: price touches lower Bollinger Band
-                    if close[i] <= lower_bb_1d_aligned[i] and close[i-1] > lower_bb_1d_aligned[i-1]:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short: price touches upper Bollinger Band
-                    elif close[i] >= upper_bb_1d_aligned[i] and close[i-1] < upper_bb_1d_aligned[i-1]:
-                        position = -1
-                        signals[i] = -0.25
+                # Long: price touches/bounces from S3 or S4 with EMA50 support and uptrend
+                if ((close[i] <= s3_6h[i] * 1.001 and close[i] >= s3_6h[i] * 0.999) or
+                    (close[i] <= s4_6h[i] * 1.001 and close[i] >= s4_6h[i] * 0.999)) and \
+                   close[i] > ema_50[i] and ema_slope[i] > 0:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price touches/rejects from R3 or R4 with EMA50 resistance and downtrend
+                elif ((close[i] >= r3_6h[i] * 0.999 and close[i] <= r3_6h[i] * 1.001) or
+                      (close[i] >= r4_6h[i] * 0.999 and close[i] <= r4_6h[i] * 1.001)) and \
+                     close[i] < ema_50[i] and ema_slope[i] < 0:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
-
-# Pre-calculate daily indicators for alignment efficiency
-def _calculate_daily_indicators(df_1d):
-    """Pre-calculate daily indicators to avoid recomputation in alignment"""
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Donchian Channel (20-period)
-    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Bollinger Bands (20,2)
-    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + 2 * std_20_1d
-    lower_bb_1d = sma_20_1d - 2 * std_20_1d
-    
-    return upper_dc, lower_dc, upper_bb_1d, lower_bb_1d, sma_20_1d
-
-# Note: The actual implementation above calculates these inside the loop for clarity
-# In production, these would be pre-calculated for better performance
