@@ -1,17 +1,16 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Ichimoku Cloud + Daily Trend + Volume Spike
-# Hypothesis: Ichimoku TK cross signals aligned with daily EMA(50) trend and volume spikes
-# capture momentum in both bull and bear markets. The cloud acts as dynamic support/resistance.
-# TK cross (Tenkan/Kijun crossover) provides timely entries while cloud filters false signals.
-# Daily EMA filter ensures we trade with higher timeframe trend. Volume spike confirms momentum.
-# Target: 20-40 trades/year (80-160 total) to stay within optimal trade frequency for 6h.
+# Strategy: 4h KAMA Trend + Volume Spike + Daily Close Filter
+# Hypothesis: KAMA adapts to market noise, reducing false signals in ranging markets.
+# Combined with volume spikes and daily close above/below KAMA, it captures strong trends
+# while avoiding whipsaws. Works in both bull and bear markets by following adaptive trend.
+# Target: 25-35 trades/year (100-140 total).
 
-name = "6h_ichimoku_cloud_daily_trend_volume_v1"
-timeframe = "6h"
+name = "4h_kama_trend_volume_daily_close_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for close filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # KAMA (Adaptive Moving Average) parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    dir = np.abs(np.subtract(close, np.roll(close, er_length)))
+    vol = np.sum(np.lib.stride_tricks.sliding_window_view(change, er_length), axis=1)
+    # Handle edge case for vol calculation
+    vol_padded = np.concatenate([np.full(er_length-1, np.nan), vol])
+    er = np.where(vol_padded != 0, dir / vol_padded, 0)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Smoothing constants
+    sc = np.power(er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1), 2)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    vol_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(tenkan[i]) or 
-            np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(vol_ma[i]) or 
+            i >= len(close_1d) or np.isnan(close_1d[i])):
             signals[i] = 0.0
             continue
+        
+        # Get daily close (already aligned via index, but we need to map 4h to daily)
+        # Since we're on 4h timeframe, we use the most recent daily close
+        daily_idx = i // 16  # 16 four-hour bars per day
+        if daily_idx >= len(close_1d):
+            daily_idx = len(close_1d) - 1
+        daily_close = close_1d[daily_idx]
         
         # Check volume confirmation
         vol_ok = vol_spike[i]
         
-        # Determine cloud color and position
-        # Green cloud (bullish): Senkou A > Senkou B
-        # Red cloud (bearish): Senkou A < Senkou B
-        cloud_green = senkou_a[i] > senkou_b[i]
-        
-        # Price above/below cloud
-        price_above_cloud = close[i] > max(senkou_a[i], senkou_b[i])
-        price_below_cloud = close[i] < min(senkou_a[i], senkou_b[i])
-        
         if position == 1:  # Long position
-            # Exit: price crosses below cloud or trend turns bearish
-            if price_below_cloud or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price crosses below KAMA or daily close turns bearish
+            if close[i] < kama[i] or daily_close < kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price crosses above cloud or trend turns bullish
-            if price_above_cloud or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price crosses above KAMA or daily close turns bullish
+            if close[i] > kama[i] or daily_close > kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Bullish TK cross above cloud in uptrend
-                if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and 
-                    price_above_cloud and close[i] > ema_50_1d_aligned[i]):
+                # Long entry: price above KAMA and daily close above KAMA
+                if close[i] > kama[i] and daily_close > kama[i]:
                     position = 1
                     signals[i] = 0.25
-                # Bearish TK cross below cloud in downtrend
-                elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and 
-                      price_below_cloud and close[i] < ema_50_1d_aligned[i]):
+                # Short entry: price below KAMA and daily close below KAMA
+                elif close[i] < kama[i] and daily_close < kama[i]:
                     position = -1
                     signals[i] = -0.25
     
