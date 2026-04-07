@@ -1,95 +1,84 @@
 #!/usr/bin/env python3
 """
-1d KAMA with RSI and Chop Filter
-Long when KAMA rising and RSI > 50 and Chop < 61.8 (trending up)
-Short when KAMA falling and RSI < 50 and Chop < 61.8 (trending down)
-Exit when RSI crosses 50 or Chop > 61.8 (range)
-Designed to capture trends while avoiding choppy markets
+4h Donchian Breakout with 1d Trend and Volume Confirmation
+Long when price breaks above Donchian(20) high in bullish regime (1d EMA50 > EMA200) with volume > 1.5x avg
+Short when price breaks below Donchian(20) low in bearish regime (1d EMA50 < EMA200) with volume > 1.5x avg
+Exit when price crosses opposite Donchian band or regime changes
+Designed to capture strong trends with filtered breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === KAMA (10) ===
-    change = abs(np.diff(close, prepend=close[0]))
-    volatility = abs(np.diff(close))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === Donchian Channel (20) ===
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=20, min_periods=20).max().values
+    donch_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === RSI (14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # === Volume Filter ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
-    # === Chop (14) ===
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    max_h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_l = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr * 14 / (max_h - min_l)) / np.log10(14)
-    chop = np.where((max_h - min_l) != 0, chop, 50)
+    # === 1d EMA Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+    for i in range(20, n):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ratio[i]) or \
+           np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI < 50 or Chop > 61.8
-            if rsi[i] < 50 or chop[i] > 61.8:
+            # Exit: price crosses below Donchian low OR regime turns bearish
+            if close[i] < donch_low[i] or ema_50_aligned[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: RSI > 50 or Chop > 61.8
-            if rsi[i] > 50 or chop[i] > 61.8:
+            # Exit: price crosses above Donchian high OR regime turns bullish
+            if close[i] > donch_high[i] or ema_50_aligned[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Trending up: KAMA rising and RSI > 50
-            if kama[i] > kama[i-1] and rsi[i] > 50 and chop[i] < 61.8:
-                position = 1
-                signals[i] = 0.25
-            # Trending down: KAMA falling and RSI < 50
-            elif kama[i] < kama[i-1] and rsi[i] < 50 and chop[i] < 61.8:
-                position = -1
-                signals[i] = -0.25
+            # Bullish regime: EMA50 > EMA200
+            if ema_50_aligned[i] > ema_200_aligned[i]:
+                # Look for long breakout with volume confirmation
+                if close[i] > donch_high[i] and vol_ratio[i] > 1.5:
+                    position = 1
+                    signals[i] = 0.30
+            # Bearish regime: EMA50 < EMA200
+            elif ema_50_aligned[i] < ema_200_aligned[i]:
+                # Look for short breakdown with volume confirmation
+                if close[i] < donch_low[i] and vol_ratio[i] > 1.5:
+                    position = -1
+                    signals[i] = -0.30
     
     return signals
