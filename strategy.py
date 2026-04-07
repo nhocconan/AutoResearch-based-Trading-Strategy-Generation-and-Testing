@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + 1d Trend Filter + Volume Spike
-Long when Bull Power > 0 and price > 1d EMA50; Short when Bear Power < 0 and price < 1d EMA50.
-Exit when Elder Power reverses sign. Uses volume spike for entry confirmation.
+4h Donchian Breakout + 1d Trend + Volume Spike
+Long when price breaks above Donchian(20) high and price > 1d EMA50 with volume spike.
+Short when price breaks below Donchian(20) low and price < 1d EMA50 with volume spike.
+Exit on opposite Donchian breakout or trend reversal.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_1d_trend_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,12 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Elder Ray Components ===
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # === Donchian Channels (20-period) ===
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === Volume Spike Detector ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,35 +41,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(13, n):
-        if np.isnan(ema13[i]) or np.isnan(ema_50_aligned[i]):
+    for i in range(20, n):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Bull Power turns negative (momentum fading)
-            if bull_power[i] <= 0:
+            # Exit: price breaks below Donchian low OR trend reverses (price < EMA50)
+            if low[i] <= low_20[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bear Power turns positive (momentum fading)
-            if bear_power[i] >= 0:
+            # Exit: price breaks above Donchian high OR trend reverses (price > EMA50)
+            if high[i] >= high_20[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: Bull Power positive + price above 1d EMA50 + volume spike
-            if (bull_power[i] > 0 and 
+            # Long: price breaks above Donchian high + price above EMA50 + volume spike
+            if (high[i] >= high_20[i] and 
                 close[i] > ema_50_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: Bear Power negative + price below 1d EMA50 + volume spike
-            elif (bear_power[i] < 0 and 
+            # Short: price breaks below Donchian low + price below EMA50 + volume spike
+            elif (low[i] <= low_20[i] and 
                   close[i] < ema_50_aligned[i] and 
                   vol_spike[i]):
                 position = -1
