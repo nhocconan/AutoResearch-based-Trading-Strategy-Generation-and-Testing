@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1d_trend_volume_v2
-Hypothesis: On 4h timeframe, buy when price breaks above 20-period Donchian high with 1d EMA uptrend and volume confirmation; sell when price breaks below 20-period Donchian low with 1d EMA downtrend and volume confirmation. Uses Donchian channels for breakout signals, 1d EMA for trend filter, and volume spike for confirmation. Designed for 75-200 total trades over 4 years to minimize fee drag while capturing trends in both bull and bear markets.
+1d_rsi_ema_trend_filter_v1
+Hypothesis: On daily timeframe, use EMA(50) trend filter combined with RSI(14) mean reversion entries.
+In bull markets, buy dips below RSI 40 in uptrend (price > EMA50). In bear markets, sell rallies above RSI 60 in downtrend (price < EMA50).
+Weekly RSI(14) acts as regime filter: only take longs when weekly RSI > 50, shorts when weekly RSI < 50.
+This reduces whipsaws and focuses on higher probability trades. Target: 15-25 trades/year (60-100 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "1d_rsi_ema_trend_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +26,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    lookback = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = low_series.rolling(window=lookback, min_periods=lookback).min().values
+    # EMA(50) for trend filter
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # RSI(14) on daily
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get 1d EMA trend (50-period)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    close_1d_series = pd.Series(close_1d)
-    ema_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly RSI(14) as regime filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
+    delta_w = np.diff(close_weekly, prepend=close_weekly[0])
+    gain_w = np.where(delta_w > 0, delta_w, 0)
+    loss_w = np.where(delta_w < 0, -delta_w, 0)
+    gain_ma_w = pd.Series(gain_w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma_w = pd.Series(loss_w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_w = gain_ma_w / (loss_ma_w + 1e-10)
+    rsi_weekly = 100 - (100 / (1 + rs_w))
+    rsi_weekly_aligned = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(lookback, 20, 50), n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(ema50[i]) or np.isnan(rsi[i]) or np.isnan(rsi_weekly_aligned[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation: require volume above average
-        vol_ok = volume[i] > vol_ma[i]
+        # Weekly regime filter
+        weekly_bull = rsi_weekly_aligned[i] > 50
+        weekly_bear = rsi_weekly_aligned[i] < 50
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low
-            if close[i] <= donchian_low[i]:
+            # Exit: RSI > 70 (overbought) or trend change (price < EMA50)
+            if rsi[i] > 70 or close[i] < ema50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high
-            if close[i] >= donchian_high[i]:
+            # Exit: RSI < 30 (oversold) or trend change (price > EMA50)
+            if rsi[i] < 30 or close[i] > ema50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Bullish breakout: price breaks above Donchian high with 1d uptrend
-                if (close[i] > donchian_high[i] and 
-                    close[i-1] <= donchian_high[i-1] and
-                    close[i] > ema_1d_aligned[i]):
-                    position = 1
-                    signals[i] = 0.30
-                # Bearish breakout: price breaks below Donchian low with 1d downtrend
-                elif (close[i] < donchian_low[i] and 
-                      close[i-1] >= donchian_low[i-1] and
-                      close[i] < ema_1d_aligned[i]):
-                    position = -1
-                    signals[i] = -0.30
+            # Long: price above EMA50 (uptrend) + RSI < 40 (oversold) + weekly bullish
+            if close[i] > ema50[i] and rsi[i] < 40 and weekly_bull:
+                position = 1
+                signals[i] = 0.25
+            # Short: price below EMA50 (downtrend) + RSI > 60 (overbought) + weekly bearish
+            elif close[i] < ema50[i] and rsi[i] > 60 and weekly_bear:
+                position = -1
+                signals[i] = -0.25
     
     return signals
