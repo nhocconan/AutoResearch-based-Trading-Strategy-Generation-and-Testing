@@ -3,79 +3,69 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray index with 1-day ADX regime filter
-# Long when Bull Power > 0 and Bear Power < 0 (bullish market) + daily ADX > 25
-# Short when Bear Power > 0 and Bull Power < 0 (bearish market) + daily ADX > 25
-# Exit when Elder Ray signals reverse or price crosses 13-period EMA
+# Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter
+# Long when Tenkan-sen > Kijun-sen (TK cross) + price above Kumo (cloud) + 1-day close > 1-day EMA50
+# Short when Tenkan-sen < Kijun-sen + price below Kumo + 1-day close < 1-day EMA50
+# Exit when TK cross reverses
 # Stoploss at 2.5 * ATR(20)
-# Position size: 0.25
-# Uses daily trend filter to avoid whipsaws in ranging markets
+# Position size: 0.25 (25% of capital)
+# Ichimoku provides clear trend definition with built-in support/resistance (cloud)
+# Daily EMA50 filters for higher timeframe trend alignment
 # Target: 80-180 total trades over 4 years (20-45/year)
 
-name = "6h_elder_ray_1d_adx_v1"
+name = "6h_ichimoku_tk_1d_ema50_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # 1-day data for EMA and ADX
+    # 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 13-period EMA on daily closes
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Kumo (Cloud) boundaries: Senkou Span A and B shifted 26 periods ahead
+    # For cloud at current point, we use values from 26 periods ago
+    senkou_span_a_shifted = np.roll(senkou_span_a, 26)
+    senkou_span_b_shifted = np.roll(senkou_span_b, 26)
+    senkou_span_a_shifted[:26] = np.nan
+    senkou_span_b_shifted[:26] = np.nan
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_shifted, senkou_span_b_shifted)
+    cloud_bottom = np.minimum(senkou_span_a_shifted, senkou_span_b_shifted)
+    
+    # 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    
-    # Calculate 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Elder Ray on 6h data
-    # Bull Power = High - EMA13(close)
-    # Bear Power = Low - EMA13(close)
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13_6h
-    bear_power = low - ema_13_6h
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # ATR(20) for stoploss
     tr1 = high - low
@@ -90,10 +80,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(52, n):
         # Skip if required data not available
-        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(ema_13_6h[i]) or np.isnan(atr[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -106,8 +97,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Elder Ray turns bearish or price below EMA13
-            elif bull_power[i] <= 0 or bear_power[i] >= 0 or close[i] < ema_13_6h[i]:
+            # Exit: TK cross turns bearish (Tenkan < Kijun)
+            elif tenkan_sen[i] < kijun_sen[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -119,25 +110,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Elder Ray turns bullish or price above EMA13
-            elif bull_power[i] >= 0 or bear_power[i] <= 0 or close[i] > ema_13_6h[i]:
+            # Exit: TK cross turns bullish (Tenkan > Kijun)
+            elif tenkan_sen[i] > kijun_sen[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray signals with ADX trend filter
-            # Trend filter: daily ADX > 25
-            trend_filter = adx_1d_aligned[i] > 25
+            # Look for entries: TK cross with cloud filter and 1-day EMA50 trend
+            # TK cross: Tenkan-sen crossing Kijun-sen
+            tk_cross_bullish = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
+            tk_cross_bearish = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
             
-            # Long: Bull Power > 0 and Bear Power < 0 (bullish) + trend filter
-            if bull_power[i] > 0 and bear_power[i] < 0 and trend_filter:
+            # Price relative to cloud
+            price_above_cloud = close[i] > cloud_top[i]
+            price_below_cloud = close[i] < cloud_bottom[i]
+            
+            # 1-day trend filter: close above/below EMA50
+            trend_bullish = close_1d[i] > ema50_1d_aligned[i]  # using current 1-day close
+            trend_bearish = close_1d[i] < ema50_1d_aligned[i]
+            
+            # Long: bullish TK cross + price above cloud + bullish 1-day trend
+            if tk_cross_bullish and price_above_cloud and trend_bullish:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Bear Power > 0 and Bull Power < 0 (bearish) + trend filter
-            elif bear_power[i] > 0 and bull_power[i] < 0 and trend_filter:
+            # Short: bearish TK cross + price below cloud + bearish 1-day trend
+            elif tk_cross_bearish and price_below_cloud and trend_bearish:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
