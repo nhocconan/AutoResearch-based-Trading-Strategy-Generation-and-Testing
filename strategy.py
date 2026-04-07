@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h RSI pullback with 4h trend filter and daily volume confirmation
-# Hypothesis: In uptrends, buy pullbacks to RSI(14) < 40; in downtrends, sell rallies to RSI(14) > 60.
-# Uses 4h EMA(50) for trend direction and daily volume > 20-period MA for confirmation.
-# Works in bull via trend-following pullbacks, in bear via counter-trend fades at extremes.
-# Target: 15-37 trades/year to minimize fee drag on 1h timeframe.
-name = "1h_rsi_pullback_4h_trend_1d_volume_v2"
-timeframe = "1h"
+# Strategy: 6h Ichimoku Cloud with 1d Trend Filter and Volume Confirmation
+# Hypothesis: Ichimoku provides dynamic support/resistance and trend direction; 
+# 1d trend filter ensures alignment with higher timeframe momentum; volume confirms strength.
+# Works in bull via cloud breakouts, in bear via mean reversion at cloud edges.
+# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
+name = "6h_ichimoku_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,80 +23,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA(50) for trend
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get daily data for volume confirmation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods back
+    # For signal generation, we use current price vs cloud
+    
+    # Determine cloud top and bottom
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # Calculate ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 6-period volume moving average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(52, n):  # Start after Ichimoku components are calculated
         # Skip if required data not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            continue
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation: current 1h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        # Volume confirmation: current volume > 6-period average
+        vol_confirm = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: RSI > 60 (overbought) or trend turns bearish
-            if rsi[i] > 60 or close[i] < ema_4h_aligned[i]:
+            # Exit: price falls below cloud bottom OR trend reverses
+            if close[i] < cloud_bottom[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: RSI < 40 (oversold) or trend turns bullish
-            if rsi[i] < 40 or close[i] > ema_4h_aligned[i]:
+            # Exit: price rises above cloud top OR trend reverses
+            if close[i] > cloud_top[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: uptrend (price > EMA) + RSI pullback (<40) + volume confirmation
-            if close[i] > ema_4h_aligned[i] and rsi[i] < 40 and vol_confirm:
+            # Enter long: price above cloud + uptrend + volume confirmation
+            if close[i] > cloud_top[i] and uptrend and vol_confirm:
                 position = 1
-                signals[i] = 0.20
-            # Enter short: downtrend (price < EMA) + RSI rally (>60) + volume confirmation
-            elif close[i] < ema_4h_aligned[i] and rsi[i] > 60 and vol_confirm:
+                signals[i] = 0.25
+            # Enter short: price below cloud + downtrend + volume confirmation
+            elif close[i] < cloud_bottom[i] and downtrend and vol_confirm:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
