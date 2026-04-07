@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_pivot_volume_v3"
-timeframe = "4h"
+name = "6d_ewm_volume_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,82 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for EWM trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EWM (exponential weighted mean) with span=30
     close_1d = df_1d['close'].values
+    ewm_1d = pd.Series(close_1d).ewm(span=30, adjust=False).mean().values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Align EWM to 6h timeframe
+    ewm_1d_aligned = align_htf_to_ltf(prices, df_1d, ewm_1d)
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (20-period average)
+    # Volume confirmation (20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Price change momentum (6-period ROC on 6h)
+    roc_6 = np.zeros(n)
+    for i in range(6, n):
+        roc_6[i] = (close[i] - close[i-6]) / close[i-6] if close[i-6] != 0 else 0
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ewm_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(roc_6[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions (using previous bar)
-        breakout_up = close[i] > donchian_high[i-1]
-        breakout_down = close[i] < donchian_low[i-1]
+        # Price relative to daily EWM
+        price_above_ewm = close[i] > ewm_1d_aligned[i]
+        price_below_ewm = close[i] < ewm_1d_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Pivot levels for entry
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        # Momentum confirmation
+        mom_up = roc_6[i] > 0.005  # 0.5% momentum up
+        mom_down = roc_6[i] < -0.005  # 0.5% momentum down
         
-        # Exit conditions: opposite Donchian break
-        exit_long = close[i] < donchian_low[i-1]
-        exit_short = close[i] > donchian_high[i-1]
+        # Exit conditions: opposite momentum
+        exit_long = roc_6[i] < -0.003
+        exit_short = roc_6[i] > 0.003
         
         if position == 1:  # Long position
-            # Exit on breakdown
+            # Exit on negative momentum
             if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on breakout
+            # Exit on positive momentum
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: breakout above R1 + volume confirmation
-            if breakout_up and close[i] > r1_level and vol_confirm:
+            # Enter long: price above daily EWM + volume + upward momentum
+            if price_above_ewm and vol_confirm and mom_up:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: breakout below S1 + volume confirmation
-            elif breakout_down and close[i] < s1_level and vol_confirm:
+            # Enter short: price below daily EWM + volume + downward momentum
+            elif price_below_ewm and vol_confirm and mom_down:
                 position = -1
                 signals[i] = -0.25
     
