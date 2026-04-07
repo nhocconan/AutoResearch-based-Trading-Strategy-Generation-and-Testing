@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA(21) trend filter and volume confirmation
-# Uses Donchian channel breakout for entry, 12h EMA for trend direction, and volume > 1.5x 20-period average for confirmation.
-# Designed for moderate trade frequency (target: 20-40 trades/year) to balance opportunity and cost.
-# Works in bull markets via breakout longs and in bear markets via breakdown shorts.
+# Hypothesis: Weekly mean reversion with daily trend filter and volume confirmation
+# Uses weekly RSI(14) extremes (>80 oversold, <20 overbought) for mean reversion signals,
+# filtered by daily trend (close > daily EMA(50) for longs, close < daily EMA(50) for shorts)
+# and volume > 1.5x 20-period average for confirmation.
+# Designed for low trade frequency (~15-30 trades/year) to minimize fee drag.
+# Works in bull markets via trend-following longs and in bear markets via mean-reversion shorts.
 
-name = "4h_donchian20_12h_ema_volume_v2"
-timeframe = "4h"
+name = "weekly_mean_reversion_daily_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,46 +21,62 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 25:
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(21) on 12h close
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Weekly data for mean reversion signal
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Donchian channel (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    # Calculate weekly RSI(14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price breaks above Donchian upper band + above 12h EMA + volume confirmation
-        if (close[i] > highest_high[i] and 
-            close[i] > ema_12h_aligned[i] and 
-            vol_confirm[i]):
+        # Volume confirmation
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # Mean reversion conditions from weekly RSI
+        oversold = rsi_1w_aligned[i] < 20  # Extreme oversold
+        overbought = rsi_1w_aligned[i] > 80  # Extreme overbought
+        
+        # Trend filter from daily EMA(50)
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
+        
+        # Long: weekly oversold + daily uptrend + volume confirmation
+        if oversold and uptrend and vol_confirmed:
             signals[i] = 0.25
-        # Short conditions: price breaks below Donchian lower band + below 12h EMA + volume confirmation
-        elif (close[i] < lowest_low[i] and 
-              close[i] < ema_12h_aligned[i] and 
-              vol_confirm[i]):
+        # Short: weekly overbought + daily downtrend + volume confirmation
+        elif overbought and downtrend and vol_confirmed:
             signals[i] = -0.25
         else:
             signals[i] = 0.0
