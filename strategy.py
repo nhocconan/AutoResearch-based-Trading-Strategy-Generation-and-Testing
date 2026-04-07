@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-1d_adx_rsi_momentum_v1
-Hypothesis: Combine ADX trend strength with RSI momentum to capture strong moves in both bull and bear markets.
-Long when ADX > 25 (strong trend) and RSI > 50 (bullish momentum).
-Short when ADX > 25 (strong trend) and RSI < 50 (bearish momentum).
-Use weekly timeframe for trend filter to avoid whipsaws.
-Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag on daily timeframe.
+12h_camarilla_pivot_1d_volume_v1
+Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
+Long when price breaks above R4 with volume confirmation (bullish continuation).
+Short when price breaks below S4 with volume confirmation (bearish continuation).
+Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
+Uses stricter volume confirmation and cooldown periods to reduce trade frequency.
+Works in both bull/bear markets by adapting to volatility and volume.
+Timeframe: 12h (primary), 1d (HTF)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_adx_rsi_momentum_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,109 +27,112 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Calculate ADX (14-period)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/14)
-    atr = np.zeros(n)
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    # Initial values
-    atr[13] = np.mean(tr[1:14])
-    plus_dm_sum = np.sum(plus_dm[1:14])
-    minus_dm_sum = np.sum(minus_dm[1:14])
-    
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-        plus_dm_sum = plus_dm_sum - (plus_dm_sum / 14) + plus_dm[i]
-        minus_dm_sum = minus_dm_sum - (minus_dm_sum / 14) + minus_dm[i]
-        
-        plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
-        minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n)
-    adx = np.zeros(n)
-    
-    for i in range(14, n):
-        di_sum = plus_di[i] + minus_di[i]
-        dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum if di_sum != 0 else 0
-    
-    # Smooth DX to get ADX
-    adx[27] = np.mean(dx[14:28])  # First ADX value after 2*14 periods
-    for i in range(28, n):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Calculate RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    # Weekly trend filter: EMA(50) on weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50 = np.zeros(len(close_1w))
-    ema_50[49] = np.mean(close_1w[:50])
-    for i in range(50, len(close_1w)):
-        ema_50[i] = (close_1w[i] * 2 + ema_50[i-1] * 49) / 50
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Previous day's values (shifted by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan  # First day has no previous
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Generate signals
+    # Avoid division by zero
+    range_1d = prev_high - prev_low
+    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
+    
+    # Camarilla levels
+    r3 = prev_close + range_1d * 1.1 / 4
+    r4 = prev_close + range_1d * 1.1 / 2
+    s3 = prev_close - range_1d * 1.1 / 4
+    s4 = prev_close - range_1d * 1.1 / 2
+    
+    # Align to 12h timeframe (previous day's levels are valid for current day)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 20-period average (12h: 10 days)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Cooldown counter to prevent overtrading (minimum 24 hours between trades)
+    cooldown = 0
+    cooldown_period = 2  # 2 bars = 24 hours minimum between trades
+    
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(adx[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(close[i])):
+    for i in range(20, n):
+        # Skip if data not available
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Long: strong uptrend (ADX > 25) + bullish momentum (RSI > 50) + price above weekly EMA
-        if adx[i] > 25 and rsi[i] > 50 and close[i] > ema_50_aligned[i]:
-            signals[i] = 0.25
-        # Short: strong downtrend (ADX > 25) + bearish momentum (RSI < 50) + price below weekly EMA
-        elif adx[i] > 25 and rsi[i] < 50 and close[i] < ema_50_aligned[i]:
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        # Decrease cooldown
+        if cooldown > 0:
+            cooldown -= 1
+        
+        vol_confirmed = volume[i] > vol_ma[i]
+        
+        if position == 1:  # Long position
+            # Exit: price crosses below R3 (mean reversion) or stop at S4 break
+            if close[i] < r3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+                cooldown = cooldown_period
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price crosses above S3 (mean reversion) or stop at R4 break
+            if close[i] > s3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+                cooldown = cooldown_period
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry (only if cooldown is 0)
+            if cooldown > 0:
+                signals[i] = 0.0
+                continue
+                
+            # Breakout long: price breaks above R4 with volume
+            if close[i] > r4_aligned[i] and vol_confirmed:
+                position = 1
+                signals[i] = 0.25
+                cooldown = cooldown_period
+            # Breakout short: price breaks below S4 with volume
+            elif close[i] < s4_aligned[i] and vol_confirmed:
+                position = -1
+                signals[i] = -0.25
+                cooldown = cooldown_period
+            # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
+            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
+                # Look for bullish rejection (close > open)
+                if close[i] > open_price[i]:
+                    position = 1
+                    signals[i] = 0.25
+                    cooldown = cooldown_period
+            # Mean reversion short: price rejects R3 with volume divergence
+            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
+                # Look for bearish rejection (close < open)
+                if close[i] < open_price[i]:
+                    position = -1
+                    signals[i] = -0.25
+                    cooldown = cooldown_period
     
     return signals
