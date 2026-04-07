@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla Pivot Reversal with Volume Filter
-# Hypothesis: Camarilla pivot levels (R3/S3, R4/S4) act as strong support/resistance on 6h timeframe.
-# Price rejecting R3/S3 with volume confirmation indicates reversal opportunity.
-# Works in bull (buy S3 bounce) and bear (sell R3 rejection). Volume filter reduces false breaks.
-# Target: 15-30 trades/year to minimize fee drag on 6h.
-name = "6h_camarilla_pivot_reversal_v1"
-timeframe = "6h"
+# Strategy: 4h Donchian Channel Breakout with 12h Volume and 1d ADX Trend Filter
+# Hypothesis: Donchian breakouts capture breakout momentum; 12h volume confirms institutional participation; 
+# 1d ADX > 25 ensures trending market to avoid false breakouts in ranging markets. 
+# Works in bull via upper breakouts, in bear via lower breakdowns. 
+# Target: 20-40 trades/year to minimize fee drag.
+name = "4h_donchian20_12h_volume_1d_adx_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,76 +23,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Using (H+L+C)/3 as pivot point approximation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Pivot point
-    pp = (prev_high + prev_low + prev_close) / 3
-    # Range
-    rng = prev_high - prev_low
+    # Calculate 12h volume moving average
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Camarilla levels
-    r3 = pp + (rng * 1.1 / 2)
-    s3 = pp - (rng * 1.1 / 2)
-    r4 = pp + (rng * 1.1)
-    s4 = pp - (rng * 1.1)
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to 6h timeframe (already shift(1) in get_htf_data, but we shifted again for prev day)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
     
-    # Volume confirmation: 6h volume > 20-period EMA of volume
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
-        # Skip if pivot data not available
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(vol_ema[i])):
+    for i in range(20, n):
+        # Skip if required data not available
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume[i] > vol_ema[i]
+        # Volume confirmation: current 4h volume > 12h average volume
+        vol_confirm = volume[i] > vol_ma_12h_aligned[i]
+        
+        # Trend filter: 1d ADX > 25 indicates trending market
+        trend_filter = adx_aligned[i] > 25
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 or reaches R4 (take profit)
-            if close[i] < s3_6h[i] or close[i] > r4_6h[i]:
+            # Exit: price closes below Donchian lower (20-period low)
+            if close[i] < lowest_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 or reaches S4 (take profit)
-            if close[i] > r3_6h[i] or close[i] < s4_6h[i]:
+            # Exit: price closes above Donchian upper (20-period high)
+            if close[i] > highest_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price rejects S3 with volume (close > S3 and volume confirmation)
-            if close[i] > s3_6h[i] and vol_confirm:
-                # Additional confirmation: not breaking below S4 (avoid strong breakdown)
-                if close[i] > s4_6h[i]:
-                    position = 1
-                    signals[i] = 0.25
-            # Enter short: price rejects R3 with volume (close < R3 and volume confirmation)
-            elif close[i] < r3_6h[i] and vol_confirm:
-                # Additional confirmation: not breaking above R4 (avoid strong breakout)
-                if close[i] < r4_6h[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long: price closes above Donchian upper + volume + trend
+            if close[i] > highest_high[i] and vol_confirm and trend_filter:
+                position = 1
+                signals[i] = 0.25
+            # Enter short: price closes below Donchian lower + volume + trend
+            elif close[i] < lowest_low[i] and vol_confirm and trend_filter:
+                position = -1
+                signals[i] = -0.25
     
     return signals
