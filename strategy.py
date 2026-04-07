@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, use daily Camarilla pivot levels (H3/L3 for mean reversion, H4/L4 for breakout) with EMA trend filter and volume confirmation. Enter long when price crosses above H3 with EMA20 > EMA50 and volume > 1.5x average; enter short when price crosses below L3 with EMA20 < EMA50 and volume > 1.5x average. Exit when price reaches opposite L4/H4 level or EMA crossover reverses. This strategy combines mean reversion at extreme daily levels with breakout continuation, using volume to confirm institutional participation. Works in bull/bear via EMA trend filter and pivot level structure. Targets 12-37 trades/year to minimize fee drag.
+4h_rsi_divergence_1d_trend_volume_v1
+Hypothesis: On 4h timeframe, combine daily trend filter with RSI divergence signals for high-probability reversals. Uses daily EMA50/EMA200 trend filter, RSI(14) with bearish/bullish divergence detection, and volume confirmation. Enters short on bearish divergence (price higher high, RSI lower high) in downtrend; enters long on bullish divergence (price lower low, RSI higher low) in uptrend. Exits on opposite divergence or trend reversal. Designed for 15-30 trades/year with strict entry conditions to minimize fee drag while capturing major reversals in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_rsi_divergence_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,61 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA20 and EMA50 for trend filter
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Calculate daily Camarilla pivot levels from prior day
+    # Calculate daily EMA50 and EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ph = df_1d['high'].values  # previous day high
-    pl = df_1d['low'].values   # previous day low
-    pc = df_1d['close'].values # previous day close
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
     
-    # Calculate Camarilla levels for each day
-    camarilla_h4 = pc + 1.1 * (ph - pl) / 2
-    camarilla_l4 = pc - 1.1 * (ph - pl) / 2
-    camarilla_h3 = pc + 1.1 * (ph - pl) / 4
-    camarilla_l3 = pc - 1.1 * (ph - pl) / 4
-    camarilla_h2 = pc + 1.1 * (ph - pl) / 6
-    camarilla_l2 = pc - 1.1 * (ph - pl) / 6
-    camarilla_h1 = pc + 1.1 * (ph - pl) / 12
-    camarilla_l1 = pc - 1.1 * (ph - pl) / 12
+    # Align to 4h timeframe (shifted by 1 day)
+    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align to 12h timeframe (shifted by 1 day for look-ahead prevention)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume confirmation (24-period average on 12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation (20-period average on 4h = ~1.3 days)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Track recent highs/lows for divergence detection
+    lookback = 10  # Look back 10 periods (~2.5 days) for swing points
+    
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_4h[i]) or np.isnan(ema200_1d_4h[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or i < lookback):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 24-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Determine trend based on daily EMA50 vs EMA200
+        uptrend = ema50_1d_4h[i] > ema200_1d_4h[i]
+        downtrend = ema50_1d_4h[i] < ema200_1d_4h[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price reaches L4 level (opposite extreme)
-            if close[i] <= l4_12h[i]:
-                exit_long = True
-            # Exit if EMA20 crosses below EMA50 (trend reversal)
-            elif ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1]:
+            # Exit on bearish divergence (potential reversal)
+            if downtrend:  # Only check for bearish div in downtrend context
+                # Find recent price high and RSI high
+                price_high_idx = np.argmax(high[i-lookback:i+1]) + i - lookback
+                rsi_high_idx = np.argmax(rsi[i-lookback:i+1]) + i - lookback
+                if (price_high_idx == i and rsi_high_idx < i and  # Current bar is price high
+                    rsi[i] < rsi[rsi_high_idx]):  # RSI lower than previous high
+                    exit_long = True
+            # Exit on trend reversal to downtrend
+            elif not uptrend:
                 exit_long = True
             
             if exit_long:
@@ -89,11 +92,16 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price reaches H4 level (opposite extreme)
-            if close[i] >= h4_12h[i]:
-                exit_short = True
-            # Exit if EMA20 crosses above EMA50 (trend reversal)
-            elif ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1]:
+            # Exit on bullish divergence (potential reversal)
+            if uptrend:  # Only check for bullish div in uptrend context
+                # Find recent price low and RSI low
+                price_low_idx = np.argmin(low[i-lookback:i+1]) + i - lookback
+                rsi_low_idx = np.argmin(rsi[i-lookback:i+1]) + i - lookback
+                if (price_low_idx == i and rsi_low_idx < i and  # Current bar is price low
+                    rsi[i] > rsi[rsi_low_idx]):  # RSI higher than previous low
+                    exit_short = True
+            # Exit on trend reversal to uptrend
+            elif not downtrend:
                 exit_short = True
             
             if exit_short:
@@ -102,22 +110,67 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price crosses above H3 with EMA20 > EMA50 and volume confirmation
-            long_entry = False
-            if (close[i] > h3_12h[i] and close[i-1] <= h3_12h[i-1] and
-                ema20[i] > ema50[i] and vol_confirm):
-                long_entry = True
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            bullish_div = False
+            if uptrend or (not downtrend and not uptrend):  # Allow in uptrend or sideways
+                # Find two most recent price lows
+                window = high[i-lookback*2:i+1]  # Look further back for two points
+                if len(window) >= lookback*2:
+                    price_lows = []
+                    rsi_lows = []
+                    # Find local minima in price
+                    for j in range(i-lookback*2, i+1):
+                        if j >= lookback and j < n:
+                            is_low = True
+                            for k in range(max(lookback, j-5), min(n, j+6)):
+                                if k != j and low[k] <= low[j]:
+                                    is_low = False
+                                    break
+                            if is_low:
+                                price_lows.append((j, low[j]))
+                                rsi_lows.append((j, rsi[j]))
+                    
+                    # Need at least two lows
+                    if len(price_lows) >= 2:
+                        # Get two most recent lows
+                        (price_low1, rsi_low1) = price_lows[-2]
+                        (price_low2, rsi_low2) = price_lows[-1]
+                        # Bullish div: lower price low, higher RSI low
+                        if price_low2 < price_low1 and rsi_low2 > rsi_low1:
+                            bullish_div = True
             
-            # Short entry: price crosses below L3 with EMA20 < EMA50 and volume confirmation
-            short_entry = False
-            if (close[i] < l3_12h[i] and close[i-1] >= l3_12h[i-1] and
-                ema20[i] < ema50[i] and vol_confirm):
-                short_entry = True
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            bearish_div = False
+            if downtrend or (not downtrend and not uptrend):  # Allow in downtrend or sideways
+                # Find two most recent price highs
+                price_highs = []
+                rsi_highs = []
+                # Find local maxima in price
+                for j in range(i-lookback*2, i+1):
+                    if j >= lookback and j < n:
+                        is_high = True
+                        for k in range(max(lookback, j-5), min(n, j+6)):
+                            if k != j and high[k] >= high[j]:
+                                is_high = False
+                                break
+                        if is_high:
+                            price_highs.append((j, high[j]))
+                            rsi_highs.append((j, rsi[j]))
+                
+                # Need at least two highs
+                if len(price_highs) >= 2:
+                    # Get two most recent highs
+                    (price_high1, rsi_high1) = price_highs[-2]
+                    (price_high2, rsi_high2) = price_highs[-1]
+                    # Bearish div: higher price high, lower RSI high
+                    if price_high2 > price_high1 and rsi_high2 < rsi_high1:
+                        bearish_div = True
             
-            if long_entry:
+            # Volume confirmation required for entry
+            if bullish_div and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            elif short_entry:
+            elif bearish_div and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
