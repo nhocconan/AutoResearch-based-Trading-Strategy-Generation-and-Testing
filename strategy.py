@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 6h_trix_1d_volume_regime_v1
-Hypothesis: On 6-hour timeframe, use TRIX momentum oscillator for entry signals filtered by daily volume spike and 6-hour chop regime (range vs trend). TRIX filters out minor cycles and is effective in both trending and ranging markets when combined with volume confirmation. Volume spikes indicate institutional interest and increase probability of sustained moves. Chop regime filter avoids whipsaw in sideways markets by switching between mean reversion (in chop) and trend following (in trend). Target: 25-35 trades/year to minimize fee drag while capturing high-probability moves.
+Hypothesis: On 6-hour timeframe, use TRIX (triple-smoothed EMA) from daily timeframe for trend direction, combined with volume confirmation on 6h.
+Enter long when daily TRIX turns positive AND 6h volume > 1.5x 20-period average.
+Enter short when daily TRIX turns negative AND 6h volume > 1.5x 20-period average.
+Exit when TRIX reverses sign or volume drops below average.
+TRIX filters noise and catches sustained momentum; volume confirms institutional participation.
+Daily timeframe filter ensures alignment with higher timeframe trend, reducing whipsaw in choppy markets.
+Target: 15-25 trades/year to minimize fee drag while capturing sustained moves.
 """
 
 import numpy as np
@@ -17,77 +23,61 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX on 6h (1-period ROC of triple EMA)
-    # TRIX = 100 * (EMA3 of ROC)
-    close_s = pd.Series(close)
-    roc = close_s.pct_change(1)  # 1-period rate of change
-    ema1 = roc.ewm(span=15, min_periods=15, adjust=False).mean()
-    ema2 = ema1.ewm(span=15, min_periods=15, adjust=False).mean()
-    ema3 = ema2.ewm(span=15, min_periods=15, adjust=False).mean()
-    trix = 100 * ema3
-    
-    # Get daily data for volume average
+    # Get daily data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-day average volume on daily
-    d_volume = df_1d['volume'].values
-    d_vol_avg = pd.Series(d_volume).rolling(window=20, min_periods=20).mean().values
-    d_vol_avg_aligned = align_htf_to_ltf(prices, df_1d, d_vol_avg)
+    d_close = df_1d['close'].values
     
-    # Calculate chop regime on 6h (using ATR and price range)
-    high = prices['high'].values
-    low = prices['low'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate TRIX on daily: triple EMA of % change
+    # TRIX = EMA(EMA(EMA(close, period), period), period) - 1
+    period = 15
+    ema1 = pd.Series(d_close).ewm(span=period, adjust=False).mean()
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False).mean()
+    ema3 = pd.Series(ema2).ewm(span=period, adjust=False).mean()
     
-    # Calculate 14-period high-low range
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_hl = max_high - min_low
+    # Calculate % change of triple EMA
+    trix_raw = ema3.pct_change() * 100  # as percentage
+    trix = trix_raw.values
     
-    # Chop = 100 * log10(sum(ATR14) / (maxHigh-minLow)) / log10(14)
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = np.where(range_hl > 0, 100 * np.log10(atr_sum / range_hl) / np.log10(14), 50)
+    # Align TRIX to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # Volume filter: 6h volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = vol_series / vol_ma
+    vol_ratio = vol_ratio.fillna(0).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
-        # Skip if required data not available
-        if (np.isnan(trix.iloc[i]) or np.isnan(d_vol_avg_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(chop[i])):
+    for i in range(1, n):  # Start from 1 for pct_change
+        # Skip if TRIX not available
+        if np.isnan(trix_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume spike: current volume > 1.5x daily average volume
-        vol_spike = volume[i] > 1.5 * d_vol_avg_aligned[i]
+        # TRIX direction
+        trix_pos = trix_aligned[i] > 0
+        trix_neg = trix_aligned[i] < 0
         
-        # Regime filters
-        in_chop = chop[i] > 61.8  # Choppy market
-        in_trend = chop[i] < 38.2  # Trending market
-        
-        # TRIX signals
-        trix_cross_up = trix.iloc[i] > 0 and trix.iloc[i-1] <= 0
-        trix_cross_down = trix.iloc[i] < 0 and trix.iloc[i-1] >= 0
+        # Volume confirmation
+        vol_confirmed = vol_ratio[i] > 1.5
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when TRIX crosses below zero
-            if trix_cross_down:
+            # Exit when TRIX turns negative
+            if trix_neg:
                 exit_long = True
-            # Exit when volatility spikes against position
-            elif trix.iloc[i] < -0.5:  # Strong bearish momentum
+            # Exit when volume drops below average
+            elif vol_ratio[i] < 1.0:
                 exit_long = True
             
             if exit_long:
@@ -99,11 +89,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when TRIX crosses above zero
-            if trix_cross_up:
+            # Exit when TRIX turns positive
+            if trix_pos:
                 exit_short = True
-            # Exit when volatility spikes against position
-            elif trix.iloc[i] > 0.5:  # Strong bullish momentum
+            # Exit when volume drops below average
+            elif vol_ratio[i] < 1.0:
                 exit_short = True
             
             if exit_short:
@@ -112,19 +102,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Entry logic adapts to regime
-            if in_trend:
-                # Trend following: enter in direction of TRIX momentum
-                long_entry = trix_cross_up and vol_spike
-                short_entry = trix_cross_down and vol_spike
-            elif in_chop:
-                # Mean reversion: fade extreme TRIX readings
-                long_entry = (trix.iloc[i] < -0.3 and trix.iloc[i] > trix.iloc[i-1]) and vol_spike
-                short_entry = (trix.iloc[i] > 0.3 and trix.iloc[i] < trix.iloc[i-1]) and vol_spike
-            else:
-                # Neutral regime: standard TRIX crossover with volume
-                long_entry = trix_cross_up and vol_spike
-                short_entry = trix_cross_down and vol_spike
+            # Long entry: TRIX positive AND volume confirmed
+            long_entry = trix_pos and vol_confirmed
+            
+            # Short entry: TRIX negative AND volume confirmed
+            short_entry = trix_neg and vol_confirmed
             
             if long_entry:
                 position = 1
