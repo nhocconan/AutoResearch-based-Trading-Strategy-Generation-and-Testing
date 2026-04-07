@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Exponential Moving Average Crossover with Daily Trend Filter and Volume Confirmation
-# Long when EMA(20) > EMA(50), price > EMA(50), and daily close > weekly close (bullish bias)
-# Short when EMA(20) < EMA(50), price < EMA(50), and daily close < weekly close (bearish bias)
-# Volume must be > 1.2x 20-period average for confirmation
-# Exit when EMA crossover reverses or volume dries up
-# Position size: 0.25 (25% of capital)
-# Uses EMA crossover for momentum, higher timeframe for trend bias, volume for confirmation
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Hypothesis: 12-hour Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper band, 1w close > 1w EMA40 (uptrend), and volume > 2.0x 12h average volume
+# Short when price breaks below 12h Donchian lower band, 1w close < 1w EMA40 (downtrend), and volume > 2.0x 12h average volume
+# Exit when trend reverses (1w close crosses EMA40) or opposite breakout occurs
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.28 (28% of capital)
+# Uses 12h EMA40 for trend filter and 12h volume average for confirmation
+# Target: 80-120 total trades over 4 years (20-30/year)
 
-name = "6h_ema_crossover_daily_trend_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema40_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,97 +27,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA calculations
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_daily = df_daily['close'].values
-    # Weekly data for stronger trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        # Fallback to daily if weekly not available
-        weekly_trend = np.zeros(len(prices))
-    else:
-        close_weekly = df_weekly['close'].values
-        weekly_trend = align_htf_to_ltf(prices, df_weekly, close_weekly)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align daily close to 6h timeframe
-    daily_close_aligned = align_htf_to_ltf(prices, df_daily, close_daily)
+    # 12h Donchian(20) channels
+    high_series = pd.Series(high_12h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_12h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian bands to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    
+    # 1w data for EMA40 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=40, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # 12h volume average for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(daily_close_aligned[i])):
-            if len(df_weekly) >= 2 and np.isnan(weekly_trend[i]):
-                if position != 0:
-                    signals[i] = position * 0.25
-                else:
-                    signals[i] = 0.0
-                continue
-            elif len(df_weekly) < 2:
-                # No weekly data, continue with available data
-                pass
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_12h_aligned[i]) or 
+            np.isnan(atr[i])):
+            if position != 0:
+                signals[i] = position * 0.28
             else:
-                if position != 0:
-                    signals[i] = position * 0.25
-                else:
-                    signals[i] = 0.0
-                continue
-        
-        # Volume confirmation: volume > 1.2x average
-        vol_confirm = volume[i] > 1.2 * volume_ma[i]
-        
-        # Trend filter: daily close > weekly close for bullish bias, < for bearish
-        if len(df_weekly) >= 2:
-            bullish_bias = daily_close_aligned[i] > weekly_trend[i]
-            bearish_bias = daily_close_aligned[i] < weekly_trend[i]
-        else:
-            # Fallback: use daily close vs its own 10-period MA for trend
-            daily_ma10 = pd.Series(close_daily).rolling(window=10, min_periods=10).mean().values
-            daily_ma10_aligned = align_htf_to_ltf(prices, df_daily, daily_ma10)
-            bullish_bias = daily_close_aligned[i] > daily_ma10_aligned[i]
-            bearish_bias = daily_close_aligned[i] < daily_ma10_aligned[i]
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # long position
-            # Exit: EMA crossover reverses or volume dries up
-            if ema20[i] <= ema50[i] or not vol_confirm:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+            # Exit: trend reverses (price below EMA40) or breaks below lower band
+            elif close[i] < ema_1w_aligned[i] or close[i] < lower_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:  # short position
-            # Exit: EMA crossover reverses or volume dries up
-            if ema20[i] >= ema50[i] or not vol_confirm:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+            # Exit: trend reverses (price above EMA40) or breaks above upper band
+            elif close[i] > ema_1w_aligned[i] or close[i] > upper_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:
-            # Look for entries with EMA crossover, volume confirmation, and trend bias
-            # Long: EMA(20) > EMA(50), price > EMA(50), bullish bias, volume confirmation
-            if (ema20[i] > ema50[i] and
-                close[i] > ema50[i] and
-                bullish_bias and
-                vol_confirm):
-                signals[i] = 0.25
+            # Look for entries with volume confirmation and trend alignment
+            # Long: price breaks above upper band, price above EMA40 (uptrend), volume spike
+            if (close[i] > upper_aligned[i] and
+                close[i] > ema_1w_aligned[i] and
+                volume[i] > 2.0 * volume_ma_12h_aligned[i]):
+                signals[i] = 0.28
                 position = 1
-            # Short: EMA(20) < EMA(50), price < EMA(50), bearish bias, volume confirmation
-            elif (ema20[i] < ema50[i] and
-                  close[i] < ema50[i] and
-                  bearish_bias and
-                  vol_confirm):
-                signals[i] = -0.25
+                entry_price = close[i]
+            # Short: price breaks below lower band, price below EMA40 (downtrend), volume spike
+            elif (close[i] < lower_aligned[i] and
+                  close[i] < ema_1w_aligned[i] and
+                  volume[i] > 2.0 * volume_ma_12h_aligned[i]):
+                signals[i] = -0.28
                 position = -1
+                entry_price = close[i]
     
     return signals
