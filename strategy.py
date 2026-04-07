@@ -9,10 +9,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
 # Volume confirmation: current volume > 1.8 * average volume of last 20 periods
 # Position size: 0.25 (25% of capital)
-# Target: 100-150 total trades over 4 years (25-38/year)
+# Target: 50-150 total trades over 4 years (12-37/year)
 # Uses daily trend to filter for stronger trends that work in both bull and bear markets
 
-name = "12h_donchian20_1d_vol_trend_v1"
+name = "12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
