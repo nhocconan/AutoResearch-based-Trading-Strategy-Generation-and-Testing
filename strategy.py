@@ -1,75 +1,83 @@
 #!/usr/bin/env python3
 """
-6H Elder Ray Momentum with 1w Trend Filter
-Long when Bull Power > 0 AND Bear Power < 0 AND 1w EMA trend up
-Short when Bear Power < 0 AND Bull Power > 0 AND 1w EMA trend down
-Exit when Bull Power * Bear Power > 0 (both same sign)
-Elder Ray uses EMA13: Bull = High - EMA13, Bear = Low - EMA13
-Works in bull/bear by requiring trend alignment from 1w timeframe.
+12h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+Long when price breaks above Donchian upper channel (20-period) with volume > 1.5x average AND 1d EMA trend up
+Short when price breaks below Donchian lower channel with volume > 1.5x average AND 1d EMA trend down
+Exit when price crosses back to Donchian middle line
+Uses Donchian channels that adapt to volatility, reducing false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_momentum_1w_trend_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === EMA 13 for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # === Donchian Channels (20-period high/low) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    # === Elder Ray Components ===
-    bull_power = high - ema13  # Strength of bulls: ability to push above EMA
-    bear_power = low - ema13   # Strength of bears: ability to push below EMA
+    # === Volume confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
     
-    # === 1w trend filter (EMA 21) ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 1d trend filter (EMA 21) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(13, n):
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(ema_1w_aligned[i-1])):
+    for i in range(20, n):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(donch_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: when bull and bear power same sign (both + or both -)
-            if bull_power[i] * bear_power[i] > 0:
+            # Exit: price crosses back below middle line
+            if close[i] < donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: when bull and bear power same sign
-            if bull_power[i] * bear_power[i] > 0:
+            # Exit: price crosses back above middle line
+            if close[i] > donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Entry: Bullish when bulls strong (+), bears weak (-) AND 1w uptrend
-            if bull_power[i] > 0 and bear_power[i] < 0 and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+            # Need expanding volume (above average)
+            if vol_ratio[i] < 1.5:
+                signals[i] = 0.0
+                continue
+            
+            # Entry: Donchian breakout with volume confirmation AND 1d trend filter
+            if close[i] > donch_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Breakout above upper channel with rising 1d EMA -> long
                 position = 1
-                signals[i] = 0.25
-            # Entry: Bearish when bears strong (-), bulls weak (+) AND 1w downtrend
-            elif bear_power[i] < 0 and bull_power[i] > 0 and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+                signals[i] = 0.30
+            elif close[i] < donch_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Breakdown below lower channel with falling 1d EMA -> short
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
