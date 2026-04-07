@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-4h_rsi_pullback_1w_trend_v1
-Hypothesis: RSI pullback on 4h chart with weekly trend filter and volume confirmation.
-Long: RSI(14) < 30 (oversold) with price above weekly EMA50 and volume above average.
-Short: RSI(14) > 70 (overbought) with price below weekly EMA50 and volume above average.
-Uses RSI for mean reversion entries, weekly EMA for trend filter, and volume for confirmation.
-Designed for 20-40 trades/year on 4h timeframe with clear rules that work in both bull and bear markets.
+12h_camarilla_pivot_1d_volume_v1
+Hypothesis: Camarilla pivot levels from 1-day timeframe with volume confirmation on 12h chart.
+Long: price bounces from S3/S4 levels with volume confirmation.
+Short: price bounces from R3/R4 levels with volume confirmation.
+Uses institutional reversal levels from daily chart with volume confirmation for entry.
+Designed for 12-37 trades per year (50-150 total) on 12h timeframe with clear reversal logic
+that works in both bull and bear markets by fading extremes at key institutional levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_pullback_1w_trend_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -27,22 +28,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # First day uses same day
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Camarilla calculations
+    range_1d = prev_high - prev_low
+    camarilla_S3 = prev_close - (range_1d * 1.1 / 6)
+    camarilla_S4 = prev_close - (range_1d * 1.1 / 4)
+    camarilla_R3 = prev_close + (range_1d * 1.1 / 6)
+    camarilla_R4 = prev_close + (range_1d * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,9 +65,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or np.isnan(R4_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
@@ -60,28 +76,32 @@ def generate_signals(prices):
         # Volume confirmation: current volume above average
         vol_confirmed = volume[i] > vol_ma[i]
         
+        # Price relative to Camarilla levels
+        near_S3_S4 = (close[i] <= S3_aligned[i] * 1.002) or (close[i] <= S4_aligned[i] * 1.002)
+        near_R3_R4 = (close[i] >= R3_aligned[i] * 0.998) or (close[i] >= R4_aligned[i] * 0.998)
+        
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral or trend turns bearish
-            if rsi[i] >= 50 or close[i] < ema50_1w_aligned[i]:
+            # Exit: price moves below S4
+            if close[i] < S4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral or trend turns bullish
-            if rsi[i] <= 50 or close[i] > ema50_1w_aligned[i]:
+            # Exit: price moves above R4
+            if close[i] > R4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: RSI oversold with volume confirmation and bullish trend
-            if rsi[i] < 30 and vol_confirmed and close[i] > ema50_1w_aligned[i]:
+            # Long: price near S3/S4 with volume confirmation
+            if near_S3_S4 and vol_confirmed:
                 position = 1
                 signals[i] = 0.25
-            # Short: RSI overbought with volume confirmation and bearish trend
-            elif rsi[i] > 70 and vol_confirmed and close[i] < ema50_1w_aligned[i]:
+            # Short: price near R3/R4 with volume confirmation
+            elif near_R3_R4 and vol_confirmed:
                 position = -1
                 signals[i] = -0.25
     
