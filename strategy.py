@@ -1,86 +1,84 @@
 #!/usr/bin/env python3
 """
-12h_ema_trend_1d_volume_v2
-Hypothesis: On 12h timeframe, use EMA crossover (20/50) for trend signals, filtered by daily volume confirmation and price above/below EMA200.
-Enter long when EMA20 crosses above EMA50, price > EMA200, and volume > 1.5x average.
-Enter short when EMA20 crosses below EMA50, price < EMA200, and volume > 1.5x average.
-Exit when EMA crossover reverses or price crosses EMA200.
-Targets 12-37 trades/year to minimize fee decay while capturing sustained trends.
-Works in bull (trend following) and bear (short signals) markets.
+4h_cci_breakout_1d_trend_volume_v1
+Hypothesis: On 4-hour timeframe, use CCI (14) for momentum signals, filtered by daily trend (EMA20 > EMA50) and volume confirmation.
+Enter long when CCI crosses above +100 and daily trend is up with volume > 1.5x average.
+Enter short when CCI crosses below -100 and daily trend is down with volume > 1.5x average.
+Exit when CCI returns to neutral zone (-100 to 100) or trend reverses.
+Designed to work in both bull and bear markets by following daily trend direction.
+Targets 20-50 trades/year to minimize fee drift while capturing sustained moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_ema_trend_1d_volume_v2"
-timeframe = "12h"
+name = "4h_cci_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA20 and EMA50 on 12h
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # EMA200 on 12h for trend filter
-    ema200 = close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
+    # CCI (14) calculation
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    ma_tp = tp_series.rolling(window=14, min_periods=14).mean()
+    mad = tp_series.rolling(window=14, min_periods=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp_series - ma_tp) / (0.015 * mad)
+    cci_values = cci.values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get daily data for additional trend filter (calculate once before loop)
+    # Get daily data for trend filter (calculate once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on daily close
+    # Calculate EMA20 and EMA50 on daily close
     daily_close = df_1d['close'].values
     daily_close_s = pd.Series(daily_close)
+    ema20_1d = daily_close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
     ema50_1d = daily_close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align to 12h timeframe (shifted by 1 day to avoid look-ahead)
+    # Align to 4h timeframe (shifted by 1 day to avoid look-ahead)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(14, n):  # Start after CCI warmup
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or np.isnan(ema200[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(cci_values[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filters
-        price_above_ema200 = close[i] > ema200[i]
-        price_below_ema200 = close[i] < ema200[i]
-        daily_uptrend = ema50_1d_aligned[i] > close[i]  # Simplified: price above daily EMA50
-        daily_downtrend = ema50_1d_aligned[i] < close[i]  # Simplified: price below daily EMA50
+        # Trend filter from daily: up if EMA20 > EMA50, down if EMA20 < EMA50
+        trend_up = ema20_1d_aligned[i] > ema50_1d_aligned[i]
+        trend_down = ema20_1d_aligned[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when EMA20 crosses below EMA50
-            if ema20[i] < ema50[i]:
+            # Exit when CCI returns to neutral zone (< 100)
+            if cci_values[i] < 100:
                 exit_long = True
-            # Exit when price crosses below EMA200
-            elif not price_above_ema200:
-                exit_long = True
-            # Exit when daily trend turns down
-            elif not daily_uptrend:
+            # Exit on trend reversal
+            elif not trend_up:
                 exit_long = True
             
             if exit_long:
@@ -92,14 +90,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when EMA20 crosses above EMA50
-            if ema20[i] > ema50[i]:
+            # Exit when CCI returns to neutral zone (> -100)
+            if cci_values[i] > -100:
                 exit_short = True
-            # Exit when price crosses above EMA200
-            elif not price_below_ema200:
-                exit_short = True
-            # Exit when daily trend turns up
-            elif not daily_downtrend:
+            # Exit on trend reversal
+            elif not trend_down:
                 exit_short = True
             
             if exit_short:
@@ -108,13 +103,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA20 crosses above EMA50, price > EMA200, daily uptrend, volume confirmation
-            ema_cross_up = ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1]
-            long_entry = ema_cross_up and price_above_ema200 and daily_uptrend and vol_confirm
+            # Long entry: CCI crosses above +100, daily trend up, volume confirmation
+            long_entry = (cci_values[i] > 100) and (cci_values[i-1] <= 100) and trend_up and vol_confirm
             
-            # Short entry: EMA20 crosses below EMA50, price < EMA200, daily downtrend, volume confirmation
-            ema_cross_down = ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1]
-            short_entry = ema_cross_down and price_below_ema200 and daily_downtrend and vol_confirm
+            # Short entry: CCI crosses below -100, daily trend down, volume confirmation
+            short_entry = (cci_values[i] < -100) and (cci_values[i-1] >= -100) and trend_down and vol_confirm
             
             if long_entry:
                 position = 1
