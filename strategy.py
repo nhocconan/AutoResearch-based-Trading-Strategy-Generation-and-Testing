@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian breakout with daily volume filter and ADX trend filter
-# Hypothesis: Donchian breakouts capture volatility expansion; volume confirms participation; ADX ensures trending conditions to avoid whipsaws.
-# Works in bull (upward breakouts) and bear (downward breakdowns) via breakout direction + trend filter.
-# Target: 25-40 trades/year (~100-160 total over 4 years) to minimize fee drag.
-name = "4h_donchian20_1d_volume_adx_v1"
-timeframe = "4h"
+# Strategy: Daily KAMA with weekly trend filter and volume confirmation
+# Hypothesis: KAMA adapts to market conditions, reducing whipsaw in sideways markets.
+# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
+# Volume confirmation adds institutional participation validation.
+# Target: 10-25 trades/year to minimize fee drag on daily timeframe.
+name = "daily_kama_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,89 +23,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Daily volume 20-period moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate weekly KAMA for trend direction
+    close_1w = df_1w['close'].values
+    # Calculate Efficiency Ratio for KAMA
+    change = np.abs(np.diff(close_1w, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_1w, n=1)), axis=0)  # 1-period volatility sum
+    # Handle first 10 values
+    change = np.concatenate([[np.nan]*10, change])
+    volatility = np.concatenate([[np.nan]*10, volatility[10:]])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Calculate KAMA
+    kama_1w = np.full_like(close_1w, np.nan)
+    kama_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        if not np.isnan(sc[i]):
+            kama_1w[i] = kama_1w[i-1] + sc[i] * (close_1w[i] - kama_1w[i-1])
+        else:
+            kama_1w[i] = kama_1w[i-1]
+    kama_1w = np.concatenate([[np.nan]*9, kama_1w[10:]])  # align with original indexing
     
-    # Daily ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Trend: price above/below weekly KAMA
+    trend_1w = close_1w > kama_1w
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w.astype(float))
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate daily KAMA for entry signal
+    change_d = np.abs(np.diff(close, n=10))
+    volatility_d = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    change_d = np.concatenate([[np.nan]*10, change_d])
+    volatility_d = np.concatenate([[np.nan]*10, volatility_d[10:]])
+    er_d = np.where(volatility_d != 0, change_d / volatility_d, 0)
+    sc_d = (er_d * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama_d = np.full_like(close, np.nan)
+    kama_d[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc_d[i]):
+            kama_d[i] = kama_d[i-1] + sc_d[i] * (close[i] - kama_d[i-1])
+        else:
+            kama_d[i] = kama_d[i-1]
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # DI and DX
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align daily indicators to 4h
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily 20-period volume moving average
+    vol_ma_d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
+    position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):  # Start after warmup period
         # Skip if required data not available
-        if (np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(kama_d[i]) or np.isnan(trend_1w_aligned[i]) or 
+            np.isnan(vol_ma_d[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
-        
-        # Trend filter: ADX > 25
-        trend_filter = adx_aligned[i] > 25
+        # Volume confirmation: current daily volume > 20-day average
+        vol_confirm = volume[i] > vol_ma_d[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower (20-period low)
-            if close[i] < lowest_low[i]:
+            # Exit: price crosses below daily KAMA OR trend changes
+            if close[i] < kama_d[i] or trend_1w_aligned[i] < 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper (20-period high)
-            if close[i] > highest_high[i]:
+            # Exit: price crosses above daily KAMA OR trend changes
+            if close[i] > kama_d[i] or trend_1w_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above Donchian upper + volume + trend
-            if close[i] > highest_high[i] and vol_confirm and trend_filter:
+            # Enter long: price above daily KAMA, uptrend on weekly, volume confirmation
+            if (close[i] > kama_d[i] and trend_1w_aligned[i] > 0.5 and vol_confirm):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian lower + volume + trend
-            elif close[i] < lowest_low[i] and vol_confirm and trend_filter:
+            # Enter short: price below daily KAMA, downtrend on weekly, volume confirmation
+            elif (close[i] < kama_d[i] and trend_1w_aligned[i] < 0.5 and vol_confirm):
                 position = -1
                 signals[i] = -0.25
     
