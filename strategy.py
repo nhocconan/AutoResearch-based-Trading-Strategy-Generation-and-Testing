@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4H Donchian Breakout + Daily Trend + Volume Confirmation
+4H Donchian Breakout + Daily EMA Trend + Volume Confirmation
 Hypothesis: Donchian(20) breakouts capture strong momentum. Daily EMA(21) filters for higher timeframe trend alignment. 
 Volume > 1.5x 24-period average confirms institutional participation. Designed for 4h timeframe to balance trade frequency 
 and signal quality in both bull and bear markets. Target: 20-40 trades/year per symbol.
