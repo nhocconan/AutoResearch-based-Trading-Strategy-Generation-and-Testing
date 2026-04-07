@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-12h_ema_bounce_volume_v1
-Hypothesis: Price bounces off EMA(50) on 12h with volume confirmation. Works in both bull and bear markets
-by capturing mean-reversion moves within the trend. Uses daily trend filter to avoid counter-trend trades.
+1h_atr_breakout_4h1d_trend_volume_v1
+Hypothesis: ATR-based breakout strategy with 4h/1d trend filter and volume confirmation.
+ATR(14) breakout captures momentum in both bull and bear markets. 4h EMA50 and 1d EMA100
+provide multi-timeframe trend alignment. Volume > 20-period average confirms breakout strength.
+Entry only during 08-20 UTC to avoid low-volume overnight hours. Target 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_ema_bounce_volume_v1"
-timeframe = "12h"
+name = "1h_atr_breakout_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,64 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1h ATR for breakout levels
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    # 1d EMA100 for higher timeframe trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Align daily EMA to 12h timeframe
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 12h EMA50 for bounce signals
-    ema50_12h_calc = pd.Series(close).ewm(span=50, adjust=False).mean().values
-    
-    # 20-period volume average on 12h
+    # 20-period volume average for confirmation
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if required data not available
-        if (np.isnan(ema50_12h[i]) or np.isnan(ema50_12h_calc[i]) or 
-            np.isnan(vol_sma[i])):
+    for i in range(100, n):
+        # Skip if required data not available or outside session
+        if (np.isnan(atr[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema100_1d_aligned[i]) or np.isnan(vol_sma[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_sma[i]
+        # Volume confirmation: current volume > 2.0x average volume
+        vol_confirm = volume[i] > 2.0 * vol_sma[i]
+        
+        # Calculate dynamic breakout levels
+        upper_break = high[i-1] + 0.5 * atr[i-1]
+        lower_break = low[i-1] - 0.5 * atr[i-1]
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA
-            if close[i] < ema50_12h_calc[i]:
+            # Exit: close below 1h EMA20 or ATR trailing stop
+            ema20 = pd.Series(close[i-19:i+1]).mean() if i >= 19 else ema50_4h_aligned[i]
+            if close[i] < ema20 or close[i] < (high[i-1] - 1.5 * atr[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA
-            if close[i] > ema50_12h_calc[i]:
+            # Exit: close above 1h EMA20 or ATR trailing stop
+            ema20 = pd.Series(close[i-19:i+1]).mean() if i >= 19 else ema50_4h_aligned[i]
+            if close[i] > ema20 or close[i] > (low[i-1] + 1.5 * atr[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long when price touches EMA from below in uptrend
-            if (close[i] <= ema50_12h_calc[i] * 1.005 and  # Allow small tolerance
-                close[i] > ema50_12h_calc[i] * 0.995 and
-                vol_confirm and
-                ema50_12h[i] > ema50_12h[max(0, i-1)]):  # Daily EMA rising
+            # Long breakout in uptrend (price > 4h EMA50 and 1d EMA100)
+            if (close[i] > upper_break and 
+                vol_confirm and 
+                close[i] > ema50_4h_aligned[i] and 
+                close[i] > ema100_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short when price touches EMA from above in downtrend
-            elif (close[i] >= ema50_12h_calc[i] * 0.995 and
-                  close[i] < ema50_12h_calc[i] * 1.005 and
-                  vol_confirm and
-                  ema50_12h[i] < ema50_12h[max(0, i-1)]):  # Daily EMA falling
+                signals[i] = 0.20
+            # Short breakout in downtrend (price < 4h EMA50 and 1d EMA100)
+            elif (close[i] < lower_break and 
+                  vol_confirm and 
+                  close[i] < ema50_4h_aligned[i] and 
+                  close[i] < ema100_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
