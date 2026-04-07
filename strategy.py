@@ -53,7 +53,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
-    tr3[0] = t1[0]
+    tr3[0] = tr1[0]
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
@@ -77,19 +77,19 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 4-period Donchian channels (20-period for breakout)
+    # 4-hour Donchian channels (20-period for breakout)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 10-period EMA for exit
     ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # 4-period ATR(14) for stoploss
+    # 4-hour ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
-    tr3[0] = t1[0]
+    tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
