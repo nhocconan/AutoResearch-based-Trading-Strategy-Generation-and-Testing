@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Parabolic SAR with Volume Filter
-Long when Parabolic SAR flips below price with above-average volume
-Short when Parabolic SAR flips above price with above-average volume
-Exit when SAR flips opposite direction
-Parabolic SAR works in trending markets (both bull and bear) and volume filter reduces whipsaws
+4h Donchian Breakout with 12h Trend and Volume
+Long when price breaks above Donchian(20) high with 12h uptrend and volume confirmation
+Short when price breaks below Donchian(20) low with 12h downtrend and volume confirmation
+Exit when price crosses back through Donchian midline or trend reverses
+Trend following with volatility breakout and volume filter to reduce whipsaws
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_parabolic_sar_volume_filter_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -26,51 +26,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Parabolic SAR ===
-    # Initialize
-    psar = np.zeros(n)
-    bull = True  # True for long, False for short
-    af = 0.02    # acceleration factor
-    max_af = 0.2
-    ep = high[0] if bull else low[0]  # extreme point
-    psar[0] = low[0] if bull else high[0]
+    # === Donchian Channels (20-period) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_channel = (highest_high + lowest_low) / 2
     
-    # Calculate SAR
-    for i in range(1, n):
-        if bull:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR is within prior period's range
-            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-        else:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR is within prior period's range
-            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
-        
-        # Reverse if price crosses SAR
-        reverse = False
-        if bull and low[i] < psar[i]:
-            bull = False
-            reverse = True
-            ep = low[i]
-            af = 0.02
-        elif not bull and high[i] > psar[i]:
-            bull = True
-            reverse = True
-            ep = high[i]
-            af = 0.02
-        
-        if reverse:
-            psar[i] = ep  # SAR at reversal point is the extreme point
-        else:
-            # Update extreme point and acceleration factor
-            if bull:
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-            else:
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
+    # === 12h Trend (HMA 21) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
+        return np.zeros(n)
+    
+    # Calculate HMA on 12h data
+    close_12h = df_12h['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    def wma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(arr, weights/weights.sum(), mode='valid')
+    
+    def hma(arr, period):
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma_half = wma(arr, half)
+        wma_full = wma(arr, period)
+        # Align arrays
+        wma_half_pad = np.full(len(arr), np.nan)
+        wma_full_pad = np.full(len(arr), np.nan)
+        wma_half_pad[half-1:half-1+len(wma_half)] = wma_half
+        wma_full_pad[period-1:period-1+len(wma_full)] = wma_full
+        diff = 2 * wma_half_pad - wma_full_pad
+        return wma(diff, sqrt)
+    
+    hma_12h = hma(close_12h, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,38 +69,38 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(psar[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: SAR flips above price (trend reversal)
-            if psar[i] > close[i]:
+            # Exit: price crosses below midline OR 12h trend turns down
+            if close[i] < mid_channel[i] or hma_12h_aligned[i] < close_12h[0]:  # simplified trend check
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: SAR flips below price (trend reversal)
-            if psar[i] < close[i]:
+            # Exit: price crosses above midline OR 12h trend turns up
+            if close[i] > mid_channel[i] or hma_12h_aligned[i] > close_12h[0]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need expanding volume (above average)
-            if vol_ratio[i] < 1.3:
+            # Need volume confirmation (above average)
+            if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: SAR flip with volume confirmation
-            if close[i] > psar[i]:
-                # Price above SAR -> long
+            # Entry: Donchian breakout with 12h trend alignment
+            if close[i] > highest_high[i] and hma_12h_aligned[i] > close_12h[0]:
+                # Break above upper band with uptrend -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < psar[i]:
-                # Price below SAR -> short
+            elif close[i] < lowest_low[i] and hma_12h_aligned[i] < close_12h[0]:
+                # Break below lower band with downtrend -> short
                 position = -1
                 signals[i] = -0.25
     
