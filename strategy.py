@@ -1,136 +1,161 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 1h Volume Weighted RSI with 4h/1d Trend Filter
+# Hypothesis: RSI(14) pulled back to 30-40 (oversold) or 60-70 (overbought) on 1h
+# with volume confirmation, aligned with 4h trend (EMA50) and 1d regime (ADX<25 for mean reversion).
+# Works in bull/bear: buys dips in uptrend, sells rallies in downtrend, avoids chop.
+# Target: 15-30 trades/year (60-120 over 4 years).
 
-# Strategy: 4h Daily Donchian Breakout with Volume Confirmation and ADX Filter
-# Hypothesis: Price breaking out of daily Donchian channels (20-period high/low) 
-# with volume confirmation (>1.5x average) and trend filter (ADX > 25) captures
-# strong momentum moves while avoiding choppy markets. Works in bull (buy breakouts) 
-# and bear (sell breakdowns) by using directional filters. Target: 20-40 trades/year.
-
-name = "4h_daily_donchian_breakout_volume_adx_v2"
-timeframe = "4h"
+name = "1h_vw_rsi_4h1d_trend_filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ADX
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    # Get 4h and 1d data for trend and regime filters
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 50 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period high/low)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
-    
-    daily_high_series = pd.Series(daily_high)
-    daily_low_series = pd.Series(daily_low)
-    donchian_high = daily_high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = daily_low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Shift by 1 to use only completed daily bars (avoid look-ahead)
-    donchian_high = np.roll(donchian_high, 1)
-    donchian_low = np.roll(donchian_low, 1)
-    
-    # Handle first element
-    if len(donchian_high) > 1:
-        donchian_high[0] = donchian_high[1]
-        donchian_low[0] = donchian_low[1]
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h = np.roll(ema_50_4h, 1)
+    if len(ema_50_4h) > 1:
+        ema_50_4h[0] = ema_50_4h[1]
     else:
-        donchian_high[0] = 0
-        donchian_low[0] = 0
+        ema_50_4h[0] = 0
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ADX (14-period) for trend strength
-    # +DM and -DM calculation
-    high_diff = np.diff(daily_high, prepend=daily_high[0])
-    low_diff = np.diff(daily_low, prepend=daily_low[0])
+    # 1d ADX(14) for regime filter (avoid chop)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # True Range calculation
-    tr1 = np.abs(np.diff(daily_high, prepend=daily_high[0]))
-    tr2 = np.abs(np.diff(daily_low, prepend=daily_low[0]))
-    tr3 = np.abs(daily_high - daily_low)
-    tr = np.maximum.reduce([tr1, tr2, tr3])
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(data[:period]) if np.sum(~np.isnan(data[:period])) >= period else 0
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.zeros_like(arr)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
         return result
     
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / (atr + 1e-10)
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = wilder_smooth(dx, 14)
-    
-    # Shift ADX by 1 to use only completed daily bars
-    adx = np.roll(adx, 1)
-    if len(adx) > 1:
-        adx[0] = adx[1]
+    atr_1d = smooth_wilder(tr, 14)
+    plus_di_1d = 100 * smooth_wilder(plus_dm, 14) / (atr_1d + 1e-10)
+    minus_di_1d = 100 * smooth_wilder(minus_dm, 14) / (atr_1d + 1e-10)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    adx_1d = smooth_wilder(dx_1d, 14)
+    adx_1d = np.roll(adx_1d, 1)
+    if len(adx_1d) > 1:
+        adx_1d[0] = adx_1d[1]
     else:
-        adx[0] = 0
+        adx_1d[0] = 25
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align daily data to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_daily, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_daily, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    # 1h RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: volume > 1.5x 50-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
+    def rsi_wilder(gain, loss, period=14):
+        rsi = np.zeros_like(close)
+        if len(gain) < period:
+            return rsi
+        avg_gain = np.mean(gain[:period])
+        avg_loss = np.mean(loss[:period])
+        if avg_loss == 0:
+            rsi[period] = 100
+        else:
+            rsi[period] = 100 - (100 / (1 + avg_gain / avg_loss))
+        for i in range(period+1, len(close)):
+            avg_gain = (avg_gain * (period-1) + gain[i-1]) / period
+            avg_loss = (avg_loss * (period-1) + loss[i-1]) / period
+            if avg_loss == 0:
+                rsi[i] = 100
+            else:
+                rsi[i] = 100 - (100 / (1 + avg_gain / avg_loss))
+        return rsi
+    
+    rsi_1h = rsi_wilder(gain, loss, 14)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(rsi_1h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Regime filter: only trade when not too choppy (ADX < 25 = range, good for mean reversion)
+        if adx_1d_aligned[i] > 25:
+            # In trending markets, reduce activity or go flat
+            if position != 0:
+                # Exit if trend changes against position
+                if position == 1 and close[i] < ema_50_4h_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                elif position == -1 and close[i] > ema_50_4h_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.20 if position == 1 else -0.20
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: price falls below daily Donchian low or trend weakens (ADX < 20)
-            if close[i] < donchian_low_aligned[i] or adx_aligned[i] < 20 or not vol_filter[i]:
+            # Exit: RSI > 50 or trend fails
+            if rsi_1h[i] > 50 or close[i] < ema_50_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.20  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above daily Donchian high or trend weakens (ADX < 20)
-            if close[i] > donchian_high_aligned[i] or adx_aligned[i] < 20 or not vol_filter[i]:
+            # Exit: RSI < 50 or trend fails
+            if rsi_1h[i] < 50 or close[i] > ema_50_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
+                signals[i] = -0.20  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: breakout above daily Donchian high with volume and strong trend (ADX > 25)
-            if (high[i] > donchian_high_aligned[i] and close[i] > donchian_high_aligned[i] and
-                adx_aligned[i] > 25 and vol_filter[i]):
+            # Long entry: RSI oversold (30-40) with volume and above 4h EMA50
+            if (30 <= rsi_1h[i] <= 40 and vol_filter[i] and close[i] > ema_50_4h_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: breakdown below daily Donchian low with volume and strong trend (ADX > 25)
-            elif (low[i] < donchian_low_aligned[i] and close[i] < donchian_low_aligned[i] and
-                  adx_aligned[i] > 25 and vol_filter[i]):
+                signals[i] = 0.20
+            # Short entry: RSI overbought (60-70) with volume and below 4h EMA50
+            elif (60 <= rsi_1h[i] <= 70 and vol_filter[i] and close[i] < ema_50_4h_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
