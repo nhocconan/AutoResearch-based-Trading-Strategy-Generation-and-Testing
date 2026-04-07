@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: 4-hour Donchian channel breakouts with daily trend filter and volume confirmation capture momentum in both bull and bear markets. The daily trend filter ensures trades align with higher timeframe direction, reducing false breakouts. Volume confirmation adds conviction. Targets 20-50 trades per year by requiring confluence of three factors: price breakout, volume surge, and daily trend alignment.
+6h_pivot_breakout_1w_trend_volume_v1
+Hypothesis: Breakout above/below weekly pivot R4/S4 levels with volume confirmation and daily trend filter.
+Trades with the daily trend (using EMA50) for momentum continuation.
+Weekly pivot levels provide strong support/resistance; breaks indicate institutional interest.
+Volume confirms conviction. Targets 15-35 trades/year by requiring:
+- Price breaks weekly R4 (for long) or S4 (for short)
+- Volume > 2.0x 20-period average
+- Price > EMA50 (long) or < EMA50 (short) for trend alignment
+Works in bull markets (breaks continue up) and bear markets (breaks continue down).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_pivot_breakout_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +30,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for Donchian channel
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:  # Need at least 20 periods for Donchian
+    # Weekly data for pivot points (R4/S4)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    # R4 = P + 3*(H - L), S4 = P - 3*(H - L)
+    r4_w = pivot_w + 3.0 * (high_w - low_w)
+    s4_w = pivot_w - 3.0 * (high_w - low_w)
     
-    # Daily data for trend filter
+    # Daily data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for EMA50
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on 4h
-    # Upper band: highest high over last 20 periods
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over last 20 periods
-    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Align weekly R4/S4 to 6h timeframe
+    r4_w_6h = align_htf_to_ltf(prices, df_1w, r4_w)
+    s4_w_6h = align_htf_to_ltf(prices, df_1w, s4_w)
     
-    # Calculate EMA50 on daily for trend filter
+    # Daily EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align 4h indicators to 4h timeframe (already aligned, but using helper for consistency)
-    donchian_upper = align_htf_to_ltf(prices, df_4h, high_20)
-    donchian_lower = align_htf_to_ltf(prices, df_4h, low_20)
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 20-period volume average on 4h
-    vol_sma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 20-period volume average
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
-            np.isnan(ema50_4h[i]) or 
-            np.isnan(vol_sma_4h[i])):
+        if (np.isnan(ema50_6h[i]) or 
+            np.isnan(r4_w_6h[i]) or 
+            np.isnan(s4_w_6h[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 2.0x average volume
-        vol_confirm = volume[i] > 2.0 * vol_sma_4h[i]
+        vol_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower OR trend turns down
-            if close[i] < donchian_lower[i] or close[i] < ema50_4h[i]:
+            # Exit: price breaks below weekly S4 OR trend turns down
+            if close[i] < s4_w_6h[i] or close[i] < ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper OR trend turns up
-            if close[i] > donchian_upper[i] or close[i] > ema50_4h[i]:
+            # Exit: price breaks above weekly R4 OR trend turns up
+            if close[i] > r4_w_6h[i] or close[i] > ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian upper + volume + uptrend
-            if (close[i] > donchian_upper[i] and 
+            # Long: price breaks above weekly R4 + volume + uptrend
+            if (close[i] > r4_w_6h[i] and 
                 vol_confirm and 
-                close[i] > ema50_4h[i]):
+                close[i] > ema50_6h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian lower + volume + downtrend
-            elif (close[i] < donchian_lower[i] and 
+            # Short: price breaks below weekly S4 + volume + downtrend
+            elif (close[i] < s4_w_6h[i] and 
                   vol_confirm and 
-                  close[i] < ema50_4h[i]):
+                  close[i] < ema50_6h[i]):
                 position = -1
                 signals[i] = -0.25
     
