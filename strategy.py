@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-6h Camarilla Pivot from 1d with Volume Spike and Momentum Filter
-Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
-provide institutional support/resistance. In ranging markets (ADX<25), fade extremes 
-at R3/S3. In trending markets (ADX>25), breakout continuations at R4/S4. 
-Volume confirms participation. Works in bull/bear by adapting to regime.
-Target: 12-37 trades/year per symbol.
+4h Donchian Breakout with 1d Trend Filter and Volume Spike
+Hypothesis: Breakouts above/below Donchian channels capture momentum.
+Using 1d EMA50 as trend filter provides stronger trend identification.
+Volume spikes confirm institutional participation.
+This should work in both bull and bear regimes by following the trend.
+Target: 20-50 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_adx_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,97 +27,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume Spike Detector (20-period)
+    # Donchian Channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume Spike Detector
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 1.5)
     
-    # ADX for regime detection (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr = np.maximum(high - low, 
-                    np.maximum(np.abs(high - np.roll(close, 1)), 
-                               np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Get Camarilla pivot levels from 1d data
+    # 1d EMA50 Trend Filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla calculations
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Resistance levels
-    r3 = close_1d + range_1d * 1.1 / 4
-    r4 = close_1d + range_1d * 1.1 / 2
-    # Support levels
-    s3 = close_1d - range_1d * 1.1 / 4
-    s4 = close_1d - range_1d * 1.1 / 2
-    
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(adx[i])):
+    for i in range(20, n):
+        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below pivot OR ADX drops (trend weakening)
-            if close[i] < pivot_aligned[i] or adx[i] < 20:
+            # Exit: price crosses below 1d EMA50
+            if close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above pivot OR ADX drops
-            if close[i] > pivot_aligned[i] or adx[i] < 20:
+            # Exit: price crosses above 1d EMA50
+            if close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Regime-based logic
-            if adx[i] > 25:  # Trending market - breakout continuation
-                # Long breakout: close above R4 with volume
-                if close[i] > r4_aligned[i] and vol_spike[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short breakout: close below S4 with volume
-                elif close[i] < s4_aligned[i] and vol_spike[i]:
-                    position = -1
-                    signals[i] = -0.25
-            else:  # Ranging market - mean reversion at extremes
-                # Long mean reversion: bounce from S3 with volume
-                if close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1] and vol_spike[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short mean reversion: rejection at R3 with volume
-                elif close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1] and vol_spike[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Long: breakout above Donchian high + price above 1d EMA50 + volume spike
+            if (close[i] > high_roll[i-1] and 
+                close[i] > ema_50_aligned[i] and 
+                vol_spike[i]):
+                position = 1
+                signals[i] = 0.30
+            # Short: breakout below Donchian low + price below 1d EMA50 + volume spike
+            elif (close[i] < low_roll[i-1] and 
+                  close[i] < ema_50_aligned[i] and 
+                  vol_spike[i]):
+                position = -1
+                signals[i] = -0.30
     
     return signals
