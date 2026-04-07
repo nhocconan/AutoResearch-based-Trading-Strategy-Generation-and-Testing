@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from daily timeframe for mean reversion entries. 
-Enter long when price touches S1/S2 support with volume confirmation; enter short when price touches R1/R2 resistance with volume confirmation.
-Exit when price returns to pivot point or reverses direction. Camarilla levels provide precise support/resistance in ranging markets, while volume confirmation filters false breaks.
-Works in both bull and bear markets by adapting to ranging conditions that occur during consolidation phases.
-Target: 20-30 trades/year to minimize fee drag while capturing mean reversion opportunities.
+12h_donchian_20_1w_trend_volume_v2
+Hypothesis: On 12-hour timeframe, use weekly Donchian channel breakout for trend direction, combined with weekly EMA filter and volume confirmation.
+Enter long when price breaks above weekly Donchian high (20-period) AND price > weekly EMA20 AND 12h volume > 1.5x 20-period average.
+Enter short when price breaks below weekly Donchian low (20-period) AND price < weekly EMA20 AND 12h volume > 1.5x 20-period average.
+Exit when price returns to weekly EMA20 or volume drops below average.
+This captures strong trends with institutional participation while avoiding whipsaw in choppy markets.
+Target: 15-25 trades/year to minimize fee drag while capturing sustained moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "12h_donchian_20_1w_trend_volume_v2"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,38 +28,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Donchian and EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    w_high = df_1w['high'].values
+    w_low = df_1w['low'].values
+    w_close = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # S1 = C - (Range * 1.1 / 12)
-    # S2 = C - (Range * 1.1 / 6)
-    # R1 = C + (Range * 1.1 / 12)
-    # R2 = C + (Range * 1.1 / 6)
+    # Calculate weekly Donchian channel (20-period)
+    period = 20
+    w_high_series = pd.Series(w_high)
+    w_low_series = pd.Series(w_low)
+    donch_high = w_high_series.rolling(window=period, min_periods=period).max().values
+    donch_low = w_low_series.rolling(window=period, min_periods=period).min().values
     
-    d_pivot = (d_high + d_low + d_close) / 3
-    d_range = d_high - d_low
-    d_s1 = d_close - (d_range * 1.1 / 12)
-    d_s2 = d_close - (d_range * 1.1 / 6)
-    d_r1 = d_close + (d_range * 1.1 / 12)
-    d_r2 = d_close + (d_range * 1.1 / 6)
+    # Calculate weekly EMA (20-period)
+    w_close_series = pd.Series(w_close)
+    w_ema = w_close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, d_pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, d_s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, d_s2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, d_r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, d_r2)
+    # Align weekly indicators to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    w_ema_aligned = align_htf_to_ltf(prices, df_1w, w_ema)
     
-    # Volume filter: 12h volume > 1.3x 20-period average
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = vol_series / vol_ma
@@ -67,26 +62,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup for volume MA
-        # Skip if any Camarilla level not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(r2_aligned[i])):
+    for i in range(1, n):
+        # Skip if weekly data not available
+        if np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(w_ema_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Price action
-        price = close[i]
-        vol_confirmed = vol_ratio[i] > 1.3
+        # Weekly breakout conditions
+        breakout_high = close[i] > donch_high_aligned[i]
+        breakout_low = close[i] < donch_low_aligned[i]
+        
+        # Weekly EMA filter
+        price_above_ema = close[i] > w_ema_aligned[i]
+        price_below_ema = close[i] < w_ema_aligned[i]
+        
+        # Volume confirmation
+        vol_confirmed = vol_ratio[i] > 1.5
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when price returns to pivot or above
-            if price >= pivot_aligned[i]:
+            # Exit when price returns to weekly EMA
+            if price_below_ema:
                 exit_long = True
-            # Exit when price breaks below S2 (stop loss)
-            elif price < s2_aligned[i]:
+            # Exit when volume drops below average
+            elif vol_ratio[i] < 1.0:
                 exit_long = True
             
             if exit_long:
@@ -98,11 +98,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when price returns to pivot or below
-            if price <= pivot_aligned[i]:
+            # Exit when price returns to weekly EMA
+            if price_above_ema:
                 exit_short = True
-            # Exit when price breaks above R2 (stop loss)
-            elif price > r2_aligned[i]:
+            # Exit when volume drops below average
+            elif vol_ratio[i] < 1.0:
                 exit_short = True
             
             if exit_short:
@@ -111,15 +111,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price near S1 or S2 with volume confirmation
-            near_s1 = abs(price - s1_aligned[i]) / s1_aligned[i] < 0.005  # Within 0.5%
-            near_s2 = abs(price - s2_aligned[i]) / s2_aligned[i] < 0.005  # Within 0.5%
-            long_entry = (near_s1 or near_s2) and vol_confirmed
+            # Long entry: breakout above Donchian high AND price above weekly EMA AND volume confirmed
+            long_entry = breakout_high and price_above_ema and vol_confirmed
             
-            # Short entry: price near R1 or R2 with volume confirmation
-            near_r1 = abs(price - r1_aligned[i]) / r1_aligned[i] < 0.005  # Within 0.5%
-            near_r2 = abs(price - r2_aligned[i]) / r2_aligned[i] < 0.005  # Within 0.5%
-            short_entry = (near_r1 or near_r2) and vol_confirmed
+            # Short entry: breakout below Donchian low AND price below weekly EMA AND volume confirmed
+            short_entry = breakout_low and price_below_ema and vol_confirmed
             
             if long_entry:
                 position = 1
