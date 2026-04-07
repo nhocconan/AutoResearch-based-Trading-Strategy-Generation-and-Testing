@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_ema_touch_1d_trend_volume_v1
-Hypothesis: Price touching EMA(21) on 4h with daily trend filter and volume confirmation captures pullbacks in trending markets. Works in bull (buy EMA support) and bear (sell EMA resistance) by following daily trend. Low-frequency entries reduce fee drag.
+12h_atr_breakout_1w_trend_volume_v2
+Hypothesis: ATR breakout from weekly ATR-based channels combined with weekly EMA trend filter and volume confirmation.
+In trending markets, price breaks out of volatility-based channels and continues in the direction of the weekly trend.
+Uses weekly ATR channels for dynamic support/resistance, weekly EMA for trend filter, and volume spike for confirmation.
+Designed for 12h timeframe to capture multi-day moves with low frequency (target: 15-30 trades/year) to minimize fee drag.
+Works in both bull and bear markets by following the trend defined by higher timeframes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ema_touch_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_atr_breakout_1w_trend_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,57 +27,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA(21) for entry
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Daily trend filter: EMA(50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for ATR channels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    ema_50_d = df_1d['close'].ewm(span=50, adjust=False).mean().values
-    ema_50_d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_d)
     
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly ATR (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Weekly ATR-based channels (using previous week's ATR)
+    atr_shift = np.roll(atr_14, 1)
+    atr_shift[0] = np.nan
+    
+    upper_channel = close_1w + 1.5 * atr_shift
+    lower_channel = close_1w - 1.5 * atr_shift
+    
+    # Weekly EMA for trend filter
+    ema_20 = close_1w.ewm(span=20, adjust=False).mean().values
+    
+    # Align all weekly data to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    
+    # Volume confirmation (24-period average = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_21[i]) or np.isnan(ema_50_d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA(21) or trend turns bearish
-            if close[i] < ema_21[i] or close[i] < ema_50_d_aligned[i]:
+            # Exit: price crosses below lower channel or trend turns bearish
+            if close[i] <= lower_aligned[i] or close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA(21) or trend turns bullish
-            if close[i] > ema_21[i] or close[i] > ema_50_d_aligned[i]:
+            # Exit: price crosses above upper channel or trend turns bullish
+            if close[i] >= upper_aligned[i] or close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price touches EMA(21) from above with volume and bullish daily trend
-            if (low[i] <= ema_21[i] * 1.001 and high[i] >= ema_21[i] * 0.999 and  # touching EMA
-                vol_confirm and 
-                close[i] > ema_50_d_aligned[i]):  # daily uptrend
+            # Long entry: price breaks above upper channel with volume and bullish trend
+            if (close[i] > upper_aligned[i] and vol_confirm and 
+                close[i] > ema_20_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price touches EMA(21) from below with volume and bearish daily trend
-            elif (low[i] <= ema_21[i] * 1.001 and high[i] >= ema_21[i] * 0.999 and  # touching EMA
-                  vol_confirm and 
-                  close[i] < ema_50_d_aligned[i]):  # daily downtrend
+            # Short entry: price breaks below lower channel with volume and bearish trend
+            elif (close[i] < lower_aligned[i] and vol_confirm and 
+                  close[i] < ema_20_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
