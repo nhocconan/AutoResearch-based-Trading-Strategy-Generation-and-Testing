@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1d EMA50 for trend filter and 12h volume average for confirmation
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 name = "12h_donchian20_1d_ema50_vol_v1"
 timeframe = "12h"
