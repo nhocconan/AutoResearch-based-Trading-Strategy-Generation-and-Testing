@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Elder Ray Index with 1d regime filter and volume confirmation
-# Hypothesis: Elder Ray (Bull/Bear power) identifies institutional buying/selling pressure.
-# Combine with 1d trend regime (price vs EMA50) to trade in direction of higher timeframe.
-# Volume confirmation ensures participation. Designed to work in bull (follow strength) 
-# and bear (fade weakness via mean reversion at extremes). Target: 15-35 trades/year.
-name = "6h_elder_ray_1d_regime_volume_v2"
-timeframe = "6h"
+# Strategy: 12h Camarilla Pivot + Daily Volume Spike + Weekly Trend Filter
+# Hypothesis: Camarilla levels act as institutional support/resistance. Long at L3 with daily volume spike and weekly uptrend, short at H3 with volume spike and weekly downtrend.
+# Uses 12h timeframe for lower frequency, 1d for volume confirmation, 1w for trend filter.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+name = "12h_camarilla_pivot_1d_volume_1w_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +22,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for regime and volume confirmation
+    # Get daily data for Camarilla pivot and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for regime filter
+    # Calculate weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
+    # Pivot = (H + L + C) / 3
+    # H4 = Pivot + 1.5 * (H - L)
+    # L4 = Pivot - 1.5 * (H - L)
+    # H3 = Pivot + 1.125 * (H - L)
+    # L3 = Pivot - 1.125 * (H - L)
+    # H2 = Pivot + 0.75 * (H - L)
+    # L2 = Pivot - 0.75 * (H - L)
+    # H1 = Pivot + 0.5 * (H - L)
+    # L1 = Pivot - 0.5 * (H - L)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    regime_1d = align_htf_to_ltf(prices, df_1d, ema50_1d)  # 1 = bull regime (price > EMA50)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate daily average volume for confirmation
+    pivot = (high_1d + low_1d + close_1d) / 3
+    rang = high_1d - low_1d
+    h3 = pivot + 1.125 * rang
+    l3 = pivot - 1.125 * rang
+    h4 = pivot + 1.5 * rang
+    l4 = pivot - 1.5 * rang
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Calculate daily 20-period volume moving average
     vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 13-period EMA for Elder Ray (standard setting)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate weekly EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(13, n):
+    for i in range(1, n):  # Start from 1 to ensure previous day data is available
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(regime_1d[i]) or np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > daily average volume
-        vol_confirm = volume[i] > vol_avg_1d_aligned[i]
+        # Volume spike: current 12h volume > 1.5x daily average volume
+        vol_spike = volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
-        # Regime filter: 1 = bull (close > daily EMA50), 0 = bear (close < daily EMA50)
-        is_bull_regime = close[i] > regime_1d[i]
+        # Weekly trend filter: price above/below weekly EMA21
+        weekly_uptrend = close[i] > ema_21_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_21_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: Bear power turns negative OR regime turns bearish
-            if bear_power[i] >= 0 or not is_bull_regime:
+            # Exit: price reaches L4 (stop) or H3 (take profit) or trend changes
+            if close[i] <= l4_aligned[i] or close[i] >= h3_aligned[i] or not weekly_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: Bull power turns positive OR regime turns bullish
-            if bull_power[i] <= 0 or is_bull_regime:
+            # Exit: price reaches H4 (stop) or L3 (take profit) or trend changes
+            if close[i] >= h4_aligned[i] or close[i] <= l3_aligned[i] or not weekly_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: Bull power positive AND volume confirmation AND bull regime
-            if bull_power[i] > 0 and vol_confirm and is_bull_regime:
+            # Enter long: price at L3 with volume spike and weekly uptrend
+            if abs(close[i] - l3_aligned[i]) < 0.001 * close[i] and vol_spike and weekly_uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: Bear power negative AND volume confirmation AND bear regime
-            elif bear_power[i] < 0 and vol_confirm and not is_bull_regime:
+            # Enter short: price at H3 with volume spike and weekly downtrend
+            elif abs(close[i] - h3_aligned[i]) < 0.001 * close[i] and vol_spike and weekly_downtrend:
                 position = -1
                 signals[i] = -0.25
     
