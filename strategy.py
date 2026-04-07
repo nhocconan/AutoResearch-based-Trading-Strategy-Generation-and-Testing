@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Breakouts with volume confirmation capture strong trends; volatility filter avoids choppy markets.
-# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 20-50 trades/year to minimize fee drag.
-name = "4h_donchian20_1d_volume_atr_v1"
-timeframe = "4h"
+# Strategy: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
+# Hypothesis: Breakouts with weekly trend filter capture strong trends; volume avoids false breakouts.
+# Works in bull via breakouts, in bear via avoiding counter-trend trades.
+# Target: 10-25 trades/year to minimize fee drag.
+name = "1d_donchian20_1w_trend_volume_v7"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,17 +22,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate weekly 50-period EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR(14) for volatility filter and stop sizing
+    # Calculate daily 20-period volume moving average
+    vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ATR(14) for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -49,38 +52,38 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        # Volume confirmation: current volume > 20-period average
+        vol_confirm = volume[i] > vol_20[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
         atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
         vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
         
         if position == 1:  # Long position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] <= lowest_low[i] or not vol_filter:
+            # Exit: price touches lower band OR trend changes OR volatility drops
+            if close[i] <= lowest_low[i] or close[i] < ema_50_1w_aligned[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] >= highest_high[i] or not vol_filter:
+            # Exit: price touches upper band OR trend changes OR volatility drops
+            if close[i] >= highest_high[i] or close[i] > ema_50_1w_aligned[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Enter long: price breaks above upper band + weekly uptrend + volume confirmation + volatility filter
+            if close[i] > highest_high[i] and close[i] > ema_50_1w_aligned[i] and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+            # Enter short: price breaks below lower band + weekly downtrend + volume confirmation + volatility filter
+            elif close[i] < lowest_low[i] and close[i] < ema_50_1w_aligned[i] and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
