@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1w_trend_volume_v1
-Hypothesis: Donchian channel breakouts on 12h, filtered by weekly trend and volume spikes,
-capture strong momentum moves. Weekly trend filter ensures we trade with the dominant
-trend, reducing whipsaws in ranging markets. Volume confirmation filters breakouts with
-institutional participation. Designed for low trade frequency (12-37/year) to minimize
-fee impact while capturing large trends in both bull and bear markets.
+4h_volume_accumulation_distribution_12h_trend_v1
+Hypothesis: Accumulation/Distribution (AD) line confirms institutional accumulation/distribution.
+Price breaking above/below 4h swing high/low with AD confirmation and 12h trend alignment
+captures strong moves. Works in bull markets (accumulation/distribution continues) and
+bear markets (distribution/accumulation continues) by trading with the 12h trend.
+Target: 20-50 trades/year by requiring swing break + AD divergence + trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1w_trend_volume_v1"
-timeframe = "12h"
+name = "4h_volume_accumulation_distribution_12h_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,71 +27,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Accumulation/Distribution Line
+    clv = ((close - low) - (high - close)) / (high - low)
+    clv = np.where((high - low) == 0, 0, clv)
+    adl = np.cumsum(clv * volume)
+    
+    # 4h swing points (10-period lookback)
+    lookback = 10
+    swing_high = np.full(n, np.nan)
+    swing_low = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        window_high = high[i-lookback:i+1]
+        window_low = low[i-lookback:i+1]
+        swing_high[i] = np.max(window_high)
+        swing_low[i] = np.min(window_low)
+    
+    # 12h trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Daily data for Donchian channel (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Donchian channel: 20-day high/low
-    high_20d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1d, high_20d)
-    donchian_low = align_htf_to_ltf(prices, df_1d, low_20d)
-    
-    # 20-period volume average on 12h
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # AD trend (20-period slope)
+    ad_sma = pd.Series(adl).rolling(window=20, min_periods=20).mean().values
+    ad_slope = np.diff(ad_sma, prepend=ad_sma[0])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema50_12h[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_sma[i])):
+        if (np.isnan(swing_high[i]) or 
+            np.isnan(swing_low[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(ad_slope[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2x average volume
-        vol_confirm = volume[i] > 2.0 * vol_sma[i]
-        
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR trend turns down
-            if close[i] < donchian_low[i] or close[i] < ema50_12h[i]:
+            # Exit: price breaks below swing low OR AD turns down
+            if close[i] < swing_low[i] or ad_slope[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR trend turns up
-            if close[i] > donchian_high[i] or close[i] > ema50_12h[i]:
+            # Exit: price breaks above swing high OR AD turns up
+            if close[i] > swing_high[i] or ad_slope[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high + volume + uptrend
-            if (close[i] > donchian_high[i] and 
-                vol_confirm and 
-                close[i] > ema50_12h[i]):
+            # Long: price breaks above swing high + AD rising + uptrend
+            if (close[i] > swing_high[i] and 
+                ad_slope[i] > 0 and 
+                close[i] > ema50_12h_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low + volume + downtrend
-            elif (close[i] < donchian_low[i] and 
-                  vol_confirm and 
-                  close[i] < ema50_12h[i]):
+            # Short: price breaks below swing low + AD falling + downtrend
+            elif (close[i] < swing_low[i] and 
+                  ad_slope[i] < 0 and 
+                  close[i] < ema50_12h_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
