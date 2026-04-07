@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high and 1-day EMA(50) > EMA(200) (uptrend).
-# Short when price breaks below Donchian(20) low and 1-day EMA(50) < EMA(200) (downtrend).
-# Exit on opposite Donchian break or 2.5 * ATR stoploss.
-# Volume confirmation: current volume > 1.8 * 20-period average volume.
-# Position size: 0.28. Designed to work in both bull and bear markets by using daily trend filter.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper(20) and 1d EMA(50) > EMA(200) (uptrend)
+# Short when price breaks below Donchian lower(20) and 1d EMA(50) < EMA(200) (downtrend)
+# Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
+# Volume confirmation: current volume > 1.8 * average volume of last 20 periods
+# Position size: 0.28 (28% of capital)
+# Target: 80-180 total trades over 4 years (20-45/year)
+# Uses daily trend to filter for stronger trends that work in both bull and bear markets
 
 name = "4h_donchian20_1d_trend_vol_v2"
 timeframe = "4h"
@@ -26,12 +27,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for trend filter
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1-day EMA(50) and EMA(200) for trend filter
+    # Calculate 1d EMA(50) and EMA(200) for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
@@ -95,7 +96,7 @@ def generate_signals(prices):
             highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
             lowest_low = low[i-20:i].min() if i >= 20 else low[:i].min()
             
-            # Trend filter: 1-day EMA(50) > EMA(200) for uptrend, < for downtrend
+            # Trend filter: 1d EMA(50) > EMA(200) for uptrend, < for downtrend
             uptrend = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
             downtrend = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
             
