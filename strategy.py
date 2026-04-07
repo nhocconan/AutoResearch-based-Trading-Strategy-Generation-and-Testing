@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from daily timeframe for mean reversion entries with volume confirmation.
-Long when price touches Camarilla L3 level with volume > 1.5x 20-period average.
-Short when price touches Camarilla H3 level with volume > 1.5x 20-period average.
-Exit when price reaches Camarilla L4/H4 levels or returns to pivot point.
-Designed for 12-37 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
-Works in both bull/bear markets as Camarilla levels adapt to volatility and volume filter avoids false signals.
+1h_volume_breakout_4h1d_trend_v1
+Hypothesis: On 1-hour timeframe, enter long when price breaks above 24-period high with volume > 2x 24-period average and 4h/1d trend up; short when price breaks below 24-period low with volume > 2x average and 4h/1d trend down. Exit when price returns to 24-period midpoint. Uses 4h/1d for trend direction and 1h for timing to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee drag while capturing momentum in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "1h_volume_breakout_4h1d_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,80 +23,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 4h and 1d data for trend filters
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 4h EMA(20) for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Determine trend direction (using EMA slope)
+    trend_4h_up = np.zeros(len(ema_20_4h_aligned), dtype=bool)
+    trend_4h_down = np.zeros(len(ema_20_4h_aligned), dtype=bool)
+    trend_1d_up = np.zeros(len(ema_50_1d_aligned), dtype=bool)
+    trend_1d_down = np.zeros(len(ema_50_1d_aligned), dtype=bool)
     
-    # Camarilla levels
-    L4 = close_1d - range_1d * 1.1 / 2
-    L3 = close_1d - range_1d * 1.1 / 4
-    L2 = close_1d - range_1d * 1.1 / 6
-    L1 = close_1d - range_1d * 1.1 / 12
-    H1 = close_1d + range_1d * 1.1 / 12
-    H2 = close_1d + range_1d * 1.1 / 6
-    H3 = close_1d + range_1d * 1.1 / 4
-    H4 = close_1d + range_1d * 1.1 / 2
+    for i in range(1, len(ema_20_4h_aligned)):
+        if not np.isnan(ema_20_4h_aligned[i]) and not np.isnan(ema_20_4h_aligned[i-1]):
+            trend_4h_up[i] = ema_20_4h_aligned[i] > ema_20_4h_aligned[i-1]
+            trend_4h_down[i] = ema_20_4h_aligned[i] < ema_20_4h_aligned[i-1]
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    for i in range(1, len(ema_50_1d_aligned)):
+        if not np.isnan(ema_50_1d_aligned[i]) and not np.isnan(ema_50_1d_aligned[i-1]):
+            trend_1d_up[i] = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            trend_1d_down[i] = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
     
-    # Volume filter: 20-period average on 12h timeframe
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate 24-period high/low and midpoint on 1h
+    period = 24
+    high_max = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    low_min = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    midpoint = (high_max + low_min) / 2
+    
+    # Volume filter: 24-period average
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(max(period, 50), n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: at least 2x average
+        vol_ok = volume[i] > 2.0 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches L4 (target) or returns to pivot (reversal)
-            if close[i] <= L4_aligned[i] or close[i] >= pivot_aligned[i]:
+            # Exit: price returns to midpoint
+            if close[i] <= midpoint[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price reaches H4 (target) or returns to pivot (reversal)
-            if close[i] >= H4_aligned[i] or close[i] <= pivot_aligned[i]:
+            # Exit: price returns to midpoint
+            if close[i] >= midpoint[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Only enter with volume confirmation
+            # Only enter with volume confirmation and trend alignment on both 4h and 1d
             if vol_ok:
-                # Long: price touches L3 level (support)
-                if low[i] <= L3_aligned[i] and close[i] > L3_aligned[i]:
+                # Long: price breaks above 24-period high with 4h and 1d uptrend
+                if (close[i] > high_max[i] and close[i-1] <= high_max[i-1] and 
+                    trend_4h_up[i] and trend_1d_up[i]):
                     position = 1
-                    signals[i] = 0.25
-                # Short: price touches H3 level (resistance)
-                elif high[i] >= H3_aligned[i] and close[i] < H3_aligned[i]:
+                    signals[i] = 0.20
+                # Short: price breaks below 24-period low with 4h and 1d downtrend
+                elif (close[i] < low_min[i] and close[i-1] >= low_min[i-1] and 
+                      trend_4h_down[i] and trend_1d_down[i]):
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
