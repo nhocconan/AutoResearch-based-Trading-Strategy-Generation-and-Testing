@@ -1,20 +1,47 @@
 #!/usr/bin/env python3
 """
-12h_supertrend_volume_breakout_v1
-Hypothesis: On 12h timeframe, use Supertrend (ATR-based trend filter) combined with Donchian channel breakouts and volume confirmation. Go long when price breaks above Donchian upper channel with Supertrend uptrend and volume > 1.5x average; go short when price breaks below Donchian lower channel with Supertrend downtrend and volume > 1.5x average. Exit when Supertrend reverses. This captures strong trending moves with volume confirmation while avoiding whipsaws in ranging markets. Works in both bull and bear via Supertrend's adaptive nature and volume confirmation. Targets 15-30 trades/year to minimize fee drag.
+4h_hull_ma_1d_trend_volume_v1
+Hypothesis: On 4h timeframe, use Hull Moving Average (HMA) trend filter with daily trend confirmation and volume spike for entries. Enter long when price crosses above HMA(16) with daily EMA50 > EMA200 and volume > 2x average; enter short when price crosses below HMA(16) with daily EMA50 < EMA200 and volume > 2x average. Exit on opposite HMA crossover or trend reversal. Hull MA reduces lag while maintaining smoothness, improving entry timing in trends. Volume spike confirms institutional participation. Works in bull/bear via daily trend filter. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_supertrend_volume_breakout_v1"
-timeframe = "12h"
+name = "4h_hull_ma_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def hull_moving_average(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan)
+    half_period = int(period / 2)
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = pd.Series(series).rolling(window=half_period, min_periods=half_period).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    
+    # WMA of full period
+    wma_full = pd.Series(series).rolling(window=period, min_periods=period).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Final WMA of sqrt period
+    hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,119 +50,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for Supertrend
-    atr_period = 10
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    atr[:atr_period] = np.nan
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Calculate HMA(16) on 4h
+    hma_16 = hull_moving_average(close, 16)
     
-    # Supertrend calculation
-    multiplier = 3.0
-    upper_band = np.zeros(n)
-    lower_band = np.zeros(n)
-    supertrend = np.zeros(n)
-    uptrend = np.ones(n, dtype=bool)
+    # Calculate daily EMA50 and EMA200 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    for i in range(n):
-        if np.isnan(atr[i]):
-            upper_band[i] = np.nan
-            lower_band[i] = np.nan
-            supertrend[i] = np.nan
-            continue
-        upper_band[i] = (high[i] + low[i]) / 2 + multiplier * atr[i]
-        lower_band[i] = (high[i] + low[i]) / 2 - multiplier * atr[i]
-        
-        if i == 0:
-            supertrend[i] = upper_band[i]
-            uptrend[i] = True
-        else:
-            if close[i] <= upper_band[i-1]:
-                upper_band[i] = min(upper_band[i], upper_band[i-1])
-            else:
-                upper_band[i] = upper_band[i]
-                
-            if close[i] >= lower_band[i-1]:
-                lower_band[i] = max(lower_band[i], lower_band[i-1])
-            else:
-                lower_band[i] = lower_band[i]
-                
-            if supertrend[i-1] == upper_band[i-1]:
-                if close[i] <= upper_band[i]:
-                    supertrend[i] = upper_band[i]
-                    uptrend[i] = True
-                else:
-                    supertrend[i] = lower_band[i]
-                    uptrend[i] = False
-            else:
-                if close[i] >= lower_band[i]:
-                    supertrend[i] = lower_band[i]
-                    uptrend[i] = False
-                else:
-                    supertrend[i] = upper_band[i]
-                    uptrend[i] = True
+    daily_close = df_1d['close'].values
+    ema50_d = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200_d = pd.Series(daily_close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Donchian channel (20-period)
-    donchian_period = 20
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(n):
-        if i < donchian_period:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
-        else:
-            donchian_high[i] = np.max(high[i-donchian_period:i])
-            donchian_low[i] = np.min(low[i-donchian_period:i])
+    # Align daily EMAs to 4h timeframe
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_d)
+    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_d)
     
-    # Volume confirmation (24-period average on 12h = 12 days)
-    vol_ma = np.zeros(n)
-    for i in range(n):
-        if i < 24:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(volume[i-24:i])
+    # Volume confirmation (20-period average on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(supertrend[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(hma_16[i]) or np.isnan(hma_16[i-1]) or
+            np.isnan(ema50_4h[i]) or np.isnan(ema200_4h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 24-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2x 20-period average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit if Supertrend turns down
-            if not uptrend[i]:
+            # Exit conditions
+            exit_long = False
+            # Exit if price crosses below HMA(16)
+            if close[i] < hma_16[i] and close[i-1] >= hma_16[i-1]:
+                exit_long = True
+            # Exit if daily EMA50 crosses below EMA200 (trend reversal)
+            elif ema50_4h[i] < ema200_4h[i] and ema50_4h[i-1] >= ema200_4h[i-1]:
+                exit_long = True
+            
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if Supertrend turns up
-            if uptrend[i]:
+            # Exit conditions
+            exit_short = False
+            # Exit if price crosses above HMA(16)
+            if close[i] > hma_16[i] and close[i-1] <= hma_16[i-1]:
+                exit_short = True
+            # Exit if daily EMA50 crosses above EMA200 (trend reversal)
+            elif ema50_4h[i] > ema200_4h[i] and ema50_4h[i-1] <= ema200_4h[i-1]:
+                exit_short = True
+            
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high with Supertrend uptrend and volume confirmation
+            # Long entry: price crosses above HMA(16) with daily EMA50 > EMA200 and volume confirmation
             long_entry = False
-            if (close[i] > donchian_high[i] and uptrend[i] and vol_confirm):
+            if (close[i] > hma_16[i] and close[i-1] <= hma_16[i-1] and
+                ema50_4h[i] > ema200_4h[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: price breaks below Donchian low with Supertrend downtrend and volume confirmation
+            # Short entry: price crosses below HMA(16) with daily EMA50 < EMA200 and volume confirmation
             short_entry = False
-            if (close[i] < donchian_low[i] and not uptrend[i] and vol_confirm):
+            if (close[i] < hma_16[i] and close[i-1] >= hma_16[i-1] and
+                ema50_4h[i] < ema200_4h[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
