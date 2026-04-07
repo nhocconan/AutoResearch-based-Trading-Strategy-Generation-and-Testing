@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and 1d EMA Trend Filter
-Long when price breaks above Donchian(20) with expanding volume AND 1d EMA trend up
-Short when price breaks below Donchian(20) with expanding volume AND 1d EMA trend down
-Exit when price crosses back to Donchian mid-point (mean of upper/lower)
-Uses Donchian channels that capture breakouts in trending markets while avoiding whipsaws.
+6H Weekly Pivot Breakout with Volume Confirmation and Daily Trend Filter
+Strategy: Break above R3 or below S3 weekly pivot levels with expanding volume.
+Long when price breaks above R3 and daily EMA 50 is rising.
+Short when price breaks below S3 and daily EMA 50 is falling.
+Exit when price crosses back to weekly pivot point.
+Weekly pivots act as strong support/resistance; breakouts with volume indicate institutional interest.
+Daily EMA filter ensures alignment with intermediate trend to avoid counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "12h"
+name = "6h_weekly_pivot_breakout_volume_daily_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,57 +28,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period high/low) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # === Weekly pivot points (using weekly OHLC) ===
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot: PP = (H + L + C) / 3
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    
+    # Align weekly pivots to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === 1d trend filter (EMA 21) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === Daily trend filter (EMA 50) ===
+    df_daily = get_htf_data(prices, '1d')
+    ema_daily = pd.Series(df_daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below mid-point
-            if close[i] < donch_mid[i]:
+            # Exit: price crosses back below weekly pivot point
+            if close[i] < pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above mid-point
-            if close[i] > donch_mid[i]:
+            # Exit: price crosses back above weekly pivot point
+            if close[i] > pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Need expanding volume (above average)
-            if vol_ratio[i] < 1.2:
+            if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation AND 1d trend filter
-            if close[i] > donch_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper band with rising 1d EMA -> long
+            # Entry: Weekly pivot breakout with volume confirmation AND daily trend filter
+            if close[i] > r3_aligned[i] and ema_daily_aligned[i] > ema_daily_aligned[i-1]:
+                # Breakout above R3 with rising daily EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donch_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower band with falling 1d EMA -> short
+            elif close[i] < s3_aligned[i] and ema_daily_aligned[i] < ema_daily_aligned[i-1]:
+                # Breakdown below S3 with falling daily EMA -> short
                 position = -1
                 signals[i] = -0.25
     
