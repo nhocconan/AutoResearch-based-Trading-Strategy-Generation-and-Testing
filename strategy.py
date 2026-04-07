@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
-# Long when price breaks above Donchian upper(20) and 12h EMA > 12h EMA(50) (uptrend)
-# Short when price breaks below Donchian lower(20) and 12h EMA < 12h EMA(50) (downtrend)
-# Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
-# Volume confirmation: current volume > 1.5 * average volume of last 20 periods
-# Position size: 0.25 (25% of capital)
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Hypothesis: 1h mean reversion on Bollinger Bands with 4h trend filter
+# Long when price touches lower BB(20,2) in 4h uptrend (4h close > EMA20)
+# Short when price touches upper BB(20,2) in 4h downtrend (4h close < EMA20)
+# Exit when price crosses middle BB (20-period SMA)
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.20 (20% of capital)
+# Uses Bollinger Bands from 1h and trend filter from 4h EMA
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "1h_bb_mean_reversion_4h_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,19 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12-hour EMA(20) and EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4-hour EMA(20) for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # Bollinger Bands (20, 2) on 1h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    middle_band = sma_20
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -47,69 +52,58 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Average volume for volume confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_avg[i])):
+        if np.isnan(ema_20_4h_aligned[i]) or np.isnan(atr[i]) or np.isnan(sma_20[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below Donchian lower(20)
-            elif close[i] < low[i-20]:
+            # Exit: price crosses above middle Bollinger Band
+            elif close[i] > middle_band[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above Donchian upper(20)
-            elif close[i] > high[i-20]:
+            # Exit: price crosses below middle Bollinger Band
+            elif close[i] < middle_band[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Calculate Donchian channels (20-period)
-            highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
-            lowest_low = low[i-20:i].min() if i >= 20 else low[:i].min()
+            # Trend filter: 4h EMA20
+            uptrend = close[i] > ema_20_4h_aligned[i]
+            downtrend = close[i] < ema_20_4h_aligned[i]
             
-            # Trend filter: 12h EMA(20) > EMA(50) for uptrend, < for downtrend
-            uptrend = ema_20_12h_aligned[i] > ema_50_12h_aligned[i]
-            downtrend = ema_20_12h_aligned[i] < ema_50_12h_aligned[i]
-            
-            # Volume confirmation: current volume > 1.5 * average volume
-            volume_confirm = volume[i] > 1.5 * vol_avg[i]
-            
-            # Long: price breaks above Donchian upper(20) in uptrend with volume
-            if close[i] > highest_high and uptrend and volume_confirm:
-                signals[i] = 0.25
+            # Long: price touches lower Bollinger Band in uptrend
+            if close[i] <= lower_band[i] and uptrend:
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian lower(20) in downtrend with volume
-            elif close[i] < lowest_low and downtrend and volume_confirm:
-                signals[i] = -0.25
+            # Short: price touches upper Bollinger Band in downtrend
+            elif close[i] >= upper_band[i] and downtrend:
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
     
