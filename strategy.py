@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 12h Trend Filter and Volume Confirmation.
-Long when price breaks above Donchian(20) upper band with 12h uptrend and volume confirmation.
-Short when price breaks below Donchian(20) lower band with 12h downtrend and volume confirmation.
-Exit when price crosses back below Donchian(20) middle line (long) or above (short).
+6h VWAP Reversion with 1w Trend Filter and Volume Spike.
+Mean reversion when price deviates from VWAP with strong trend alignment.
+Long when price < VWAP - 1.5*sigma in 1w uptrend with volume spike.
+Short when price > VWAP + 1.5*sigma in 1w downtrend with volume spike.
+Exit when price returns to VWAP or trend changes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "6h_vwap_reversion_1w_trend_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,66 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H TREND FILTER (HTF) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
+    # === 1W TREND FILTER (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
-    twelve_h_close = df_12h['close'].values
-    twelve_h_ema = pd.Series(twelve_h_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    twelve_h_ema_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_ema)
+    one_w_close = df_1w['close'].values
+    one_w_ema = pd.Series(one_w_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)
     
-    # === DONCHIAN CHANNELS (4H) ===
-    # Upper band: 20-period high
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Middle line: average of upper and lower
-    donch_mid = (donch_high + donch_low) / 2
+    # === VWAP AND STD DEV (6H) ===
+    # Typical price
+    typical_price = (high + low + close) / 3.0
+    # VWAP calculation
+    pv = typical_price * volume
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    # Standard deviation of price from VWAP
+    price_diff = typical_price - vwap
+    # Use rolling window for volatility
+    vol_window = 20
+    cum_sum_diff2 = np.nancumsum(price_diff * price_diff)
+    cum_sum_diff2 = np.where(cum_vol > 0, cum_sum_diff2, 0)
+    variance = np.divide(cum_sum_diff2, cum_vol, out=np.full_like(cum_sum_diff2, np.nan), where=cum_vol!=0)
+    std_dev = np.sqrt(variance)
     
-    # === VOLUME CONFIRMATION (4H) ===
+    # === VOLUME SPIKE FILTER (6H) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_std = pd.Series(volume).rolling(window=20, min_periods=20).std().values
+    vol_threshold = vol_ma + 2.0 * vol_std  # 2 sigma volume spike
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(twelve_h_ema_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(one_w_ema_aligned[i]) or np.isnan(vwap[i]) or np.isnan(std_dev[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(vol_threshold[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 12h EMA
-        uptrend = close[i] > twelve_h_ema_aligned[i]
-        downtrend = close[i] < twelve_h_ema_aligned[i]
+        # Determine trend direction from 1w EMA
+        uptrend = close[i] > one_w_ema_aligned[i]
+        downtrend = close[i] < one_w_ema_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below middle line OR trend turns down
-            if close[i] < donch_mid[i] or downtrend:
+            # Exit: price returns to VWAP OR trend turns down
+            if close[i] >= vwap[i] or downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above middle line OR trend turns up
-            if close[i] > donch_mid[i] or uptrend:
+            # Exit: price returns to VWAP OR trend turns up
+            if close[i] <= vwap[i] or uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation
-            if volume[i] <= vol_ma[i]:
+            # Need volume spike
+            if volume[i] < vol_threshold[i]:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with trend alignment
-            if close[i] > donch_high[i] and uptrend:
-                # Breakout above upper band in uptrend -> long
+            # Entry: VWAP deviation with trend alignment
+            if close[i] < vwap[i] - 1.5 * std_dev[i] and uptrend:
+                # Price below VWAP in uptrend -> long (mean reversion)
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donch_low[i] and downtrend:
-                # Breakdown below lower band in downtrend -> short
+            elif close[i] > vwap[i] + 1.5 * std_dev[i] and downtrend:
+                # Price above VWAP in downtrend -> short (mean reversion)
                 position = -1
                 signals[i] = -0.25
     
