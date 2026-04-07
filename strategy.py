@@ -1,90 +1,118 @@
 #!/usr/bin/env python3
 """
-4h_river_2_bank_v1
-Hypothesis: Combines 4h price action with 1d trend and volume confirmation. 
-Long when price touches 4h 20-period EMA support in 1d uptrend with volume confirmation.
-Short when price touches 4h 20-period EMA resistance in 1d downtrend with volume confirmation.
-Uses the 'river to bank' concept where price moves from trend (river) to mean-reversion (bank).
-Designed for low trade frequency and high win rate in both bull and bear markets.
+6h_camarilla_pivot_1d_volume_v1
+Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
+Long when price breaks above R4 with volume confirmation (bullish continuation).
+Short when price breaks below S4 with volume confirmation (bearish continuation).
+Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
+Works in both bull/bear markets by adapting to volatility and volume.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_river_2_bank_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 10:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h EMA20 for dynamic support/resistance
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    # 1d EMA50 for trend filter
+    # Daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Previous day's values (shifted by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan  # First day has no previous
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla calculations
+    range_1d = prev_high - prev_low
+    # Avoid division by zero
+    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
+    
+    # Camarilla levels
+    r3 = prev_close + range_1d * 1.1 / 4
+    r4 = prev_close + range_1d * 1.1 / 2
+    s3 = prev_close - range_1d * 1.1 / 4
+    s4 = prev_close - range_1d * 1.1 / 2
+    
+    # Align to 6h timeframe (previous day's levels are valid for current day)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not available
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(close[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i]
         
-        # Price position relative to EMA20
-        price_vs_ema = (close[i] - ema_20[i]) / ema_20[i]
-        
         if position == 1:  # Long position
-            # Exit: price breaks below EMA20 or trend turns down
-            if price_vs_ema < -0.005 or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price crosses below R3 (mean reversion) or stop at S4 break
+            if close[i] < r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above EMA20 or trend turns up
-            if price_vs_ema > 0.005 or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price crosses above S3 (mean reversion) or stop at R4 break
+            if close[i] > s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price near EMA20 support in 1d uptrend with volume
-            if (price_vs_ema > -0.01 and price_vs_ema < 0.01 and  # near EMA20
-                close[i] > ema_50_1d_aligned[i] and  # 1d uptrend
-                vol_confirmed):
+            # Breakout long: price breaks above R4 with volume
+            if close[i] > r4_aligned[i] and vol_confirmed:
                 position = 1
                 signals[i] = 0.25
-            # Short: price near EMA20 resistance in 1d downtrend with volume
-            elif (price_vs_ema > -0.01 and price_vs_ema < 0.01 and  # near EMA20
-                  close[i] < ema_50_1d_aligned[i] and  # 1d downtrend
-                  vol_confirmed):
+            # Breakout short: price breaks below S4 with volume
+            elif close[i] < s4_aligned[i] and vol_confirmed:
                 position = -1
                 signals[i] = -0.25
+            # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
+            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
+                # Look for bullish rejection (close > open)
+                if close[i] > prices['open'].iloc[i]:
+                    position = 1
+                    signals[i] = 0.25
+            # Mean reversion short: price rejects R3 with volume divergence
+            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
+                # Look for bearish rejection (close < open)
+                if close[i] < prices['open'].iloc[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
