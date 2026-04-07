@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Supertrend + 1d ADX Trend Filter + Volume Confirmation
-# Hypothesis: Supertrend on 6h captures trend direction and momentum. 
-# ADX on 1d filters for trending vs ranging markets - we only trade when ADX > 25.
-# Volume confirmation ensures institutional participation. Works in both bull and bear markets
-# by following the trend direction. 6h timeframe reduces noise vs lower timeframes.
-# Target: 15-40 trades/year (60-160 over 4 years).
-name = "6h_supertrend_1d_adx_volume_v1"
-timeframe = "6h"
+# Strategy: 4h Donchian Breakout + Volume Spike + Choppiness Filter
+# Hypothesis: Donchian(20) breakouts capture momentum, volume spike confirms institutional participation,
+# and choppiness filter avoids false signals in sideways markets. Works in both bull and bear regimes.
+# 4h timeframe balances responsiveness and noise. Target: 20-50 trades/year (80-200 over 4 years).
+name = "4h_donchian_breakout_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -24,121 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for ADX filter
+    # Get 1-day data for choppiness filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Supertrend parameters (60-period ATR, multiplier 3.0)
-    atr_period = 60
-    multiplier = 3.0
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Volume filter: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_filter = volume > (vol_ma * 2.0)
     
-    # Calculate basic upper and lower bands
-    hl2 = (high + low) / 2
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    
-    # Initialize Supertrend
-    supertrend = np.zeros(n)
-    uptrend = np.ones(n, dtype=bool)
-    
-    for i in range(1, n):
-        if close[i] > upperband[i-1]:
-            uptrend[i] = True
-        elif close[i] < lowerband[i-1]:
-            uptrend[i] = False
-        else:
-            uptrend[i] = uptrend[i-1]
-            if uptrend[i] and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if not uptrend[i] and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        supertrend[i] = lowerband[i] if uptrend[i] else upperband[i]
-    
-    # ADX calculation on 1d data (14-period)
-    period_adx = 14
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Choppiness Index (14-period) on daily timeframe
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
     # True Range
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], tr_1d])
+    tr1 = np.abs(daily_high - daily_low)
+    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low
+    tr[0] = daily_high[0] - daily_low[0]
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Chop calculation
+    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr14 / (highest_high - lowest_low)) / np.log10(14)
+    chop[0:13] = np.nan  # First 13 values invalid
     
-    # Smoothed values
-    tr_sum = pd.Series(tr_1d).ewm(alpha=1/period_adx, adjust=False, min_periods=period_adx).mean().values
-    dm_plus_sum = pd.Series(dm_plus).ewm(alpha=1/period_adx, adjust=False, min_periods=period_adx).mean().values
-    dm_minus_sum = pd.Series(dm_minus).ewm(alpha=1/period_adx, adjust=False, min_periods=period_adx).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_sum / tr_sum
-    di_minus = 100 * dm_minus_sum / tr_sum
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/period_adx, adjust=False, min_periods=period_adx).mean().values
-    
-    # Align 1d ADX to 6h
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_filter = volume > (vol_ma * 1.3)
+    # Align chop to 4h timeframe
+    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(supertrend[i]) or np.isnan(adx_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Check for trending market (ADX > 25)
-        trending = adx_6h[i] > 25
+        # Choppiness filter: only trade when trending (CHOP < 38.2)
+        if chop_4h[i] > 38.2:
+            # In choppy market, flatten position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit: Supertrend flips to downtrend OR ADX drops below 20 (ranging)
-            if not uptrend[i] or adx_6h[i] < 20:
+            # Exit: price closes below Donchian lower band or volume spike fails
+            if close[i] < low_min[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.30  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: Supertrend flips to uptrend OR ADX drops below 20 (ranging)
-            if uptrend[i] or adx_6h[i] < 20:
+            # Exit: price closes above Donchian upper band or volume spike fails
+            if close[i] > high_max[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.30  # Maintain short position
         else:  # Flat, look for entry
-            # Require trending market and volume confirmation
-            if trending and vol_filter[i]:
-                # Enter long when Supertrend is uptrend
-                if uptrend[i]:
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Long breakout: price closes above Donchian upper band
+                if close[i] > high_max[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Enter short when Supertrend is downtrend
-                elif not uptrend[i]:
+                    signals[i] = 0.30
+                # Short breakdown: price closes below Donchian lower band
+                elif close[i] < low_min[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
