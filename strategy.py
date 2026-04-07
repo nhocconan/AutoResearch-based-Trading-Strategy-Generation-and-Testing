@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla pivot + 1d trend filter + volume confirmation
-# Hypothesis: Camarilla levels (R3/S3, R4/S4) act as institutional support/resistance.
-# In trending markets (1d EMA25), breakouts beyond R4/S4 continue; reversions at R3/S3.
-# Works in both bull/bear: trend filter adapts direction, volume avoids false breakouts.
-# Target: 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag.
-name = "6h_camarilla_1d_trend_volume_v2"
-timeframe = "6h"
+# Strategy: 4h 12-period ATR breakout with daily volume confirmation
+# Hypothesis: ATR breakouts capture volatility expansion moves; volume confirms institutional participation.
+# Works in bull via upward breakouts, in bear via downward breakdowns. ATR adapts to volatility regime.
+# Target: 20-50 trades/year to minimize fee drag.
+name = "4h_atr12_1d_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,84 +22,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels from previous day
-    # Classic formula: based on previous day's range
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    range_val = prev_high - prev_low
+    # Calculate daily 20-period volume moving average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Camarilla levels
-    R3 = prev_close + range_val * 1.1 / 2
-    R4 = prev_close + range_val * 1.1
-    S3 = prev_close - range_val * 1.1 / 2
-    S4 = prev_close - range_val * 1.1
-    
-    # Align to 6h timeframe (shifted by 1 day for lookback)
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Daily trend filter: EMA25
-    ema_25 = df_1d['close'].ewm(span=25, min_periods=25).mean().values
-    ema_25_6h = align_htf_to_ltf(prices, df_1d, ema_25)
-    
-    # Volume confirmation: 60-period volume MA on 6h
-    vol_ma_60 = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
+    # Calculate ATR(12) for breakout threshold
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(12, n):
         # Skip if required data not available
-        if (np.isnan(R3_6h[i]) or np.isnan(R4_6h[i]) or 
-            np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or
-            np.isnan(ema_25_6h[i]) or np.isnan(vol_ma_60[i])):
+        if (np.isnan(atr[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 60-period average
-        vol_confirm = volume[i] > vol_ma_60[i]
+        # Volume confirmation: current 4h volume > daily average volume
+        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 (reversion to mean)
-            if close[i] < S3_6h[i]:
+            # Exit: price closes below open - ATR (mean reversion signal)
+            if close[i] < (prices['open'].iloc[i] - atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above R3 (reversion to mean)
-            if close[i] > R3_6h[i]:
+            # Exit: price closes above open + ATR (mean reversion signal)
+            if close[i] > (prices['open'].iloc[i] + atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Determine trend direction from daily EMA25
-            uptrend = close[i] > ema_25_6h[i]
-            
-            # Enter long: break above R4 in uptrend OR reversal at S3 in downtrend
-            if vol_confirm:
-                if uptrend and close[i] > R4_6h[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif (not uptrend) and close[i] < S3_6h[i]:
-                    position = 1
-                    signals[i] = 0.25
-            # Enter short: break below S4 in downtrend OR reversal at R3 in uptrend
-            if vol_confirm:
-                if (not uptrend) and close[i] < S4_6h[i]:
-                    position = -1
-                    signals[i] = -0.25
-                elif uptrend and close[i] > R3_6h[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long: price closes above open + ATR + volume confirmation
+            if close[i] > (prices['open'].iloc[i] + atr[i]) and vol_confirm:
+                position = 1
+                signals[i] = 0.25
+            # Enter short: price closes below open - ATR + volume confirmation
+            elif close[i] < (prices['open'].iloc[i] - atr[i]) and vol_confirm:
+                position = -1
+                signals[i] = -0.25
     
     return signals
