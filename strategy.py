@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA trend filter and volume confirmation
-# Long when price breaks above 20-day high + close > weekly EMA(20) + volume > 1.5x 20-day average volume
-# Short when price breaks below 20-day low + close < weekly EMA(20) + volume > 1.5x 20-day average volume
-# Exit when price crosses 10-day EMA (trend reversal) or volatility contraction (ATR ratio < 0.8)
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: 1-day donchian breakout + 1-week ema trend + volume confirmation
+# Long when price breaks above 1-day Donchian High(20) + price > 1-week EMA(20) + volume > 1.5x avg volume
+# Short when price breaks below 1-day Donchian Low(20) + price < 1-week EMA(20) + volume > 1.5x avg volume
+# Exit when price crosses 1-day Donchian midline or volume drops below average
+# Stoploss at 2 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses weekly EMA for trend filter to avoid counter-trend trades
-# Target: 50-100 total trades over 4 years (12-25/year)
+# Uses 1-day Donchian channels for breakout and 1-week EMA for trend filter
+# Target: 30-100 total trades over 4 years (7-25/year)
 
 name = "1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
@@ -18,7 +18,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -32,23 +32,21 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20)
+    # Calculate 1-week EMA(20)
     close_1w = df_1w['close'].values
     close_1w_s = pd.Series(close_1w)
     ema_20_1w = close_1w_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # 1-day Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
     
-    # 10-day EMA for exit signal
-    close_s = pd.Series(close)
-    ema_10 = close_s.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Average volume for confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for stoploss and volatility
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -57,25 +55,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-day average volume
-    volume_s = pd.Series(volume)
-    vol_ma_20 = volume_s.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
-    
-    # ATR ratio for volatility contraction exit (current ATR / 20-day average ATR)
-    atr_s = pd.Series(atr)
-    atr_ma_20 = atr_s.rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr / (atr_ma_20 + 1e-10)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_10[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -83,40 +71,40 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2 * ATR
+            if close[i] < entry_price - 2 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 10-day EMA or volatility contraction
-            elif close[i] < ema_10[i] or atr_ratio[i] < 0.8:
+            # Exit: price crosses Donchian midline or volume drops below average
+            elif close[i] < donchian_mid[i] or volume[i] < avg_volume[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2 * ATR
+            if close[i] > entry_price + 2 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 10-day EMA or volatility contraction
-            elif close[i] > ema_10[i] or atr_ratio[i] < 0.8:
+            # Exit: price crosses Donchian midline or volume drops below average
+            elif close[i] > donchian_mid[i] or volume[i] < avg_volume[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with trend and volume filters
-            # Long: break above 20-day high + close > weekly EMA + volume spike
-            if close[i] > donchian_high[i] and close[i] > ema_20_1w_aligned[i] and volume_spike[i]:
+            # Look for entries: Donchian breakout with EMA trend and volume confirmation
+            # Long: break above Donchian high + price > weekly EMA + volume > 1.5x avg
+            if close[i] > high_20[i] and close[i] > ema_20_1w_aligned[i] and volume[i] > 1.5 * avg_volume[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: break below 20-day low + close < weekly EMA + volume spike
-            elif close[i] < donchian_low[i] and close[i] < ema_20_1w_aligned[i] and volume_spike[i]:
+            # Short: break below Donchian low + price < weekly EMA + volume > 1.5x avg
+            elif close[i] < low_20[i] and close[i] < ema_20_1w_aligned[i] and volume[i] > 1.5 * avg_volume[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
