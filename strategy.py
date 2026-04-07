@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and Daily Trend Filter
-Long when price breaks above Donchian(20) high with expanding volume AND daily EMA trend up
-Short when price breaks below Donchian(20) low with expanding volume AND daily EMA trend down
-Exit when price crosses back to Donchian middle line
-Uses Donchian channels (price channel breakouts) which work in both trending and mean-reverting markets.
+4H Donchian Breakout with Volume Confirmation and 12H Trend Filter
+Long when price breaks above Donchian(20) upper band with expanding volume AND 12H EMA trend up
+Short when price breaks below Donchian(20) lower band with expanding volume AND 12H EMA trend down
+Exit when price crosses back to midline (10-period SMA)
+Uses Donchian breakouts which capture momentum in both bull and bear markets, with volume and trend filters to reduce false signals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_12h_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +26,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period high/low) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_high + donchian_low) / 2
+    # === Donchian Channels (20-period) ===
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === Daily trend filter (EMA 21) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 12H trend filter (EMA 21) ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below middle line
-            if close[i] < donchian_middle[i]:
+            # Exit: price crosses back below midline
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above middle line
-            if close[i] > donchian_middle[i]:
+            # Exit: price crosses back above midline
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -70,13 +70,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation AND daily trend filter
-            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper channel with rising daily EMA -> long
+            # Entry: Donchian breakout with volume confirmation AND 12H trend filter
+            if close[i] > donchian_upper[i] and ema_12h_aligned[i] > ema_12h_aligned[i-1]:
+                # Breakout above upper band with rising 12H EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower channel with falling daily EMA -> short
+            elif close[i] < donchian_lower[i] and ema_12h_aligned[i] < ema_12h_aligned[i-1]:
+                # Breakdown below lower band with falling 12H EMA -> short
                 position = -1
                 signals[i] = -0.25
     
