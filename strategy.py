@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1D Weekly Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Breakouts from weekly Donchian channels (20-period) with volume confirmation
-# and ADX trend strength filter capture strong momentum moves in both bull and bear markets.
-# Weekly timeframe provides robust levels, volume confirms institutional interest,
-# ADX filters out weak/choppy periods. Target: 10-30 trades/year.
+# Strategy: 6H Daily Camarilla Pivot Breakout with Volume Confirmation
+# Hypothesis: Camarilla pivot levels derived from daily OHLC provide reliable support/resistance.
+# Breakouts beyond R4/S4 with volume confirmation capture strong momentum moves.
+# Works in bull markets (buy R4 breakouts) and bear markets (sell S4 breakdowns).
+# Daily timeframe provides robust levels, volume confirms institutional interest.
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
-name = "1d_weekly_donchian_breakout_volume_adx_v1"
-timeframe = "1d"
+name = "6h_daily_camarilla_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,106 +25,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels and ADX
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get daily data for Camarilla pivots
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Weekly high/low/close for calculations
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Daily high/low/close
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    weekly_high_series = pd.Series(weekly_high)
-    weekly_low_series = pd.Series(weekly_low)
-    donchian_high = weekly_high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = weekly_low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for each day
+    # R4 = Close + (High - Low) * 1.1/2
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
+    # S4 = Close - (High - Low) * 1.1/2
+    camarilla_r4 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    camarilla_s4 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Shift by 1 to use only completed weekly bars (avoid look-ahead)
-    donchian_high = np.roll(donchian_high, 1)
-    donchian_low = np.roll(donchian_low, 1)
+    # Align daily Camarilla levels to 6h timeframe (shifted by 1 for completed bars)
+    r4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s4)
     
-    # Handle first element
-    if len(donchian_high) > 1:
-        donchian_high[0] = donchian_high[1]
-        donchian_low[0] = donchian_low[1]
-    else:
-        donchian_high[0] = 0
-        donchian_low[0] = 0
-    
-    # Calculate ADX (14-period) for trend strength
-    # True Range
-    tr1 = pd.Series(weekly_high).subtract(pd.Series(weekly_low)).abs()
-    tr2 = pd.Series(weekly_high).subtract(pd.Series(weekly_close).shift(1)).abs()
-    tr3 = pd.Series(weekly_low).subtract(pd.Series(weekly_close).shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
-    
-    # Directional Movement
-    up_move = pd.Series(weekly_high).diff()
-    down_move = pd.Series(weekly_low).diff().abs()  # positive when down
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr
-    
-    # DX and ADX
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di)).replace([np.inf, -np.inf], 0)
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    
-    # Handle NaN values
-    adx = adx.fillna(0).values
-    
-    # Align weekly data to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
-    
-    # Volume filter: volume > 1.5x 50-period average
+    # Volume filter: volume > 1.8x 50-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below weekly Donchian low or weak trend (ADX < 20)
-            if close[i] < donchian_low_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price falls back below R3 (take profit) or reverses below S4 (stop)
+            if close[i] < r3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above weekly Donchian high or weak trend (ADX < 20)
-            if close[i] > donchian_high_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price rises back above S3 (take profit) or reverses above R4 (stop)
+            if close[i] > s3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Strong trend filter: ADX > 25
-            if adx_aligned[i] > 25:
-                # Long entry: breakout above weekly Donchian high with volume
-                if (high[i] > donchian_high_aligned[i] and close[i] > donchian_high_aligned[i] and
-                    vol_filter[i]):
-                    position = 1
-                    signals[i] = 0.25
-                # Short entry: breakdown below weekly Donchian low with volume
-                elif (low[i] < donchian_low_aligned[i] and close[i] < donchian_low_aligned[i] and
-                      vol_filter[i]):
-                    position = -1
-                    signals[i] = -0.25
+            # Long entry: breakout above R4 with volume
+            if (high[i] > r4_aligned[i] and close[i] > r4_aligned[i] and
+                vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: breakdown below S4 with volume
+            elif (low[i] < s4_aligned[i] and close[i] < s4_aligned[i] and
+                  vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
