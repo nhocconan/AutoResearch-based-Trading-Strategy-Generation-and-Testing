@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v2
-Hypothesis: Daily Camarilla pivot reversal with volume confirmation on 12h chart.
-Long when price rejects S3/S4 with volume spike; short when rejected at R3/R4.
-Uses only daily pivots + volume to minimize trades (<20/year) and avoid overtrading.
-Works in bull/bear via mean-reversion at institutional levels.
+1d_donchian_20_breakout_1w_trend_volume_v1
+Hypothesis: Daily Donchian(20) breakouts with weekly trend filter (EMA20) and volume confirmation.
+In long: price breaks above 20-day high with volume above average and price above weekly EMA20.
+In short: price breaks below 20-day low with volume above average and price below weekly EMA20.
+Uses Donchian channels for breakout structure, EMA for trend filter, and volume for confirmation.
+Designed for 15-25 trades/year on 1d timeframe with clear breakout logic that works in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v2"
-timeframe = "12h"
+name = "1d_donchian_20_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -26,65 +27,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Donchian(20) channels on daily
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
+    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Previous day's OHLC
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
-    
-    # Camarilla levels
-    range_1d = prev_high - prev_low
-    camarilla_S3 = prev_close - (range_1d * 1.1 / 6)
-    camarilla_S4 = prev_close - (range_1d * 1.1 / 4)
-    camarilla_R3 = prev_close + (range_1d * 1.1 / 6)
-    camarilla_R4 = prev_close + (range_1d * 1.1 / 4)
-    
-    # Align to 12h
-    S3 = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    S4 = align_htf_to_ltf(prices, df_1d, camarilla_S4)
-    R3 = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    R4 = align_htf_to_ltf(prices, df_1d, camarilla_R4)
-    
-    # Volume spike: 2x 24-period average (2 days worth)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Volume confirmation: 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
-        if (np.isnan(S3[i]) or np.isnan(S4[i]) or np.isnan(R3[i]) or np.isnan(R4[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+    for i in range(20, n):
+        # Skip if data not available
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+            signals[i] = 0.0
             continue
         
-        if position == 1:
-            # Exit long: price crosses S4 or loses volume momentum
-            if close[i] < S4[i] or not vol_spike[i]:
+        # Volume confirmation: current volume above average
+        vol_confirmed = volume[i] > vol_ma[i]
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_roll[i-1]  # Break above previous 20-day high
+        breakout_down = close[i] < low_roll[i-1]  # Break below previous 20-day low
+        
+        # Weekly trend filter
+        above_weekly_ema20 = close[i] > ema20_1w_aligned[i]
+        below_weekly_ema20 = close[i] < ema20_1w_aligned[i]
+        
+        if position == 1:  # Long position
+            # Exit: price breaks below 20-day low or trend turns bearish
+            if close[i] < low_roll[i] or below_weekly_ema20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
-        elif position == -1:
-            # Exit short: price crosses R4 or loses volume momentum
-            if close[i] > R3[i] or not vol_spike[i]:
+                
+        elif position == -1:  # Short position
+            # Exit: price breaks above 20-day high or trend turns bullish
+            if close[i] > high_roll[i] or above_weekly_ema20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:
-            # Enter long: rejection of S3/S4 with volume spike
-            if ((close[i] <= S3[i] * 1.005) or (close[i] <= S4[i] * 1.005)) and vol_spike[i]:
+        else:  # Flat, look for entry
+            # Long: breakout up with volume confirmation and bullish weekly trend
+            if breakout_up and vol_confirmed and above_weekly_ema20:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: rejection of R3/R4 with volume spike
-            elif ((close[i] >= R3[i] * 0.995) or (close[i] >= R4[i] * 0.995)) and vol_spike[i]:
+            # Short: breakout down with volume confirmation and bearish weekly trend
+            elif breakout_down and vol_confirmed and below_weekly_ema20:
                 position = -1
                 signals[i] = -0.25
     
