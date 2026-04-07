@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_trix_volume_regime_v1
-Hypothesis: TRIX (triple exponential average) with volume confirmation and regime filter (Choppiness Index) works on 6h timeframe.
-TRIX > 0 and rising indicates bullish momentum; TRIX < 0 and falling indicates bearish momentum.
-Volume confirms momentum strength. Choppiness Index > 61.8 indicates ranging market (use mean reversion at TRIX extremes),
-while < 38.2 indicates trending market (follow TRIX direction). Works in both bull and bear markets by adapting to regime.
-Targets 12-37 trades/year (50-150 over 4 years).
+12h_volume_breakout_1d_trend_v1
+Hypothesis: Volume expansion breakouts above 1-day high or below 1-day low, 
+filtered by 1-week EMA trend, with volume confirmation. Works in both bull and bear 
+markets by following the primary trend direction while requiring volume confirmation 
+to avoid false breakouts. Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_trix_volume_regime_v1"
-timeframe = "6h"
+name = "12h_volume_breakout_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,91 +26,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h data for TRIX calculation
-    # TRIX = EMA(EMA(EMA(close, period), period), period) - 1-period percent change
-    period = 12
-    ema1 = pd.Series(close).ewm(span=period, adjust=False).mean()
-    ema2 = ema1.ewm(span=period, adjust=False).mean()
-    ema3 = ema2.ewm(span=period, adjust=False).mean()
-    trix = ema3.pct_change(1) * 100  # percentage change
-    trix_values = trix.values
-    
-    # 12h data for Choppiness Index (regime filter)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Daily data for breakout levels and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily high and low for breakout levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate True Range and ATR(14) for Choppiness
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    atr_period = 14
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
     
-    # Highest high and lowest low over ATR period
-    hh = pd.Series(high_12h).rolling(window=atr_period, min_periods=atr_period).max().values
-    ll = pd.Series(low_12h).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    # Choppiness Index: 100 * log10(sum(TR, atr_period) / (hh - ll)) / log10(atr_period)
-    tr_sum = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).sum().values
-    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(atr_period)
-    
-    # Align 12h data to 6h timeframe
-    chop_6h = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Volume confirmation: 20-period average
+    # 20-period volume average on 12h
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align daily breakout levels and weekly EMA to 12h timeframe
+    high_1d_12h = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_12h = align_htf_to_ltf(prices, df_1d, low_1d)
+    ema50_1w_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(trix_values[i]) or np.isnan(chop_6h[i]) or 
-            np.isnan(vol_sma[i])):
+        if (np.isnan(high_1d_12h[i]) or np.isnan(low_1d_12h[i]) or 
+            np.isnan(ema50_1w_12h[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_sma[i]
+        # Volume confirmation: current volume > 1.8x average volume
+        vol_confirm = volume[i] > 1.8 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: TRIX crosses below zero OR chop > 61.8 and TRIX < 0 (range reversal)
-            if trix_values[i] < 0 or (chop_6h[i] > 61.8 and trix_values[i] < 0):
+            # Exit: price breaks below 1-day low OR volume dries up
+            if close[i] < low_1d_12h[i] or volume[i] < 0.5 * vol_sma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: TRIX crosses above zero OR chop > 61.8 and TRIX > 0 (range reversal)
-            if trix_values[i] > 0 or (chop_6h[i] > 61.8 and trix_values[i] > 0):
+            # Exit: price breaks above 1-day high OR volume dries up
+            if close[i] > high_1d_12h[i] or volume[i] < 0.5 * vol_sma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trending market (chop < 38.2): follow TRIX direction
-            if chop_6h[i] < 38.2 and vol_confirm:
-                if trix_values[i] > 0 and trix_values[i] > trix_values[i-1]:
-                    position = 1
-                    signals[i] = 0.25
-                elif trix_values[i] < 0 and trix_values[i] < trix_values[i-1]:
-                    position = -1
-                    signals[i] = -0.25
-            # Ranging market (chop > 61.8): mean reversion at TRIX extremes
-            elif chop_6h[i] > 61.8 and vol_confirm:
-                if trix_values[i] < -2.0:  # oversold
-                    position = 1
-                    signals[i] = 0.25
-                elif trix_values[i] > 2.0:  # overbought
-                    position = -1
-                    signals[i] = -0.25
+            # Breakout long: price breaks above 1-day high with volume, in uptrend
+            if (close[i] > high_1d_12h[i] and 
+                vol_confirm and 
+                close[i] > ema50_1w_12h[i]):
+                position = 1
+                signals[i] = 0.25
+            # Breakout short: price breaks below 1-day low with volume, in downtrend
+            elif (close[i] < low_1d_12h[i] and 
+                  vol_confirm and 
+                  close[i] < ema50_1w_12h[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
