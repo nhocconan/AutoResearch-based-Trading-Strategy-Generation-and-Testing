@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_cci_trend_reversal_v2
-Hypothesis: Improve upon previous CCI strategy by tightening entry conditions and adding ATR-based volatility filter to reduce false signals. Enter long when CCI crosses above -80 with above-average volume and price above 20-period EMA, short when CCI crosses below +80 with above-average volume and price below 20-period EMA. Exit when CCI crosses zero. Use 1d ADX > 25 to ensure trending market. Designed for 20-40 trades/year to minimize fee drag while capturing momentum reversals.
+12h_donchian_breakout_1w_trend_volume_v1
+Hypothesis: On 12h timeframe, enter long when price breaks above 20-period Donchian upper band with above-average volume and 1-week EMA trend bullish, enter short when price breaks below 20-period Donchian lower band with above-average volume and 1-week EMA trend bearish. Exit when price crosses the 20-period Donchian midpoint. Uses volume and trend filters to avoid false breakouts. Designed for 12-37 trades/year to minimize fee dust while capturing trending moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_trend_reversal_v2"
-timeframe = "4h"
+name = "12h_donchian_breakout_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,129 +23,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h CCI (20-period)
-    if len(close) < 20:
+    # Calculate 12h Donchian channels (20-period)
+    if len(high) < 20 or len(low) < 20:
         return np.zeros(n)
     
-    # Typical Price
-    tp = (high + low + close) / 3.0
+    # Upper band: highest high over 20 periods
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over 20 periods
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Middle band: average of upper and lower
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # Moving Average of TP
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    
-    # Mean Deviation
-    md = pd.Series(tp).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    
-    # CCI
-    cci = (tp - ma_tp) / (0.015 * md)
-    
-    # Calculate 20-period EMA for trend filter
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    # Volume moving average for confirmation
+    # Volume moving average for confirmation (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ADX for trend filter (avoid ranging markets)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate 1-week EMA for trend filter (21-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate ADX components
-    # True Range
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: smoothed = prev_smoothed * (1 - 1/period) + current * (1/period)
-            for i in range(period, len(data)):
-                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-        return result
-    
-    atr_1d = wilders_smoothing(tr_1d, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, dm_plus_smooth / atr_1d * 100, 0)
-    di_minus = np.where(atr_1d != 0, dm_minus_smooth / atr_1d * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align indicators to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(close[i]) or np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr[i] > 0.5 * np.nanmedian(atr[max(0, i-50):i+1]) if i >= 50 else True
         
         # Volume confirmation: above average volume
         vol_ok = volume[i] > vol_ma[i]
         
-        # Trend filter: 1d ADX > 25 indicates trending market
-        trend_filter = adx_1d_aligned[i] > 25
-        
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero (momentum exhaustion)
-            if cci[i] < 0 and cci[i-1] >= 0:
+            # Exit: price crosses below Donchian middle
+            if close[i] < donchian_middle[i] and close[i-1] >= donchian_middle[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero (momentum exhaustion)
-            if cci[i] > 0 and cci[i-1] <= 0:
+            # Exit: price crosses above Donchian middle
+            if close[i] > donchian_middle[i] and close[i-1] <= donchian_middle[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok and vol_filter and trend_filter:
-                # Long: CCI crosses above -80 with price above EMA20
-                if cci[i] > -80 and cci[i-1] <= -80 and close[i] > ema_20[i]:
+            if vol_ok:
+                # Long: price breaks above Donchian upper with bullish 1w EMA trend
+                if close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and ema_21_1w_aligned[i] > ema_21_1w_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short: CCI crosses below +80 with price below EMA20
-                elif cci[i] < 80 and cci[i-1] >= 80 and close[i] < ema_20[i]:
+                # Short: price breaks below Donchian lower with bearish 1w EMA trend
+                elif close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and ema_21_1w_aligned[i] < ema_21_1w_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
