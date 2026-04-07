@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h RSI Pullback + 4h/1d Trend Filter
-# Hypothesis: During pullbacks in strong trends (4h EMA20 > EMA50 AND 1d close > SMA50),
-# buy RSI < 30 and sell RSI > 70. Works in bull/bear by only trading with trend.
-# Target: 60-150 total trades over 4 years (15-37/year).
+# Strategy: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
+# Hypothesis: Donchian breakouts in the direction of daily trend with above-average volume capture strong moves in both bull and bear markets.
+# Uses 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years) while capturing multi-day trends.
+# Volume confirmation avoids false breakouts. Trend filter ensures alignment with higher timeframe momentum.
 
-name = "1h_rsi_pullback_4h1d_trend_v1"
-timeframe = "1h"
+name = "12h_donchian20_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,13 +21,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
+    volume = prices['volume'].values
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -36,62 +30,55 @@ def generate_signals(prices):
     
     close_1d = df_1d['close'].values
     
-    # RSI (14) on 1h
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian Channel (20-period) on 12h
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # 4h EMA(20) and EMA(50) for trend filter
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # EMA(50) on 1d for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d SMA(50) for trend filter
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(sma50_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 4h EMA20 > EMA50 AND 1d close > SMA50
-        uptrend = ema20_4h_aligned[i] > ema50_4h_aligned[i] and close[i] > sma50_1d_aligned[i]
-        downtrend = ema20_4h_aligned[i] < ema50_4h_aligned[i] and close[i] < sma50_1d_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: RSI > 70 or trend changes
-            if rsi[i] > 70 or not uptrend:
+            # Exit: price closes below Donchian lower or trend changes
+            if close[i] < lowest_low[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: RSI < 30 or trend changes
-            if rsi[i] < 30 or not downtrend:
+            # Exit: price closes above Donchian upper or trend changes
+            if close[i] > highest_high[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            if uptrend and rsi[i] < 30:
-                # Long: pullback in uptrend
-                position = 1
-                signals[i] = 0.20
-            elif downtrend and rsi[i] > 70:
-                # Short: pullback in downtrend
-                position = -1
-                signals[i] = -0.20
+            # Volume confirmation: current volume > 1.5x average
+            vol_ok = volume[i] > volume_threshold[i]
+            
+            if vol_ok:
+                # Long breakout: price closes above Donchian upper with uptrend
+                if close[i] > highest_high[i] and close[i] > ema_50_1d_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short breakdown: price closes below Donchian lower with downtrend
+                elif close[i] < lowest_low[i] and close[i] < ema_50_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
