@@ -3,107 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and 1d regime filter for reduced whipsaw
-# Uses 4h EMA(21) for trend direction, 1d ADX(14) for trend strength filter,
-# and 1h RSI(14) for entry timing. Designed for low trade frequency (target: 15-37/year)
-# by requiring multi-timeframe alignment. Works in bull markets via trend following
-# and in bear markets via reduced exposure during weak trends.
+# Hypothesis: 12h Donchian breakout with daily ADX trend filter and volume confirmation
+# Uses Donchian(20) breakout for entry, daily ADX(14) > 25 for trend strength,
+# and volume > 1.5x 20-period average for confirmation. Filters out choppy markets
+# and focuses on strong trends. Position size scaled to 0.25. Designed for low
+# trade frequency (12-37/year) to minimize fee drift while capturing major moves
+# in both bull and bear markets via breakout logic.
 
-name = "mtf_ema_rsi_adx_filter_1h_4h1d_v1"
-timeframe = "1h"
+name = "12h_donchian20_daily_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h EMA(21) for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d ADX(14) for trend strength filter
+    # Daily data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
+    
+    # Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Daily ADX(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX components
-    plus_dm = np.zeros(len(high_1d))
-    minus_dm = np.zeros(len(high_1d))
-    tr = np.zeros(len(high_1d))
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    for i in range(1, len(high_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    tr[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx = np.where((plus_di + minus_di) != 0, 100 * abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 1h RSI(14) for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1h = 100 - (100 / (1 + rs))
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Volume confirmation: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(rsi_1h[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
+        # Volume > 1.5x average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend direction from 4h EMA
-        bullish_trend = close[i] > ema_4h_aligned[i]
-        bearish_trend = close[i] < ema_4h_aligned[i]
-        
-        # Trend strength filter: only trade when ADX > 25
+        # Strong trend: ADX > 25
         strong_trend = adx_1d_aligned[i] > 25
         
-        # RSI conditions for entry timing
-        rsi_oversold = rsi_1h[i] < 30
-        rsi_overbought = rsi_1h[i] > 70
-        rsi_neutral = 40 <= rsi_1h[i] <= 60
-        
-        # Long conditions: bullish trend + strong trend + RSI pullback
-        if bullish_trend and strong_trend and rsi_oversold:
-            signals[i] = 0.20
-        # Short conditions: bearish trend + strong trend + RSI bounce
-        elif bearish_trend and strong_trend and rsi_overbought:
-            signals[i] = -0.20
+        # Long: price breaks above upper Donchian band
+        if close[i] > highest_high[i] and vol_confirmed and strong_trend:
+            signals[i] = 0.25
+        # Short: price breaks below lower Donchian band
+        elif close[i] < lowest_low[i] and vol_confirmed and strong_trend:
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
