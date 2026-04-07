@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h 12h/1d Pivot Breakout with Volume Filter
+# Strategy: 4h 12h/1d Pivot Breakout with Volume Filter - Optimized
 # Hypothesis: Daily and 12h pivot levels act as strong support/resistance. 
 # Price breaking above R1 with volume indicates institutional buying, leading to continuation. 
 # Price breaking below S1 with volume indicates institutional selling, leading to continuation. 
