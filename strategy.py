@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour volume confirmation and 12-hour ADX trend filter
-# Long when price breaks above 20-period 4h Donchian high + volume > 1.5x 20-period 12h average + 12h ADX > 25
-# Short when price breaks below 20-period 4h Donchian low + volume > 1.5x 20-period 12h average + 12h ADX > 25
-# Exit when price crosses opposite Donchian level (long exits at Donchian low, short exits at Donchian high)
+# Hypothesis: 1-hour MACD histogram reversal with 4-hour RSI filter and 1-day volume confirmation
+# Long when MACD histogram crosses above zero + 4h RSI > 50 + 1d volume > 1.2x 20-period average
+# Short when MACD histogram crosses below zero + 4h RSI < 50 + 1d volume > 1.2x 20-period average
+# Exit when MACD histogram crosses back to opposite side (zero-line crossover)
 # Stoploss at 2.0 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Uses 12h volume for confirmation and 12h ADX for trend strength
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Position size: 0.20 (20% of capital)
+# Uses multi-timeframe confirmation to filter false signals and reduce trade frequency
+# Target: 60-150 total trades over 4 years (15-37/year)
 
-name = "4h_donchian20_12h_vol_adx_v1"
-timeframe = "4h"
+name = "1h_macd_hist_4h_rsi_1d_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,56 +27,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for volume confirmation and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4-hour data for RSI filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # Calculate 12-hour volume average (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_12h_s = pd.Series(volume_12h)
-    volume_ma = volume_12h_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
+    # 1-day data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 12-hour ADX (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4-hour RSI (14-period)
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1-day volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Directional Movement
-    up_move = np.diff(high_12h, prepend=high_12h[0])
-    down_move = np.diff(low_12h, prepend=low_12h[0]) * -1  # invert to positive
+    # Calculate MACD (12,26,9) on 1-hour data
+    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # 20-period Donchian channels (on 4h data)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ATR(14) for stoploss (on 4h data)
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -89,13 +74,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(macd_hist[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -106,41 +90,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below Donchian low
-            elif close[i] < lowest_low[i]:
+            # Exit: MACD histogram crosses below zero
+            elif macd_hist[i] < 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above Donchian high
-            elif close[i] > highest_high[i]:
+            # Exit: MACD histogram crosses above zero
+            elif macd_hist[i] > 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries: Donchian breakout with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period 12h average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: 12h ADX > 25
-            trend_filter = adx_aligned[i] > 25
+            # Look for entries: MACD histogram zero-cross with 4h RSI filter and 1d volume confirmation
+            # Volume filter: volume > 1.2x 20-period daily average
+            volume_filter = volume[i] > 1.2 * volume_ma_aligned[i]
+            # RSI filter: RSI > 50 for long, RSI < 50 for short
+            rsi_filter_long = rsi_4h_aligned[i] > 50
+            rsi_filter_short = rsi_4h_aligned[i] < 50
             
-            # Long: price breaks above Donchian high + volume filter + trend filter
-            if close[i] > highest_high[i] and volume_filter and trend_filter:
-                signals[i] = 0.25
+            # Long: MACD histogram crosses above zero + volume filter + RSI > 50
+            if macd_hist[i] > 0 and macd_hist[i-1] <= 0 and volume_filter and rsi_filter_long:
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low + volume filter + trend filter
-            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
-                signals[i] = -0.25
+            # Short: MACD histogram crosses below zero + volume filter + RSI < 50
+            elif macd_hist[i] < 0 and macd_hist[i-1] >= 0 and volume_filter and rsi_filter_short:
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
     
