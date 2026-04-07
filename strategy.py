@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Breakouts on 12h with daily volume confirmation capture strong trends; volatility filter avoids choppy markets.
-# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 12-37 trades/year to minimize fee drag (50-150 total over 4 years).
-name = "12h_donchian20_1d_volume_atr_v1"
-timeframe = "12h"
+# Strategy: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
+# Hypothesis: Weekly trend filters false breakouts; volume confirms strength; Donchian captures trends.
+# Works in bull via trend-following breakouts; bear via volatility-filtered mean reversion at bands.
+# Target: 15-25 trades/year to minimize fee drag.
+name = "1d_donchian20_1w_trend_volume_v8"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +22,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
     # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # Calculate weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate daily 20-period volume moving average
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate ATR(14) for volatility filter and stop sizing
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period high/low) on 12h data
+    # Calculate Donchian channels (20-period high/low)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -53,7 +63,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
+        # Volume confirmation: current daily volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
@@ -75,12 +85,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Enter long: price breaks above upper band + weekly uptrend + volume confirmation + volatility filter
+            if close[i] > highest_high[i] and close[i] > ema_1w_aligned[i] and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+            # Enter short: price breaks below lower band + weekly downtrend + volume confirmation + volatility filter
+            elif close[i] < lowest_low[i] and close[i] < ema_1w_aligned[i] and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
