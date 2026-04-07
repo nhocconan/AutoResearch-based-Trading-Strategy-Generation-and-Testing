@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian breakout with daily volume confirmation and ATR volatility filter
-# Works in bull markets via breakouts, in bear via volatility-filtered mean reversion at bands
-# Target: 19-50 trades/year, low frequency to minimize fee drag
-name = "4h_donchian20_1d_volume_atr_v1"
-timeframe = "4h"
+# Strategy: 12h Donchian breakout with daily volume confirmation and ATR volatility filter
+# Designed for 12h timeframe: fewer trades, lower fee drag, works in bull via breakouts, in bear via volatility-filtered mean reversion
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag and improve generalization
+name = "12h_donchian20_1d_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period high/low)
+    # Calculate Donchian channels (20-period high/low) on 12h data
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -52,7 +52,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
+        # Volume confirmation: current 12h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
