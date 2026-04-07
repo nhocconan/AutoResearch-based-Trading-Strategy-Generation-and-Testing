@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Donchian channel breakouts on 12h timeframe capture medium-term trends. 
-The 1d EMA200 ensures trades align with daily trend, reducing whipsaws. 
-Volume > 1.5x 20-period average confirms institutional participation.
-Target: 15-30 trades/year (~60-120 total over 4 years) to minimize fee drag.
-Works in bull markets via breakouts and in bear markets via short breakdowns.
+4h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Breakouts from 20-period Donchian channels capture institutional momentum.
+The 1d EMA200 filter ensures alignment with higher-timeframe trend, reducing whipsaws.
+Volume confirmation (>2x 20-period average) filters weak breakouts.
+Target: 20-40 trades/year (~80-160 total over 4 years) to balance opportunity and fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -31,9 +30,9 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume Confirmation (>1.5x 20-period average)
+    # Volume Spike Detector (>2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     # 1d EMA200 Trend Filter
     df_1d = get_htf_data(prices, '1d')
@@ -64,16 +63,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: breakout above Donchian high + price above 1d EMA200 + volume confirmation
+            # Long: breakout above Donchian high + price above 1d EMA200 + volume spike
             if (close[i] > high_roll[i-1] and 
                 close[i] > ema_200_aligned[i] and 
-                vol_confirm[i]):
+                vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: breakout below Donchian low + price below 1d EMA200 + volume confirmation
+            # Short: breakout below Donchian low + price below 1d EMA200 + volume spike
             elif (close[i] < low_roll[i-1] and 
                   close[i] < ema_200_aligned[i] and 
-                  vol_confirm[i]):
+                  vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
     
