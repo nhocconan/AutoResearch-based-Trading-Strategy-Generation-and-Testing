@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Donchian Breakout with Volume and ADX Filter
+# Strategy: 4H Daily Donchian Breakout with Volume and ADX Filter
 # Hypothesis: Breakouts from daily Donchian channels (20-period) with volume confirmation
 # and ADX trend strength filter capture strong momentum moves. Works in bull markets
 # (buy breakouts above daily high) and bear markets (sell breakdowns below daily low).
