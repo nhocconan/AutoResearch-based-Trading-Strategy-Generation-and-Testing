@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1h Momentum Reversal with 4h Trend Filter and Volume Spike
-Hypothesis: Intraday reversals against short-term momentum, filtered by 4h trend,
-             offer high-probability entries in both bull and bear markets.
-             Volume spikes confirm institutional participation at turning points.
-             Using 4h trend (not 1d) avoids whipsaws in choppy 1d trends.
-             Target: 15-35 trades/year per symbol to minimize fee drag.
+6h Camarilla Pivot with 1d EMA Trend and Volume Spike
+Hypothesis: Camarilla pivot levels from 1d provide key support/resistance.
+Fading at R3/S3 levels in ranging markets, breakout continuation at R4/S4.
+Using 1d EMA50 for trend filter and volume spikes for confirmation.
+Designed to work in both bull and bear regimes by adapting to price action.
+Target: 15-35 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_momentum_reversal_4h_trend_volume_v1"
-timeframe = "1h"
+name = "6h_camarilla_pivot_1d_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,67 +27,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h EMA20 Trend Filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_20 = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
-    
     # Volume Spike Detector (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 2.0)  # Higher threshold for fewer trades
     
-    # Session filter: 08-20 UTC (already datetime64[ms] index)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 1d OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    o_1d = df_1d['open'].values
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    range_1d = h_1d - l_1d
+    r4 = c_1d + (range_1d * 1.1 / 2)
+    r3 = c_1d + (range_1d * 1.1 / 4)
+    s3 = c_1d - (range_1d * 1.1 / 4)
+    s4 = c_1d - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 6t timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 1d EMA50 Trend Filter
+    ema_50 = pd.Series(c_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(rsi[i]) or np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 60 (overbought) or trend turns bearish
-            if rsi[i] > 60 or close[i] < ema_20_aligned[i]:
+            # Exit: price crosses below 1d EMA50
+            if close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 40 (oversold) or trend turns bullish
-            if rsi[i] < 40 or close[i] > ema_20_aligned[i]:
+            # Exit: price crosses above 1d EMA50
+            if close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: RSI < 30 (oversold) + price above 4h EMA20 + volume spike
-            if (rsi[i] < 30 and 
-                close[i] > ema_20_aligned[i] and 
+            # Long: bounce from S3 with volume spike in uptrend
+            if (close[i] > s3_aligned[i] and 
+                close[i] < s3_aligned[i] * 1.005 and  # Within 0.5% of S3
+                close[i] > ema_50_aligned[i] and
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: RSI > 70 (overbought) + price below 4h EMA20 + volume spike
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_20_aligned[i] and 
+                signals[i] = 0.25
+            # Short: rejection at R3 with volume spike in downtrend
+            elif (close[i] < r3_aligned[i] and 
+                  close[i] > r3_aligned[i] * 0.995 and  # Within 0.5% of R3
+                  close[i] < ema_50_aligned[i] and
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
+            # Long breakout: close above R4 with volume spike
+            elif (close[i] > r4_aligned[i] and 
+                  vol_spike[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short breakdown: close below S4 with volume spike
+            elif (close[i] < s4_aligned[i] and 
+                  vol_spike[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
