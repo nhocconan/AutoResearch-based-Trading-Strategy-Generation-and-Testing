@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(55) breakout with 1-week EMA(20) trend filter and volume confirmation
-# Designed for low frequency (target: 15-25 trades/year) to minimize fee drag
-# Uses longer Donchian period to filter noise and 1-week EMA for stronger trend filter
-# Works in both bull and bear markets by aligning with higher timeframe trend (1w EMA)
-# Longer lookback reduces whipsaws in choppy markets while capturing strong trends
+# Hypothesis: 6-hour Camarilla pivot levels from daily data with volume confirmation
+# Fade at R3/S3 levels, breakout continuation at R4/S4 levels
+# Works in both bull and bear markets by using price action around key intraday levels
+# Camarilla levels provide natural support/resistance; volume confirms institutional interest
+# Low frequency design targets 12-37 trades per year to minimize fee drag
 
-name = "4h_donchian55_1w_ema_volume_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,66 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week EMA trend filter (longer-term trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian channel (55-period for stronger signal)
-    donchian_high = pd.Series(high).rolling(window=55, min_periods=55).max().values
-    donchian_low = pd.Series(low).rolling(window=55, min_periods=55).min().values
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    range_1d = high_1d - low_1d
+    r4 = close_1d + 1.5 * range_1d
+    r3 = close_1d + 1.1 * range_1d
+    s3 = close_1d - 1.1 * range_1d
+    s4 = close_1d - 1.5 * range_1d
     
-    # Volume confirmation (50-period average for stability)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation (24-period average on 6h = 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(24, n):
         # Skip if required data not available
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend filter from 1w EMA
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
-        
-        # Donchian breakout conditions (use previous bar for breakout)
-        breakout_up = close[i] > donchian_high[i-1] if i > 0 else False
-        breakout_down = close[i] < donchian_low[i-1] if i > 0 else False
+        # Price levels
+        r4_level = r4_aligned[i]
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
+        s4_level = s4_aligned[i]
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit on downside breakout or trend reversal
-            if breakout_down or not uptrend:
+            # Exit if price breaks below S3 (mean reversion failure) or reaches R4 (take profit)
+            if close[i] < s3_level or close[i] > r4_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on upside breakout or trend reversal
-            if breakout_up or not downtrend:
+            # Exit if price breaks above R3 (mean reversion failure) or reaches S4 (take profit)
+            if close[i] > r3_level or close[i] < s4_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Entry conditions with trend and volume confirmation
-            # Long on upside breakout in uptrend
-            if breakout_up and uptrend and vol_confirm:
+            # Fade at R3/S3: sell at R3, buy at S3 with volume confirmation
+            # Breakout continuation: buy above R4, sell below S4 with volume confirmation
+            
+            # Long: buy at S3 bounce or break above R4
+            if (abs(close[i] - s3_level) < 0.001 * s3_level and vol_confirm) or \
+               (close[i] > r4_level and vol_confirm):
                 position = 1
                 signals[i] = 0.25
-            # Short on downside breakout in downtrend
-            elif breakout_down and downtrend and vol_confirm:
+            # Short: sell at R3 bounce or break below S4
+            elif (abs(close[i] - r3_level) < 0.001 * r3_level and vol_confirm) or \
+                 (close[i] < s4_level and vol_confirm):
                 position = -1
                 signals[i] = -0.25
     
