@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour ADX trend strength filter with daily Donchian breakout confirmation
-# ADX(14) > 25 indicates strong trend, Donchian(20) breakout provides entry in trend direction
-# Volume confirmation ensures institutional participation. Designed for low frequency in 6h timeframe.
+# Hypothesis: 12-hour ADX trend strength filter with weekly Donchian breakout confirmation
+# ADX(14) > 25 indicates strong trend, weekly Donchian(20) breakout provides entry in trend direction
+# Volume confirmation ensures institutional participation. Designed for low frequency in 12h timeframe.
 # Works in bull markets (trend continuation) and bear markets (strong downtrends).
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "6h_adx_donchian_volume_v1"
-timeframe = "6h"
+name = "12h_adx_weekly_donchian_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,20 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian breakout
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Donchian breakout
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    donchian_high = high_1d.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_1d.rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = pd.Series(df_1w['high'].values)
+    low_1w = pd.Series(df_1w['low'].values)
+    donchian_high = high_1w.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1w.rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Calculate ADX on 6h data (14-period)
+    # Calculate ADX on 12h data (14-period)
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
@@ -52,6 +53,8 @@ def generate_signals(prices):
     # Smoothed values
     def wilders_smoothing(values, period):
         smoothed = np.zeros_like(values)
+        if len(values) < period:
+            return smoothed
         smoothed[period-1] = np.mean(values[:period])
         for i in range(period, len(values)):
             smoothed[i] = (smoothed[i-1] * (period-1) + values[i]) / period
