@@ -1,23 +1,19 @@
-# 6H_CAMARILLA_PIVOT_1D_VOLUME_V1
-# Hypothesis: Camarilla pivot levels from daily timeframe act as key support/resistance levels.
-# At R3/S3 levels, price tends to reverse (mean reversion) with volume confirmation.
-# At R4/S4 levels, price breaks out with continuation (trend following).
-# Works in both bull and bear markets as pivots adapt to price action.
-# Volume confirmation filters false breakouts/reversals.
-# Target: 15-30 trades/year to minimize fee drift on 6h timeframe.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_volume_v1"
-timeframe = "6h"
+# Strategy: 12h Donchian(20) Breakout with 1w Volume Confirmation and ADX Trend Filter
+# Hypothesis: Donchian breakouts capture major trend moves; weekly volume confirms institutional participation.
+# ADX filter ensures we only trade in trending markets, avoiding chop. Works in bull via upper breakouts, in bear via lower breakdowns.
+# Target: 15-25 trades/year to minimize fee drag and pass robustness tests.
+name = "12h_donchian20_1w_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -26,87 +22,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for volume and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using formulas: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # where C = (H+L+C)/3 (typical price)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1w volume moving average
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    # Typical price (pivot point)
-    pp = (prev_high + prev_low + prev_close) / 3
-    # Range
-    range_hl = prev_high - prev_low
+    # Calculate 1w ADX (14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla levels
-    r4 = pp + range_hl * 1.1 / 2
-    r3 = pp + range_hl * 1.1 / 4
-    s3 = pp - range_hl * 1.1 / 4
-    s4 = pp - range_hl * 1.1 / 2
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align to 6h timeframe (shifted by 1 day for lookback)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume confirmation: current 6h volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate Donchian Channels (20) on 12h
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > vol_ma[i]
+        # Volume confirmation: current 12h volume > 1w average volume
+        vol_confirm = volume[i] > vol_ma_1w_aligned[i]
+        # Trend filter: ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
         if position == 1:  # Long position
-            # Exit: price reaches S3 (mean reversion target) or closes below S4 (stop)
-            if close[i] <= s3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] < s4_aligned[i]:  # Stop loss
+            # Exit: price closes below Donchian low (trend reversal)
+            if close[i] < donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price reaches R3 (mean reversion target) or closes above R4 (stop)
-            if close[i] >= r3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] > r4_aligned[i]:  # Stop loss
+            # Exit: price closes above Donchian high (trend reversal)
+            if close[i] > donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long at S3 with volume confirmation (bounce from support)
-            if close[i] <= s3_aligned[i] and vol_confirm:
+            # Enter long: price closes above Donchian high + volume confirmation + trend filter
+            if close[i] > donch_high[i] and vol_confirm and trend_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short at R3 with volume confirmation (rejection at resistance)
-            elif close[i] >= r3_aligned[i] and vol_confirm:
-                position = -1
-                signals[i] = -0.25
-            # Enter long breakout above R4 with volume confirmation
-            elif close[i] > r4_aligned[i] and vol_confirm:
-                position = 1
-                signals[i] = 0.25
-            # Enter short breakdown below S4 with volume confirmation
-            elif close[i] < s4_aligned[i] and vol_confirm:
+            # Enter short: price closes below Donchian low + volume confirmation + trend filter
+            elif close[i] < donch_low[i] and vol_confirm and trend_filter:
                 position = -1
                 signals[i] = -0.25
     
