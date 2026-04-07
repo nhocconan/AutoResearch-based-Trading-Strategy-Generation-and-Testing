@@ -1,23 +1,46 @@
 #!/usr/bin/env python3
 """
-12h_volatility_squeeze_breakout
-Hypothesis: Combines Bollinger Band squeeze (low volatility) with Donchian breakout and volume confirmation.
-In low volatility regimes, price builds energy for explosive moves. We enter on breakouts from the squeeze
-with volume confirmation, using higher timeframe (1d/1w) trend filter to avoid counter-trend trades.
-Works in both bull and bear markets by capturing volatility expansion phases.
+6h_chaos_fractal_1w_v1
+Hypothesis: Chaos fractal dimension (based on Hurst exponent) detects market regime shifts.
+In trending markets (Hurst > 0.6), trend-following works; in ranging markets (Hurst < 0.4), mean-reversion works.
+Uses weekly Hurst exponent to determine regime, then applies appropriate strategy:
+- Trending: 60-bar Donchian breakout with volume confirmation
+- Ranging: Fade at Bollinger Bands (20,2) with RSI divergence
+Weekly regime filter adapts to changing market conditions, working in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_volatility_squeeze_breakout"
-timeframe = "12h"
+name = "6h_chaos_fractal_1w_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def hurst_exponent(series, max_lag=20):
+    """Calculate Hurst exponent using R/S analysis."""
+    n = len(series)
+    if n < max_lag * 2:
+        return 0.5
+    
+    lags = range(2, max_lag)
+    tau = []
+    for lag in lags:
+        # Calculate variance of lagged differences
+        pp = np.subtract(series[lag:], series[:-lag])
+        tau.append(np.std(pp))
+    
+    if len(tau) < 2:
+        return 0.5
+    
+    # Linear fit in log-log space
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    hurst = poly[0] * 2.0  # Hurst exponent is 2 * slope
+    return np.clip(hurst, 0.0, 1.0)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,136 +48,134 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Bollinger Bands (20, 2) for squeeze detection
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Bollinger Band width percentile (20-period lookback) for squeeze
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Donchian channels (20-period) for breakout
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    
-    # Higher timeframe filters: 1d and 1w trend
-    df_1d = get_htf_data(prices, '1d')
+    # Weekly data for regime detection
     df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1w EMA(20) for trend filter
+    # Calculate weekly Hurst exponent (regime detector)
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    hurst_values = np.full(len(close_1w), np.nan)
     
-    # ADX (14) for trend strength filter
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(high)
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        
-        if len(high) >= period:
-            atr[period-1] = np.mean(tr[1:period])
-            plus_dm_sum = np.sum(plus_dm[1:period])
-            minus_dm_sum = np.sum(minus_dm[1:period])
-            
-            for i in range(period, len(high)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_di[i] = 100 * (plus_dm_sum / atr[i]) if atr[i] != 0 else 0
-                minus_di[i] = 100 * (minus_dm_sum / atr[i]) if atr[i] != 0 else 0
-                plus_dm_sum = plus_dm_sum - plus_dm[i-period+1] + plus_dm[i]
-                minus_dm_sum = minus_dm_sum - minus_dm[i-period+1] + minus_dm[i]
-        
-        dx = np.zeros_like(high)
-        for i in range(period, len(high)):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        adx = np.zeros_like(high)
-        if len(high) >= 2*period-1:
-            adx[2*period-2] = np.mean(dx[period:2*period-1])
-            for i in range(2*period-1, len(high)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate rolling Hurst with lookback of 50 weeks
+    for i in range(50, len(close_1w)):
+        window = close_1w[i-50:i]
+        hurst_values[i] = hurst_exponent(window, max_lag=10)
     
-    adx = calculate_adx(high, low, close, 14)
+    # Align Hurst to 6h timeframe (previous week's value)
+    hurst_aligned = align_htf_to_ltf(prices, df_1w, hurst_values)
+    
+    # Daily data for Bollinger Bands (used in ranging regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Bollinger Bands (20, 2)
+    close_1d = df_1d['close'].values
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    
+    # Align Bollinger Bands to 6h
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    
+    # RSI for divergence detection (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Donchian channel (60-period for breakouts)
+    donchian_high = pd.Series(high).rolling(window=60, min_periods=60).max().values
+    donchian_low = pd.Series(low).rolling(window=60, min_periods=60).min().values
+    
+    # Volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not available
-        if (np.isnan(bb_width_percentile[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(adx[i])):
+        if (np.isnan(hurst_aligned[i]) or np.isnan(close[i]) or 
+            np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Conditions
-        bb_squeeze = bb_width_percentile[i] < 20  # Bollinger Band width in lowest 20%
-        vol_expansion = bb_width_percentile[i] > 80  # Bollinger Band width in highest 20% (exit condition)
-        vol_confirmed = volume[i] > vol_ma[i] * 1.5  # Volume 1.5x average
-        uptrend_filter = (close[i] > ema_1d_aligned[i]) and (close[i] > ema_1w_aligned[i])
-        downtrend_filter = (close[i] < ema_1d_aligned[i]) and (close[i] < ema_1w_aligned[i])
-        strong_trend = adx[i] > 25
+        hurst = hurst_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: volatility expansion or breakdown below Donchian low
-            if vol_expansion or close[i] < donchian_low[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
+            if hurst > 0.5:  # Trending regime - trail with Donchian low
+                if close[i] < donchian_low[i]:
+                    position = 0
+                    signals[i] = 0.0
+            else:  # Ranging regime - exit at BB middle or RSI overbought
+                if (not np.isnan(bb_middle_aligned[i]) and 
+                    close[i] > bb_middle_aligned[i]):
+                    position = 0
+                    signals[i] = 0.0
+                elif (not np.isnan(rsi[i]) and rsi[i] > 70):
+                    position = 0
+                    signals[i] = 0.0
+            if position == 1:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: volatility expansion or breakout above Donchian high
-            if vol_expansion or close[i] > donchian_high[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
+            if hurst > 0.5:  # Trending regime - trail with Donchian high
+                if close[i] > donchian_high[i]:
+                    position = 0
+                    signals[i] = 0.0
+            else:  # Ranging regime - exit at BB middle or RSI oversold
+                if (not np.isnan(bb_middle_aligned[i]) and 
+                    close[i] < bb_middle_aligned[i]):
+                    position = 0
+                    signals[i] = 0.0
+                elif (not np.isnan(rsi[i]) and rsi[i] < 30):
+                    position = 0
+                    signals[i] = 0.0
+            if position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Donchian breakout with volume, in uptrend or strong trend
-            if close[i] > donchian_high[i] and vol_confirmed and (uptrend_filter or strong_trend):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: Donchian breakdown with volume, in downtrend or strong trend
-            elif close[i] < donchian_low[i] and vol_confirmed and (downtrend_filter or strong_trend):
-                position = -1
-                signals[i] = -0.25
+            # Regime-based entry logic
+            if hurst > 0.6:  # Strong trending regime
+                # Donchian breakout with volume confirmation
+                if (not np.isnan(donchian_high[i]) and 
+                    close[i] > donchian_high[i] and 
+                    volume[i] > vol_ma[i] * 1.5):
+                    position = 1
+                    signals[i] = 0.25
+                elif (not np.isnan(donchian_low[i]) and 
+                      close[i] < donchian_low[i] and 
+                      volume[i] > vol_ma[i] * 1.5):
+                    position = -1
+                    signals[i] = -0.25
+            elif hurst < 0.4:  # Strong ranging regime
+                # Mean reversion at Bollinger Bands with RSI divergence
+                if (not np.isnan(bb_lower_aligned[i]) and 
+                    not np.isnan(rsi[i]) and
+                    close[i] < bb_lower_aligned[i] and 
+                    rsi[i] < 30 and
+                    # Bullish divergence: price makes lower low, RSI makes higher low
+                    i >= 2 and close[i] < close[i-1] and close[i-1] < close[i-2] and
+                    rsi[i] > rsi[i-1]):
+                    position = 1
+                    signals[i] = 0.25
+                elif (not np.isnan(bb_upper_aligned[i]) and 
+                      not np.isnan(rsi[i]) and
+                      close[i] > bb_upper_aligned[i] and 
+                      rsi[i] > 70 and
+                      # Bearish divergence: price makes higher high, RSI makes lower high
+                      i >= 2 and close[i] > close[i-1] and close[i-1] > close[i-2] and
+                      rsi[i] < rsi[i-1]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
