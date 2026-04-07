@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily 20-period Donchian breakout with weekly EMA filter and volume confirmation
-# Buy when price breaks above upper Donchian channel with price above weekly EMA and volume above average
-# Sell when price breaks below lower Donchian channel with price below weekly EMA and volume above average
-# Exit when price returns to the Donchian midline or on opposite breakout
-# Designed for low frequency (7-25 trades/year) to minimize fee drag on 1d timeframe
-# Works in bull markets via breakout continuation and bear markets via mean reversion at channel extremes
+# Hypothesis: 6-hour KAMA with daily trend filter and volume confirmation
+# KAMA adapts to market noise - fast in trending, slow in ranging markets
+# Daily trend filter (EMA50) ensures we only trade in direction of higher timeframe trend
+# Volume confirms institutional participation at entry
+# Designed for low frequency: 15-30 trades per year to minimize fee drag in 6h timeframe
 
-name = "1d_donchian20_weekly_ema_volume_v4"
-timeframe = "1d"
+name = "6h_kama_daily_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +24,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(21)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily EMA50 for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily Donchian channels (20-period)
-    # Upper channel = highest high of past 20 days
-    # Lower channel = lowest low of past 20 days
-    # Middle channel = average of upper and lower
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_middle = (highest_high + lowest_low) / 2
+    # Calculate KAMA on 6h data
+    # Efficiency Ratio: |change| / sum(|changes|) over 10 periods
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
     
-    # Volume confirmation (20-day average)
+    # Avoid division by zero
+    sum_abs_change = np.zeros(n)
+    for i in range(10, n):
+        sum_abs_change[i] = np.sum(abs_change[i-9:i+1])
+    
+    er = np.zeros(n)
+    for i in range(10, n):
+        if sum_abs_change[i] > 0:
+            er[i] = change[i] / sum_abs_change[i]
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Donchian levels
-        upper = highest_high[i]
-        lower = lowest_low[i]
-        middle = donchian_middle[i]
-        
-        # EMA filter
-        price_above_ema = close[i] > ema_1w_aligned[i]
-        price_below_ema = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit if price returns to middle line or breaks below lower channel
-            if close[i] <= middle or close[i] < lower:
+            # Exit if price crosses below KAMA (trend change) or breaks daily EMA50
+            if close[i] < kama[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit if price returns to middle line or breaks above upper channel
-            if close[i] >= middle or close[i] > upper:
+            # Exit if price crosses above KAMA (trend change) or breaks daily EMA50
+            if close[i] > kama[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long on break above upper channel with volume confirmation and price above weekly EMA
-            if close[i] > upper and vol_confirm and price_above_ema:
+            # Enter long: price above KAMA AND uptrend AND volume confirmation
+            if close[i] > kama[i] and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short on break below lower channel with volume confirmation and price below weekly EMA
-            elif close[i] < lower and vol_confirm and price_below_ema:
+            # Enter short: price below KAMA AND downtrend AND volume confirmation
+            elif close[i] < kama[i] and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
