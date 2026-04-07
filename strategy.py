@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1w_ema_volume_v1
-Hypothesis: On 12-hour timeframe, use weekly (1w) Camarilla pivot levels with EMA trend filter and volume confirmation. 
-Enter long when price breaks above R4 with volume > 2.0x average and price > 50 EMA, short when price breaks below S4 with volume > 2.0x average and price < 50 EMA. 
-Exit when price touches opposite pivot level (S4 for long, R4 for short). 
-Designed for low frequency (12-37 trades/year) to minimize fee drag while capturing multi-week trends in both bull and bear markets.
+4h_atr_breakout_1w_trend_volume_v1
+Hypothesis: On 4-hour timeframe, use weekly ATR breakout with weekly trend filter and volume confirmation to capture strong moves in both bull and bear markets. 
+Enter long when price breaks above weekly high + 0.5*weekly ATR with volume > 1.5x average and price > weekly EMA50, short when price breaks below weekly low - 0.5*weekly ATR with volume > 1.5x average and price < weekly EMA50. 
+Exit when price touches opposite weekly ATR level (weekly low - 0.5*ATR for long, weekly high + 0.5*ATR for short). 
+Designed for low frequency (20-50 trades/year) to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1w_ema_volume_v1"
-timeframe = "12h"
+name = "4h_atr_breakout_1w_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,66 +26,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots
+    # Get weekly data for ATR, high/low, and EMA
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels
+    # Calculate weekly ATR (14-period)
     w_high = df_1w['high'].values
     w_low = df_1w['low'].values
     w_close = df_1w['close'].values
     
-    pivot = (w_high + w_low + w_close) / 3
-    range_val = w_high - w_low
+    # True Range
+    tr1 = w_high - w_low
+    tr2 = np.abs(w_high - np.roll(w_close, 1))
+    tr3 = np.abs(w_low - np.roll(w_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
-    r4 = w_close + range_val * 1.1 / 2
-    s4 = w_close - range_val * 1.1 / 2
+    # ATR
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
     
-    # Align to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Weekly high and low
+    w_high_val = w_high
+    w_low_val = w_low
+    
+    # Breakout levels: weekly high/low +/- 0.5*ATR
+    breakout_high = w_high_val + 0.5 * atr_14
+    breakout_low = w_low_val - 0.5 * atr_14
+    
+    # Weekly EMA50 for trend filter
+    w_close_series = pd.Series(w_close)
+    ema_50 = w_close_series.ewm(span=50, adjust=False).mean().values
+    
+    # Align to 4h timeframe
+    breakout_high_aligned = align_htf_to_ltf(prices, df_1w, breakout_high)
+    breakout_low_aligned = align_htf_to_ltf(prices, df_1w, breakout_low)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 50 EMA for trend filter
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after EMA and volume average warmup
+    for i in range(20, n):  # Start after volume average warmup
         # Skip if weekly data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+        if np.isnan(breakout_high_aligned[i]) or np.isnan(breakout_low_aligned[i]) or np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume[i] > 2.0 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below S4
-            if close[i] <= s4_aligned[i]:
+            # Exit when price touches or goes below breakout_low
+            if close[i] <= breakout_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above R4
-            if close[i] >= r4_aligned[i]:
+            # Exit when price touches or goes above breakout_high
+            if close[i] >= breakout_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 with volume confirmation AND price > 50 EMA (uptrend)
-            long_entry = (close[i] > r4_aligned[i]) and vol_confirm and (close[i] > ema_50[i])
-            # Short entry: price breaks below S4 with volume confirmation AND price < 50 EMA (downtrend)
-            short_entry = (close[i] < s4_aligned[i]) and vol_confirm and (close[i] < ema_50[i])
+            # Long entry: price breaks above breakout_high with volume confirmation AND price > weekly EMA50 (uptrend)
+            long_entry = (close[i] > breakout_high_aligned[i]) and vol_confirm and (close[i] > ema_50_aligned[i])
+            # Short entry: price breaks below breakout_low with volume confirmation AND price < weekly EMA50 (downtrend)
+            short_entry = (close[i] < breakout_low_aligned[i]) and vol_confirm and (close[i] < ema_50_aligned[i])
             
             if long_entry:
                 position = 1
