@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_volatility_breakout_1w_trend_v1
-Hypothesis: On 1d timeframe, trade volatility breakouts aligned with weekly trend. 
-Go long when price breaks above 20-day high with expanding volume in a low volatility regime (volatility < 50th percentile) and weekly trend is up (price > weekly EMA20). 
-Go short when price breaks below 20-day low with expanding volume in low volatility regime and weekly trend is down (price < weekly EMA20). 
-Use 1d ATR percentile to filter for low volatility environments where breakouts are more likely to succeed. 
-Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag and improve generalization.
+6h_camarilla_pivot_1d_ema_volume_v2
+Hypothesis: On 6h timeframe, use daily Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) combined with 12h EMA trend filter and volume confirmation. Fade extreme levels (R3/S3) in range markets, breakout at stronger levels (R4/S4) with trend alignment. Uses 12h EMA for trend and daily volume for confirmation. Designed for 12-37 trades/year (50-150 total over 4 years) to avoid fee drain while capturing mean reversion and breakout moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_volatility_breakout_1w_trend_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_ema_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,78 +23,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-day high and low for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h EMA for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Calculate 1d ATR for volatility regime filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # ATR percentile rank (252-day lookback for ~1 year)
-    atr_percentile = pd.Series(atr).rolling(window=252, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    # Calculate daily Camarilla pivot levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r4 = close_1d + range_1d * 1.500
+    r3 = close_1d + range_1d * 1.250
+    s3 = close_1d - range_1d * 1.250
+    s4 = close_1d - range_1d * 1.500
+    
+    # Align levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(atr_percentile[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Low volatility regime: ATR percentile below 50th percentile
-        low_vol = atr_percentile[i] < 0.5
+        # Trend filter: 12h EMA direction
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
         # Volume confirmation: above average volume
         vol_ok = volume[i] > vol_ma[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > high_20[i-1]  # Break above previous 20-day high
-        breakout_down = close[i] < low_20[i-1]  # Break below previous 20-day low
-        
         if position == 1:  # Long position
-            # Exit: price crosses back below 20-day low or volatility increases significantly
-            if close[i] < low_20[i] or atr_percentile[i] > 0.8:
+            # Exit: price crosses below S3 or strong breakout above R4 fails
+            if close[i] < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above 20-day high or volatility increases significantly
-            if close[i] > high_20[i] or atr_percentile[i] > 0.8:
+            # Exit: price crosses above R3 or strong breakdown below S4 fails
+            if close[i] > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if low_vol and vol_ok:
-                # Breakout above 20-day high with volume - go long (only if weekly trend up)
-                if breakout_up and close[i] > ema_1w_aligned[i]:
+            if vol_ok:
+                # Fade at extreme levels (R3/S3) - mean reversion
+                if close[i] >= r3_aligned[i] and close[i] < r4_aligned[i]:
+                    # Sell at R3, expecting reversion to pivot
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] <= s3_aligned[i] and close[i] > s4_aligned[i]:
+                    # Buy at S3, expecting reversion to pivot
                     position = 1
                     signals[i] = 0.25
-                # Breakout below 20-day low with volume - go short (only if weekly trend down)
-                elif breakout_down and close[i] < ema_1w_aligned[i]:
+                # Breakout at stronger levels (R4/S4) with trend alignment
+                elif close[i] > r4_aligned[i] and uptrend:
+                    # Breakout above R4 in uptrend
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < s4_aligned[i] and downtrend:
+                    # Breakdown below S4 in downtrend
                     position = -1
                     signals[i] = -0.25
     
