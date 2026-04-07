@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla pivot levels from 1d with volume confirmation and 12h trend filter
-# Camarilla levels: Pivot = (H+L+C)/3; R1 = C + (H-L)*1.1/12; S1 = C - (H-L)*1.1/12
-# In bull markets: buy at S1/S2 with upward 12h trend; sell at R3/R4
-# In bear markets: sell at R1/R2 with downward 12h trend; buy at S3/S4
-# Target: 15-30 trades/year, low frequency to minimize fee drag
-name = "6h_camarilla_pivot_1d_volume_12h_trend_v1"
-timeframe = "6h"
+# Strategy: 4h Donchian breakout with 1d volume confirmation and ATR volatility filter
+# Works in bull markets via breakouts, in bear via volatility-filtered mean reversion at bands
+# Target: 20-40 trades/year, low frequency to minimize fee drag
+name = "4h_donchian20_1d_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,94 +21,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    # Pivot = (H+L+C)/3
-    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    # Range = H - L
-    range_hl = df_1d['high'] - df_1d['low']
-    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
-    r1 = df_1d['close'] + range_hl * 1.1 / 12.0
-    r2 = df_1d['close'] + range_hl * 1.1 / 6.0
-    r3 = df_1d['close'] + range_hl * 1.1 / 4.0
-    r4 = df_1d['close'] + range_hl * 1.1 / 2.0
-    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    s1 = df_1d['close'] - range_hl * 1.1 / 12.0
-    s2 = df_1d['close'] - range_hl * 1.1 / 6.0
-    s3 = df_1d['close'] - range_hl * 1.1 / 4.0
-    s4 = df_1d['close'] - range_hl * 1.1 / 2.0
-    
-    # Align Camarilla levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA(20) for trend direction
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Get daily volume for confirmation
+    # Calculate daily 20-period volume moving average
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate ATR(14) for volatility filter and stop sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate Donchian channels (20-period high/low)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > daily average volume
+        # Volume confirmation: current 4h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
-        # Trend filter: 12h EMA direction
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
+        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
         
         if position == 1:  # Long position
-            # Exit: price reaches R3 (strong resistance) OR trend turns down
-            if close[i] >= r3_aligned[i] or not uptrend:
+            # Exit: price touches opposite band OR volatility drops
+            if close[i] <= lowest_low[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price reaches S3 (strong support) OR trend turns up
-            if close[i] <= s3_aligned[i] or not downtrend:
+            # Exit: price touches opposite band OR volatility drops
+            if close[i] >= highest_high[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price at S1/S2 support + volume confirmation + uptrend
-            if ((close[i] <= s1_aligned[i] * 1.001 and close[i] >= s1_aligned[i] * 0.999) or
-                (close[i] <= s2_aligned[i] * 1.001 and close[i] >= s2_aligned[i] * 0.999)) and \
-               vol_confirm and uptrend:
+            # Enter long: price breaks above upper band + volume confirmation + volatility filter
+            if close[i] > highest_high[i] and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price at R1/R2 resistance + volume confirmation + downtrend
-            elif ((close[i] >= r1_aligned[i] * 0.999 and close[i] <= r1_aligned[i] * 1.001) or
-                  (close[i] >= r2_aligned[i] * 0.999 and close[i] <= r2_aligned[i] * 1.001)) and \
-                 vol_confirm and downtrend:
+            # Enter short: price breaks below lower band + volume confirmation + volatility filter
+            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
