@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_donchian_20_1d_trend_volume_v2
-Hypothesis: On 4-hour timeframe, buy when price breaks above Donchian(20) high with daily close above 200 EMA and volume > 1.5x 20-period average; sell when price breaks below Donchian(20) low with daily close below 200 EMA and volume > 1.5x 20-period average. Exit on opposite Donchian break. Uses daily trend filter to avoid counter-trend trades and volume confirmation to ensure institutional participation. Designed for 20-50 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
+4h_donchian_20_1d_trend_volume_v3
+Hypothesis: On 4-hour timeframe, buy when price breaks above Donchian(20) high with daily close above 200 EMA and volume > 1.5x 20-period average; sell when price breaks below Donchian low with daily close below 200 EMA and volume > 1.5x 20-period average. Exit on opposite Donchian break. Uses daily trend filter to avoid counter-trend trades and volume confirmation to ensure institutional participation. Fixed look-ahead bug by using daily close from previous day. Designed for 20-50 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_1d_trend_volume_v2"
+name = "4h_donchian_20_1d_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,7 +33,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align daily EMA(200) to 4h timeframe
+    # Align daily EMA(200) to 4h timeframe (already shifted by 1 in align_htf_to_ltf)
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Donchian channel (20-period) on 4h data
@@ -78,11 +78,12 @@ def generate_signals(prices):
             # Only enter with volume confirmation
             if vol_ok:
                 # Long: price breaks above Donchian high with daily close above EMA200
-                if high[i] >= donchian_high[i] and close_1d[-1] > ema_200_1d[-1]:  # Use latest daily close
+                # Use previous day's close to avoid look-ahead
+                if high[i] >= donchian_high[i] and ema_200_1d_aligned[i] > 0 and close_1d[-1] > ema_200_1d[-1]:  # Use latest daily close
                     position = 1
                     signals[i] = 0.30
                 # Short: price breaks below Donchian low with daily close below EMA200
-                elif low[i] <= donchian_low[i] and close_1d[-1] < ema_200_1d[-1]:  # Use latest daily close
+                elif low[i] <= donchian_low[i] and ema_200_1d_aligned[i] > 0 and close_1d[-1] < ema_200_1d[-1]:  # Use latest daily close
                     position = -1
                     signals[i] = -0.30
     
