@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_donchian_20_1d_trend_volume_v2
+4h_donchian_20_1d_trend_volume_v3
 Hypothesis: On 4-hour timeframe, use Donchian channel breakouts with 1-day trend filter and volume confirmation.
 Long when price breaks above 20-period Donchian high with daily EMA(50) trending up and volume > 1.5x 20-period average.
 Short when price breaks below 20-period Donchian low with daily EMA(50) trending down and volume > 1.5x 20-period average.
 Exit when price returns to the Donchian midpoint.
-Adjusted entry conditions to increase trade frequency: removed strict daily trend requirement for entry,
-keeping it only for trend filter. Added momentum filter to reduce whipsaws.
-Target: 50-150 trades over 4 years to balance opportunity with fee control.
+This version fixes the data availability check to prevent zero trades.
+Designed for 20-40 trades/year to minimize fee drag while capturing strong trends with institutional validation.
+Works in both bull/bear markets as Donchian channels adapt to volatility and daily trend filter avoids counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_1d_trend_volume_v2"
+name = "4h_donchian_20_1d_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -58,22 +58,15 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Momentum filter: RSI(14) to avoid overextended entries
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when not enough data
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(20, 50), n):
-        # Skip if data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(rsi[i])):
+    # Start loop after max of donchian_period and ema period
+    start_idx = max(donchian_period, 50)
+    
+    for i in range(start_idx, n):
+        # Check data availability
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
             
@@ -96,16 +89,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume confirmation
+            # Only enter with volume confirmation and daily trend alignment
             if vol_ok:
-                # Long: price breaks above Donchian high with bullish momentum (RSI > 50)
+                # Long: price breaks above Donchian high with daily uptrend
                 if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1] and 
-                    rsi[i] > 50):
+                    daily_trend_up[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below Donchian low with bearish momentum (RSI < 50)
+                # Short: price breaks below Donchian low with daily downtrend
                 elif (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1] and 
-                      rsi[i] < 50):
+                      daily_trend_down[i]):
                     position = -1
                     signals[i] = -0.25
     
