@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 12h Trend and Volume
-Long when price breaks above Donchian(20) high with 12h uptrend and volume confirmation
-Short when price breaks below Donchian(20) low with 12h downtrend and volume confirmation
-Exit when price crosses back through Donchian midline or trend reverses
-Trend following with volatility breakout and volume filter to reduce whipsaws
+1h Range Breakout with 4h Trend Filter and Volume Confirmation
+Long when price breaks above 1h range with 4h uptrend and high volume
+Short when price breaks below 1h range with 4h downtrend and high volume
+Exit when price returns to middle of 1h range
+Designed for low-frequency, high-conviction trades to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_range_breakout_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -26,82 +26,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_channel = (highest_high + lowest_low) / 2
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour  # Pre-computed from DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # === 12h Trend (HMA 21) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # === 4h Trend Filter: EMA(50) direction ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate HMA on 12h data
-    close_12h = df_12h['close'].values
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights/weights.sum(), mode='valid')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    def hma(arr, period):
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, period)
-        # Align arrays
-        wma_half_pad = np.full(len(arr), np.nan)
-        wma_full_pad = np.full(len(arr), np.nan)
-        wma_half_pad[half-1:half-1+len(wma_half)] = wma_half
-        wma_full_pad[period-1:period-1+len(wma_full)] = wma_full
-        diff = 2 * wma_half_pad - wma_full_pad
-        return wma(diff, sqrt)
+    # Determine 4h trend: slope of EMA
+    ema_slope = np.zeros_like(ema_4h_aligned)
+    ema_slope[1:] = ema_4h_aligned[1:] - ema_4h_aligned[:-1]
+    trend_up = ema_slope > 0
+    trend_down = ema_slope < 0
     
-    hma_12h = hma(close_12h, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # === 1h Range: 20-period high/low ===
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    range_mid = (high_20 + low_20) / 2
     
-    # === Volume confirmation ===
+    # === Volume filter: 20-period average ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
+    vol_threshold = 1.5  # 50% above average
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]):
+    for i in range(50, n):
+        # Skip if not in session
+        if not in_session[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            continue
+        
+        # Skip if any data is NaN
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below midline OR 12h trend turns down
-            if close[i] < mid_channel[i] or hma_12h_aligned[i] < close_12h[0]:  # simplified trend check
+            # Exit: price returns to range midpoint
+            if close[i] <= range_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above midline OR 12h trend turns up
-            if close[i] > mid_channel[i] or hma_12h_aligned[i] > close_12h[0]:
+            # Exit: price returns to range midpoint
+            if close[i] >= range_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Need volume confirmation (above average)
-            if vol_ratio[i] < 1.5:
+            # Need high volume
+            if vol_ratio[i] < vol_threshold:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with 12h trend alignment
-            if close[i] > highest_high[i] and hma_12h_aligned[i] > close_12h[0]:
-                # Break above upper band with uptrend -> long
+            # Long: break above range high with 4h uptrend
+            if high[i] > high_20[i] and trend_up[i]:
                 position = 1
-                signals[i] = 0.25
-            elif close[i] < lowest_low[i] and hma_12h_aligned[i] < close_12h[0]:
-                # Break below lower band with downtrend -> short
+                signals[i] = 0.20
+            # Short: break below range low with 4h downtrend
+            elif low[i] < low_20[i] and trend_down[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
