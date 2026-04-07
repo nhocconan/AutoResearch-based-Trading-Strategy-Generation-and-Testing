@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Daily Camarilla Pivot Reversal with Volume Filter
-# Hypothesis: Camarilla pivot levels (R3/S3) act as strong intraday support/resistance.
-# Price rejecting these levels with volume exhaustion signals potential reversals.
-# Works in bull/bear markets: sells at R3 in rallies, buys at S3 in declines.
-# Target: 20-40 trades/year (80-160 over 4 years).
+# Strategy: 12h Daily Pivot Breakout with Volume Confirmation
+# Hypothesis: Daily pivot levels act as strong support/resistance.
+# Breaking above R1 or below S1 with volume confirmation indicates momentum.
+# Works in both bull and bear markets: breaks above R1 in bull, breaks below S1 in bear.
+# Target: 15-30 trades/year (60-120 over 4 years).
 
-name = "6h_daily_camarilla_pivot_reversal_volume_v1"
-timeframe = "6h"
+name = "12h_daily_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,65 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for pivot calculation
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # P = (H+L+C)/3, Range = H-L
-    # R3 = P + 1.1 * Range, S3 = P - 1.1 * Range
+    # Calculate daily pivots: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
     daily_high = df_daily['high'].values
     daily_low = df_daily['low'].values
     daily_close = df_daily['close'].values
     
     daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
-    daily_r3 = daily_pivot + 1.1 * daily_range
-    daily_s3 = daily_pivot - 1.1 * daily_range
+    daily_r1 = 2 * daily_pivot - daily_low
+    daily_s1 = 2 * daily_pivot - daily_high
     
-    # Align daily Camarilla levels to 6h timeframe
+    # Align daily pivots to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_daily, daily_pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, daily_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, daily_s3)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, daily_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, daily_s1)
     
-    # Volume filter: volume < 0.7x 20-period average (low volume on rejection)
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume < (0.7 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches pivot or volume increases (breakout)
-            if close[i] >= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price falls below daily pivot or volume drops
+            if close[i] < pivot_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price reaches pivot or volume increases (breakdown)
-            if close[i] <= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price rises above daily pivot or volume drops
+            if close[i] > pivot_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Short: price rejects R3 with low volume (bearish rejection)
-            if close[i] < r3_aligned[i] and close[i-1] >= r3_aligned[i-1] and vol_filter[i]:
-                position = -1
-                signals[i] = -0.25
-            # Long: price rejects S3 with low volume (bullish rejection)
-            elif close[i] > s3_aligned[i] and close[i-1] <= s3_aligned[i-1] and vol_filter[i]:
+            # Long: price breaks above R1 with volume confirmation
+            if close[i] > r1_aligned[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
+            # Short: price breaks below S1 with volume confirmation
+            elif close[i] < s1_aligned[i] and vol_filter[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
