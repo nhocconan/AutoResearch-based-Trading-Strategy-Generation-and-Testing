@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v4
+12h_camarilla_pivot_1d_volume_v1
 Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
 Long when price breaks above R4 with volume confirmation and price above daily EMA (bullish continuation).
 Short when price breaks below S4 with volume confirmation and price below daily EMA (bearish continuation).
 Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
 Uses stricter volume confirmation, longer cooldown, and daily EMA filter to reduce trade frequency.
 Works in both bull/bear markets by adapting to volatility and volume.
+Timeframe: 12h (primary), HTF: 1d.
+Target: 50-150 trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v4"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -61,19 +63,19 @@ def generate_signals(prices):
     close_series = pd.Series(close_1d)
     ema_1d = close_series.ewm(span=20, min_periods=20).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: volume > 50-period average (stricter)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 30-period average (stricter)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     # Cooldown counter to prevent overtrading
     cooldown = 0
-    cooldown_period = 12  # 12 bars = 48 hours minimum between trades
+    cooldown_period = 4  # 4 bars = 48 hours minimum between trades
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
