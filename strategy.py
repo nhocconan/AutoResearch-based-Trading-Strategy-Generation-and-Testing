@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_ema_rsi_trend_volume_v1
-Hypothesis: On 6-hour timeframe, enter trades only when EMA(50) trend, RSI(2) extreme, and volume spike align.
-Long when EMA(50) rising, RSI(2) < 10 (oversold), and volume > 2x 20-period average.
-Short when EMA(50) falling, RSI(2) > 90 (overbought), and volume > 2x 20-period average.
-Exit when RSI(2) crosses back to neutral (40-60 range).
-Uses contrarian momentum within trend context to capture mean-reversion bounces in both bull and bear markets.
-Low frequency design targets 15-25 trades/year to minimize fee impact.
+4h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 4-hour timeframe, use daily Camarilla pivot levels with volume confirmation.
+Long when price breaks above R4 level with volume > 1.5x 20-period average.
+Short when price breaks below S4 level with volume > 1.5x 20-period average.
+Exit when price returns to the Pivot Point (PP) level.
+Designed for 20-50 trades/year to minimize fee drag while capturing institutional breakout moves.
+Works in both bull and bear markets as Camarilla levels adapt to volatility and volume filter ensures institutional participation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema_rsi_trend_volume_v1"
-timeframe = "6h"
+name = "4h_camarilla_pivot_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,48 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA(50) for trend filter
-    ema_period = 50
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # RSI(2) for entry signals
-    rsi_period = 2
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate pivot point and ranges
+    pp = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels
+    r4 = pp + range_val * 1.1 / 2
+    r3 = pp + range_val * 1.1 / 4
+    r2 = pp + range_val * 1.1 / 6
+    r1 = pp + range_val * 1.1 / 12
+    s1 = pp - range_val * 1.1 / 12
+    s2 = pp - range_val * 1.1 / 6
+    s3 = pp - range_val * 1.1 / 4
+    s4 = pp - range_val * 1.1 / 2
+    
+    # Align to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume filter: 20-period average
     vol_series = pd.Series(volume)
@@ -50,26 +73,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(20, 50), n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(ema[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
         # Volume confirmation
-        vol_ok = volume[i] > 2.0 * vol_ma[i]
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 40 (exiting oversold)
-            if rsi[i] >= 40:
+            # Exit: price returns to pivot point
+            if close[i] <= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 60 (exiting overbought)
-            if rsi[i] <= 60:
+            # Exit: price returns to pivot point
+            if close[i] >= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -77,16 +101,12 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Only enter with volume confirmation
             if vol_ok:
-                # EMA trend direction
-                ema_rising = ema[i] > ema[i-1]
-                ema_falling = ema[i] < ema[i-1]
-                
-                # Long: EMA up + RSI extremely oversold
-                if ema_rising and rsi[i] < 10:
+                # Long: price breaks above R4
+                if close[i] > r4_aligned[i] and close[i-1] <= r4_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short: EMA down + RSI extremely overbought
-                elif ema_falling and rsi[i] > 90:
+                # Short: price breaks below S4
+                elif close[i] < s4_aligned[i] and close[i-1] >= s4_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
