@@ -1,108 +1,123 @@
 #!/usr/bin/env python3
 """
-4h_atr_breakout_1w_trend_volume_v1
-Hypothesis: On 4-hour timeframe, use weekly ATR breakout with weekly trend filter and volume confirmation to capture strong moves in both bull and bear markets. 
-Enter long when price breaks above weekly high + 0.5*weekly ATR with volume > 1.5x average and price > weekly EMA50, short when price breaks below weekly low - 0.5*weekly ATR with volume > 1.5x average and price < weekly EMA50. 
-Exit when price touches opposite weekly ATR level (weekly low - 0.5*ATR for long, weekly high + 0.5*ATR for short). 
-Designed for low frequency (20-50 trades/year) to minimize fee drift.
+6h_ichimoku_1d_filter_v1
+Hypothesis: On 6-hour timeframe, use Ichimoku Cloud components with daily timeframe filter. 
+Enter long when Tenkan-sen crosses above Kijun-sen AND price is above Kumo (cloud) from daily timeframe, 
+short when Tenkan-sen crosses below Kijun-sen AND price is below Kumo from daily timeframe.
+Exit when Tenkan-sen crosses back in opposite direction. 
+Uses Ichimoku's built-in trend/filter properties to reduce whipsaws in both bull and bear markets.
+Target: 50-150 trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_atr_breakout_1w_trend_volume_v1"
-timeframe = "4h"
+name = "6h_ichimoku_1d_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for ATR, high/low, and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Ichimoku filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate weekly ATR (14-period)
-    w_high = df_1w['high'].values
-    w_low = df_1w['low'].values
-    w_close = df_1w['close'].values
+    # Calculate daily Ichimoku components
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
     
-    # True Range
-    tr1 = w_high - w_low
-    tr2 = np.abs(w_high - np.roll(w_close, 1))
-    tr3 = np.abs(w_low - np.roll(w_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(d_high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(d_low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # ATR
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(d_high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(d_low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Weekly high and low
-    w_high_val = w_high
-    w_low_val = w_low
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Breakout levels: weekly high/low +/- 0.5*ATR
-    breakout_high = w_high_val + 0.5 * atr_14
-    breakout_low = w_low_val - 0.5 * atr_14
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(d_high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(d_low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # Weekly EMA50 for trend filter
-    w_close_series = pd.Series(w_close)
-    ema_50 = w_close_series.ewm(span=50, adjust=False).mean().values
+    # Kumo (Cloud) boundaries: Senkou Span A and B shifted 26 periods ahead
+    # For filtering, we need current cloud (already shifted in Ichimoku definition)
+    # So we use Senkou Span A and B as is for current cloud
+    kumoinfo_top = np.maximum(senkou_a, senkou_b)  # Upper cloud boundary
+    kumoinfo_bottom = np.minimum(senkou_a, senkou_b)  # Lower cloud boundary
     
-    # Align to 4h timeframe
-    breakout_high_aligned = align_htf_to_ltf(prices, df_1w, breakout_high)
-    breakout_low_aligned = align_htf_to_ltf(prices, df_1w, breakout_low)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    kumoinfo_top_aligned = align_htf_to_ltf(prices, df_1d, kumoinfo_top)
+    kumoinfo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumoinfo_bottom)
     
-    # Calculate 20-period average volume for confirmation
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h Ichimoku for entry signals (Tenkan/Kijun cross)
+    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_6h = (period9_high_6h + period9_low_6h) / 2
+    
+    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_6h = (period26_high_6h + period26_low_6h) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume average warmup
-        # Skip if weekly data not available
-        if np.isnan(breakout_high_aligned[i]) or np.isnan(breakout_low_aligned[i]) or np.isnan(ema_50_aligned[i]):
+    for i in range(52, n):  # Start after Ichimoku warmup
+        # Skip if daily data not available
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(kumoinfo_top_aligned[i]) or np.isnan(kumoinfo_bottom_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Skip if 6h Ichimoku not ready
+        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]):
+            signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below breakout_low
-            if close[i] <= breakout_low_aligned[i]:
+            # Exit when Tenkan crosses below Kijun
+            if tenkan_6h[i] < kijun_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above breakout_high
-            if close[i] >= breakout_high_aligned[i]:
+            # Exit when Tenkan crosses above Kijun
+            if tenkan_6h[i] > kijun_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above breakout_high with volume confirmation AND price > weekly EMA50 (uptrend)
-            long_entry = (close[i] > breakout_high_aligned[i]) and vol_confirm and (close[i] > ema_50_aligned[i])
-            # Short entry: price breaks below breakout_low with volume confirmation AND price < weekly EMA50 (downtrend)
-            short_entry = (close[i] < breakout_low_aligned[i]) and vol_confirm and (close[i] < ema_50_aligned[i])
+            # Long entry: Tenkan crosses above Kijun AND price above daily cloud
+            tenkan_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+            price_above_cloud = close[i] > kumoinfo_top_aligned[i]
             
-            if long_entry:
+            # Short entry: Tenkan crosses below Kijun AND price below daily cloud
+            tenkan_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
+            price_below_cloud = close[i] < kumoinfo_bottom_aligned[i]
+            
+            if tenkan_cross_up and price_above_cloud:
                 position = 1
                 signals[i] = 0.25
-            elif short_entry:
+            elif tenkan_cross_down and price_below_cloud:
                 position = -1
                 signals[i] = -0.25
     
