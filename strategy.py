@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian channel breakout with daily volume confirmation and volatility filter
-# Hypothesis: Breakouts capture momentum; volume confirms institutional participation; volatility filter avoids choppy markets.
-# Works in bull via upward breakouts, in bear via downward breakdowns. Volatility filter adapts to market regime.
-# Target: 20-40 trades/year to minimize fee drag.
-name = "4h_donchian20_vol_volfilt_v1"
-timeframe = "4h"
+# Strategy: 6h Camarilla pivot from daily + volume confirmation
+# Hypothesis: Camarilla levels (R3/S3, R4/S4) act as strong support/resistance. 
+# Fade at R3/S3 with rejection, breakout continuation at R4/S4. Volume confirms institutional interest.
+# Works in both bull/bear: mean reversion in ranges, trend following in breakouts.
+# Target: 15-35 trades/year to minimize fee drag.
+name = "6h_camarilla_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -22,69 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume confirmation and volatility filter
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Camarilla levels from previous day
+    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # S4 = C - (H-L)*1.1/2, S3 = C - (H-L)*1.1/4
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate daily volatility (ATR-based) for filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    # Avoid division by zero in range
+    prev_range = prev_high - prev_low
+    prev_range = np.where(prev_range == 0, 1e-10, prev_range)
     
-    # Calculate 4-hour Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate levels
+    r4 = prev_close + prev_range * 1.1 / 2
+    r3 = prev_close + prev_range * 1.1 / 4
+    s3 = prev_close - prev_range * 1.1 / 4
+    s4 = prev_close - prev_range * 1.1 / 2
+    
+    # Align to 6h timeframe (shifted by 1 day for lookback)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 20-period volume moving average for confirmation
+    vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr_1d[i] > atr_ma_1d_aligned[i] if not np.isnan(atr_ma_1d_aligned[i]) else False
-        
-        # Volume confirmation: current 4h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        # Volume confirmation: current volume > 20-period average
+        vol_confirm = volume[i] > vol_20[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band
-            if close[i] < lowest_low[i]:
+            # Exit: price closes below S3 (support broken) OR above R4 (take profit at extreme)
+            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band
-            if close[i] > highest_high[i]:
+            # Exit: price closes above R3 (resistance broken) OR below S4 (take profit at extreme)
+            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above Donchian upper band + vol confirmation + vol filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Fade at R3/S3: short at R3 with rejection, long at S3 with rejection
+            # Breakout continuation: long above R4, short below S4
+            
+            # Enter long: price closes above S3 with volume (fade) OR above R4 with volume (breakout)
+            if ((close[i] > s3_aligned[i] and close[i] <= r3_aligned[i] and vol_confirm) or  # Fade at S3
+                (close[i] > r4_aligned[i] and vol_confirm)):  # Breakout above R4
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian lower band + vol confirmation + vol filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+            # Enter short: price closes below R3 with volume (fade) OR below S4 with volume (breakout)
+            elif ((close[i] < r3_aligned[i] and close[i] >= s3_aligned[i] and vol_confirm) or  # Fade at R3
+                  (close[i] < s4_aligned[i] and vol_confirm)):  # Breakdown below S4
                 position = -1
                 signals[i] = -0.25
     
