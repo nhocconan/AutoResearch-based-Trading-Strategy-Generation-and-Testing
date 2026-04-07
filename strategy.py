@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1d_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_pivot_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,12 +18,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for pivot points (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard)
+    # Calculate daily pivot points
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -33,17 +33,13 @@ def generate_signals(prices):
     s1 = 2 * pivot - high_1d
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Calculate Donchian channels (20-period)
     high_series = pd.Series(high)
@@ -61,26 +57,23 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
+        # Donchian breakout conditions (previous bar)
         breakout_up = close[i] > donchian_high[i-1]
         breakout_down = close[i] < donchian_low[i-1]
         
         # Volume confirmation
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Pivot levels for entry/exit
+        # Pivot levels
         pivot_level = pivot_aligned[i]
         r1_level = r1_aligned[i]
         s1_level = s1_aligned[i]
         r2_level = r2_aligned[i]
         s2_level = s2_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
         
         # Exit conditions: opposite Donchian break
         exit_long = close[i] < donchian_low[i-1]
