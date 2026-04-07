@@ -53,7 +53,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1w - np.roll(close_1w, 1))
     tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = tr1[0]
-    tr3[0] = t1[0]
+    tr3[0] = tr1[0]
     tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
