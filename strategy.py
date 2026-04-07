@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v4
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from daily timeframe with volume confirmation. 
-Enter long when price breaks above R4 with volume > 1.5x average, short when price breaks below S4 with volume > 1.5x average. 
-Exit when price touches opposite pivot level (S4 for long, R4 for short). 
-Reduced frequency: increased volume threshold to 2.0x average and added ATR volatility filter to reduce trades.
+4h_donchian_20_1d_trend_volume_v2
+Hypothesis: On 4-hour timeframe, use Donchian channel breakouts with daily trend filter and volume confirmation. 
+Enter long when price breaks above 20-period high with daily close above 50 EMA and volume > 1.5x average. 
+Enter short when price breaks below 20-period low with daily close below 50 EMA and volume > 1.5x average. 
+Exit when price touches opposite Donchian band or trend reverses. Designed for 20-50 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v4"
-timeframe = "12h"
+name = "4h_donchian_20_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,79 +26,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate daily 50 EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    pivot = (d_high + d_low + d_close) / 3
-    range_val = d_high - d_low
+    # Calculate 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
-    r4 = d_close + range_val * 1.1 / 2
-    s4 = d_close - range_val * 1.1 / 2
-    
-    # Align to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate 20-period average volume for confirmation (lower period for 12h)
+    # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume average warmup
+    for i in range(20, n):
         # Skip if daily data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (more strict)
-        vol_confirm = volume[i] > 2.0 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
-        
-        # Volatility filter: only trade when ATR > 50-period average (avoid low volatility chop)
-        atr_avg = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > atr_avg[i] if not np.isnan(atr_avg[i]) else False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below S4
-            if close[i] <= s4_aligned[i]:
+            # Exit when price touches or goes below Donchian low OR trend turns bearish
+            if close[i] <= donchian_low[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above R4
-            if close[i] >= r4_aligned[i]:
+            # Exit when price touches or goes above Donchian high OR trend turns bullish
+            if close[i] >= donchian_high[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 with volume confirmation and volatility filter
-            long_entry = (close[i] > r4_aligned[i]) and vol_confirm and vol_filter
-            # Short entry: price breaks below S4 with volume confirmation and volatility filter
-            short_entry = (close[i] < s4_aligned[i]) and vol_confirm and vol_filter
+            # Long entry: price breaks above Donchian high with daily bullish trend and volume confirmation
+            long_entry = (close[i] > donchian_high[i]) and (close[i] > ema_50_aligned[i]) and vol_confirm
+            # Short entry: price breaks below Donchian low with daily bearish trend and volume confirmation
+            short_entry = (close[i] < donchian_low[i]) and (close[i] < ema_50_aligned[i]) and vol_confirm
             
             if long_entry:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
