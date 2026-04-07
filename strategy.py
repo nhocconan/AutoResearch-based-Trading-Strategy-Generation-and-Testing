@@ -1,37 +1,52 @@
 #!/usr/bin/env python3
 """
-1d_rsi_pullback_1w_trend_volume_v1
-Hypothesis: On daily timeframe, use weekly RSI to identify pullbacks in the prevailing weekly trend. Enter long when daily RSI < 30 and weekly RSI > 50 in uptrend, short when daily RSI > 70 and weekly RSI < 50 in downtrend. Volume confirmation filters low-volatility noise. Designed for 15-25 trades/year to minimize fee drag while capturing trend resumption after pullbacks in both bull and bear markets.
+6h_supertrend_volume_12h1d_v1
+Hypothesis: Use Supertrend(10,3) on 12h for trend direction, Supertrend(10,3) on 1d for regime filter, and volume confirmation on 6h. Enter long when both timeframes are bullish and volume confirms; short when both are bearish and volume confirms. Exit when either timeframe turns opposite or volume drops. Designed for 6-12 trades per month (72-144/year) to minimize fee drift while capturing sustained trends. Works in bull (rides uptrends) and bear (rides downtrends) by requiring alignment across timeframes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_rsi_pullback_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_supertrend_volume_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+def supertrend(high, low, close, period=10, multiplier=3):
+    """Calculate Supertrend indicator."""
+    if len(high) < period:
+        return np.full(len(close), np.nan), np.full(len(close), np.nan)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
+    # Calculate ATR
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
     
-    if len(close) >= period:
-        avg_gain[period-1] = np.mean(gain[:period-1])
-        avg_loss[period-1] = np.mean(loss[:period-1])
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    # Calculate upper and lower bands
+    hl2 = (high + low) / 2
+    upper = hl2 + (multiplier * atr)
+    lower = hl2 - (multiplier * atr)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:period-1] = np.nan
-    return rsi
+    # Initialize Supertrend
+    supertrend = np.full(len(close), np.nan)
+    direction = np.full(len(close), np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    # Set first value
+    supertrend[0] = upper[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close)):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = max(lower[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            supertrend[i] = min(upper[i], supertrend[i-1])
+            direction[i] = -1
+    
+    return supertrend, direction
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,48 +54,52 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and RSI
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h and 1d data for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    w_close = df_1w['close'].values
+    # Calculate Supertrend on 12h
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
+    st_12h, dir_12h = supertrend(h_12h, l_12h, c_12h, 10, 3)
+    st_12h_aligned = align_htf_to_ltf(prices, df_12h, st_12h)
+    dir_12h_aligned = align_htf_to_ltf(prices, df_12h, dir_12h)
     
-    # Calculate weekly RSI for trend filter
-    w_rsi = calculate_rsi(w_close, 14)
+    # Calculate Supertrend on 1d
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
+    st_1d, dir_1d = supertrend(h_1d, l_1d, c_1d, 10, 3)
+    st_1d_aligned = align_htf_to_ltf(prices, df_1d, st_1d)
+    dir_1d_aligned = align_htf_to_ltf(prices, df_1d, dir_1d)
     
-    # Calculate daily RSI for entry signals
-    d_rsi = calculate_rsi(close, 14)
-    
-    # Volume filter: daily volume > 1.3x 20-day average
+    # Volume filter: 6h volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = vol_series / vol_ma
-    vol_ratio = vol_ratio.fillna(0).values
-    
-    # Align weekly RSI to daily timeframe
-    w_rsi_aligned = align_htf_to_ltf(prices, df_1w, w_rsi)
+    vol_ratio = vol_ratio.fillna(1.0).values  # Fill NaN with 1.0 (no volume filter)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if weekly RSI not available
-        if np.isnan(w_rsi_aligned[i]):
+    for i in range(20, n):  # Start after warmup
+        # Check if Supertrend values are available
+        if np.isnan(dir_12h_aligned[i]) or np.isnan(dir_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Skip if daily RSI not available
-        if np.isnan(d_rsi[i]):
-            signals[i] = 0.0
-            continue
-        
-        # Determine weekly trend based on RSI
-        weekly_uptrend = w_rsi_aligned[i] > 50
-        weekly_downtrend = w_rsi_aligned[i] < 50
+        # Determine trend alignment
+        bullish_aligned = (dir_12h_aligned[i] == 1) and (dir_1d_aligned[i] == 1)
+        bearish_aligned = (dir_12h_aligned[i] == -1) and (dir_1d_aligned[i] == -1)
         
         # Volume confirmation
         vol_confirmed = vol_ratio[i] > 1.3
@@ -88,14 +107,11 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when daily RSI reaches overbought (take profit)
-            if d_rsi[i] >= 70:
-                exit_long = True
-            # Exit when weekly trend turns down
-            elif not weekly_uptrend:
+            # Exit when either timeframe turns bearish
+            if not bullish_aligned:
                 exit_long = True
             # Exit when volume drops significantly
-            elif vol_ratio[i] < 0.7:
+            elif vol_ratio[i] < 0.8:
                 exit_long = True
             
             if exit_long:
@@ -107,14 +123,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when daily RSI reaches oversold (take profit)
-            if d_rsi[i] <= 30:
-                exit_short = True
-            # Exit when weekly trend turns up
-            elif not weekly_downtrend:
+            # Exit when either timeframe turns bullish
+            if not bearish_aligned:
                 exit_short = True
             # Exit when volume drops significantly
-            elif vol_ratio[i] < 0.7:
+            elif vol_ratio[i] < 0.8:
                 exit_short = True
             
             if exit_short:
@@ -123,16 +136,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: daily RSI oversold in weekly uptrend with volume
-            long_entry = (d_rsi[i] < 30) and weekly_uptrend and vol_confirmed
-            
-            # Short entry: daily RSI overbought in weekly downtrend with volume
-            short_entry = (d_rsi[i] > 70) and weekly_downtrend and vol_confirmed
-            
-            if long_entry:
+            # Long entry when both timeframes bullish and volume confirms
+            if bullish_aligned and vol_confirmed:
                 position = 1
                 signals[i] = 0.25
-            elif short_entry:
+            # Short entry when both timeframes bearish and volume confirms
+            elif bearish_aligned and vol_confirmed:
                 position = -1
                 signals[i] = -0.25
     
