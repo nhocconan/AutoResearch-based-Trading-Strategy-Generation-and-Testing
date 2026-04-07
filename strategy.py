@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_supertrend_1d_trend_volume_v1
-Hypothesis: Supertrend on 12h with direction from 1d EMA200 and volume confirmation.
-Long when Supertrend flips up, price above 1d EMA200, and volume > 1.5x average.
-Short when Supertrend flips down, price below 1d EMA200, and volume > 1.5x average.
-Supertrend avoids whipsaws, EMA200 filters trend, volume confirms strength.
-Target: 15-30 trades/year per symbol.
+4h_trix_momentum_1d_trend_volume_v1
+Hypothesis: TRIX(15) captures momentum on 4h. Long when TRIX > 0 and TRIX > EMA9(TRIX) and price above 1d EMA50 (uptrend). Short when TRIX < 0 and TRIX < EMA9(TRIX) and price below 1d EMA50 (downtrend). Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend. Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_supertrend_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_trix_momentum_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -32,93 +28,62 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA200 for trend filter
-    ema_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200.values)
+    # 1d EMA50 for trend filter
+    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
     
-    # Supertrend on 12h (ATR=10, multiplier=3)
-    atr_period = 10
-    multiplier = 3
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # TRIX(15) on 4h: triple EMA of ROC
+    roc = pd.Series(close).pct_change(1)
+    ema1 = roc.ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100
+    trix = trix.fillna(0).values
     
-    # ATR
-    atr = np.zeros(n)
-    atr[atr_period] = np.mean(tr[:atr_period])
-    for i in range(atr_period + 1, n):
-        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Signal line: EMA9 of TRIX
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False).mean().values
     
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros(n)
-    supertrend_direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    # Initialize
-    supertrend[0] = upper_band[0]
-    supertrend_direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            supertrend_direction[i] = 1
-        elif close[i] < supertrend[i-1]:
-            supertrend_direction[i] = -1
-        else:
-            supertrend_direction[i] = supertrend_direction[i-1]
-        
-        if supertrend_direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # Volume confirmation (20-period average)
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma[i]) or 
-            vol_ma[i] <= 0 or np.isnan(supertrend[i]) or np.isnan(supertrend_direction[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Supertrend flips down OR price breaks below EMA200
-            if supertrend_direction[i] == -1 or close[i] < ema_200_aligned[i]:
+            # Exit: TRIX crosses below signal line or price breaks below EMA50
+            if trix[i] < trix_signal[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: Supertrend flips up OR price breaks above EMA200
-            if supertrend_direction[i] == 1 or close[i] > ema_200_aligned[i]:
+            # Exit: TRIX crosses above signal line or price breaks above EMA50
+            if trix[i] > trix_signal[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Supertrend uptrend with volume and price above EMA200
-            if (supertrend_direction[i] == 1 and vol_confirm and 
-                close[i] > ema_200_aligned[i]):
+            # Long entry: TRIX > 0, TRIX > signal line, with volume and price above EMA50
+            if (trix[i] > 0 and trix[i] > trix_signal[i] and vol_confirm and 
+                close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Supertrend downtrend with volume and price below EMA200
-            elif (supertrend_direction[i] == -1 and vol_confirm and 
-                  close[i] < ema_200_aligned[i]):
+            # Short entry: TRIX < 0, TRIX < signal line, with volume and price below EMA50
+            elif (trix[i] < 0 and trix[i] < trix_signal[i] and vol_confirm and 
+                  close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
