@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 12-hour volume confirmation and 1-day ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 12-hour average + daily ADX > 25
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 12-hour average + daily ADX > 25
+# Hypothesis: 6-hour Donchian(20) breakout with 12-hour volume confirmation and daily ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + daily ADX > 25
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + daily ADX > 25
 # Exit when price crosses 8-period EMA in opposite direction
 # Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
