@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_cci_volume_regime_v1
-Hypothesis: On 4h timeframe, enter long when CCI(20) crosses above -100 with volume > 1.5x average, enter short when CCI(20) crosses below +100 with volume > 1.5x average. Uses 1d trend filter (price above/below 50-period EMA) to avoid counter-trend trades. Designed for 20-40 trades/year to minimize fee drag while capturing momentum reversals in both bull and bear markets.
+1d_donchian_breakout_1w_trend_volume_v1
+Hypothesis: On daily timeframe, enter long when price breaks above 20-day Donchian high with volume > 1.5x average and weekly trend up (price > 50-week EMA), enter short when price breaks below 20-day Donchian low with volume > 1.5x average and weekly trend down (price < 50-week EMA). Uses 10-day ATR for stoploss. Designed for 10-20 trades/year to minimize fee flood while capturing major trend moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_volume_regime_v1"
-timeframe = "4h"
+name = "1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,33 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate CCI(20)
-    tp = (high + low + close) / 3.0
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # Avoid division by zero
-    mad = np.where(mad == 0, 0.001, mad)
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # 10-day ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d EMA for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 20-day Donchian channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 50-week EMA for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(cci[i-1]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(high[i]) or 
+            np.isnan(low[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
@@ -57,28 +62,28 @@ def generate_signals(prices):
         vol_ok = volume[i] > (vol_ma[i] * 1.5)
         
         if position == 1:  # Long position
-            # Exit: CCI crosses below +100 (momentum fading)
-            if cci[i] < 100 and cci[i-1] >= 100:
+            # Exit: price closes below Donchian low or stoploss hit
+            if close[i] < donch_low[i] or close[i] < (donch_low[i] - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above -100 (momentum fading)
-            if cci[i] > -100 and cci[i-1] <= -100:
+            # Exit: price closes above Donchian high or stoploss hit
+            if close[i] > donch_high[i] or close[i] > (donch_high[i] + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: CCI crosses above -100 (bullish momentum) + price > 1d EMA50
-                if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema_50_1d_aligned[i]:
+                # Long: break above Donchian high + weekly uptrend
+                if close[i] > donch_high[i] and close[i] > ema_50_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: CCI crosses below +100 (bearish momentum) + price < 1d EMA50
-                elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema_50_1d_aligned[i]:
+                # Short: break below Donchian low + weekly downtrend
+                elif close[i] < donch_low[i] and close[i] < ema_50_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
