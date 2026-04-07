@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout + Daily Trend + Volume Spike
-# Hypothesis: Donchian(20) breakouts on 4h timeframe capture medium-term momentum.
-# Only trade breakouts aligned with daily EMA(50) trend direction.
-# Volume confirmation ensures breakout legitimacy.
-# Works in both bull and bear by following daily trend for breakouts and avoiding counter-trend trades.
-# Target: 20-50 trades/year (80-200 total over 4 years).
+# Strategy: 12h RSI Mean Reversion with Daily Trend Filter
+# Hypothesis: RSI extremes on 12h timeframe combined with daily trend direction
+# provides high-probability mean reversion entries in both bull and bear markets.
+# In uptrend, buy RSI<30; in downtrend, sell RSI>70. Avoids counter-trend trades.
+# Target: 20-30 trades/year (80-120 total over 4 years).
 
-name = "4h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "4h"
+name = "12h_rsi_mean_reversion_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +26,7 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -36,50 +35,48 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    # 12h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(14, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
-        # Check volume confirmation
-        vol_ok = vol_spike[i]
-        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend turns bearish
-            if close[i] < low_20[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: RSI crosses above 50 or trend turns bearish
+            if rsi_values[i] > 50 or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend turns bullish
-            if close[i] > high_20[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: RSI crosses below 50 or trend turns bullish
+            if rsi_values[i] < 50 or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Breakout above Donchian high in uptrend
-                if close[i] > high_20[i] and close[i] > ema_50_1d_aligned[i]:
+            # Only trade in direction of daily trend
+            if close[i] > ema_50_1d_aligned[i]:  # Uptrend
+                if rsi_values[i] < 30:  # Oversold - buy the dip
                     position = 1
-                    signals[i] = 0.30
-                # Breakdown below Donchian low in downtrend
-                elif close[i] < low_20[i] and close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+            elif close[i] < ema_50_1d_aligned[i]:  # Downtrend
+                if rsi_values[i] > 70:  # Overbought - sell the rally
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
