@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_weekly_rsi_momentum_v1
-Hypothesis: Weekly RSI momentum combined with daily price action provides edge in both bull and bear markets.
-Long when weekly RSI > 50 and daily close breaks above daily EMA20 with volume confirmation.
-Short when weekly RSI < 50 and daily close breaks below daily EMA20 with volume confirmation.
-Uses weekly RSI as trend filter to avoid counter-trend trades, reducing whipsaw in ranging markets.
+12h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: 12-hour Camarilla pivot levels act as strong support/resistance when combined with daily trend filter and volume confirmation.
+Long when price breaks above H3 with daily uptrend and volume spike.
+Short when price breaks below L3 with daily downtrend and volume spike.
+Works in both bull and bear markets by following the daily trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_rsi_momentum_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,80 +22,77 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Weekly data for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Daily data for trend and pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly RSI calculation
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Daily pivot point and ranges
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Camarilla levels: H3/L3 are key resistance/support
+    h3_1d = close_1d + (range_1d * 1.1 / 4)
+    l3_1d = close_1d - (range_1d * 1.1 / 4)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w[:13] = np.nan  # Not enough data
+    # Align Camarilla levels to 12h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # Daily EMA20 for trend
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, min_periods=20).mean().values
+    # Daily trend filter: EMA25
+    close_1d_series = pd.Series(close_1d)
+    ema_25_1d = close_1d_series.ewm(span=25, min_periods=25).mean().values
+    ema_25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_25_1d)
     
-    # Volume confirmation: volume > 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align weekly RSI to daily
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Volume confirmation: volume > 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(close[i]) or 
-            np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
-            np.isnan(ema_20[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(ema_25_1d_aligned[i]) or np.isnan(close[i]) or 
+            np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        rsi_weekly = rsi_1w_aligned[i]
-        vol_confirmed = volume[i] > vol_ma[i]
-        
         if position == 1:  # Long position
-            # Exit: weekly RSI < 45 or price below EMA20
-            if rsi_weekly < 45 or close[i] < ema_20[i]:
+            # Exit: price below L3 or daily trend turns down
+            if close[i] < l3_1d_aligned[i] or close[i] < ema_25_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: weekly RSI > 55 or price above EMA20
-            if rsi_weekly > 55 or close[i] > ema_20[i]:
+            # Exit: price above H3 or daily trend turns up
+            if close[i] > h3_1d_aligned[i] or close[i] > ema_25_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: weekly RSI > 50, price above EMA20, volume confirmation
-            if rsi_weekly > 50 and close[i] > ema_20[i] and vol_confirmed:
+            # Long: price breaks above H3 with daily uptrend and volume confirmation
+            if (close[i] > h3_1d_aligned[i] and 
+                close[i] > ema_25_1d_aligned[i] and 
+                volume[i] > vol_ma[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: weekly RSI < 50, price below EMA20, volume confirmation
-            elif rsi_weekly < 50 and close[i] < ema_20[i] and vol_confirmed:
+            # Short: price breaks below L3 with daily downtrend and volume confirmation
+            elif (close[i] < l3_1d_aligned[i] and 
+                  close[i] < ema_25_1d_aligned[i] and 
+                  volume[i] > vol_ma[i]):
                 position = -1
                 signals[i] = -0.25
     
