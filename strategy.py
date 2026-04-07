@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Breakouts with volume confirmation capture strong trends; volatility filter avoids choppy markets.
-# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 20-50 trades/year to minimize fee drag.
-name = "4h_donchian20_1d_volume_atr_v1"
+# Strategy: 4h Donchian(40) breakout with daily volume confirmation and ATR volatility filter
+# Hypothesis: Wider Donchian reduces false breakouts; volume confirms institutional interest; 
+# ATR filter avoids chop. Works in bull via breakouts, in bear via volatility-filtered mean reversion.
+# Target: 25-40 trades/year to minimize fee drag.
+name = "4h_donchian40_1d_volume_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -39,14 +39,14 @@ def generate_signals(prices):
     tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (40-period high/low) - wider for fewer, higher quality signals
+    highest_high = pd.Series(high).rolling(window=40, min_periods=40).max().values
+    lowest_low = pd.Series(low).rolling(window=40, min_periods=40).min().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(40, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
