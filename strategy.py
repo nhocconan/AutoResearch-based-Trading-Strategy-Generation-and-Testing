@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Bollinger Breakout with Volume and ADX Trend Filter
-Long when price breaks above upper Bollinger Band with volume surge and ADX > 25
-Short when price breaks below lower Bollinger Band with volume surge and ADX > 25
-Exit when price returns to middle Bollinger Band
-Designed to capture volatility breakouts in both bull and bear markets
+6h Ehlers Fisher Transform with 1d Regime Filter
+Long when Fisher crosses above -1.5 and 1d EMA50 > EMA200 (bullish regime)
+Short when Fisher crosses below +1.5 and 1d EMA50 < EMA200 (bearish regime)
+Exit when Fisher crosses back through zero
+Designed to capture reversals in both trending and ranging markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_bollinger_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "6h_fisher_transform_1d_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +24,64 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Bollinger Bands (20, 2) ===
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean().values
-    dev = close_s.rolling(window=20, min_periods=20).std().values
-    upper = basis + 2 * dev
-    lower = basis - 2 * dev
+    # === Ehlers Fisher Transform (9) ===
+    price = (high + low) / 2
+    # Normalize price to [-1, 1] range
+    max_h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    min_l = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    diff = max_h - min_l
+    diff = np.where(diff == 0, 1, diff)  # Avoid division by zero
+    value1 = 2 * ((price - min_l) / diff - 0.5)
+    # Smooth
+    value1 = pd.Series(value1).ewm(alpha=0.5, adjust=False).mean().values
+    # Fisher transform
+    value1 = np.clip(value1, -0.999, 0.999)  # Avoid log(0)
+    fish = 0.5 * np.log((1 + value1) / (1 - value1))
+    fish = pd.Series(fish).ewm(alpha=0.5, adjust=False).mean().values
     
-    # === ADX (14) for trend strength ===
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Calculate Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed averages
-    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_ma = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_ma = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_ma / (tr_ma + 1e-10)
-    minus_di = 100 * minus_dm_ma / (tr_ma + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # === Volume confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    # === 1d EMA Regime Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if np.isnan(basis[i]) or np.isnan(adx[i]) or np.isnan(vol_ratio[i]):
+    for i in range(10, n):
+        if np.isnan(fish[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to middle Bollinger Band
-            if close[i] <= basis[i]:
+            # Exit: Fisher crosses below zero
+            if fish[i] < 0 and fish[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to middle Bollinger Band
-            if close[i] >= basis[i]:
+            # Exit: Fisher crosses above zero
+            if fish[i] > 0 and fish[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume surge and strong trend
-            if vol_ratio[i] < 1.5 or adx[i] < 25:
-                signals[i] = 0.0
-                continue
-            
-            # Entry: Bollinger Band breakout with volume and trend confirmation
-            if close[i] > upper[i]:
-                # Price above upper band -> long
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < lower[i]:
-                # Price below lower band -> short
-                position = -1
-                signals[i] = -0.25
+            # Bullish regime: EMA50 > EMA200
+            # Bearish regime: EMA50 < EMA200
+            if ema_50_aligned[i] > ema_200_aligned[i]:
+                # Bullish regime - look for long
+                if fish[i] > -1.5 and fish[i-1] <= -1.5:
+                    position = 1
+                    signals[i] = 0.25
+            elif ema_50_aligned[i] < ema_200_aligned[i]:
+                # Bearish regime - look for short
+                if fish[i] < 1.5 and fish[i-1] >= 1.5:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
