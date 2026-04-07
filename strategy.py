@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
-# Hypothesis: Breakouts aligned with higher timeframe trend capture strong moves; volume confirms institutional interest.
-# Works in bull via trend-following breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 20-50 trades/year to minimize fee drag.
-name = "4h_donchian20_12h_trend_volume_v1"
-timeframe = "4h"
+# Strategy: 1h RSI pullback with 4h trend filter and 1d volume confirmation
+# Hypothesis: In uptrends, buy RSI pullbacks to 40; in downtrends, sell RSI bounces to 60.
+# 4h EMA50 defines trend, 1d volume filter ensures participation, RSI(14) provides entry timing.
+# Works in bull via pullback longs, in bear via bounce shorts. Low turnover by requiring trend alignment.
+name = "1h_rsi_pullback_4h_trend_1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,76 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 12h EMA(50) for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Get daily data for volume confirmation
+    # Get 1d data for volume confirmation (20-period average)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
-    
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate ATR(14) for volatility filter and stop sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate RSI(14) on 1h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+    for i in range(50, n):
+        # Skip if required data not available or outside session
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or not session_mask[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
+        # Volume confirmation: current 1h volume > 1-day average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
-        
         if position == 1:  # Long position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] <= lowest_low[i] or not vol_filter:
+            # Exit: RSI > 60 (overbought) or trend breaks down
+            if rsi[i] > 60 or close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] >= highest_high[i] or not vol_filter:
+            # Exit: RSI < 40 (oversold) or trend breaks up
+            if rsi[i] < 40 or close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + 12h trend up + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and close[i] > ema_12h_aligned[i] and vol_confirm and vol_filter:
+            # Enter long: uptrend (price > EMA50) + RSI pullback to 40 + volume confirmation
+            if close[i] > ema_4h_aligned[i] and rsi[i] < 40 and vol_confirm:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below lower band + 12h trend down + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and close[i] < ema_12h_aligned[i] and vol_confirm and vol_filter:
+                signals[i] = 0.20
+            # Enter short: downtrend (price < EMA50) + RSI bounce to 60 + volume confirmation
+            elif close[i] < ema_4h_aligned[i] and rsi[i] > 60 and vol_confirm:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
