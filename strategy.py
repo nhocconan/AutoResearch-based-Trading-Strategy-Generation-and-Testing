@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
-# Uses 4-hour Donchian channel breakouts for trend-following entries:
-# - Buy when price breaks above 4h Donchian upper band (20-period high)
-# - Sell when price breaks below 4h Donchian lower band (20-period low)
-# - 12h EMA50 filter ensures trades align with higher timeframe trend
-# - Volume confirmation avoids false breakouts
-# Designed for moderate frequency (target: 20-50 trades/year) to balance edge and fees
-# Works in both bull/bear via trend filter: follow 12h trend direction only
+# Hypothesis: 1h mean reversion with 4h trend filter and volume filter
+# Uses RSI(14) for mean reversion signals:
+# - Long when RSI < 30 and price > 4h EMA200 (uptrend filter)
+# - Short when RSI > 70 and price < 4h EMA200 (downtrend filter)
+# - Volume confirmation: current volume > 20-period average
+# - Time filter: only trade 08-20 UTC to avoid low-volume sessions
+# - Position size: 0.20 (20% of capital) to limit drawdown
+# Designed for low frequency (~20-40 trades/year) to minimize fee drag
+# Works in bull/bear via trend filter: only trade in direction of 4h trend
 
-name = "4h_donchian20_12h_ema_volume_v1"
-timeframe = "4h"
+name = "1h_rsi_meanrev_4h_trend_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,76 +28,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # 4h Donchian channel (20-period)
-    # Calculate on 4h data then align
+    # 4h EMA200 trend filter
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
-    # Calculate 20-period high/low for Donchian
-    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 4h timeframe
-    upper_band = align_htf_to_ltf(prices, df_4h, high_20)
-    lower_band = align_htf_to_ltf(prices, df_4h, low_20)
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # already datetime64[ms], .hour works
+    
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_200_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Session filter
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend filter from 12h EMA
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter from 4h EMA200
+        uptrend = close[i] > ema_200_4h_aligned[i]
+        downtrend = close[i] < ema_200_4h_aligned[i]
         
-        # Exit conditions
+        # Exit conditions: reverse signal or trend change
         if position == 1:  # Long position
-            # Exit on reverse breakout or when trend changes
-            if close[i] < lower_band[i] or not uptrend:
+            if rsi[i] > 50 or not uptrend or not in_session:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on reverse breakout or when trend changes
-            if close[i] > upper_band[i] or not downtrend:
+            if rsi[i] < 50 or not downtrend or not in_session:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Breakout entries with trend and volume confirmation
-            # Buy on upside breakout in uptrend
-            if close[i] > upper_band[i] and uptrend and vol_confirm:
-                position = 1
-                signals[i] = 0.25
-            # Sell on downside breakout in downtrend
-            elif close[i] < lower_band[i] and downtrend and vol_confirm:
-                position = -1
-                signals[i] = -0.25
+            # Mean reversion entries with trend and volume confirmation
+            if in_session and vol_confirm:
+                # Buy on oversold in uptrend
+                if rsi[i] < 30 and uptrend:
+                    position = 1
+                    signals[i] = 0.20
+                # Sell on overbought in downtrend
+                elif rsi[i] > 70 and downtrend:
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
