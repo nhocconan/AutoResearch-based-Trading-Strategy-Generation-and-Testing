@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) + 12h EMA20 > EMA50 (uptrend) + volume > 1.5x 20-period average
-# Short when Williams %R > -20 (overbought) + 12h EMA20 < EMA50 (downtrend) + volume > 1.5x 20-period average
-# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Hypothesis: 1-day price action with weekly regime filter (ADX) and daily momentum (RSI)
+# Long when price > daily EMA(50) + weekly ADX > 25 (trending) + daily RSI > 55
+# Short when price < daily EMA(50) + weekly ADX > 25 + daily RSI < 45
+# Exit when price crosses EMA(50) in opposite direction
 # Stoploss at 2.0 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Williams %R identifies overextended moves; 12h EMA filter ensures trend alignment; volume confirms strength
-# Target: 75-150 total trades over 4 years (19-38/year)
+# Position size: 0.25
+# Uses weekly ADX for trend strength and daily RSI for momentum confirmation
+# Target: 50-150 total trades over 4 years (12-38/year)
 
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
+name = "1d_ema50_weekly_adx_daily_rsi_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +25,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 12-hour data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Daily EMA(50) for trend
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Weekly data for ADX (trend strength filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA20 and EMA50 for trend
-    close_12h = df_12h['close'].values
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate weekly ADX(14)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # True Range
+    tr1 = high_w - low_w
+    tr2 = np.abs(high_w - np.roll(close_w, 1))
+    tr3 = np.abs(low_w - np.roll(close_w, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr_w = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume confirmation: 20-period average
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_w - np.roll(high_w, 1)) > (np.roll(low_w, 1) - low_w), 
+                       np.maximum(high_w - np.roll(high_w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_w, 1) - low_w) > (high_w - np.roll(high_w, 1)), 
+                        np.maximum(np.roll(low_w, 1) - low_w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr_w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus14 / (tr14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Daily RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -61,11 +93,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema20_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema50[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -78,8 +109,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R crosses above -50
-            elif williams_r[i] > -50:
+            # Exit: price crosses below EMA50
+            elif close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -91,28 +122,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R crosses below -50
-            elif williams_r[i] < -50:
+            # Exit: price crosses above EMA50
+            elif close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Williams %R extreme + 12h EMA trend + volume confirmation
-            # Trend filter: EMA20 > EMA50 for uptrend, EMA20 < EMA50 for downtrend
-            uptrend = ema20_12h_aligned[i] > ema50_12h_aligned[i]
-            downtrend = ema20_12h_aligned[i] < ema50_12h_aligned[i]
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma[i]
+            # Look for entries: EMA50 break with weekly ADX trend filter and daily RSI momentum
+            # Trend filter: weekly ADX > 25 (strong trend)
+            adx_filter = adx_aligned[i] > 25
+            # Momentum filter: daily RSI > 55 for long, < 45 for short
+            rsi_filter_long = rsi[i] > 55
+            rsi_filter_short = rsi[i] < 45
             
-            # Long: Williams %R < -80 (oversold) + uptrend + volume
-            if williams_r[i] < -80 and uptrend and volume_filter:
+            # Long: price above EMA50 + strong trend + bullish momentum
+            if close[i] > ema50[i] and adx_filter and rsi_filter_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R > -20 (overbought) + downtrend + volume
-            elif williams_r[i] > -20 and downtrend and volume_filter:
+            # Short: price below EMA50 + strong trend + bearish momentum
+            elif close[i] < ema50[i] and adx_filter and rsi_filter_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
