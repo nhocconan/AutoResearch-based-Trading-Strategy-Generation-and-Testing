@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with weekly trend filter
-# Long when Bull Power > 0 (price > EMA13) and weekly close > weekly EMA40 (uptrend)
-# Short when Bear Power < 0 (price < EMA13) and weekly close < weekly EMA40 (downtrend)
-# Exit when Elder Power reverses sign or weekly trend changes
+# Hypothesis: 6-hour Donchian(20) breakout with 1-week trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band, 1w close > 1w EMA50 (uptrend), and volume > 1.5x 6h average volume
+# Short when price breaks below 6h Donchian lower band, 1w close < 1w EMA50 (downtrend), and volume > 1.5x 6h average volume
+# Exit when trend reverses (1w close crosses EMA50) or opposite breakout occurs
 # Stoploss at 2.0 * ATR(14)
-# Position size: 0.25
-# Uses weekly EMA40 for trend filter and Elder Power for entry/exit
+# Position size: 0.25 (25% of capital)
+# Uses 1w EMA50 for trend filter and 6h volume average for confirmation
 # Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "6h_elder_ray_weekly_ema40_v1"
+name = "6h_donchian20_1w_ema50_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,36 +25,39 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 6h data for Elder Ray calculation
+    # 6h data for Donchian channels
     df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    close_6h = df_6h['close'].values
     high_6h = df_6h['high'].values
     low_6h = df_6h['low'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close_6h).ewm(span=13, adjust=False).mean().values
+    # 6h Donchian(20) channels
+    high_series = pd.Series(high_6h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_6h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Bull Power = High - EMA13
-    bull_power = high_6h - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low_6h - ema13
+    # Align Donchian bands to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
     
-    # Align Elder Power to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
-    
-    # Weekly data for EMA40 trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 40:
+    # 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
-    ema40_weekly = pd.Series(close_weekly).ewm(span=40, adjust=False).mean().values
-    ema40_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema40_weekly)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # 6h volume average for confirmation
+    volume_6h = df_6h['volume'].values
+    volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -71,8 +74,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema40_weekly_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_6h_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -85,8 +89,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Elder Power turns negative OR weekly trend turns down
-            elif bear_power_aligned[i] >= 0 or close[i] < ema40_weekly_aligned[i]:
+            # Exit: trend reverses (price below EMA50) or breaks below lower band
+            elif close[i] < ema_1w_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -98,22 +102,26 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Elder Power turns positive OR weekly trend turns up
-            elif bull_power_aligned[i] <= 0 or close[i] > ema40_weekly_aligned[i]:
+            # Exit: trend reverses (price above EMA50) or breaks above upper band
+            elif close[i] > ema_1w_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with Elder Power alignment and weekly trend
-            # Long: Bull Power positive AND price above weekly EMA40 (uptrend)
-            if bull_power_aligned[i] > 0 and close[i] > ema40_weekly_aligned[i]:
+            # Look for entries with volume confirmation and trend alignment
+            # Long: price breaks above upper band, price above EMA50 (uptrend), volume spike
+            if (close[i] > upper_aligned[i] and
+                close[i] > ema_1w_aligned[i] and
+                volume[i] > 1.5 * volume_ma_6h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Bear Power negative AND price below weekly EMA40 (downtrend)
-            elif bear_power_aligned[i] < 0 and close[i] < ema40_weekly_aligned[i]:
+            # Short: price breaks below lower band, price below EMA50 (downtrend), volume spike
+            elif (close[i] < lower_aligned[i] and
+                  close[i] < ema_1w_aligned[i] and
+                  volume[i] > 1.5 * volume_ma_6h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
