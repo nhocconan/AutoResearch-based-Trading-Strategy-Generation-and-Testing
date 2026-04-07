@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 4-hour timeframe, use daily Camarilla pivot levels for mean reversion in ranging markets. 
-Long when price touches S3 level with volume confirmation in ranging market (CHOP > 61.8).
-Short when price touches R3 level with volume confirmation in ranging market.
-Exit when price moves to opposite pivot level or volatility expands (CHOP < 38.2).
-Designed for 20-40 trades/year to minimize fee drag while capturing mean reversion in both bull and bear markets.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 6-hour timeframe, use daily Camarilla pivot levels with EMA filter and volume confirmation.
+Go long when price breaks above R4 with volume > 1.5x average and EMA(50) > EMA(200).
+Go short when price breaks below S4 with volume > 1.5x average and EMA(50) < EMA(200).
+Exit when price returns to the daily pivot (PP) or EMA crossover reverses.
+Designed for 15-30 trades/year to minimize fee dust while capturing strong breakouts in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,81 +27,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and CHOP
+    # Get 1d data for Camarilla pivots and EMA
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for 1d
+    # Calculate EMA on 1d close
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    
+    # Calculate Camarilla pivot levels for each day
+    # Based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Pivot point (PP) = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
     
     # Camarilla levels
-    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    r2_1d = pivot_1d + (range_1d * 1.1 / 6)
-    r1_1d = pivot_1d + (range_1d * 1.1 / 12)
-    s1_1d = pivot_1d - (range_1d * 1.1 / 12)
-    s2_1d = pivot_1d - (range_1d * 1.1 / 6)
-    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    # R4 = Close + ((High - Low) * 1.1/2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # R2 = Close + ((High - Low) * 1.1/6)
+    # R1 = Close + ((High - Low) * 1.1/12)
+    # S1 = Close - ((High - Low) * 1.1/12)
+    # S2 = Close - ((High - Low) * 1.1/6)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
+    r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
+    r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align 1d data to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate Choppiness Index for 1d (CHOP)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR(14) - Wilder's smoothing
-    period = 14
-    alpha = 1.0 / period
-    
-    def wilders_smoothing(arr):
-        smoothed = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if np.isnan(arr[i]):
-                if i == 0:
-                    smoothed[i] = np.nan
-                else:
-                    smoothed[i] = smoothed[i-1]
-            else:
-                if i == 0 or np.isnan(smoothed[i-1]):
-                    smoothed[i] = arr[i]
-                else:
-                    smoothed[i] = smoothed[i-1] + alpha * (arr[i] - smoothed[i-1])
-        return smoothed
-    
-    atr = wilders_smoothing(tr)
-    
-    # CHOP = 100 * log10(sum(ATR,14)/(n*(high-low))) / log10(n)
-    # where n=14
-    atr_sum = np.convolve(atr, np.ones(14), 'full')[:len(atr)]
-    atr_sum[:13] = np.nan
-    high_low_sum = np.convolve(range_1d, np.ones(14), 'full')[:len(range_1d)]
-    high_low_sum[:13] = np.nan
-    
-    chop = 100 * np.log10(atr_sum / (14 * high_low_sum)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume ratio: current volume / 20-period average
-    vol_ma = np.convolve(volume, np.ones(20)/20, 'same')
-    vol_ma[:10] = np.nan
-    vol_ma[-10:] = np.nan
-    vol_ratio = volume / vol_ma
+    # Calculate average volume (50-period)
+    vol_avg = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -110,45 +80,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after EMA warmup
         if not in_session[i]:
             signals[i] = 0.0
             continue
             
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
             
-        # Range market condition: CHOP > 61.8
-        ranging = chop_aligned[i] > 61.8
-        trending = chop_aligned[i] < 38.2
+        # Volume filter: current volume > 1.5x average
+        vol_filter = volume[i] > (1.5 * vol_avg[i])
+        
+        # EMA trend filter
+        ema_bullish = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
+        ema_bearish = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches R1 or volatility expands (trending market)
-            if close[i] >= r1_aligned[i] or trending:
+            # Exit: price returns to pivot or EMA crossover reverses
+            if close[i] <= pp_aligned[i] or not ema_bullish:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches S1 or volatility expands (trending market)
-            if close[i] <= s1_aligned[i] or trending:
+            # Exit: price returns to pivot or EMA crossover reverses
+            if close[i] >= pp_aligned[i] or not ema_bearish:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter in ranging market with volume confirmation
-            if ranging and vol_ratio[i] > 1.5:
-                # Long at S3
-                if close[i] <= s3_aligned[i] and low[i] <= s3_aligned[i]:
+            # Only enter with volume and EMA alignment
+            if vol_filter:
+                if ema_bullish and close[i] > r4_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short at R3
-                elif close[i] >= r3_aligned[i] and high[i] >= r3_aligned[i]:
+                elif ema_bearish and close[i] < s4_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
