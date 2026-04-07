@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_cci_extreme_1d_vwap_reversion_v1
-Hypothesis: Mean-reversion from extreme CCI levels (CCI > 200 or < -200) on 6h, filtered by 1-day VWAP trend.
-Long when CCI < -200 (oversold) and price above 1-day VWAP (bullish bias).
-Short when CCI > 200 (overbought) and price below 1-day VWAP (bearish bias).
-Exit when CCI returns to neutral zone (-100 to 100).
-Designed for 12-30 trades/year on 6h with clear logic that works in bull and bear markets.
+12h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: Camarilla pivot levels from 1d with volume confirmation and 1d EMA trend filter.
+Long when price touches or breaks above Camarilla R3 with volume > average and price above 1d EMA50.
+Short when price touches or breaks below Camarilla S3 with volume > average and price below 1d EMA50.
+Designed for 12-37 trades/year on 12h with clear logic that works in bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_extreme_1d_vwap_reversion_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,66 +26,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for VWAP calculation
+    # 1d data for Camarilla pivot and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day VWAP: cumulative(volume * price) / cumulative(volume)
-    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    vwap_num = np.cumsum(typical_price * df_1d['volume'].values)
-    vwap_den = np.cumsum(df_1d['volume'].values)
-    vwap_1d = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Camarilla formulas: 
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # PP = (H + L + C) / 3
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    H = df_1d['high'].values
+    L = df_1d['low'].values
+    C = df_1d['close'].values
     
-    # CCI (20-period) on 6h
-    typical = (high + low + close) / 3.0
-    sma_tp = pd.Series(typical).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(typical).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    cci = np.where(mad != 0, (typical - sma_tp) / (0.015 * mad), 0)
+    # Pivot point
+    PP = (H + L + C) / 3.0
+    # Range
+    range_hl = H - L
+    
+    # Camarilla levels
+    R3 = C + (range_hl * 1.1 / 4.0)
+    S3 = C - (range_hl * 1.1 / 4.0)
+    
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(C).ewm(span=50, adjust=False).mean().values
+    
+    # Align 1d data to 12h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: 20-period average on 12h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(cci[i]) or np.isnan(sma_tp[i]) or np.isnan(mad[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # CCI zones
-        cci_overbought = cci[i] > 200
-        cci_oversold = cci[i] < -200
-        cci_neutral = (cci[i] >= -100) & (cci[i] <= 100)
+        # Volume confirmation: current volume above average
+        vol_confirmed = volume[i] > vol_ma[i]
         
-        # VWAP trend filter
-        above_vwap = close[i] > vwap_1d_aligned[i]
-        below_vwap = close[i] < vwap_1d_aligned[i]
+        # Price touching/breaking Camarilla levels
+        touch_R3 = close[i] >= R3_aligned[i]
+        touch_S3 = close[i] <= S3_aligned[i]
+        
+        # 1d trend filter
+        above_1d_ema50 = close[i] > ema50_1d_aligned[i]
+        below_1d_ema50 = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: CCI returns to neutral or price crosses below VWAP
-            if cci_neutral or below_vwap:
+            # Exit: price breaks below S3 or trend turns bearish
+            if close[i] < S3_aligned[i] or below_1d_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI returns to neutral or price crosses above VWAP
-            if cci_neutral or above_vwap:
+            # Exit: price breaks above R3 or trend turns bullish
+            if close[i] > R3_aligned[i] or above_1d_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: CCI oversold with bullish VWAP bias
-            if cci_oversold and above_vwap:
+            # Long: price touches/breaks above R3 with volume confirmation and bullish trend
+            if touch_R3 and vol_confirmed and above_1d_ema50:
                 position = 1
                 signals[i] = 0.25
-            # Short: CCI overbought with bearish VWAP bias
-            elif cci_overbought and below_vwap:
+            # Short: price touches/breaks below S3 with volume confirmation and bearish trend
+            elif touch_S3 and vol_confirmed and below_1d_ema50:
                 position = -1
                 signals[i] = -0.25
     
