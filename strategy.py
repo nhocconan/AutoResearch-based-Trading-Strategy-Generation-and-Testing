@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12h timeframe, enter long when price breaks above the 1d Camarilla R3 level with above-average volume, short when price breaks below S3 level with above-average volume. Use the 1d ATR percentile to filter for low volatility regimes where breakouts are more likely to succeed. Exit when price returns to the 1d Camarilla Pivot level. Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity with fee minimization.
+4h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 4h timeframe, enter long when price breaks above the 1d Camarilla R3 level with above-average volume, short when price breaks below S3 level with above-average volume. Use the 1d ATR percentile to filter for low volatility regimes where breakouts are more likely to succeed. Exit when price returns to the 1d Camarilla Pivot level. Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity with fee minimization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,13 +36,12 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: H5 = close + 1.1*range/2, H4 = close + 1.1*range/4, H3 = close + 1.1*range/6
-    # L3 = close - 1.1*range/6, L4 = close - 1.1*range/4, L5 = close - 1.1*range/2
+    # Camarilla levels: R3 = close + 1.1*range/6, S3 = close - 1.1*range/6
     r3 = close_1d + 1.1 * range_1d / 6.0
     s3 = close_1d - 1.1 * range_1d / 6.0
     pivot_level = pivot
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_level)
