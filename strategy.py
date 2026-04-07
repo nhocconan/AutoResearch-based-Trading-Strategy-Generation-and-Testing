@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# Long when price breaks above Donchian upper(20) and 1w EMA > 1w EMA(50) (uptrend)
-# Short when price breaks below Donchian lower(20) and 1w EMA < 1w EMA(50) (downtrend)
-# Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
-# Volume confirmation: current volume > 1.5 * average volume of last 20 periods
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper(20) and 1w EMA(20) > EMA(50) (uptrend)
+# Short when price breaks below Donchian lower(20) and 1w EMA(20) < EMA(50) (downtrend)
+# Exit when price crosses opposite Donchian level or stoploss at 2.0 * ATR
+# Volume confirmation: current volume > 1.3 * average volume of last 20 periods
 # Position size: 0.25 (25% of capital)
-# Target: 30-100 total trades over 4 years (7-25/year)
+# Target: 50-100 total trades over 4 years (12-25/year)
 
 name = "1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
@@ -65,8 +65,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -78,8 +78,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -99,8 +99,8 @@ def generate_signals(prices):
             uptrend = ema_20_1w_aligned[i] > ema_50_1w_aligned[i]
             downtrend = ema_20_1w_aligned[i] < ema_50_1w_aligned[i]
             
-            # Volume confirmation: current volume > 1.5 * average volume
-            volume_confirm = volume[i] > 1.5 * vol_avg[i]
+            # Volume confirmation: current volume > 1.3 * average volume
+            volume_confirm = volume[i] > 1.3 * vol_avg[i]
             
             # Long: price breaks above Donchian upper(20) in uptrend with volume
             if close[i] > highest_high and uptrend and volume_confirm:
