@@ -1,18 +1,14 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Strategy: 4h Daily Donchian Channel with Volume Filter
-# Hypothesis: Daily Donchian breakouts capture major trend moves; volume filters ensure institutional participation.
-# Works in bull via upward breakouts, in bear via downward breakdowns. Target: 20-50 trades/year.
-name = "4h_daily_donchian_breakout_v1"
-timeframe = "4h"
+# 1d DMI (ADX) with volume confirmation
+# Hypothesis: DMI identifies strong trends (ADX>25) and direction (+DI/-DI), while volume confirms institutional participation.
+# Works in bull via +DI crossovers, in bear via -DI crossovers. ADX filters out weak/choppy markets.
+# Target: 15-30 trades/year to minimize fee drag.
+name = "1d_dmi_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -21,62 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily Donchian(20)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    vol_1d = df_1d['volume'].values
+    # Calculate weekly 50-period EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Daily 20-period high and low
-    upper_donch = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_donch = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate DMI (ADX) components
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Daily 20-period volume moving average
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Align to 4h timeframe
-    upper_donch_aligned = align_htf_to_ltf(prices, df_1d, upper_donch)
-    lower_donch_aligned = align_htf_to_ltf(prices, df_1d, lower_donch)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Smoothed values
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: daily volume > weekly average volume
+    vol_1w = df_1w['volume'].values
+    vol_avg_1w = pd.Series(vol_1w).rolling(window=4, min_periods=4).mean().values  # ~monthly average
+    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
+    vol_confirm = volume > vol_avg_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if required data not available
-        if (np.isnan(upper_donch_aligned[i]) or np.isnan(lower_donch_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 4h volume > 20-day average daily volume
-        vol_filter = volume[i] > vol_ma_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below daily lower Donchian
-            if close[i] < lower_donch_aligned[i]:
+            # Exit: ADX weakens or trend reverses
+            if adx[i] < 20 or minus_di[i] > plus_di[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above daily upper Donchian
-            if close[i] > upper_donch_aligned[i]:
+            # Exit: ADX weakens or trend reverses
+            if adx[i] < 20 or plus_di[i] > minus_di[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above daily upper Donchian + volume filter
-            if close[i] > upper_donch_aligned[i] and vol_filter:
+            # Enter long: +DI crosses above -DI, ADX>25, uptrend, volume confirmation
+            if (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1] and 
+                adx[i] > 25 and uptrend and vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below daily lower Donchian + volume filter
-            elif close[i] < lower_donch_aligned[i] and vol_filter:
+            # Enter short: -DI crosses above +DI, ADX>25, downtrend, volume confirmation
+            elif (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1] and 
+                  adx[i] > 25 and downtrend and vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
     
