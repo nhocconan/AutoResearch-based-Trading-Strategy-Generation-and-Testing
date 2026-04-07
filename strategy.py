@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
 # Uses Donchian channel breakouts for trend following, confirmed by 1d EMA trend direction
 # and volume above 20-period average. Includes ATR-based stoploss to limit drawdowns.
-# Designed for moderate trade frequency (target: 20-50 trades/year) to balance signal quality
+# Designed for moderate trade frequency (target: 12-37 trades/year) to balance signal quality
 # and fee efficiency. Works in bull markets via breakouts and in bear markets via
 # short breakdowns with trend filter alignment.
 
-name = "4h_donchian20_1d_ema_volume_v1"
-timeframe = "4h"
+name = "6h_donchian20_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -79,23 +79,23 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
             # Exit on reverse breakout or stoploss (2*ATR above entry)
             if long_breakout or close[i] >= highest_high[i-1] - 2 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
             # Long entry: bullish breakout with uptrend and volume confirmation
             if long_breakout and uptrend and vol_confirm:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             # Short entry: bearish breakout with downtrend and volume confirmation
             elif short_breakout and downtrend and vol_confirm:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
