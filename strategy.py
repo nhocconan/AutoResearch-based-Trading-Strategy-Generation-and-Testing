@@ -1,15 +1,10 @@
-#!/usr/bin/env python3
-# Hypothesis: 4-hour Donchian(20) breakout with 1-week ADX trend filter and volume confirmation
-# Uses shorter Donchian period for timely entries, weekly ADX to filter strong trends, and volume to confirm institutional participation.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Target: 20-40 trades/year to minimize fee drag.
-
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1w_adx_volume_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +18,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly ADX (14-period)
-    high_1w = pd.Series(df_1w['high'].values)
-    low_1w = pd.Series(df_1w['low'].values)
-    close_1w = pd.Series(df_1w['close'].values)
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = abs(high_1w - close_1w.shift(1))
-    tr3 = abs(low_1w - close_1w.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Directional Movement
-    up_move = high_1w.diff()
-    down_move = low_1w.diff() * -1  # Invert to get positive values
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Resistance levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    r2 = pivot + (range_val * 1.1 / 6)
+    r3 = pivot + (range_val * 1.1 / 4)
+    r4 = pivot + (range_val * 1.1 / 2)
     
-    plus_dm = pd.Series(plus_dm)
-    minus_dm = pd.Series(minus_dm)
+    # Support levels
+    s1 = pivot - (range_val * 1.1 / 12)
+    s2 = pivot - (range_val * 1.1 / 6)
+    s3 = pivot - (range_val * 1.1 / 4)
+    s4 = pivot - (range_val * 1.1 / 2)
     
-    # Smoothed DM
-    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr)
-    
-    # DX and ADX
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx.values)
-    strong_trend = adx_aligned > 25  # ADX > 25 indicates strong trend
-    
-    # Calculate Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -74,45 +64,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(1, n):  # Start after first bar
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous period high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous period low
-        
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma[i]
-        
-        # Exit conditions: opposite Donchian break
-        exit_long = close[i] < donchian_low[i-1]
-        exit_short = close[i] > donchian_high[i-1]
-        
         if position == 1:  # Long position
-            # Exit on breakdown or weak trend
-            if exit_long or not strong_trend[i]:
+            # Exit on close below S3 or S4
+            if close[i] < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on breakout or weak trend
-            if exit_short or not strong_trend[i]:
+            # Exit on close above R3 or R4
+            if close[i] > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: upward breakout + strong trend + volume confirmation
-            if breakout_up and strong_trend[i] and vol_confirm:
+            # Volume confirmation
+            vol_confirm = volume[i] > vol_ma[i]
+            
+            # Enter long: price above R3 with volume
+            if close[i] > r3_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: downward breakout + strong trend + volume confirmation
-            elif breakout_down and strong_trend[i] and vol_confirm:
+            # Enter short: price below S3 with volume
+            elif close[i] < s3_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
