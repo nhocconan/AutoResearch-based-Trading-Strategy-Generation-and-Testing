@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-1h RSI Pullback with 4h Trend and Volume Confirmation
-Long: 4h EMA50 > EMA200 (uptrend) + RSI(14) < 30 (oversold) + volume > 1.5x average
-Short: 4h EMA50 < EMA200 (downtrend) + RSI(14) > 70 (overbought) + volume > 1.5x average
-Exit: RSI crosses back to 50 or trend reverses
-Session filter: 08-20 UTC only
-Position size: 0.20
+1d Donchian Breakout with 1w Trend Filter
+Breakout long when price > Donchian(20) high and weekly close > weekly SMA50
+Breakout short when price < Donchian(20) low and weekly close < weekly SMA50
+Exit on opposite Donchian breakout or trend reversal
+Designed to capture trends in both bull and bear markets with controlled risk
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_pullback_4h_trend_volume_v1"
-timeframe = "1h"
+name = "1d_donchian_breakout_1w_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +22,50 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # === 1h RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === Donchian Channel (20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h EMA Trend (50 and 200) ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_200_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
-    
-    # === Volume filter: 1.5x 20-period average ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # === Weekly Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    sma_50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if outside session
-        if not (8 <= hours[i] <= 20):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(sma_50_aligned[i]):
             signals[i] = 0.0
             continue
-            
-        # Skip if not enough data
-        if np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_4h_aligned[i]) or np.isnan(vol_ma[i]):
-            signals[i] = 0.0
-            continue
-            
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
-        uptrend = ema_50_4h_aligned[i] > ema_200_4h_aligned[i]
-        downtrend = ema_50_4h_aligned[i] < ema_200_4h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 or trend turns down
-            if rsi[i] > 50 and rsi[i-1] <= 50:
-                position = 0
-                signals[i] = 0.0
-            elif not uptrend:
+            # Exit: price breaks below Donchian low OR weekly trend turns bearish
+            if close[i] < donch_low[i] or weekly_close[-1] < sma_50[-1]:  # Use last known weekly values
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 or trend turns up
-            if rsi[i] < 50 and rsi[i-1] >= 50:
-                position = 0
-                signals[i] = 0.0
-            elif not downtrend:
+            # Exit: price breaks above Donchian high OR weekly trend turns bullish
+            if close[i] > donch_high[i] or weekly_close[-1] > sma_50[-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            if vol_ok:
-                # Long: uptrend + RSI oversold
-                if uptrend and rsi[i] < 30 and rsi[i-1] >= 30:
-                    position = 1
-                    signals[i] = 0.20
-                # Short: downtrend + RSI overbought
-                elif downtrend and rsi[i] > 70 and rsi[i-1] <= 70:
-                    position = -1
-                    signals[i] = -0.20
+            # Long: price breaks above Donchian high AND weekly bullish
+            if close[i] > donch_high[i] and weekly_close[-1] > sma_50[-1]:
+                position = 1
+                signals[i] = 0.30
+            # Short: price breaks below Donchian low AND weekly bearish
+            elif close[i] < donch_low[i] and weekly_close[-1] < sma_50[-1]:
+                position = -1
+                signals[i] = -0.30
     
     return signals
