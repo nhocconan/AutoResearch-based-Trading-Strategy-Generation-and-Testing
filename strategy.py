@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ADX filter
-# Hypothesis: Donchian breakouts capture trend continuation; volume confirms institutional participation.
-# ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranging conditions.
-# Works in bull via upward breakouts, in bear via downward breakdowns.
-# Target: 15-35 trades/year to minimize fee drag.
-name = "12h_donchian20_1d_volume_adx_v1"
-timeframe = "12h"
+# Strategy: 4h Donchian breakout with daily volume confirmation and ADX filter
+# Hypothesis: Donchian breakouts capture volatility expansion; volume confirms institutional participation; ADX ensures trending conditions.
+# Works in bull via upward breakouts, in bear via downward breakdowns. Avoids choppy markets via ADX filter.
+# Target: 25-40 trades/year to minimize fee drag.
+name = "4h_donchian20_1d_volume_adx_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,12 +22,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume and ADX
+    # Get daily data for volume confirmation and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ADX(14)
+    # Calculate daily 20-period volume moving average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate daily ADX(14) for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -37,35 +41,28 @@ def generate_signals(prices):
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
     # Smoothed values
-    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    # Avoid division by zero
+    plus_di_14 = np.where(tr_14 != 0, 100 * plus_dm_14 / tr_14, 0)
+    minus_di_14 = np.where(tr_14 != 0, 100 * minus_dm_14 / tr_14, 0)
+    dx = np.where((plus_di_14 + minus_di_14) != 0, 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14), 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d = adx
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align daily data to 12h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Daily volume average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate Donchian channels (20-period) on 12h data
+    # Calculate Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -74,16 +71,16 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
+        # Volume confirmation: current 4h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
-        # Trend filter: ADX > 25
-        trend_filter = adx_1d_aligned[i] > 25
+        # ADX filter: trending market (ADX > 25)
+        trending = adx_aligned[i] > 25
         
         if position == 1:  # Long position
             # Exit: price closes below Donchian lower band
@@ -101,11 +98,11 @@ def generate_signals(prices):
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
             # Enter long: price closes above Donchian upper band + volume + trend
-            if close[i] > highest_high[i] and vol_confirm and trend_filter:
+            if (close[i] > highest_high[i]) and vol_confirm and trending:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price closes below Donchian lower band + volume + trend
-            elif close[i] < lowest_low[i] and vol_confirm and trend_filter:
+            elif (close[i] < lowest_low[i]) and vol_confirm and trending:
                 position = -1
                 signals[i] = -0.25
     
