@@ -1,22 +1,21 @@
-# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h_4h1d_trend_volume_v1
-# Hypothesis: Use 4h and 1d timeframes for trend direction, 1h for entry timing with volume confirmation.
-# In both bull and bear markets: trade with the higher timeframe trend when price pulls back to
-# the 4h EMA on the 1h chart with above-average volume. This reduces whipsaws and focuses on
-# higher probability entries. Target: 15-37 trades/year (60-150 over 4 years).
+# Strategy: 6h Daily ATR Expansion with Volume and Trend Filter
+# Hypothesis: ATR expansion (volatility increase) combined with price breakout and volume confirmation
+# captures momentum moves in both bull and bear markets. Uses daily ATR to filter regime.
+# Trend filter (price vs 50 EMA) ensures alignment with intermediate trend.
+# Target: 15-30 trades/year (60-120 over 4 years).
 
-name = "1h_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "6h_daily_atr_expansion_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,56 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for trend
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 20 or len(df_1d) < 50:
+    # Get daily data for ATR calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    # 4h EMA for trend direction (20-period)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate daily ATR(14)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # 1d EMA for longer-term trend (50-period)
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # True Range
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume filter: volume > 1.5x 20-period average on 1h
+    # ATR calculation with smoothing
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # ATR expansion: current ATR > 1.5x ATR from 5 periods ago
+    atr_expansion = np.zeros_like(atr)
+    for i in range(5, len(atr)):
+        if atr[i-5] > 0:
+            atr_expansion[i] = atr[i] > (1.5 * atr[i-5])
+    
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    atr_expansion = np.roll(atr_expansion, 1)
+    if len(atr_expansion) > 1:
+        atr_expansion[0] = atr_expansion[1]
+    else:
+        atr_expansion[0] = False
+    
+    # Align to 6h timeframe
+    atr_expansion_aligned = align_htf_to_ltf(prices, df_daily, atr_expansion)
+    
+    # Trend filter: price vs 50 EMA on 6h
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
+    position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if np.isnan(ema_50[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Determine trend: both 4h and 1d EMA must agree
-        bullish = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
-        bearish = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
-        
-        # Entry conditions with volume confirmation
-        if bullish and vol_filter[i]:
-            signals[i] = 0.20  # Long 20%
-        elif bearish and vol_filter[i]:
-            signals[i] = -0.20  # Short 20%
-        else:
-            signals[i] = 0.0  # Flat
+        if position == 1:  # Long position
+            # Exit: trend reversal or volatility contraction
+            if close[i] < ema_50[i] or not atr_expansion_aligned[i] or not vol_filter[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25  # Maintain long
+        elif position == -1:  # Short position
+            # Exit: trend reversal or volatility contraction
+            if close[i] > ema_50[i] or not atr_expansion_aligned[i] or not vol_filter[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25  # Maintain short
+        else:  # Flat, look for entry
+            # Long entry: price above EMA with ATR expansion and volume
+            if close[i] > ema_50[i] and atr_expansion_aligned[i] and vol_filter[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short entry: price below EMA with ATR expansion and volume
+            elif close[i] < ema_50[i] and atr_expansion_aligned[i] and vol_filter[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
