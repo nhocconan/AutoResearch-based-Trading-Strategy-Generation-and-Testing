@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: Camarilla pivot levels from daily timeframe combined with EMA trend filter 
-and volume confirmation works on 12h timeframe. In ranging markets, fade at S3/R3 with 
-EMA filter; in trending markets, breakout at S4/R4. Volume confirmation reduces false 
-signals. Targets 12-37 trades/year (50-150 over 4 years). Works in both bull and bear 
-markets by adapting to regime via EMA filter.
+4h_atr_breakout_1d_trend_volume_v1
+Hypothesis: ATR-based breakouts above Donchian(20) high/low with 1d EMA trend filter and volume confirmation.
+In trending markets, breakouts with volume and trend alignment capture momentum.
+In ranging markets, the EMA filter reduces false breakouts. Volume confirmation ensures conviction.
+Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-50 trades/year.
+Works in both bull and bear markets by requiring trend alignment (EMA) and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_atr_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,37 +27,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
+    # Daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily OHLC for pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for each day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
     # Daily EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align daily levels to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # ATR(14) for stop loss and breakout threshold
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 20-period volume average on 12h
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 20-period volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,54 +59,44 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or 
-            np.isnan(ema50_12h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(ema50_4h[i]) or np.isnan(atr[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x average volume
         vol_confirm = volume[i] > 1.5 * vol_sma[i]
         
+        # Breakout thresholds with ATR filter
+        breakout_up = donchian_high[i] + 0.5 * atr[i]
+        breakout_down = donchian_low[i] - 0.5 * atr[i]
+        
         if position == 1:  # Long position
-            # Exit: price breaks below S3 (mean reversion fail) OR 
-            # price breaks above R4 and EMA turns down (breakout fail)
-            if close[i] < s3_12h[i] or (close[i] > r4_12h[i] and close[i] < ema50_12h[i]):
+            # Exit: price breaks below Donchian low OR EMA turns down
+            if close[i] < donchian_low[i] or close[i] < ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (mean reversion fail) OR
-            # price breaks below S4 and EMA turns up (breakout fail)
-            if close[i] > r3_12h[i] or (close[i] < s4_12h[i] and close[i] > ema50_12h[i]):
+            # Exit: price breaks above Donchian high OR EMA turns up
+            if close[i] > donchian_high[i] or close[i] > ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion longs at S3 in uptrend (price > EMA)
-            if (close[i] <= s3_12h[i] and 
+            # Long breakout with volume and uptrend
+            if (close[i] > breakout_up and 
                 vol_confirm and 
-                close[i] > ema50_12h[i]):
+                close[i] > ema50_4h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Mean reversion shorts at R3 in downtrend (price < EMA)
-            elif (close[i] >= r3_12h[i] and 
+            # Short breakout with volume and downtrend
+            elif (close[i] < breakout_down and 
                   vol_confirm and 
-                  close[i] < ema50_12h[i]):
-                position = -1
-                signals[i] = -0.25
-            # Breakout longs at R4 in uptrend
-            elif (close[i] >= r4_12h[i] and 
-                  vol_confirm and 
-                  close[i] > ema50_12h[i]):
-                position = 1
-                signals[i] = 0.25
-            # Breakout shorts at S4 in downtrend
-            elif (close[i] <= s4_12h[i] and 
-                  vol_confirm and 
-                  close[i] < ema50_12h[i]):
+                  close[i] < ema50_4h[i]):
                 position = -1
                 signals[i] = -0.25
     
