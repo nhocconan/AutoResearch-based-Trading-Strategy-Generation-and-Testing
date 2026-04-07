@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-# Hypothesis: Donchian breakouts capture strong momentum. The 1w EMA filter ensures
-# we only trade in the direction of the higher timeframe trend, reducing false
-# breakouts. Volume confirmation adds conviction. Works in both bull and bear
-# markets by filtering breakouts with higher timeframe trend.
-# Target: 10-25 trades/year (40-100 total over 4 years).
+# Strategy: 4h Bollinger Band Breakout with 1d Trend Filter and Volume Spike
+# Hypothesis: In volatile crypto markets, price often breaks out of Bollinger Bands
+# during strong momentum moves. Combining with 1d EMA trend filter ensures we
+# only trade in the direction of the higher timeframe trend, while volume spikes
+# confirm institutional participation. This approach works in both bull and bear
+# markets by capturing breakouts from volatility contractions.
+# Target: 20-40 trades/year (80-160 total over 4 years).
 
-name = "1d_donchian20_1w_trend_volume_v1"
-timeframe = "1d"
+name = "4h_bb_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,32 +26,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels (20-period) on daily timeframe
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2) on 4h
+    bb_period = 20
+    bb_std = 2
+    sma_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_bb = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_bb + (bb_std * std_bb)
+    bb_lower = sma_bb - (bb_std * std_bb)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    vol_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(bb_period, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(sma_bb[i]) or np.isnan(std_bb[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -58,27 +63,27 @@ def generate_signals(prices):
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below 20-day low or trend turns bearish
-            if close[i] < low_20[i] or close[i] < ema_20_1w_aligned[i]:
+            # Exit: price crosses below middle band or trend turns bearish
+            if close[i] < sma_bb[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above 20-day high or trend turns bullish
-            if close[i] > high_20[i] or close[i] > ema_20_1w_aligned[i]:
+            # Exit: price crosses above middle band or trend turns bullish
+            if close[i] > sma_bb[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Bullish breakout: price closes above 20-day high in uptrend
-                if close[i] > high_20[i] and close[i] > ema_20_1w_aligned[i]:
+                # Strong breakout above upper band in uptrend
+                if close[i] > bb_upper[i] and close[i] > ema_50_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Bearish breakout: price closes below 20-day low in downtrend
-                elif close[i] < low_20[i] and close[i] < ema_20_1w_aligned[i]:
+                # Strong breakout below lower band in downtrend
+                elif close[i] < bb_lower[i] and close[i] < ema_50_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
