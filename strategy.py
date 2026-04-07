@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Donchian Breakout with Volume and Trend Filter
-# Hypothesis: Breakouts above/below Donchian(20) channels on 4h with volume confirmation
-# and trend filter (price vs 200 EMA) work in both bull and bear markets.
-# In bull markets: buy breakouts above upper band, sell breakouts below lower band.
-# In bear markets: sell breakouts below lower band, buy breakouts above upper band.
-# Target: 20-50 trades/year (80-200 over 4 years).
+# Strategy: 1d Weekly Camarilla Pivot with Volume and Trend Filter
+# Hypothesis: Price reacting at weekly Camarilla pivot levels (S3/S2 for reversal, R3/R4 for breakout)
+# with volume confirmation and trend filter (price vs 40-week EMA) works in both bull and bear markets.
+# In bull markets: buy at S3/S2 reversals, sell at R3/R4 breakouts.
+# In bear markets: sell at R3/R2 reversals, buy at S3/S4 breakouts.
+# Target: 10-30 trades/year (40-120 over 4 years).
 
-name = "4h_daily_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_weekly_camarilla_pivot_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,77 +25,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channel calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    # Get weekly data for Camarilla pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    # Calculate daily Donchian channel (20-period)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Calculate weekly Camarilla pivot levels
+    # Based on previous week's OHLC
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate upper and lower bands
-    high_series = pd.Series(daily_high)
-    low_series = pd.Series(daily_low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate pivot and support/resistance levels
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    range_hl = weekly_high - weekly_low
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    upper = np.roll(upper, 1)
-    lower = np.roll(lower, 1)
+    # Camarilla levels
+    r4 = pivot + (range_hl * 1.1 / 2)
+    r3 = pivot + (range_hl * 1.1 / 4)
+    s3 = pivot - (range_hl * 1.1 / 4)
+    s4 = pivot - (range_hl * 1.1 / 2)
+    
+    # Shift by 1 to use previous week's data (avoid look-ahead)
+    pivot = np.roll(pivot, 1)
+    r4 = np.roll(r4, 1)
+    r3 = np.roll(r3, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
     
     # Handle first element
-    if len(upper) > 1:
-        upper[0] = upper[1]
-        lower[0] = lower[1]
+    if len(pivot) > 1:
+        pivot[0] = pivot[1]
+        r4[0] = r4[1]
+        r3[0] = r3[1]
+        s3[0] = s3[1]
+        s4[0] = s4[1]
     else:
-        upper[0] = 0
-        lower[0] = 0
+        pivot[0] = 0
+        r4[0] = 0
+        r3[0] = 0
+        s3[0] = 0
+        s4[0] = 0
     
-    # Align to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_daily, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_daily, lower)
+    # Align to 1d timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
     
-    # Trend filter: price vs 200 EMA
+    # Trend filter: price vs 40-week EMA (approx 200-day EMA)
     close_series = pd.Series(close)
     ema_200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 2.0x 50-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
+    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
+    vol_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(ema_200[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_200[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: breakout below lower band or trend reversal
-            if (low[i] <= lower_aligned[i]) or (close[i] < ema_200[i]) or not vol_filter[i]:
+            # Exit conditions: reversal at R3 or breakout failure at R4
+            if (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or \
+               (high[i] <= r4_aligned[i] and close[i] < r4_aligned[i] * 0.995) or \
+               close[i] < ema_200[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit conditions: breakout above upper band or trend reversal
-            if (high[i] >= upper_aligned[i]) or (close[i] > ema_200[i]) or not vol_filter[i]:
+            # Exit conditions: reversal at S3 or breakout failure at S4
+            if (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or \
+               (low[i] >= s4_aligned[i] and close[i] > s4_aligned[i] * 1.005) or \
+               close[i] > ema_200[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: breakout above upper band with volume and trend
-            if (high[i] > upper_aligned[i]) and close[i] > ema_200[i] and vol_filter[i]:
+            # Long entry: reversal at S3 or breakout above R4 with volume
+            if ((low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or \
+                (high[i] > r4_aligned[i] and close[i] > r4_aligned[i])) and \
+               close[i] > ema_200[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakout below lower band with volume and trend
-            elif (low[i] < lower_aligned[i]) and close[i] < ema_200[i] and vol_filter[i]:
+            # Short entry: reversal at R3 or breakdown below S4 with volume
+            elif ((high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or \
+                  (low[i] < s4_aligned[i] and close[i] < s4_aligned[i])) and \
+                 close[i] < ema_200[i] and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
