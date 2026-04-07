@@ -1,19 +1,15 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high, 1d close > 1d EMA50 (uptrend), and volume > 1.5x 6h average volume
-# Short when price breaks below Donchian(20) low, 1d close < 1d EMA50 (downtrend), and volume > 1.5x 6h average volume
-# Exit when price returns to Donchian(20) midpoint or trend changes
+# 12h_Donchian20_1d_EMA50_Volume_v1
+# Hypothesis: 12-hour Donchian(20) breakout with daily EMA50 trend filter and volume confirmation
+# Long when price breaks above 20-period high, daily close > daily EMA50 (uptrend), and volume > 1.5x 12h average volume
+# Short when price breaks below 20-period low, daily close < daily EMA50 (downtrend), and volume > 1.5x 12h average volume
+# Exit when price returns to midline or trend changes
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 1d EMA50 for trend filter and 6h volume average for confirmation
+# Uses daily EMA50 for trend filter and 12h volume average for confirmation
 # Target: 75-150 total trades over 4 years (19-38/year)
 
-name = "6h_donchian20_1d_ema50_vol_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1d_EMA50_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,14 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
+    # Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # 1d data for trend filter
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -43,7 +39,7 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 6h volume average for confirmation
+    # 12h volume average for confirmation
     volume_series = pd.Series(volume)
     volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -77,8 +73,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to Donchian midpoint or trend changes
-            elif close[i] < donchian_mid[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: price returns to midline or trend changes
+            elif close[i] <= donchian_mid[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -90,8 +86,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to Donchian midpoint or trend changes
-            elif close[i] > donchian_mid[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: price returns to midline or trend changes
+            elif close[i] >= donchian_mid[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -99,19 +95,19 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with Donchian breakout, trend alignment, and volume confirmation
-            # Bullish breakout: price breaks above Donchian(20) high
+            # Bullish breakout: price breaks above 20-period high
             bullish_break = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
-            # Bearish breakout: price breaks below Donchian(20) low
+            # Bearish breakout: price breaks below 20-period low
             bearish_break = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
             
-            # Long: bullish breakout, 1d uptrend, volume spike
+            # Long: bullish breakout, daily uptrend, volume spike
             if (bullish_break and
                 close[i] > ema50_1d_aligned[i] and
                 volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: bearish breakout, 1d downtrend, volume spike
+            # Short: bearish breakout, daily downtrend, volume spike
             elif (bearish_break and
                   close[i] < ema50_1d_aligned[i] and
                   volume[i] > 1.5 * volume_ma[i]):
@@ -120,5 +116,3 @@ def generate_signals(prices):
                 entry_price = close[i]
     
     return signals
-
-</think>
