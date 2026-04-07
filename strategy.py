@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Volume Confirmation and ADX Trend Filter
-Long when price breaks above Donchian(20) high + volume spike + ADX>25
-Short when price breaks below Donchian(20) low + volume spike + ADX>25
-Exit when price crosses opposite Donchian boundary or ADX<20 (range)
-Target: 20-40 trades/year per symbol with strong trend capture
+6h Keltner Channel Breakout + 12h ADX Trend + Volume Confirmation
+Long when price breaks above upper KC with ADX>25 and volume spike; short when breaks below lower KC.
+Exit when price crosses middle line (EMA20). Uses 12h ADX for trend strength filter.
+Designed to work in both bull (breakouts) and bear (mean reversion via exits) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_volume_adx_v3"
-timeframe = "4h"
+name = "6h_keltner_breakout_12h_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,78 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Keltner Channel (20, 2) ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
+    upper_kc = ema20 + 2 * atr
+    lower_kc = ema20 - 2 * atr
     
-    # === ADX Calculation (14-period) ===
+    # === Volume Spike Detector ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # === 12h ADX Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
     # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr = np.concatenate([[np.nan], tr])  # align indices
     
     # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
     # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Directional Indicators
+    # DI and DX
     plus_di = 100 * plus_dm_14 / tr_14
     minus_di = 100 * minus_dm_14 / tr_14
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # === 1d Volume Spike Detector ===
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma_1d * 1.5)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if any NaN values
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if np.isnan(ema20[i]) or np.isnan(upper_kc[i]) or np.isnan(lower_kc[i]) or np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian OR ADX weakens (<20)
-            if close[i] < low_20[i] or adx[i] < 20:
+            # Exit: price crosses below EMA20 (middle line)
+            if close[i] < ema20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian OR ADX weakens (<20)
-            if close[i] > high_20[i] or adx[i] < 20:
+            # Exit: price crosses above EMA20 (middle line)
+            if close[i] > ema20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: break above upper Donchian + volume spike + strong trend (ADX>25)
-            if (close[i] > high_20[i] and 
-                vol_spike_1d_aligned[i] and 
-                adx[i] > 25):
+            # Long: break above upper KC + ADX>25 + volume spike
+            if (close[i] > upper_kc[i] and 
+                adx_aligned[i] > 25 and 
+                vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: break below lower Donchian + volume spike + strong trend (ADX>25)
-            elif (close[i] < low_20[i] and 
-                  vol_spike_1d_aligned[i] and 
-                  adx[i] > 25):
+            # Short: break below lower KC + ADX>25 + volume spike
+            elif (close[i] < lower_kc[i] and 
+                  adx_aligned[i] > 25 and 
+                  vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
     
