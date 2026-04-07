@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_donchian_20_12h_trend_volume_v2
-Hypothesis: On 4-hour timeframe, use 20-period Donchian channel breakouts for entry, filtered by 12-hour EMA trend and volume confirmation. This strategy captures medium-term trends with institutional participation, using a simple, robust structure to avoid overtrading. Target: 20-50 trades/year per symbol to minimize fee drag while performing in both bull and bear regimes.
+1h_rsi_momentum_4h1d_trend_volume_v1
+Hypothesis: On 1-hour timeframe, use RSI(14) momentum signals filtered by 4h EMA(50) trend and 1d volume confirmation. RSI > 60 with bullish 4h trend = long, RSI < 40 with bearish 4h trend = short. Volume must be above average to confirm institutional participation. This captures momentum in trending markets while avoiding chop. Designed for 60-150 total trades over 4 years (~15-37/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_12h_trend_volume_v2"
-timeframe = "4h"
+name = "1h_rsi_momentum_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,71 +18,81 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(20) for trend filter
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align 12h EMA(20) to 4h timeframe
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 20-period Donchian channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d volume MA(20)
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Volume filter: 20-period average on 4h timeframe
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate RSI(14) on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(max(50, 20), n):
         # Skip if data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current 1h volume > 1.5x daily average volume (scaled)
+        # Scale daily volume to hourly: divide by 24
+        vol_threshold = vol_ma_1d_aligned[i] / 24.0 * 1.5
+        vol_ok = volume[i] > vol_threshold
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low (stop) or reaches Donchian high (take profit)
-            if low[i] <= donchian_low[i]:
+            # Exit: RSI < 50 (momentum fading) or trend change
+            if rsi_values[i] < 50 or ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high (stop) or reaches Donchian low (take profit)
-            if high[i] >= donchian_high[i]:
+            # Exit: RSI > 50 (momentum fading) or trend change
+            if rsi_values[i] > 50 or ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             if vol_ok:
-                # Long breakout: price breaks above Donchian high with bullish trend
-                if high[i] >= donchian_high[i] and ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1]:
+                # Long: RSI > 60 with bullish 4h trend
+                if rsi_values[i] > 60 and ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]:
                     position = 1
-                    signals[i] = 0.25
-                # Short breakdown: price breaks below Donchian low with bearish trend
-                elif low[i] <= donchian_low[i] and ema_20_12h_aligned[i] < ema_20_12h_aligned[i-1]:
+                    signals[i] = 0.20
+                # Short: RSI < 40 with bearish 4h trend
+                elif rsi_values[i] < 40 and ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
