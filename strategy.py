@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_atr_volume_v1
-Hypothesis: Camarilla pivot levels from daily chart provide key support/resistance.
-Price often reverses or breaks from these levels with volume confirmation.
-In trending markets, breakouts through S3/R3 with volume continue the trend.
-In ranging markets, reversals from S1/R1, S2/R2 with volume offer mean reversion.
-Trades both breakouts and reversals based on price action at Camarilla levels.
-Uses ATR for volatility filtering and position sizing.
-Target: 20-40 trades/year (80-160 total over 4 years).
+12h_camarilla_pivot_1d_volume_v3
+Hypothesis: Daily Camarilla pivot levels (S3/R3, S4/R4) act as strong support/resistance zones.
+Price respects these levels with volume confirmation, offering mean-reversion bounces in range
+and breakout continuation in trends. Uses 12h candles for lower frequency to reduce trade count
+and avoid fee drag. Target: 15-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_atr_volume_v1"
-timeframe = "12h"
+name = "12h_camarilla_pivot_1d_volume_v3"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +20,6 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
-    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -34,98 +30,83 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate Camarilla levels from previous day
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
     prev_close = df_1d['close'].values
     
-    H4 = prev_close + 1.5 * (prev_high - prev_low)
-    H3 = prev_close + 1.0 * (prev_high - prev_low)
-    H2 = prev_close + 0.5 * (prev_high - prev_low)
-    H1 = prev_close + 0.25 * (prev_high - prev_low)
-    L1 = prev_close - 0.25 * (prev_high - prev_low)
-    L2 = prev_close - 0.5 * (prev_high - prev_low)
-    L3 = prev_close - 1.0 * (prev_high - prev_low)
-    L4 = prev_close - 1.5 * (prev_high - prev_low)
+    R4 = prev_close + 1.5 * (prev_high - prev_low)
+    R3 = prev_close + 1.0 * (prev_high - prev_low)
+    R2 = prev_close + 0.5 * (prev_high - prev_low)
+    R1 = prev_close + 0.25 * (prev_high - prev_low)
+    S1 = prev_close - 0.25 * (prev_high - prev_low)
+    S2 = prev_close - 0.5 * (prev_high - prev_low)
+    S3 = prev_close - 1.0 * (prev_high - prev_low)
+    S4 = prev_close - 1.5 * (prev_high - prev_low)
     
-    # Align all levels to 12h timeframe (shifted by 1 day for lookback)
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    H2_12h = align_htf_to_ltf(prices, df_1d, H2)
-    H1_12h = align_htf_to_ltf(prices, df_1d, H1)
-    L1_12h = align_htf_to_ltf(prices, df_1d, L1)
-    L2_12h = align_htf_to_ltf(prices, df_1d, L2)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # ATR for volatility filter and position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_series = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    atr = atr_series.values
+    # Align to 12h timeframe (shifted by 1 day for lookback)
+    R4_12h = align_htf_to_ltf(prices, df_1d, R4)
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    R2_12h = align_htf_to_ltf(prices, df_1d, R2)
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    S2_12h = align_htf_to_ltf(prices, df_1d, S2)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Volatility filter: ATR > 0.5 * 50-period ATR average (avoid choppy low-vol periods)
-    atr_ma_series = pd.Series(atr).rolling(window=50, min_periods=50).mean()
-    atr_ma = atr_ma_series.values
-    vol_filter = atr > (0.5 * atr_ma)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if any data is not ready
-        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+    for i in range(20, n):
+        # Skip if any level or volume MA is not ready
+        if (np.isnan(R4_12h[i]) or np.isnan(R3_12h[i]) or np.isnan(R2_12h[i]) or np.isnan(R1_12h[i]) or
+            np.isnan(S1_12h[i]) or np.isnan(S2_12h[i]) or np.isnan(S3_12h[i]) or np.isnan(S4_12h[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Apply volatility and volume filters
-        if not (volume_spike[i] and vol_filter[i]):
-            if position != 0:
-                # Exit if filters fail
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below L2 (strong support broken)
-            if close[i] < L2_12h[i]:
+            # Exit: price closes below S2 (strong support broken)
+            if close[i] < S2_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H2 (strong resistance broken)
-            if close[i] > H2_12h[i]:
+            # Exit: price closes above R2 (strong resistance broken)
+            if close[i] > R2_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above H3 with volume (bullish breakout)
-            # OR price bounces from L3/L4 with volume (bullish reversal)
-            long_breakout = (close[i] > H3_12h[i] and close[i-1] <= H3_12h[i-1])
-            long_bounce = ((close[i] > L3_12h[i] and close[i-1] <= L3_12h[i-1]) or 
-                          (close[i] > L4_12h[i] and close[i-1] <= L4_12h[i-1]))
-            if (long_breakout or long_bounce) and close[i] < H2_12h[i]:
+            # Volume must be present for any entry
+            if not volume_spike[i]:
+                signals[i] = 0.0
+                continue
+                
+            # Long entry: price bounces from S3/S4 with volume (bullish reversal)
+            # OR breaks above R3 with volume (bullish breakout)
+            long_breakout = (close[i] > R3_12h[i] and close[i-1] <= R3_12h[i-1])
+            long_bounce_s3 = (close[i] > S3_12h[i] and close[i-1] <= S3_12h[i-1])
+            long_bounce_s4 = (close[i] > S4_12h[i] and close[i-1] <= S4_12h[i-1])
+            
+            if (long_breakout or long_bounce_s3 or long_bounce_s4) and close[i] < R2_12h[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below L3 with volume (bearish breakout)
-            # OR price rejects from H3/H4 with volume (bearish reversal)
-            elif ((close[i] < L3_12h[i] and close[i-1] >= L3_12h[i-1]) or  # Breakdown below L3
-                  ((close[i] < H3_12h[i] and close[i-1] >= H3_12h[i-1]) or  # Rejection from H3
-                   (close[i] < H4_12h[i] and close[i-1] >= H4_12h[i-1])) and  # Rejection from H4
-                  close[i] > L2_12h[i]):  # But not below strong support
+            # Short entry: price rejects from R3/R4 with volume (bearish reversal)
+            # OR breaks below S3 with volume (bearish breakdown)
+            short_breakdown = (close[i] < S3_12h[i] and close[i-1] >= S3_12h[i-1])
+            short_reject_r3 = (close[i] < R3_12h[i] and close[i-1] >= R3_12h[i-1])
+            short_reject_r4 = (close[i] < R4_12h[i] and close[i-1] >= R4_12h[i-1])
+            
+            if (short_breakdown or short_reject_r3 or short_reject_r4) and close[i] > S2_12h[i]:
                 position = -1
                 signals[i] = -0.25
     
