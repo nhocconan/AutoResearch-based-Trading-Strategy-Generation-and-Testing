@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend and Volume Confirmation.
+4h Donchian Breakout with 1d Trend and Volume Confirmation.
 Long when price breaks above Donchian(20) high with 1d uptrend and volume confirmation.
 Short when price breaks below Donchian(20) low with 1d downtrend and volume confirmation.
 Volume must be above 20-period average to confirm breakout.
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     one_d_ema = pd.Series(one_d_close).ewm(span=20, adjust=False, min_periods=20).mean().values
     one_d_ema_aligned = align_htf_to_ltf(prices, df_1d, one_d_ema)
     
-    # === 12H DONCHIAN CHANNEL (LTF) ===
+    # === 4H DONCHIAN CHANNEL (LTF) ===
     donch_length = 20
     donch_high = pd.Series(high).rolling(window=donch_length, min_periods=donch_length).max().values
     donch_low = pd.Series(low).rolling(window=donch_length, min_periods=donch_length).min().values
