@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_trend_volume_v3
-Hypothesis: Use Camarilla pivot levels from daily timeframe with a 4-hour EMA trend filter. 
-In uptrends (price > EMA20), go long at S3 (support) and exit at R3 (resistance). 
-In downtrends (price < EMA20), go short at R3 (resistance) and exit at S3 (support). 
-Volume confirmation filters out low-probability signals. 
-This mean-reversion approach works in both bull and bear markets by adapting to trend.
+1d_donchian_1w_trend_volume_v1
+Hypothesis: Daily Donchian(20) breakouts with weekly trend filter (EMA50) and volume confirmation.
+In trending markets (price > weekly EMA50), buy breakouts above upper band; in ranging markets,
+fade at lower band with volume confirmation. Works in both bull and bear by adapting to weekly trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_trend_volume_v3"
-timeframe = "4h"
+name = "1d_donchian_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +25,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily OHLC for pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema50_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Daily EMA20 for trend filter
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
+    # Daily Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align daily levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # 20-period volume average on 4h
+    # 20-period volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,8 +48,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema20_4h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(ema50_1d[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
@@ -66,31 +57,45 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches S3 resistance (mean reversion complete)
-            if close[i] >= s3_4h[i]:
+            # Exit: price crosses below weekly EMA50 (trend change)
+            if close[i] < ema50_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price reaches R3 support (mean reversion complete)
-            if close[i] <= r3_4h[i]:
+            # Exit: price crosses above weekly EMA50 (trend change)
+            if close[i] > ema50_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion long at S3 in uptrend (price > EMA)
-            if (close[i] <= s3_4h[i] and 
+            # In uptrend (price > weekly EMA50): buy breakout above upper band
+            if (close[i] > high_max[i] and 
                 vol_confirm and 
-                close[i] > ema20_4h[i]):
+                close[i] > ema50_1d[i]):
                 position = 1
                 signals[i] = 0.25
-            # Mean reversion short at R3 in downtrend (price < EMA)
-            elif (close[i] >= r3_4h[i] and 
+            # In downtrend (price < weekly EMA50): sell breakout below lower band
+            elif (close[i] < low_min[i] and 
                   vol_confirm and 
-                  close[i] < ema20_4h[i]):
+                  close[i] < ema50_1d[i]):
                 position = -1
                 signals[i] = -0.25
+            # In ranging market (near weekly EMA50): fade at Donchian bands with volume
+            elif (abs(close[i] - ema50_1d[i]) < 0.02 * ema50_1d[i]):  # Within 2% of weekly EMA
+                # Fade lower band (long) with volume confirmation
+                if (close[i] <= low_min[i] and 
+                    vol_confirm and 
+                    close[i] > ema50_1d[i]):
+                    position = 1
+                    signals[i] = 0.25
+                # Fade upper band (short) with volume confirmation
+                elif (close[i] >= high_max[i] and 
+                      vol_confirm and 
+                      close[i] < ema50_1d[i]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
