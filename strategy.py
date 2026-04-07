@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1w volatility regime filter
-# Uses Donchian(20) breakout for trend entry, confirmed by 1d volume spike and filtered by 1w ATR-based volatility regime.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at channel extremes.
+# Hypothesis: 6h Donchian(20) breakout with 1d pivot level confirmation and volume spike
+# Uses 6h Donchian channels for breakout direction, 1d Camarilla pivot levels (R3/S3) for
+# institutional support/resistance, and volume spike (>2x 20-period average) for confirmation.
+# Designed for medium frequency (target: 50-150 total trades over 4 years) with discrete
+# position sizing to minimize fee drag. Works in trending markets via breakouts and
+# in ranging markets via fade at extreme pivot levels.
 
-name = "4h_donchian20_1d_volume_1w_vol_regime_v1"
-timeframe = "4h"
+name = "6h_donchian20_daily_pivot_volume_v5"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,76 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for volume confirmation
+    # 1d data for pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly data for volatility regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 6h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily volume spike (volume > 1.5 * 20-day average)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (1.5 * vol_ma_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Camarilla levels
+    range_1d = high_1d - low_1d
+    r3_1d = pivot_1d + (range_1d * 1.1 / 2)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 2)
+    r4_1d = pivot_1d + (range_1d * 1.1)
+    s4_1d = pivot_1d - (range_1d * 1.1)
     
-    # Weekly ATR-based volatility regime (low volatility = trending, high volatility = range)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Align 1d pivot levels to 6h
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_1w = pd.Series(atr_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    vol_ratio_1w = atr_1w / atr_ma_1w
-    vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
-    
-    # Volatility regime: low vol (ratio < 0.8) = trend following, high vol (ratio > 1.2) = mean reversion
-    low_vol = vol_ratio_1w_aligned < 0.8
-    high_vol = vol_ratio_1w_aligned > 1.2
+    # Volume spike detection (2x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Base position size
-        base_size = 0.25
+        # Breakout conditions
+        bullish_breakout = close[i] > highest_high[i] and volume_spike[i]
+        bearish_breakout = close[i] < lowest_low[i] and volume_spike[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donch_high[i-1]  # break above previous high
-        breakout_down = close[i] < donch_low[i-1]  # break below previous low
+        # Fade conditions at extreme pivot levels
+        near_r3 = abs(close[i] - r3_1d_aligned[i]) / close[i] < 0.005  # within 0.5%
+        near_s3 = abs(close[i] - s3_1d_aligned[i]) / close[i] < 0.005  # within 0.5%
+        at_r4 = close[i] >= r4_1d_aligned[i]
+        at_s4 = close[i] <= s4_1d_aligned[i]
         
-        # Low volatility regime: trend following
-        if low_vol[i]:
-            if breakout_up and vol_spike_1d_aligned[i]:
-                signals[i] = base_size  # long
-            elif breakout_down and vol_spike_1d_aligned[i]:
-                signals[i] = -base_size  # short
-        
-        # High volatility regime: mean reversion at channel extremes
-        elif high_vol[i]:
-            # Near upper channel: short
-            if close[i] >= 0.95 * donch_high[i]:
-                signals[i] = -base_size
-            # Near lower channel: long
-            elif close[i] <= 1.05 * donch_low[i]:
-                signals[i] = base_size
+        # Long: bullish breakout OR fade from S3/S4
+        if bullish_breakout or near_s3 or at_s4:
+            signals[i] = 0.25
+        # Short: bearish breakout OR fade from R3/R4
+        elif bearish_breakout or near_r3 or at_r4:
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
