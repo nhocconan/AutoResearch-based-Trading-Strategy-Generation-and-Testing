@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_keltner_channel_1w_trend_volume_v1
-Hypothesis: Keltner Channel breakouts with weekly trend alignment and volume confirmation capture
-institutional moves while avoiding false breakouts in ranging markets. Weekly trend filter ensures
-trading with the higher-timeframe momentum, reducing whipsaws. Targets 12-37 trades/year by
-requiring confluence of upper/lower band break, volume spike (>1.5x 20-period average), and
-weekly EMA trend alignment. Works in bull markets (breakouts continue) and bear markets
-(breakdowns continue) by following the weekly trend.
+12h_camarilla_pivot_1d_trend_volume_v3
+Hypothesis: Trading breakouts of Camarilla H4/L4 levels with volume confirmation and daily trend alignment captures institutional momentum. Uses tighter entry conditions (volume > 2x average, tighter stops) to reduce trade frequency and avoid overtrading. Works in bull markets (buying breakouts) and bear markets (selling breakdowns) by aligning with daily trend. Targets 12-37 trades/year by requiring confluence of breakout, volume surge, and trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_channel_1w_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,30 +23,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly OHLC for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # Keltner Channel (20, 2.0) on 6h timeframe
-    # Middle line = EMA20
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Average True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Upper and lower bands
-    upper_band = ema20 + 2.0 * atr
-    lower_band = ema20 - 2.0 * atr
+    # Calculate range
+    daily_range = prev_high - prev_low
+    
+    # Camarilla levels
+    camarilla_h4 = prev_close + 1.5 * daily_range
+    camarilla_l4 = prev_close - 1.5 * daily_range
+    camarilla_h3 = prev_close + 1.0 * daily_range
+    camarilla_l3 = prev_close - 1.0 * daily_range
+    
+    # Align to 12h timeframe (shift by 1 day for completed bars only)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(prev_close).ewm(span=50, adjust=False).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # 20-period volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,42 +60,41 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema50_6h[i]) or 
-            np.isnan(ema20[i]) or 
-            np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or 
+        if (np.isnan(ema50_12h[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or 
             np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 2.0x average volume (stricter)
+        vol_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below middle line (EMA20) OR trend turns down
-            if close[i] < ema20[i] or close[i] < ema50_6h[i]:
+            # Exit: price breaks below Camarilla L3 OR trend turns down
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above middle line (EMA20) OR trend turns up
-            if close[i] > ema20[i] or close[i] > ema50_6h[i]:
+            # Exit: price breaks above Camarilla H3 OR trend turns up
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above upper band + volume + weekly uptrend
-            if (close[i] > upper_band[i] and 
+            # Long: price breaks above Camarilla H4 + volume + uptrend
+            if (close[i] > camarilla_h4_aligned[i] and 
                 vol_confirm and 
-                close[i] > ema50_6h[i]):
+                close[i] > ema50_12h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below lower band + volume + weekly downtrend
-            elif (close[i] < lower_band[i] and 
+            # Short: price breaks below Camarilla L4 + volume + downtrend
+            elif (close[i] < camarilla_l4_aligned[i] and 
                   vol_confirm and 
-                  close[i] < ema50_6h[i]):
+                  close[i] < ema50_12h[i]):
                 position = -1
                 signals[i] = -0.25
     
