@@ -3,47 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI mean reversion with 4-hour trend filter and session filter (08-20 UTC)
-# Long when RSI(14) < 30 + 4-hour EMA(50) up + session active
-# Short when RSI(14) > 70 + 4-hour EMA(50) down + session active
-# Exit when RSI crosses 50 in opposite direction
-# Stoploss at 2.5 * ATR(14)
-# Position size: 0.20 (20% of capital)
-# Uses 4-hour EMA for trend direction and session filter to avoid low-volatility periods
-# Target: 100-180 total trades over 4 years (25-45/year)
+# Hypothesis: 6-hour Donchian(20) breakout with 1-week pivot direction and 1-day volume confirmation
+# Long when price breaks above 20-period Donchian high + weekly pivot direction bullish + volume > 1.5x 20-day average
+# Short when price breaks below 20-period Donchian low + weekly pivot direction bearish + volume > 1.5x 20-day average
+# Exit when price crosses 5-period EMA in opposite direction
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses 1-week pivot for trend direction (resists whipsaw) and 1-day volume for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1h_rsi14_4h_ema50_session_v1"
-timeframe = "1h"
+name = "6h_donchian20_1w_pivot_1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4-hour data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1-week data for pivot trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(50) for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1-day data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # RSI(14) on 1-hour
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly pivot points (using weekly OHLC)
+    # Pivot = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    
+    # Pivot trend: bullish if close > R1, bearish if close < S1
+    pivot_bullish = close_1w > r1_1w
+    pivot_bearish = close_1w < s1_1w
+    
+    # Align pivot signals to 6h timeframe
+    pivot_bullish_aligned = align_htf_to_ltf(prices, df_1w, pivot_bullish.astype(float))
+    pivot_bearish_aligned = align_htf_to_ltf(prices, df_1w, pivot_bearish.astype(float))
+    
+    # Calculate 1-day volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    
+    # 20-period Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 5-period EMA for exit
+    ema_5 = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -54,68 +84,60 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_active = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr[i]) or not session_active[i]):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(pivot_bullish_aligned[i]) or 
+            np.isnan(pivot_bearish_aligned[i]) or np.isnan(ema_5[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: RSI crosses above 50
-            elif rsi[i] > 50:
+            # Exit: price crosses below 5-period EMA
+            elif close[i] < ema_5[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: RSI crosses below 50
-            elif rsi[i] < 50:
+            # Exit: price crosses above 5-period EMA
+            elif close[i] > ema_5[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: RSI extreme + 4-hour EMA trend + session
-            # RSI oversold/overbought
-            rsi_oversold = rsi[i] < 30
-            rsi_overbought = rsi[i] > 70
+            # Look for entries: Donchian breakout with pivot direction and volume confirmation
+            # Volume filter: volume > 1.5x 20-day average
+            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
             
-            # 4-hour EMA trend: slope approximation
-            ema_up = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] if i > 0 else False
-            ema_down = ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] if i > 0 else False
-            
-            # Long: RSI oversold + 4-hour EMA up + session
-            if rsi_oversold and ema_up and session_active[i]:
-                signals[i] = 0.20
+            # Long: price breaks above Donchian high + weekly pivot bullish + volume filter
+            if close[i] > highest_high[i] and pivot_bullish_aligned[i] > 0.5 and volume_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: RSI overbought + 4-hour EMA down + session
-            elif rsi_overbought and ema_down and session_active[i]:
-                signals[i] = -0.20
+            # Short: price breaks below Donchian low + weekly pivot bearish + volume filter
+            elif close[i] < lowest_low[i] and pivot_bearish_aligned[i] > 0.5 and volume_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
