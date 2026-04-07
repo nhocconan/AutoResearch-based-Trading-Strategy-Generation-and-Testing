@@ -1,80 +1,74 @@
 #!/usr/bin/env python3
 """
-1d_weekly_pivot_reversion_v2
-Hypothesis: Weekly pivot levels act as strong support/resistance on 1d timeframe. Price tends to revert from R1/S1 towards pivot point (PP). In ranging markets (2025-2026), this mean reversion works well. Uses weekly PP, R1, S1 as reference. Enter long when price crosses above S1 with bullish momentum (close > open) and weekly trend up (price > weekly MA50). Enter short when price crosses below R1 with bearish momentum (close < open) and weekly trend down (price < weekly MA50). Weekly trend filter prevents counter-trend trades. Targets 15-25 trades/year to minimize fee drag. Works in bull via trend filter and in bear via mean reversion from overextended levels.
+12h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, buy when price breaks above 20-period Donchian high with 1d uptrend (EMA50 > EMA200) and volume confirmation; sell when price breaks below 20-period Donchian low with 1d downtrend (EMA50 < EMA200) and volume confirmation. Exit on opposite Donchian breakout or trend reversal. This strategy captures medium-term trends with institutional volume confirmation, working in both bull and bear markets by following the 1d trend. Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_pivot_reversion_v2"
-timeframe = "1d"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Calculate weekly pivot points (PP, R1, S1) from weekly OHLC
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        return np.zeros(n)
+    # 1d trend data (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly high, low, close
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate EMAs on 1d data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
     
-    # Pivot point calculation: PP = (H + L + C) / 3
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    # R1 = 2 * PP - L
-    r1 = 2 * pp - weekly_low
-    # S1 = 2 * PP - H
-    s1 = 2 * pp - weekly_high
+    # Align to 12h timeframe (with shift(1) for completed bars only)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align weekly levels to daily (with shift(1) for completed weekly bar only)
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    # 1d trend: True if EMA50 > EMA200 (uptrend), False if EMA50 < EMA200 (downtrend)
+    trend_up = ema50_1d_aligned > ema200_1d_aligned
+    trend_down = ema50_1d_aligned < ema200_1d_aligned
     
-    # Weekly trend filter: 50-period MA on weekly close
-    weekly_ma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    weekly_ma50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ma50)
+    # Donchian channels (20-period)
+    period = 20
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    # Volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Need 50 periods for weekly MA50
+    for i in range(period, n):
         # Skip if required data not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(weekly_ma50_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish/bearish momentum from daily candle
-        bullish_momentum = close[i] > open_price[i]
-        bearish_momentum = close[i] < open_price[i]
-        
-        # Weekly trend direction
-        weekly_uptrend = close[i] > weekly_ma50_aligned[i]
-        weekly_downtrend = close[i] < weekly_ma50_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price crosses below pivot point (mean reversion complete)
-            if close[i] < pp_aligned[i]:
+            # Exit if price breaks below Donchian low
+            if close[i] < lowest_low[i]:
                 exit_long = True
-            # Exit if weekly trend turns down
-            elif weekly_downtrend:
+            # Exit if 1d trend turns down
+            elif trend_down[i]:
                 exit_long = True
             
             if exit_long:
@@ -86,11 +80,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price crosses above pivot point (mean reversion complete)
-            if close[i] > pp_aligned[i]:
+            # Exit if price breaks above Donchian high
+            if close[i] > highest_high[i]:
                 exit_short = True
-            # Exit if weekly trend turns up
-            elif weekly_uptrend:
+            # Exit if 1d trend turns up
+            elif trend_up[i]:
                 exit_short = True
             
             if exit_short:
@@ -99,16 +93,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price crosses above S1 with bullish momentum and weekly uptrend
+            # Long entry conditions
             long_entry = False
-            if (close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1] and
-                bullish_momentum and weekly_uptrend):
+            # Price breaks above Donchian high, 1d uptrend, and volume confirmation
+            if close[i] > highest_high[i] and trend_up[i] and vol_confirm:
                 long_entry = True
             
-            # Short entry: price crosses below R1 with bearish momentum and weekly downtrend
+            # Short entry conditions
             short_entry = False
-            if (close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1] and
-                bearish_momentum and weekly_downtrend):
+            # Price breaks below Donchian low, 1d downtrend, and volume confirmation
+            if close[i] < lowest_low[i] and trend_down[i] and vol_confirm:
                 short_entry = True
             
             if long_entry:
