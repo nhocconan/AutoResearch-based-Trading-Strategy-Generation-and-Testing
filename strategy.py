@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(15) breakout with 1-day EMA200 trend filter and volume confirmation
-# Long when price breaks above 1d Donchian upper band, 12h close > 1d EMA200 (uptrend), and volume > 1.5x 1d average volume
-# Short when price breaks below 1d Donchian lower band, 12h close < 1d EMA200 (downtrend), and volume > 1.5x 1d average volume
-# Exit when trend reverses (12h close crosses EMA200) or opposite breakout occurs
-# Stoploss at 2.5 * ATR(14)
+# Hypothesis: 4-hour Camarilla pivot levels from daily high-low-close + volume confirmation + volatility filter
+# Long when price closes above Camarilla H4 level (resistance) with volume > 1.5x average and ATR(14) > 0.5*ATR(50)
+# Short when price closes below Camarilla L4 level (support) with volume > 1.5x average and ATR(14) > 0.5*ATR(50)
+# Exit when price touches Camarilla H3/L3 levels or volatility drops below threshold
 # Position size: 0.25 (25% of capital)
-# Target: 75-150 total trades over 4 years (19-38/year)
+# Uses daily Camarilla levels for structure, volume for confirmation, ATR ratio for volatility regime filter
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "12h_donchian15_1d_ema200_vol_v1"
-timeframe = "12h"
+name = "4h_camarilla_daily_vol_volat_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -26,97 +26,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels and EMA200
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Daily data for Camarilla pivot levels
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # 1d Donchian(15) channels
-    high_series = pd.Series(high_1d)
-    donchian_upper = high_series.rolling(window=15, min_periods=15).max().values
-    low_series = pd.Series(low_1d)
-    donchian_lower = low_series.rolling(window=15, min_periods=15).min().values
+    # Camarilla levels: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    range_daily = high_daily - low_daily
+    camarilla_h4 = close_daily + 1.1 * range_daily / 2
+    camarilla_l4 = close_daily - 1.1 * range_daily / 2
+    camarilla_h3 = close_daily + 1.1 * range_daily / 4
+    camarilla_l3 = close_daily - 1.1 * range_daily / 4
     
-    # 1d EMA200 for trend filter
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    # Align Camarilla levels to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l3)
     
-    # 1d volume average for confirmation
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=15, min_periods=15).mean().values
+    # 4h volume average for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    
-    # ATR(14) for stoploss
+    # ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Volatility filter: require ATR(14) > 0.5 * ATR(50) to avoid low-volatility chop
+        vol_filter = atr14[i] > 0.5 * atr50[i]
+        
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: trend reverses (price below EMA200) or breaks below lower band
-            elif close[i] < ema_200_aligned[i] or close[i] < lower_aligned[i]:
+            # Exit: price touches H3 level or volatility drops
+            if close[i] <= h3_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: trend reverses (price above EMA200) or breaks above upper band
-            elif close[i] > ema_200_aligned[i] or close[i] > upper_aligned[i]:
+            # Exit: price touches L3 level or volatility drops
+            if close[i] >= l3_aligned[i] or not vol_filter:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend alignment
-            # Long: price breaks above upper band, price above EMA200 (uptrend), volume spike
-            if (close[i] > upper_aligned[i] and
-                close[i] > ema_200_aligned[i] and
-                volume[i] > 1.5 * volume_ma_1d_aligned[i]):
+            # Look for entries with volume confirmation and volatility filter
+            # Long: price closes above H4 level, volume > 1.5x average, volatility sufficient
+            if (close[i] > h4_aligned[i] and
+                volume[i] > 1.5 * volume_ma[i] and
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower band, price below EMA200 (downtrend), volume spike
-            elif (close[i] < lower_aligned[i] and
-                  close[i] < ema_200_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_1d_aligned[i]):
+            # Short: price closes below L4 level, volume > 1.5x average, volatility sufficient
+            elif (close[i] < l4_aligned[i] and
+                  volume[i] > 1.5 * volume_ma[i] and
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
