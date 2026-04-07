@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-1h_price_position_4h1d_trend_volume_v1
-Hypothesis: Use price position within 4h ATR-based channel for mean reversion in ranging markets,
-filtered by 1d trend direction. Enter when price reaches channel extremes (oversold/overbought)
-with volume confirmation, following the 1d trend. Works in bull/bear by aligning with higher timeframe trend.
-Target: 15-35 trades/year per symbol.
+12h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: Donchian(20) breakout on 12h with 1d trend filter and volume confirmation.
+Long when price breaks above 20-period high and 1d EMA50 rising.
+Short when price breaks below 20-period low and 1d EMA50 falling.
+Volume confirmation ensures breakout strength. Works in bull/bear by following higher timeframe trend.
+Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_price_position_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -26,34 +27,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for channel calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # 4h ATR(14) for channel width
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h SMA(20) for channel center
-    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Channel bounds: SMA ± ATR
-    upper_channel = sma_20 + atr_14
-    lower_channel = sma_20 - atr_14
-    
-    # Align 4h channel to 1h
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
-    sma_aligned = align_htf_to_ltf(prices, df_4h, sma_20)
-    
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
@@ -61,49 +34,56 @@ def generate_signals(prices):
     
     # 1d EMA50 for trend filter
     ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
+    
+    # Align 1d EMA50 to 12h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
-    # Volume confirmation (24-period average on 1h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Donchian channels (20-period) on 12h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation (20-period average on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(sma_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x average volume
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
+        # Trend filter: EMA50 slope (rising/falling)
+        ema_rising = ema_50_aligned[i] > ema_50_aligned[i-1] if i > 0 else False
+        ema_falling = ema_50_aligned[i] < ema_50_aligned[i-1] if i > 0 else False
+        
         if position == 1:  # Long position
-            # Exit: price returns to SMA or breaks below lower channel
-            if close[i] >= sma_aligned[i] or close[i] <= lower_aligned[i]:
+            # Exit: price breaks below 20-period low or EMA50 turns down
+            if close[i] < low_20[i] or not ema_rising:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price returns to SMA or breaks above upper channel
-            if close[i] <= sma_aligned[i] or close[i] >= upper_aligned[i]:
+            # Exit: price breaks above 20-period high or EMA50 turns up
+            if close[i] > high_20[i] or not ema_falling:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price at lower channel with volume and uptrend (price > EMA50)
-            if (close[i] <= lower_aligned[i] and vol_confirm and 
-                close[i] > ema_50_aligned[i]):
+            # Long entry: price breaks above 20-period high with volume and EMA50 rising
+            if (close[i] > high_20[i] and vol_confirm and ema_rising):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: price at upper channel with volume and downtrend (price < EMA50)
-            elif (close[i] >= upper_aligned[i] and vol_confirm and 
-                  close[i] < ema_50_aligned[i]):
+                signals[i] = 0.25
+            # Short entry: price breaks below 20-period low with volume and EMA50 falling
+            elif (close[i] < low_20[i] and vol_confirm and ema_falling):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
