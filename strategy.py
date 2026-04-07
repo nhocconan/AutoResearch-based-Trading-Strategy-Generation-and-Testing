@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Daily Pivot Reversion with Volume Filter
-# Hypothesis: Price tends to revert to the daily pivot after extreme moves away from it.
-# In bull markets: overextended moves below S1 get bought back to pivot.
-# In bear markets: overextended moves above R1 get sold back to pivot.
-# Volume filter ensures mean reversion occurs with participation, avoiding fakeouts.
-# Target: 15-25 trades/year (60-100 over 4 years).
+# Strategy: 12h Daily Pivot Breakout with Volume Filter
+# Hypothesis: Daily pivot levels act as major support/resistance. Price breaking above R1 with volume indicates institutional buying, leading to continuation. Price breaking below S1 with volume indicates institutional selling, leading to continuation. Works in both bull and bear markets because: In bull, breaks above R1 continue up; breaks below S1 get bought (mean reversion). In bear, breaks below S1 continue down; breaks above R1 get sold (mean reversion). Volume filter ensures only institutional participation triggers entries.
+# Target: 12-30 trades/year (48-120 over 4 years).
 
-name = "6h_daily_pivot_reversion_volume_v1"
-timeframe = "6h"
+name = "12h_daily_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,19 +44,25 @@ def generate_signals(prices):
     # Pivot = (High + Low + Close) / 3
     # R1 = (2 * Pivot) - Low
     # S1 = (2 * Pivot) - High
+    # R2 = Pivot + (High - Low)
+    # S2 = Pivot - (High - Low)
     daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
     daily_r1 = (2 * daily_pivot) - prev_daily_low
     daily_s1 = (2 * daily_pivot) - prev_daily_high
+    daily_r2 = daily_pivot + (prev_daily_high - prev_daily_low)
+    daily_s2 = daily_pivot - (prev_daily_high - prev_daily_low)
     
-    # Align to 6h timeframe (use previous day's levels)
+    # Align to 12h timeframe (use previous day's levels)
     pivot_aligned = align_htf_to_ltf(prices, df_daily, daily_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_daily, daily_r1)
     s1_aligned = align_htf_to_ltf(prices, df_daily, daily_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
@@ -67,31 +70,32 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot or volume drops
-            if close[i] >= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price falls to pivot or volume drops
+            if close[i] <= pivot_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price returns to pivot or volume drops
-            if close[i] <= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price rises to pivot or volume drops
+            if close[i] >= pivot_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price is below S1 with volume (mean reversion up to pivot)
-            if low[i] < s1_aligned[i] and close[i] < s1_aligned[i] and vol_filter[i]:
+            # Long: price breaks above R1 with volume (continuation in bull, mean reversion in bear)
+            if high[i] > r1_aligned[i] and close[i] > r1_aligned[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short: price is above R1 with volume (mean reversion down to pivot)
-            elif high[i] > r1_aligned[i] and close[i] > r1_aligned[i] and vol_filter[i]:
+            # Short: price breaks below S1 with volume (continuation in bear, mean reversion in bull)
+            elif low[i] < s1_aligned[i] and close[i] < s1_aligned[i] and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
