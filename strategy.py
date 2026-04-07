@@ -10,6 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Volume confirmation: current volume > 1.8 * average volume of last 20 periods
 # Position size: 0.28 (28% of capital)
 # Daily trend filter provides robust trend direction across bull and bear markets
+# Designed for low trade frequency (target: 75-200 trades over 4 years) to minimize fee drag
 
 name = "4h_donchian20_daily_trend_vol_v1"
 timeframe = "4h"
