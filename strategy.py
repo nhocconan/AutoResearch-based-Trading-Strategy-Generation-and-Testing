@@ -1,17 +1,18 @@
-# 6h Donchian Breakout with Weekly Trend Filter
-# Uses 6h Donchian channel breakout for entry, filtered by weekly trend direction
-# Works in both bull/bear markets by only taking breakouts in the direction of weekly trend
-# Volume confirmation reduces false breakouts
-# Target: 15-30 trades/year (60-120 total over 4 years)
-
 #!/usr/bin/env python3
+"""
+12h Parabolic SAR with Volume Filter
+Long when Parabolic SAR flips below price with above-average volume
+Short when Parabolic SAR flips above price with above-average volume
+Exit when SAR flips opposite direction
+Parabolic SAR works in trending markets (both bull and bear) and volume filter reduces whipsaws
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_breakout_weekly_trend_v1"
-timeframe = "6h"
+name = "12h_parabolic_sar_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +26,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly trend filter (HTF) ===
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
-        return np.zeros(n)
+    # === Parabolic SAR ===
+    # Initialize
+    psar = np.zeros(n)
+    bull = True  # True for long, False for short
+    af = 0.02    # acceleration factor
+    max_af = 0.2
+    ep = high[0] if bull else low[0]  # extreme point
+    psar[0] = low[0] if bull else high[0]
     
-    # Weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
-    
-    # === 6h Donchian channels ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate SAR
+    for i in range(1, n):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is within prior period's range
+            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is within prior period's range
+            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+        
+        # Reverse if price crosses SAR
+        reverse = False
+        if bull and low[i] < psar[i]:
+            bull = False
+            reverse = True
+            ep = low[i]
+            af = 0.02
+        elif not bull and high[i] > psar[i]:
+            bull = True
+            reverse = True
+            ep = high[i]
+            af = 0.02
+        
+        if reverse:
+            psar[i] = ep  # SAR at reversal point is the extreme point
+        else:
+            # Update extreme point and acceleration factor
+            if bull:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,43 +79,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any data is NaN
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_ratio[i]):
+    for i in range(20, n):
+        if np.isnan(psar[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly trend: above EMA = uptrend, below EMA = downtrend
-        weekly_uptrend = close[i] > weekly_ema_aligned[i]
-        weekly_downtrend = close[i] < weekly_ema_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower band
-            if close[i] < lowest_low[i]:
+            # Exit: SAR flips above price (trend reversal)
+            if psar[i] > close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper band
-            if close[i] > highest_high[i]:
+            # Exit: SAR flips below price (trend reversal)
+            if psar[i] < close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation (above average)
-            if vol_ratio[i] < 1.5:
+            # Need expanding volume (above average)
+            if vol_ratio[i] < 1.3:
                 signals[i] = 0.0
                 continue
             
-            # Long entry: break above upper band in weekly uptrend
-            if close[i] > highest_high[i] and weekly_uptrend:
+            # Entry: SAR flip with volume confirmation
+            if close[i] > psar[i]:
+                # Price above SAR -> long
                 position = 1
                 signals[i] = 0.25
-            # Short entry: break below lower band in weekly downtrend
-            elif close[i] < lowest_low[i] and weekly_downtrend:
+            elif close[i] < psar[i]:
+                # Price below SAR -> short
                 position = -1
                 signals[i] = -0.25
     
