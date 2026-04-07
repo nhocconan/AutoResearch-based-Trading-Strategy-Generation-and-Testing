@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h trend filter and volume filter
-# Uses RSI(14) for mean reversion signals:
-# - Long when RSI < 30 and price > 4h EMA200 (uptrend filter)
-# - Short when RSI > 70 and price < 4h EMA200 (downtrend filter)
-# - Volume confirmation: current volume > 20-period average
-# - Time filter: only trade 08-20 UTC to avoid low-volume sessions
-# - Position size: 0.20 (20% of capital) to limit drawdown
-# Designed for low frequency (~20-40 trades/year) to minimize fee drag
-# Works in bull/bear via trend filter: only trade in direction of 4h trend
+# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
+# Uses Williams %R (14) on 6h for overbought/oversold signals:
+# - Buy when Williams %R crosses above -80 (oversold) in 1d uptrend
+# - Sell when Williams %R crosses below -20 (overbought) in 1d downtrend
+# - 1d EMA50 filter ensures trades align with higher timeframe trend
+# - Volume confirmation (current volume > 20-period average) avoids false signals
+# Designed for low frequency (target: 15-35 trades/year) to minimize fee drag
+# Williams %R is effective in ranging markets and captures reversals in trends
 
-name = "1h_rsi_meanrev_4h_trend_volume_session_v1"
-timeframe = "1h"
+name = "6h_williamsr_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -28,75 +27,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA200 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 1d EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Williams %R (14-period) on 6h data
+    # Calculate on 6h data then align (though we're already on 6h, this ensures proper handling)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    williams_r = np.where(diff != 0, -100 * (highest_high - close) / diff, -50)
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # already datetime64[ms], .hour works
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_200_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
-        
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend filter from 4h EMA200
-        uptrend = close[i] > ema_200_4h_aligned[i]
-        downtrend = close[i] < ema_200_4h_aligned[i]
+        # Trend filter from 1d EMA
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Exit conditions: reverse signal or trend change
+        # Williams %R levels
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        
+        # Exit conditions
         if position == 1:  # Long position
-            if rsi[i] > 50 or not uptrend or not in_session:
+            # Exit when overbought or trend changes
+            if overbought or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            if rsi[i] < 50 or not downtrend or not in_session:
+            # Exit when oversold or trend changes
+            if oversold or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Mean reversion entries with trend and volume confirmation
-            if in_session and vol_confirm:
-                # Buy on oversold in uptrend
-                if rsi[i] < 30 and uptrend:
-                    position = 1
-                    signals[i] = 0.20
-                # Sell on overbought in downtrend
-                elif rsi[i] > 70 and downtrend:
-                    position = -1
-                    signals[i] = -0.20
+            # Entry conditions with trend and volume confirmation
+            # Buy when coming out of oversold in uptrend
+            if oversold and uptrend and vol_confirm and i > 0 and williams_r[i-1] >= -80:
+                position = 1
+                signals[i] = 0.25
+            # Sell when coming out of overbought in downtrend
+            elif overbought and downtrend and vol_confirm and i > 0 and williams_r[i-1] <= -20:
+                position = -1
+                signals[i] = -0.25
     
     return signals
