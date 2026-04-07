@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
-Long when price breaks above R4 with volume confirmation (bullish continuation).
-Short when price breaks below S4 with volume confirmation (bearish continuation).
-Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
-Works in both bull/bear markets by adapting to volatility and volume.
-Designed for 12h timeframe to reduce trade frequency and avoid fee drag.
+1d_camarilla_pivot_1w_volume_v1
+Hypothesis: Weekly Camarilla pivot levels act as strong support/resistance. 
+Long when price breaks above weekly R4 with volume confirmation (bullish continuation).
+Short when price breaks below weekly S4 with volume confirmation (bearish continuation).
+Otherwise, fade at weekly R3/S3 levels with volume divergence (mean reversion in ranging markets).
+Uses daily timeframe for entries with weekly pivot context to work in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "1d_camarilla_pivot_1w_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -27,43 +26,44 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's values (shifted by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First day has no previous
+    # Previous week's values (shifted by 1)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = np.nan  # First week has no previous
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
     # Camarilla calculations
-    range_1d = prev_high - prev_low
+    range_1w = prev_high - prev_low
     # Avoid division by zero
-    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
+    range_1w = np.where(range_1w == 0, 1e-10, range_1w)
     
-    # Camarilla levels
-    r3 = prev_close + range_1d * 1.1 / 4
-    r4 = prev_close + range_1d * 1.1 / 2
-    s3 = prev_close - range_1d * 1.1 / 4
-    s4 = prev_close - range_1d * 1.1 / 2
+    # Camarilla levels (using 1.1 multiplier as per standard formula)
+    r3 = prev_close + range_1w * 1.1 / 4
+    r4 = prev_close + range_1w * 1.1 / 2
+    s3 = prev_close - range_1w * 1.1 / 4
+    s4 = prev_close - range_1w * 1.1 / 2
     
-    # Align to 12h timeframe (previous day's levels are valid for current day)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to daily timeframe (previous week's levels are valid for current week)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Volume confirmation: volume > 20-period average (adjusted for 12h)
+    # Volume confirmation: volume > 20-period average (daily)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -106,13 +106,13 @@ def generate_signals(prices):
             # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
             elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
                 # Look for bullish rejection (close > open)
-                if close[i] > prices['open'].iloc[i]:
+                if close[i] > open_price[i]:
                     position = 1
                     signals[i] = 0.25
             # Mean reversion short: price rejects R3 with volume divergence
             elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
                 # Look for bearish rejection (close < open)
-                if close[i] < prices['open'].iloc[i]:
+                if close[i] < open_price[i]:
                     position = -1
                     signals[i] = -0.25
     
