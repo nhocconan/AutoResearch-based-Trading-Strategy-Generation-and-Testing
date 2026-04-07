@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_rsi_momentum_1w_trend_volume_v1
-Hypothesis: RSI(14) momentum on daily timeframe, filtered by weekly trend (EMA20) and volume spike.
-Long when RSI > 55, price above weekly EMA20, and volume > 1.5x average.
-Short when RSI < 45, price below weekly EMA20, and volume > 1.5x average.
-Designed for low trade frequency (~10-20 trades/year) with strong momentum signals to work in both bull and bear markets.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4 with volume confirmation and daily EMA20 trend filter.
+In ranging markets, price tends to revert from R3/S3. In trending markets, breaks of R4/S4 with volume indicate continuation.
+Works in both bull and bear by adapting to market structure via volume and trend filters.
+Target: 12-37 trades/year on 6f with strict entry conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_rsi_momentum_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,30 +26,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily data for Camarilla pivot and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla pivot levels from previous day
+    # Using classic Camarilla formulas based on previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14]) if n >= 14 else 0
-    avg_loss[13] = np.mean(loss[1:14]) if n >= 14 else 0
+    # Pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Camarilla levels
+    r3 = pivot + (range_hl * 1.1 / 2)
+    s3 = pivot - (range_hl * 1.1 / 2)
+    r4 = pivot + (range_hl * 1.1)
+    s4 = pivot - (range_hl * 1.1)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 6f timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Daily EMA20 for trend filter
+    ema20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,44 +66,52 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average (spike)
-        vol_spike = volume[i] > (vol_ma[i] * 1.5)
+        # Volume confirmation: current volume > 1.3x average
+        vol_spike = volume[i] > (vol_ma[i] * 1.3)
         
-        # RSI conditions
-        rsi_over = rsi[i] > 55
-        rsi_under = rsi[i] < 45
-        
-        # Weekly trend filter
-        above_1w_ema20 = close[i] > ema20_1w_aligned[i]
-        below_1w_ema20 = close[i] < ema20_1w_aligned[i]
+        # Trend filter
+        above_ema20 = close[i] > ema20_1d_aligned[i]
+        below_ema20 = close[i] < ema20_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI turns bearish or trend turns bearish
-            if rsi[i] < 50 or below_1w_ema20:
+            # Exit: price reaches S3 (mean reversion) or trend turns bearish with volume
+            if close[i] <= s3_aligned[i] or (below_ema20 and vol_spike):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI turns bullish or trend turns bullish
-            if rsi[i] > 50 or above_1w_ema20:
+            # Exit: price reaches R3 (mean reversion) or trend turns bullish with volume
+            if close[i] >= r3_aligned[i] or (above_ema20 and vol_spike):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: RSI bullish with volume spike and bullish trend
-            if rsi_over and vol_spike and above_1w_ema20:
+            # Fade at R3/S3: sell at R3, buy at S3 in ranging markets
+            # But only if volume confirms and trend is not strong
+            if close[i] >= r3_aligned[i] and vol_spike and not above_ema20:
+                # Potential short at R3 rejection
+                position = -1
+                signals[i] = -0.25
+            elif close[i] <= s3_aligned[i] and vol_spike and not below_ema20:
+                # Potential long at S3 bounce
                 position = 1
                 signals[i] = 0.25
-            # Short: RSI bearish with volume spike and bearish trend
-            elif rsi_under and vol_spike and below_1w_ema20:
+            # Breakout continuation at R4/S4 with volume and trend
+            elif close[i] > r4_aligned[i] and vol_spike and above_ema20:
+                # Bullish breakout with volume and trend
+                position = 1
+                signals[i] = 0.25
+            elif close[i] < s4_aligned[i] and vol_spike and below_ema20:
+                # Bearish breakout with volume and trend
                 position = -1
                 signals[i] = -0.25
     
