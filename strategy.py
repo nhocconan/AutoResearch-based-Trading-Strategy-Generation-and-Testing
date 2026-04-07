@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Donchian breakout with weekly trend filter and volume confirmation
-# Long when price breaks above weekly Donchian high + daily volume confirmation
-# Short when price breaks below weekly Donchian low + daily volume confirmation
-# Uses weekly trend to filter direction: only long in weekly uptrend, only short in weekly downtrend
-# Target: 7-25 trades/year, low frequency to minimize fee drag
-name = "1d_donchian20_1w_trend_volume_v2"
-timeframe = "1d"
+# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ATR filter
+# Hypothesis: Donchian breakouts capture strong trends; volume confirms institutional interest;
+# ATR filter avoids low-volatility chop. Works in both bull (breakouts) and bear (mean reversion at bands).
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+name = "12h_donchian20_1d_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,64 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_highest = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    weekly_lowest = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
-    weekly_highest_aligned = align_htf_to_ltf(prices, df_1w, weekly_highest)
-    weekly_lowest_aligned = align_htf_to_ltf(prices, df_1w, weekly_lowest)
+    # Calculate daily 20-period volume moving average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate weekly trend: slope of 20-period EMA of weekly close
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    # Trend: 1 if EMA rising, -1 if falling, 0 if flat
-    weekly_trend = np.zeros(len(weekly_ema_aligned))
-    weekly_trend[1:] = np.where(weekly_ema_aligned[1:] > weekly_ema_aligned[:-1], 1, -1)
+    # Calculate ATR(14) for volatility filter and stop sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian channels (20-period high/low)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(weekly_highest_aligned[i]) or np.isnan(weekly_lowest_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(weekly_trend[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current daily volume > 20-day average volume
-        vol_confirm = volume[i] > vol_ma[i]
+        # Volume confirmation: current 12h volume > daily average volume
+        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
+        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
         
         if position == 1:  # Long position
-            # Exit: price touches weekly lower band OR trend turns down
-            if close[i] <= weekly_lowest_aligned[i] or weekly_trend[i] == -1:
+            # Exit: price touches opposite band OR volatility drops
+            if close[i] <= lowest_low[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches weekly upper band OR trend turns up
-            if close[i] >= weekly_highest_aligned[i] or weekly_trend[i] == 1:
+            # Exit: price touches opposite band OR volatility drops
+            if close[i] >= highest_high[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above weekly upper band + volume confirmation + weekly uptrend
-            if close[i] > weekly_highest_aligned[i] and vol_confirm and weekly_trend[i] == 1:
+            # Enter long: price breaks above upper band + volume confirmation + volatility filter
+            if close[i] > highest_high[i] and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below weekly lower band + volume confirmation + weekly downtrend
-            elif close[i] < weekly_lowest_aligned[i] and vol_confirm and weekly_trend[i] == -1:
+            # Enter short: price breaks below lower band + volume confirmation + volatility filter
+            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
