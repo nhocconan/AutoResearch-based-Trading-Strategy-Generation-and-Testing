@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_1w_momentum_reversal_volume_filter_v1
-Hypothesis: On daily timeframe, capture momentum reversals using RSI extremes with weekly trend filter and volume confirmation. Weekly trend avoids counter-trend trades, RSI(14)<30 or >70 identifies overextended moves, and volume confirmation ensures institutional participation. Designed for 30-100 total trades over 4 years (~7-25/year) to minimize fee drag while performing in both bull and bear regimes.
+6d_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 6-hour timeframe, use Donchian(20) breakout with 1-day trend filter (price above/below 200 EMA) and volume confirmation to capture strong directional moves. The 6h timeframe balances responsiveness with reduced noise, while the 1d trend filter ensures alignment with higher timeframe direction, reducing whipsaws in sideways markets. Volume confirmation ensures institutional participation. Designed for 50-150 total trades over 4 years (~12-37/year) to minimize fee drag while performing in both bull and bear regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_momentum_reversal_volume_filter_v1"
-timeframe = "1d"
+name = "6d_donchian_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,83 +23,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI calculation (14-period)
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Use Wilder's smoothing (alpha = 1/period)
-        avg_gain = np.zeros_like(prices)
-        avg_loss = np.zeros_like(prices)
-        
-        # Initial values
-        if len(gain) >= period:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            # Wilder's smoothing
-            for i in range(period + 1, len(prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Donchian channel parameters
+    donch_len = 20
     
-    # Calculate RSI
-    rsi = calculate_rsi(close, 14)
+    # Calculate Donchian bands
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=donch_len, min_periods=donch_len).max().values
+    donch_low = low_series.rolling(window=donch_len, min_periods=donch_len).min().values
     
-    # Weekly trend filter: EMA(21) on weekly data
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_close = df_weekly['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # 1-day trend filter: EMA200
+    close_series = pd.Series(close)
+    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume filter: 20-day average volume
+    # Volume filter: 20-period average on 6h timeframe
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(21, 20), n):
+    for i in range(max(donch_len, 200, 20), n):
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(weekly_ema_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(ema200[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
         # Volume confirmation: require volume above average
         vol_ok = volume[i] > vol_ma[i]
         
-        # Weekly trend: price above/below weekly EMA
-        weekly_uptrend = close[i] > weekly_ema_aligned[i]
-        weekly_downtrend = close[i] < weekly_ema_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral (50) or weekly trend turns down
-            if rsi[i] >= 50 or not weekly_uptrend:
+            # Exit: price breaks below Donchian low
+            if close[i] <= donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral (50) or weekly trend turns up
-            if rsi[i] <= 50 or not weekly_downtrend:
+            # Exit: price breaks above Donchian high
+            if close[i] >= donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Oversold bounce in weekly uptrend: RSI < 30
-                if rsi[i] < 30 and weekly_uptrend:
+                # Bullish breakout: price closes above Donchian high with uptrend
+                if close[i] > donch_high[i] and close[i] > ema200[i]:
                     position = 1
                     signals[i] = 0.25
-                # Overbought reversal in weekly downtrend: RSI > 70
-                elif rsi[i] > 70 and weekly_downtrend:
+                # Bearish breakout: price closes below Donchian low with downtrend
+                elif close[i] < donch_low[i] and close[i] < ema200[i]:
                     position = -1
                     signals[i] = -0.25
     
