@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band, 1d close > 1d EMA50 (uptrend), and volume > 1.5x 4h average volume
-# Short when price breaks below 4h Donchian lower band, 1d close < 1d EMA50 (downtrend), and volume > 1.5x 4h average volume
+# Long when price breaks above 4h Donchian upper band, 1d close > 1d EMA50 (uptrend), and volume > 1.8x 4h average volume
+# Short when price breaks below 4h Donchian lower band, 1d close < 1d EMA50 (downtrend), and volume > 1.8x 4h average volume
 # Exit when trend reverses (1d close crosses EMA50) or opposite breakout occurs
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1d EMA50 for trend filter and 4h volume average for confirmation
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 name = "4h_donchian20_1d_ema50_vol_v1"
 timeframe = "4h"
@@ -114,14 +114,14 @@ def generate_signals(prices):
             # Long: price breaks above upper band, price above EMA50 (uptrend), volume spike
             if (close[i] > upper_aligned[i] and
                 close[i] > ema_1d_aligned[i] and
-                volume[i] > 1.5 * volume_ma_4h_aligned[i]):
+                volume[i] > 1.8 * volume_ma_4h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below lower band, price below EMA50 (downtrend), volume spike
             elif (close[i] < lower_aligned[i] and
                   close[i] < ema_1d_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_4h_aligned[i]):
+                  volume[i] > 1.8 * volume_ma_4h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
