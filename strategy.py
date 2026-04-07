@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Elder Ray + ADX Trend + Volume Confirmation
-# Hypothesis: Combines Elder Ray (bull/bear power) with ADX trend strength and volume
-# to capture momentum in both bull and bear markets. Elder Ray > 0 indicates bullish
-# pressure, < 0 bearish pressure. ADX > 25 filters for trending conditions.
-# Works in bull via bull power + ADX, in bear via bear power + ADX, and avoids whipsaws
-# in ranging markets. Target: 15-30 trades/year to minimize fee drag.
-name = "6h_elder_ray_adx_volume_v1"
-timeframe = "6h"
+# Strategy: 1h_4h1d_trend_follow_volume
+# Hypothesis: Use 4h trend (EMA21) and 1d trend (EMA50) as directional filters, enter on 1h EMA(8/21) crossovers with volume confirmation.
+# 4h/1d filters prevent counter-trend trades, reducing whipsaw in sideways markets. Volume confirms institutional participation.
+# Target: 15-35 trades/year (~60-140 over 4 years) to minimize fee drag.
+name = "1h_4h1d_trend_follow_volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,114 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA(13) - used in Elder Ray calculation
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # 4h EMA(21) for trend
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False).mean().values
+    ema_4h_1h = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(13) from daily close
-    daily_close = df_1d['close'].values
-    daily_ema13 = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_6h = align_htf_to_ltf(prices, df_1d, daily_ema13)
+    # 1d EMA(50) for trend
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_1d_1h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Elder Ray components
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    bull_power = high - ema13_6h
-    bear_power = low - ema13_6h
+    # 1h EMA(8) and EMA(21) for entry timing
+    ema_8 = pd.Series(close).ewm(span=8, adjust=False).mean().values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False).mean().values
     
-    # Get weekly data for ADX calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate ADX(14) from weekly data
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(weekly_high - weekly_low)
-    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
-    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((weekly_high - np.roll(weekly_high, 1)) > (np.roll(weekly_low, 1) - weekly_low), 
-                       np.maximum(weekly_high - np.roll(weekly_high, 1), 0), 0)
-    dm_minus = np.where((np.roll(weekly_low, 1) - weekly_low) > (weekly_high - np.roll(weekly_high, 1)), 
-                        np.maximum(np.roll(weekly_low, 1) - weekly_low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    def smooth_series(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # Initial average
-        result[period-1] = np.nansum(data[:period])
-        # Wilder smoothing
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr = smooth_series(tr, 14)
-    dm_plus_smooth = smooth_series(dm_plus, 14)
-    dm_minus_smooth = smooth_series(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth_series(dx, 14)
-    
-    adx_6h = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume confirmation: 6h volume > 20-period average
+    # Volume confirmation: 1h volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(21, n):
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_4h_1h[i]) or np.isnan(ema_1d_1h[i]) or 
+            np.isnan(ema_8[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend strength filter
-        trending = adx_6h[i] > 25
-        
         if position == 1:  # Long position
-            # Exit: Bear power becomes positive (momentum fading) or trend weakens
-            if bear_power[i] > 0 or not trending:
+            # Exit: EMA(8) crosses below EMA(21) OR trend turns bearish on 4h or 1d
+            if ema_8[i] < ema_21[i] or close[i] < ema_4h_1h[i] or close[i] < ema_1d_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: Bull power becomes negative (momentum fading) or trend weakens
-            if bull_power[i] < 0 or not trending:
+            # Exit: EMA(8) crosses above EMA(21) OR trend turns bullish on 4h or 1d
+            if ema_8[i] > ema_21[i] or close[i] > ema_4h_1h[i] or close[i] > ema_1d_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: Bull power > 0 with volume and trending ADX
-            if bull_power[i] > 0 and vol_confirm and trending:
+            # Enter long: EMA(8) crosses above EMA(21) with volume and bullish 4h/1d trend
+            if ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1] and vol_confirm and close[i] > ema_4h_1h[i] and close[i] > ema_1d_1h[i]:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: Bear power < 0 with volume and trending ADX
-            elif bear_power[i] < 0 and vol_confirm and trending:
+                signals[i] = 0.20
+            # Enter short: EMA(8) crosses below EMA(21) with volume and bearish 4h/1d trend
+            elif ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1] and vol_confirm and close[i] < ema_4h_1h[i] and close[i] < ema_1d_1h[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
