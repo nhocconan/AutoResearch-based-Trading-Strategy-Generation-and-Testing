@@ -1,23 +1,30 @@
+# 4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+# Long when price breaks above Donchian(20) high with expanding volume AND 1d EMA trend up
+# Short when price breaks below Donchian(20) low with expanding volume AND 1d EMA trend down
+# Exit when price crosses back to middle line
+# Uses Donchian channels that adapt to volatility, reducing false breakouts in ranging markets.
+# Designed for 4h timeframe with 1d trend filter - targets 20-50 trades/year per symbol
+
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and 1d Trend Filter
-Long when price breaks above Donchian upper band with expanding volume AND 1d EMA trend up
-Short when price breaks below Donchian lower band with expanding volume AND 1d EMA trend down
-Exit when price crosses back to Donchian middle line
-Uses Donchian channels (20-period high/low) for clear breakout levels.
+4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+Long when price breaks above Donchian(20) high with expanding volume AND 1d EMA trend up
+Short when price breaks below Donchian(20) low with expanding volume AND 1d EMA trend down
+Exit when price crosses back to middle line
+Uses Donchian channels that adapt to volatility, reducing false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_1d_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,10 +33,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_max + low_min) / 2
+    # === Donchian Channels (20-period high/low) ===
+    # Highest high of last 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lowest low of last 20 periods
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Middle line (average of high and low)
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,7 +54,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -71,12 +81,12 @@ def generate_signals(prices):
                 continue
             
             # Entry: Donchian breakout with volume confirmation AND 1d trend filter
-            if close[i] > high_max[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper band with rising 1d EMA -> long
+            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Breakout above upper channel with rising 1d EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < low_min[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower band with falling 1d EMA -> short
+            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Breakdown below lower channel with falling 1d EMA -> short
                 position = -1
                 signals[i] = -0.25
     
