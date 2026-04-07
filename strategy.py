@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Daily Williams %R + Volume Spike Reversal
-# Hypothesis: In 6h timeframe, extreme Williams %R readings (< -80 or > -20) 
-# combined with volume spikes (>2x 20-period average) signal exhaustion and 
-# impending reversals. Uses daily Williams %R for higher timeframe context to 
-# avoid counter-trend traps. Works in both bull/bear markets by fading extremes 
-# rather than chasing trends. Target: 20-35 trades/year (80-140 total over 4 years).
+# Strategy: 4h Daily Donchian Breakout with Volume and ADX Filter
+# Hypothesis: Donchian(10) breakouts in direction of daily ADX > 20 trend with volume
+# confirmation capture momentum moves while avoiding whipsaws. Uses daily trend for
+# robustness across bull/bear markets, volume filter to reduce false breakouts.
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
 
-name = "6h_daily_williamsr_volume_reversal_v1"
-timeframe = "6h"
+name = "4h_daily_donchian_breakout_volume_adx_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +24,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R
+    # Get daily data for ADX and breakout levels
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 20:
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate Williams %R on daily data (14-period)
+    # Calculate ADX on daily data
     daily_high = df_daily['high'].values
     daily_low = df_daily['low'].values
     daily_close = df_daily['close'].values
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
+    # True Range
+    tr1 = daily_high[1:] - daily_low[1:]
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          ((highest_high - daily_close) / (highest_high - lowest_low)) * -100, 
-                          -50)  # Neutral when range is zero
+    # Directional Movement
+    dm_plus = np.where((daily_high[1:] - daily_high[:-1]) > (daily_low[:-1] - daily_low[1:]),
+                       np.maximum(daily_high[1:] - daily_high[:-1], 0), 0)
+    dm_minus = np.where((daily_low[:-1] - daily_low[1:]) > (daily_high[1:] - daily_high[:-1]),
+                        np.maximum(daily_low[:-1] - daily_low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Williams %R signals: > -20 = overbought, < -80 = oversold
-    williams_r_overbought = williams_r > -20
-    williams_r_oversold = williams_r < -80
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) / period
+        # Subsequent values
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Align daily Williams %R signals to 6h timeframe
-    williams_r_overbought_aligned = align_htf_to_ltf(prices, df_daily, williams_r_overbought.astype(float))
-    williams_r_oversold_aligned = align_htf_to_ltf(prices, df_daily, williams_r_oversold.astype(float))
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Volume filter on 6h: volume > 2x 20-period average (strong spike)
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Daily breakout levels (10-period high/low)
+    high_series = pd.Series(daily_high)
+    low_series = pd.Series(daily_low)
+    daily_high_10 = high_series.rolling(window=10, min_periods=10).max().values
+    daily_low_10 = low_series.rolling(window=10, min_periods=10).min().values
+    
+    # Align daily indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    high_10_aligned = align_htf_to_ltf(prices, df_daily, daily_high_10)
+    low_10_aligned = align_htf_to_ltf(prices, df_daily, daily_low_10)
+    
+    # Volume filter on 4h: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(40, n):
         # Skip if required data not available
-        if (np.isnan(williams_r_overbought_aligned[i]) or 
-            np.isnan(williams_r_oversold_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(high_10_aligned[i]) or
+            np.isnan(low_10_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Williams %R returns from oversold or volume spike fades
-            if williams_r_oversold_aligned[i] == False or volume_spike[i] == False:
+            # Exit: price falls back below 10-day low or ADX weakens
+            if close[i] < low_10_aligned[i] or adx_aligned[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: Williams %R returns from overbought or volume spike fades
-            if williams_r_overbought_aligned[i] == False or volume_spike[i] == False:
+            # Exit: price rises back above 10-day high or ADX weakens
+            if close[i] > high_10_aligned[i] or adx_aligned[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Fade extremes with volume confirmation
-            if williams_r_overbought_aligned[i] and volume_spike[i]:
-                # Short at daily overbought + volume spike (expecting reversal down)
-                position = -1
-                signals[i] = -0.25
-            elif williams_r_oversold_aligned[i] and volume_spike[i]:
-                # Long at daily oversold + volume spike (expecting reversal up)
-                position = 1
-                signals[i] = 0.25
+            # Moderate trend required
+            if adx_aligned[i] >= 20:
+                # Long entry: breakout above 10-day high with volume
+                if (high[i] > high_10_aligned[i] and close[i] > high_10_aligned[i] and
+                    vol_filter[i]):
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: breakdown below 10-day low with volume
+                elif (low[i] < low_10_aligned[i] and close[i] < low_10_aligned[i] and
+                      vol_filter[i]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
