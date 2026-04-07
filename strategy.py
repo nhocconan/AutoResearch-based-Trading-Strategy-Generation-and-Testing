@@ -9,7 +9,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Exit when trend reverses (1d close crosses EMA150) or opposite breakout occurs
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Based on top performers: tight entries, volume confirmation, price channel structure
+# Uses 1d EMA150 for trend filter and 4h volume average for confirmation
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 name = "4h_donchian20_1d_ema150_vol_v1"
 timeframe = "4h"
