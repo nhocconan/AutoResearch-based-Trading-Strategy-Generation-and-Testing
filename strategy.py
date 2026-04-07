@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Donchian Breakout + Weekly Trend + Volume Confirmation
-# Hypothesis: Donchian breakouts capture strong directional moves. Weekly trend filter ensures
-# alignment with higher timeframe momentum. Volume confirmation filters false breakouts.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-# Target: 20-30 trades/year to minimize fee drag on daily timeframe.
-name = "1d_donchian_breakout_weekly_trend_volume_v2"
-timeframe = "1d"
+# Strategy: 6h Camarilla Pivot + 1D Trend + Volume Confirmation
+# Hypothesis: Camarilla pivot levels from the 1-day timeframe provide strong
+# support/resistance zones. We trade breakouts from R4/S4 (trend continuation)
+# or reversals at R3/S3 (mean reversion), filtered by 1-day trend and volume.
+# This structure adapts to both trending and ranging markets.
+# Target: 15-30 trades/year to minimize fee drag on 6h timeframe.
+name = "6h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +24,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get weekly trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1-day data for Camarilla pivots and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA(34) for trend filter (more responsive)
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=34, adjust=False).mean().values
-    weekly_ema_1d = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # Calculate Camarilla pivot levels from previous day
+    # PP = (H + L + C) / 3
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate pivot levels
+    pp = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r4 = prev_close + (range_hl * 1.1 / 2)
+    r3 = prev_close + (range_hl * 1.1 / 4)
+    s3 = prev_close - (range_hl * 1.1 / 4)
+    s4 = prev_close - (range_hl * 1.1 / 2)
+    
+    # Align pivots to 6h timeframe (using previous day's levels)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 1-day EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
+    daily_ema_6h = align_htf_to_ltf(prices, df_1d, daily_ema)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(weekly_ema_1d[i])):
+        if (np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(daily_ema_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian channel or weekly trend turns bearish
-            if close[i] < lowest_low[i] or close[i] < weekly_ema_1d[i]:
+            # Exit: price crosses below S3 (mean reversion target) or trend turns bearish
+            if close[i] < s3_6h[i] or close[i] < daily_ema_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian channel or weekly trend turns bullish
-            if close[i] > highest_high[i] or close[i] > weekly_ema_1d[i]:
+            # Exit: price crosses above R3 (mean reversion target) or trend turns bullish
+            if close[i] > r3_6h[i] or close[i] > daily_ema_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_confirm = volume[i] > 1.5 * vol_ma[i]
-            
-            # Enter long: price breaks above upper Donchian, volume confirms, bullish weekly trend
-            if (close[i] > highest_high[i] and volume_confirm and 
-                close[i] > weekly_ema_1d[i]):
-                position = 1
-                signals[i] = 0.30
-            # Enter short: price breaks below lower Donchian, volume confirms, bearish weekly trend
-            elif (close[i] < lowest_low[i] and volume_confirm and 
-                  close[i] < weekly_ema_1d[i]):
-                position = -1
-                signals[i] = -0.30
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Breakout mode: price breaks R4/S4 with trend (continuation)
+                if close[i] > r4_6h[i] and close[i] > daily_ema_6h[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < s4_6h[i] and close[i] < daily_ema_6h[i]:
+                    position = -1
+                    signals[i] = -0.25
+                # Mean reversion mode: price reverses at R3/S3 against trend
+                elif close[i] < r3_6h[i] and close[i] > daily_ema_6h[i]:
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] > s3_6h[i] and close[i] < daily_ema_6h[i]:
+                    position = 1
+                    signals[i] = 0.25
     
     return signals
