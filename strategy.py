@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_weekly_pivot_reversion_v3
-Hypothesis: On 1d timeframe, use weekly reversal points from prior week's high/low/close for mean reversion. Enter long when price closes below weekly S3 (deep oversold) with RSI < 30 and volume > 1.5x average; enter short when price closes above weekly R3 (deep overbought) with RSI > 70 and volume > 1.5x average. Exit when price reaches opposite weekly H3/L3 level or RSI reverts to 50. Uses weekly structure to avoid noise and focuses on extreme reversals. Targets 10-20 trades/year to minimize fee drag.
+12h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, use daily Donchian channels (20-day) for breakout signals with 1d EMA trend filter and volume confirmation. Enter long when price breaks above 20-day high with daily EMA50 > EMA200 and volume > 1.5x average; enter short when price breaks below 20-day low with daily EMA50 < EMA200 and volume > 1.5x average. Exit when price reaches opposite Donchian level or EMA crossover reverses. This strategy captures breakouts with trend alignment and volume confirmation, targeting 15-30 trades/year to minimize fee drag. Works in bull/bear via EMA trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_pivot_reversion_v3"
-timeframe = "1d"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -23,63 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = (100 - (100 / (1 + rs))).values
+    # Calculate EMA50 and EMA200 for trend filter
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Calculate weekly reversal points from prior week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate daily Donchian channels (20-day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    ph = df_1w['high'].values  # previous week high
-    pl = df_1w['low'].values   # previous week low
-    pc = df_1w['close'].values # previous week close
+    # 20-day high and low
+    donchian_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly reversal levels (similar to Camarilla but using weekly range)
-    # S3 = close - 1.1 * (high - low) / 4
-    # R3 = close + 1.1 * (high - low) / 4
-    weekly_s3 = pc - 1.1 * (ph - pl) / 4
-    weekly_r3 = pc + 1.1 * (ph - pl) / 4
-    weekly_s2 = pc - 1.1 * (ph - pl) / 6
-    weekly_r2 = pc + 1.1 * (ph - pl) / 6
+    # Align to 12h timeframe (shifted by 1 day for look-ahead prevention)
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align to daily timeframe
-    s3_1d = align_htf_to_ltf(prices, df_1w, weekly_s3)
-    r3_1d = align_htf_to_ltf(prices, df_1w, weekly_r3)
-    s2_1d = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    r2_1d = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    
-    # Volume confirmation (20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (24-period average on 12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(s3_1d[i]) or np.isnan(r3_1d[i]) or
-            np.isnan(s2_1d[i]) or np.isnan(r2_1d[i]) or
+        if (np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
+            np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
+        # Volume confirmation: current volume > 1.5x 24-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price reaches S2 level (take profit)
-            if close[i] <= s2_1d[i]:
+            # Exit if price reaches Donchian low (opposite level)
+            if close[i] <= donchian_low_12h[i]:
                 exit_long = True
-            # Exit if RSI returns to 50 (mean reversion complete)
-            elif rsi[i] >= 50 and rsi[i-1] < 50:
+            # Exit if EMA50 crosses below EMA200 (trend reversal)
+            elif ema50[i] < ema200[i] and ema50[i-1] >= ema200[i-1]:
                 exit_long = True
             
             if exit_long:
@@ -91,11 +76,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price reaches R2 level (take profit)
-            if close[i] >= r2_1d[i]:
+            # Exit if price reaches Donchian high (opposite level)
+            if close[i] >= donchian_high_12h[i]:
                 exit_short = True
-            # Exit if RSI returns to 50 (mean reversion complete)
-            elif rsi[i] <= 50 and rsi[i-1] > 50:
+            # Exit if EMA50 crosses above EMA200 (trend reversal)
+            elif ema50[i] > ema200[i] and ema50[i-1] <= ema200[i-1]:
                 exit_short = True
             
             if exit_short:
@@ -104,14 +89,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price closes below S3 with RSI < 30 and volume confirmation
+            # Long entry: price breaks above Donchian high with EMA50 > EMA200 and volume confirmation
             long_entry = False
-            if (close[i] < s3_1d[i] and rsi[i] < 30 and vol_confirm):
+            if (close[i] > donchian_high_12h[i] and close[i-1] <= donchian_high_12h[i-1] and
+                ema50[i] > ema200[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: price closes above R3 with RSI > 70 and volume confirmation
+            # Short entry: price breaks below Donchian low with EMA50 < EMA200 and volume confirmation
             short_entry = False
-            if (close[i] > r3_1d[i] and rsi[i] > 70 and vol_confirm):
+            if (close[i] < donchian_low_12h[i] and close[i-1] >= donchian_low_12h[i-1] and
+                ema50[i] < ema200[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
