@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_trend_volume_v3
-Hypothesis: Focus on high-probability mean reversion at S3/R3 levels with 
-EMA trend filter and volume confirmation. Reduce trades by requiring 
-stronger volume filter (2.0x) and only trading in direction of daily trend.
-In ranging markets, fade at S3/R3. In trending markets, only trade pullbacks 
-to S3/R3 in direction of trend. This should reduce false breakouts and 
-lower trade frequency while maintaining edge in both bull and bear markets.
+6h_aroon_oscillator_1d_trend_volume_v1
+Hypothesis: Aroon oscillator from daily timeframe identifies strong trends 
+(above +50 = strong uptrend, below -50 = strong downtrend). On 6h timeframe, 
+we enter pullbacks in the direction of the daily trend with volume confirmation. 
+This strategy works in both bull and bear markets by following the higher timeframe trend 
+and avoids choppy markets by requiring strong Aroon readings (>|50|).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_trend_volume_v3"
-timeframe = "4h"
+name = "6h_aroon_oscillator_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,74 +27,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
+    # Daily data for Aroon oscillator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily OHLC for pivot points
+    # Calculate Aroon oscillator (25-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    period = 25
+    aroon_up = np.full(len(high_1d), np.nan)
+    aroon_down = np.full(len(low_1d), np.nan)
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    for i in range(period, len(high_1d)):
+        # Periods since highest high
+        highest_high_idx = np.argmax(high_1d[i-period:i+1]) + i - period
+        periods_since_high = i - highest_high_idx
+        aroon_up[i] = ((period - periods_since_high) / period) * 100
+        
+        # Periods since lowest low
+        lowest_low_idx = np.argmin(low_1d[i-period:i+1]) + i - period
+        periods_since_low = i - lowest_low_idx
+        aroon_down[i] = ((period - periods_since_low) / period) * 100
     
-    # Align daily levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    aroon_osc = aroon_up - aroon_down  # -100 to +100
     
-    # 20-period volume average on 4h
+    # Daily EMA20 for dynamic support/resistance
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
+    
+    # Aroon EMA for smoothing
+    aroon_osc_ema = pd.Series(aroon_osc).ewm(span=5, adjust=False).mean().values
+    
+    # Align daily indicators to 6h timeframe
+    aroon_osc_6h = align_htf_to_ltf(prices, df_1d, aroon_osc_ema)
+    ema20_6h = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    
+    # 20-period volume average on 6h
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema50_4h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(aroon_osc_6h[i]) or np.isnan(ema20_6h[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter)
-        vol_confirm = volume[i] > 2.0 * vol_sma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price moves back above S3 (mean reversion complete) 
-            # or breaks below S4 (failed mean reversion)
-            if close[i] > s3_4h[i] or close[i] < (close_1d[-1] - (high_1d[-1] - low_1d[-1]) * 1.1 / 2):
+            # Exit: Aroon turns negative (trend weakness) OR price breaks below EMA20
+            if aroon_osc_6h[i] < 0 or close[i] < ema20_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price moves back below R3 (mean reversion complete) 
-            # or breaks above R4 (failed mean reversion)
-            if close[i] < r3_4h[i] or close[i] > (close_1d[-1] + (high_1d[-1] - low_1d[-1]) * 1.1 / 2):
+            # Exit: Aroon turns positive (trend weakness) OR price breaks above EMA20
+            if aroon_osc_6h[i] > 0 or close[i] > ema20_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade mean reversion in direction of daily trend
-            # Long at S3 when above daily EMA (uptrend pullback)
-            if (close[i] <= s3_4h[i] and 
+            # Strong uptrend (Aroon > +50): buy pullbacks to EMA20 with volume
+            if (aroon_osc_6h[i] > 50 and 
                 vol_confirm and 
-                close[i] > ema50_4h[i]):
+                close[i] <= ema20_6h[i] * 1.005):  # Allow small overshoot
                 position = 1
                 signals[i] = 0.25
-            # Short at R3 when below daily EMA (downtrend pullback)
-            elif (close[i] >= r3_4h[i] and 
+            # Strong downtrend (Aroon < -50): sell rallies to EMA20 with volume
+            elif (aroon_osc_6h[i] < -50 and 
                   vol_confirm and 
-                  close[i] < ema50_4h[i]):
+                  close[i] >= ema20_6h[i] * 0.995):  # Allow small undershoot
                 position = -1
                 signals[i] = -0.25
     
