@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend Filter
-Long when price breaks above 20-day Donchian high with weekly uptrend
-Short when price breaks below 20-day Donchian low with weekly downtrend
-Exit when price crosses 10-day SMA or weekly trend reverses
+12h ATR Breakout with Daily Trend Filter
+Long when price breaks above ATR-based upper band with daily uptrend
+Short when price breaks below ATR-based lower band with daily downtrend
+Exit when price crosses opposite band or trend reverses
+Designed for low-frequency trading (12-37 trades/year) with volatility filtering
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_v1"
-timeframe = "1d"
+name = "12h_atr_breakout_daily_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,81 +26,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 10-day SMA for exit ===
-    close_series = pd.Series(close)
-    sma_10 = close_series.rolling(window=10, min_periods=10).mean().values
+    # === ATR Calculation (14-period) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === Weekly trend filter (HMA) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        hma_1w = np.full(n, np.nan)
-    else:
-        # Calculate HMA on weekly close
-        weekly_close = df_1w['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        def wma(arr, n):
-            if len(arr) < n:
-                return np.full(len(arr), np.nan)
-            weights = np.arange(1, n + 1)
-            return np.convolve(arr, weights/weights.sum(), mode='valid')
-        
-        n_hma = 21
-        half_n = n_hma // 2
-        sqrt_n = int(np.sqrt(n_hma))
-        
-        wma_full = wma(weekly_close, n_hma)
-        wma_half = wma(weekly_close, half_n)
-        wma_diff = 2 * wma_half - wma_full
-        hma_raw = wma(wma_diff, sqrt_n)
-        
-        # Pad to match weekly_close length
-        hma_1w_raw = np.full(len(weekly_close), np.nan)
-        if len(hma_raw) > 0:
-            start_idx = len(weekly_close) - len(hma_raw)
-            hma_1w_raw[start_idx:] = hma_raw
-        
-        # Align to daily and shift by 1 week for completed bar only
-        hma_1w = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # === ATR Bands (2.5 * ATR) ===
+    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    upper_band = ma + 2.5 * atr
+    lower_band = ma - 2.5 * atr
     
-    # === Donchian channels (20-day) ===
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=20, min_periods=20).max().values
-    donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    # === Daily Trend Filter (using 1d data) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(sma_10[i]) or np.isnan(hma_1w[i]):
+        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below 10-day SMA or weekly trend turns down
-            if close[i] < sma_10[i] or hma_1w[i] < hma_1w[i-1]:
+            # Exit: price crosses below lower band OR daily trend turns down
+            if close[i] < lower_band[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above 10-day SMA or weekly trend turns up
-            if close[i] > sma_10[i] or hma_1w[i] > hma_1w[i-1]:
+            # Exit: price crosses above upper band OR daily trend turns up
+            if close[i] > upper_band[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Weekly trend filter: only trade in direction of weekly trend
-            weekly_uptrend = hma_1w[i] > hma_1w[i-1]
-            weekly_downtrend = hma_1w[i] < hma_1w[i-1]
+            # Need volatility filter (ATR not too low)
+            if atr[i] < 0.5 * np.nanmedian(atr[max(0, i-50):i]):
+                signals[i] = 0.0
+                continue
             
-            # Entry: Donchian breakout with weekly trend alignment
-            if weekly_uptrend and close[i] > donch_high[i]:
+            # Entry: breakout with daily trend alignment
+            if close[i] > upper_band[i] and close[i] > ema_50_1d_aligned[i]:
+                # Break above upper band with daily uptrend -> long
                 position = 1
                 signals[i] = 0.25
-            elif weekly_downtrend and close[i] < donch_low[i]:
+            elif close[i] < lower_band[i] and close[i] < ema_50_1d_aligned[i]:
+                # Break below lower band with daily downtrend -> short
                 position = -1
                 signals[i] = -0.25
     
