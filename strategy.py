@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4H Donchian Breakout with Volume Confirmation and 1D Trend Filter
-Long when price breaks above Donchian upper (20-period) with expanding volume AND 1d EMA trend up
-Short when price breaks below Donchian lower with expanding volume AND 1d EMA trend down
-Exit when price crosses back to middle line (10-period EMA)
-Uses ATR-based position sizing and volatility filter to reduce false breakouts.
+4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+Long when price breaks above Donchian upper band (20-period high) with volume expansion AND 1d EMA trend up
+Short when price breaks below Donchian lower band (20-period low) with volume expansion AND 1d EMA trend down
+Exit when price crosses back to the 20-period EMA
+Designed to capture strong trends while avoiding false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_1d_trend_v1"
+name = "4h_donchian_breakout_volume_1d_trend_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,73 +26,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
+    # === Donchian Channels (20-period high/low) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
     
-    # === EMA middle line for exit (10-period) ===
-    ema_mid = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # === EMA for exit (20-period) ===
+    ema_exit = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # === Volume confirmation (20-period average) ===
+    # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === 1D trend filter (EMA 21) ===
+    # === 1d trend filter (EMA 21) ===
     df_1d = get_htf_data(prices, '1d')
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Volatility filter (ATR ratio) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr / (atr_ma + 1e-10)  # Current ATR vs average
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_mid[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_filter[i])):
+            np.isnan(ema_exit[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below EMA middle
-            if close[i] < ema_mid[i]:
+            # Exit: price crosses back below EMA
+            if close[i] < ema_exit[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above EMA middle
-            if close[i] > ema_mid[i]:
+            # Exit: price crosses back above EMA
+            if close[i] > ema_exit[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need expanding volume AND volatility not too low
-            if vol_ratio[i] < 1.3 or vol_filter[i] < 0.8:
+            # Need volume expansion (above average)
+            if vol_ratio[i] < 1.3:
                 signals[i] = 0.0
                 continue
             
             # Entry: Donchian breakout with volume confirmation AND 1d trend filter
             if close[i] > donch_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper channel with rising 1d EMA -> long
+                # Breakout above upper band with rising 1d EMA -> long
                 position = 1
                 signals[i] = 0.25
             elif close[i] < donch_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower channel with falling 1d EMA -> short
+                # Breakdown below lower band with falling 1d EMA -> short
                 position = -1
                 signals[i] = -0.25
     
