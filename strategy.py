@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Spike
+4h Donchian Breakout with 1d Trend Filter and Volume Spike
 Hypothesis: Breakouts above/below Donchian channels capture momentum.
 Using 1d EMA50 as trend filter provides stronger trend identification.
 Volume spikes confirm institutional participation.
-Target: 15-30 trades/year per symbol to minimize fee drag and improve generalization.
+This should work in both bull and bear regimes by following the trend.
+Target: 20-50 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,7 +54,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price crosses above 1d EMA50
@@ -61,19 +62,19 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Long: breakout above Donchian high + price above 1d EMA50 + volume spike
             if (close[i] > high_roll[i-1] and 
                 close[i] > ema_50_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Short: breakout below Donchian low + price below 1d EMA50 + volume spike
             elif (close[i] < low_roll[i-1] and 
                   close[i] < ema_50_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
