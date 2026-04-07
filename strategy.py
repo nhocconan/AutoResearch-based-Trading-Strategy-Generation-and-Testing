@@ -11,8 +11,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
 # Target: 75-200 total trades over 4 years (19-50/year)
-# This strategy works in both bull and bear markets by using ADX to filter for trending conditions only,
-# avoiding false breakouts in ranging markets. Volume confirmation ensures breakouts have institutional participation.
 
 name = "4h_donchian20_1d_vol_1w_adx_v1"
 timeframe = "4h"
@@ -34,7 +32,7 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-week data for ADX filter
+    # 1-week data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
