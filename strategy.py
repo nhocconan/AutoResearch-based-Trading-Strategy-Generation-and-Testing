@@ -4,15 +4,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band, 12h close > 12h EMA50 (uptrend), and volume > 1.5x 4h average volume
-# Short when price breaks below 4h Donchian lower band, 12h close < 12h EMA50 (downtrend), and volume > 1.5x 4h average volume
-# Exit when trend reverses (12h close crosses EMA50) or opposite breakout occurs
+# Long when price breaks above 4h Donchian upper band, 12h close > 12h EMA20 (uptrend), and volume > 1.3x 4h average volume
+# Short when price breaks below 4h Donchian lower band, 12h close < 12h EMA20 (downtrend), and volume > 1.3x 4h average volume
+# Exit when trend reverses (12h close crosses EMA20) or opposite breakout occurs
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12h EMA50 for trend filter and 4h volume average for confirmation
+# Uses 12h EMA20 for trend filter and 4h volume average for confirmation
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_12h_ema50_vol_v1"
+name = "4h_donchian20_12h_ema20_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,13 +45,13 @@ def generate_signals(prices):
     upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
     lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
     
-    # 12h data for EMA50 trend filter
+    # 12h data for EMA20 trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # 4h volume average for confirmation
@@ -89,7 +89,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (price below EMA50) or breaks below lower band
+            # Exit: trend reverses (price below EMA20) or breaks below lower band
             elif close[i] < ema_12h_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -102,7 +102,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (price above EMA50) or breaks above upper band
+            # Exit: trend reverses (price above EMA20) or breaks above upper band
             elif close[i] > ema_12h_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -111,17 +111,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: price breaks above upper band, price above EMA50 (uptrend), volume spike
+            # Long: price breaks above upper band, price above EMA20 (uptrend), volume spike
             if (close[i] > upper_aligned[i] and
                 close[i] > ema_12h_aligned[i] and
-                volume[i] > 1.5 * volume_ma_4h_aligned[i]):
+                volume[i] > 1.3 * volume_ma_4h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower band, price below EMA50 (downtrend), volume spike
+            # Short: price breaks below lower band, price below EMA20 (downtrend), volume spike
             elif (close[i] < lower_aligned[i] and
                   close[i] < ema_12h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_4h_aligned[i]):
+                  volume[i] > 1.3 * volume_ma_4h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
