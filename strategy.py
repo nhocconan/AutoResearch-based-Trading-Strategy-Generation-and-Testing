@@ -1,58 +1,65 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v3
-Hypothesis: Daily Camarilla pivot levels (S3/R3, S4/R4) act as strong support/resistance zones.
-Price respects these levels with volume confirmation, offering mean-reversion bounces in range
-and breakout continuation in trends. Uses 12h candles for lower frequency to reduce trade count
-and avoid fee drag. Target: 15-35 trades/year.
+12h_camarilla_pivot_1d_trend_v1
+Hypothesis: On 12h timeframe, use 1-day Camarilla pivot levels for trend context and 1-week EMA for higher timeframe trend filter.
+Long when price > H3 and above 1w EMA with volume confirmation; short when price < L3 and below 1w EMA with volume.
+Exit when price crosses the opposite H/L level or trend changes. Targets 15-30 trades/year (60-120 over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v3"
-timezone = "12h"
+name = "12h_camarilla_pivot_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
+    # 1-day data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Calculate Camarilla pivot levels from previous day
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
     prev_close = df_1d['close'].values
     
-    R4 = prev_close + 1.5 * (prev_high - prev_low)
-    R3 = prev_close + 1.0 * (prev_high - prev_low)
-    R2 = prev_close + 0.5 * (prev_high - prev_low)
-    R1 = prev_close + 0.25 * (prev_high - prev_low)
-    S1 = prev_close - 0.25 * (prev_high - prev_low)
-    S2 = prev_close - 0.5 * (prev_high - prev_low)
-    S3 = prev_close - 1.0 * (prev_high - prev_low)
-    S4 = prev_close - 1.5 * (prev_high - prev_low)
+    H4 = prev_close + 1.5 * (prev_high - prev_low)
+    H3 = prev_close + 1.0 * (prev_high - prev_low)
+    H2 = prev_close + 0.5 * (prev_high - prev_low)
+    H1 = prev_close + 0.25 * (prev_high - prev_low)
+    L1 = prev_close - 0.25 * (prev_high - prev_low)
+    L2 = prev_close - 0.5 * (prev_high - prev_low)
+    L3 = prev_close - 1.0 * (prev_high - prev_low)
+    L4 = prev_close - 1.5 * (prev_high - prev_low)
     
-    # Align to 12h timeframe (shifted by 1 day for lookback)
-    R4_12h = align_htf_to_ltf(prices, df_1d, R4)
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    R2_12h = align_htf_to_ltf(prices, df_1d, R2)
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
-    S2_12h = align_htf_to_ltf(prices, df_1d, S2)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
+    # Align all levels to 12h timeframe (shifted by 1 day for lookback)
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    H2_12h = align_htf_to_ltf(prices, df_1d, H2)
+    H1_12h = align_htf_to_ltf(prices, df_1d, H1)
+    L1_12h = align_htf_to_ltf(prices, df_1d, L1)
+    L2_12h = align_htf_to_ltf(prices, df_1d, L2)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # 1-week EMA for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
+    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -63,24 +70,23 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if any level or volume MA is not ready
-        if (np.isnan(R4_12h[i]) or np.isnan(R3_12h[i]) or np.isnan(R2_12h[i]) or np.isnan(R1_12h[i]) or
-            np.isnan(S1_12h[i]) or np.isnan(S2_12h[i]) or np.isnan(S3_12h[i]) or np.isnan(S4_12h[i]) or
+        # Skip if any required data is not ready
+        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or np.isnan(ema_1w_12h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S2 (strong support broken)
-            if close[i] < S2_12h[i]:
+            # Exit: price closes below H1 (weaken bullish structure) or trend turns bearish
+            if close[i] < H1_12h[i] or close[i] < ema_1w_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R2 (strong resistance broken)
-            if close[i] > R2_12h[i]:
+            # Exit: price closes above L1 (weaken bearish structure) or trend turns bullish
+            if close[i] > L1_12h[i] or close[i] > ema_1w_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,22 +97,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
                 
-            # Long entry: price bounces from S3/S4 with volume (bullish reversal)
-            # OR breaks above R3 with volume (bullish breakout)
-            long_breakout = (close[i] > R3_12h[i] and close[i-1] <= R3_12h[i-1])
-            long_bounce_s3 = (close[i] > S3_12h[i] and close[i-1] <= S3_12h[i-1])
-            long_bounce_s4 = (close[i] > S4_12h[i] and close[i-1] <= S4_12h[i-1])
-            
-            if (long_breakout or long_bounce_s3 or long_bounce_s4) and close[i] < R2_12h[i]:
+            # Long entry: price above H3 and above 1w EMA (bullish breakout with trend)
+            if close[i] > H3_12h[i] and close[i] > ema_1w_12h[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price rejects from R3/R4 with volume (bearish reversal)
-            # OR breaks below S3 with volume (bearish breakdown)
-            short_breakdown = (close[i] < S3_12h[i] and close[i-1] >= S3_12h[i-1])
-            short_reject_r3 = (close[i] < R3_12h[i] and close[i-1] >= R3_12h[i-1])
-            short_reject_r4 = (close[i] < R4_12h[i] and close[i-1] >= R4_12h[i-1])
-            
-            if (short_breakdown or short_reject_r3 or short_reject_r4) and close[i] > S2_12h[i]:
+            # Short entry: price below L3 and below 1w EMA (bearish breakdown with trend)
+            elif close[i] < L3_12h[i] and close[i] < ema_1w_12h[i]:
                 position = -1
                 signals[i] = -0.25
     
