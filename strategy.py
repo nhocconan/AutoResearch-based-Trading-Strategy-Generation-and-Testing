@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12H Weekly Donchian Breakout with Volume and ADX Filter
+# Strategy: 4H Weekly Donchian Breakout with Volume and ADX Filter
 # Hypothesis: Breakouts from weekly Donchian channels (20-period) with volume confirmation
 # and ADX trend strength filter capture strong momentum moves. Weekly timeframe provides
-# robust levels for 12h trading, volume confirms institutional interest, ADX filters out
-# weak/choppy periods. Works in bull markets (buy breakouts above weekly high) and bear
-# markets (sell breakdowns below weekly low). Target: 12-37 trades/year.
+# more robust levels than daily, reducing false breakouts. Works in both bull and bear
+# markets by trading breakouts in the direction of the weekly trend. Target: 20-40 trades/year.
 
-name = "12h_weekly_donchian_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_weekly_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -79,7 +78,7 @@ def generate_signals(prices):
     # Handle NaN values
     adx = adx.fillna(0).values
     
-    # Align weekly data to 12h timeframe
+    # Align weekly data to 4h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
     adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
