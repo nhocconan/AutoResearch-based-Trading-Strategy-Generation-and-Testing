@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when price crosses 20-period EMA in opposite direction
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + weekly ADX > 20
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + weekly ADX > 20
+# Exit when price crosses 12-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "4h_donchian20_1d_vol_1w_adx_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_vol_1w_adx_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -81,8 +81,8 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 20-period EMA for exit
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 12-period EMA for exit
+    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -101,7 +101,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(atr[i])):
+            np.isnan(ema_12[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -114,8 +114,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 20-period EMA
-            elif close[i] < ema_20[i]:
+            # Exit: price crosses below 12-period EMA
+            elif close[i] < ema_12[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -127,8 +127,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 20-period EMA
-            elif close[i] > ema_20[i]:
+            # Exit: price crosses above 12-period EMA
+            elif close[i] > ema_12[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -138,8 +138,8 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout with volume confirmation and ADX filter
             # Volume filter: volume > 1.5x 20-period average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 25
-            trend_filter = adx_aligned[i] > 25
+            # Trend filter: weekly ADX > 20
+            trend_filter = adx_aligned[i] > 20
             
             # Long: price breaks above Donchian high + volume filter + trend filter
             if close[i] > highest_high[i] and volume_filter and trend_filter:
