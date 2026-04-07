@@ -1,23 +1,22 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-6h Volatility-Adaptive Keltner Breakout with Volume Confirmation.
-Long when price breaks above upper Keltner channel with expanding volume and ATR.
-Short when price breaks below lower Keltner channel with expanding volume and ATR.
-Exit when price crosses back to middle line.
-Uses ATR-based bands that adapt to volatility, reducing false breakouts in ranging markets.
+4h Donchian Breakout with 1d Trend Filter, Volume Confirmation, and ATR Stop.
+Long when price breaks above Donchian upper band and 1d EMA trend is up with volume confirmation.
+Short when price breaks below Donchian lower band and 1d EMA trend is down with volume confirmation.
+Exit when price crosses back to Donchian middle line.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_breakout_volume_atr_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,7 +25,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === ATR (14) for Keltner channels ===
+    # === Donchian Channels (20-period) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # === ATR (14) for position sizing and volatility filter ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -36,27 +40,28 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === Keltner Channels (20-period EMA ± 2*ATR) ===
-    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema_mid + 2 * atr
-    keltner_lower = ema_mid - 2 * atr
-    
-    # === Volume confirmation ===
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    vol_ratio = volume / (vol_ma + 1e-10)
+    
+    # === 1d EMA trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema_mid[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price crosses back below middle line
-            if close[i] < ema_mid[i]:
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -64,24 +69,24 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price crosses back above middle line
-            if close[i] > ema_mid[i]:
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need expanding volume (above average)
-            if vol_ratio[i] < 1.2:
+            # Need volume confirmation (above average)
+            if vol_ratio[i] < 1.3:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Keltner breakout with volume confirmation
-            if close[i] > keltner_upper[i]:
-                # Breakout above upper channel -> long
+            # Entry: Donchian breakout with 1d trend filter and volume
+            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Breakout above upper band with rising 1d trend -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < keltner_lower[i]:
-                # Breakdown below lower channel -> short
+            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Breakdown below lower band with falling 1d trend -> short
                 position = -1
                 signals[i] = -0.25
     
