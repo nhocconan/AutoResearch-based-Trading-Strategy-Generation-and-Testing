@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_keltner_1w_trend_volume_v1
-Hypothesis: On 6-hour timeframe, use weekly Keltner Channels with 1-week trend filter and volume confirmation.
-Long when price closes above upper Keltner channel with weekly EMA(50) trending up and volume > 1.5x 20-period average.
-Short when price closes below lower Keltner channel with weekly EMA(50) trending down and volume > 1.5x 20-period average.
-Exit when price closes back inside the Keltner channel.
-Designed for 10-30 trades/year to minimize fee dust while capturing strong trends with institutional validation.
-Works in both bull/bear markets as Keltner channels adapt to volatility and weekly trend filter avoids counter-trend trades.
+4h_camarilla_pivot_12h_volume_v1
+Hypothesis: On 4-hour timeframe, use daily Camarilla pivot levels with 12-hour trend filter and volume confirmation.
+Long when price touches S1/S2 support with 12h EMA(20) trending up and volume > 1.5x 20-period average.
+Short when price touches R1/R2 resistance with 12h EMA(20) trending down and volume > 1.5x 20-period average.
+Exit when price moves back toward the mean (Pivot point) or reverses at opposite levels.
+Designed for 20-40 trades/year to minimize fee drag while capturing mean-reversion bounces in ranging markets and trend continuations in trending markets.
+Works in both bull/bear markets as Camarilla levels adapt to volatility and 12h trend filter avoids counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_1w_trend_volume_v1"
-timeframe = "6h"
+name = "4h_camarilla_pivot_12h_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,44 +28,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Determine weekly trend direction (using EMA slope)
-    weekly_trend_up = np.zeros(len(ema_50_1w_aligned), dtype=bool)
-    weekly_trend_down = np.zeros(len(ema_50_1w_aligned), dtype=bool)
-    for i in range(1, len(ema_50_1w_aligned)):
-        if not np.isnan(ema_50_1w_aligned[i]) and not np.isnan(ema_50_1w_aligned[i-1]):
-            weekly_trend_up[i] = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
-            weekly_trend_down[i] = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate Keltner Channels on 6h timeframe
-    # Typical Price = (High + Low + Close) / 3
-    typical_price = (high + low + close) / 3
-    atr_period = 10
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Camarilla levels: R4 = C + ((H-L) * 1.5000), R3 = C + ((H-L) * 1.2500), etc.
+    r4 = pivot + (range_1d * 1.5000)
+    r3 = pivot + (range_1d * 1.2500)
+    r2 = pivot + (range_1d * 1.1666)
+    r1 = pivot + (range_1d * 1.0833)
+    s1 = pivot - (range_1d * 1.0833)
+    s2 = pivot - (range_1d * 1.1666)
+    s3 = pivot - (range_1d * 1.2500)
+    s4 = pivot - (range_1d * 1.5000)
     
-    ema_period = 20
-    ema_tp = pd.Series(typical_price).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    # Align pivots to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    multiplier = 2.0
-    upper_keltner = ema_tp + multiplier * atr
-    lower_keltner = ema_tp - multiplier * atr
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA(20) for trend filter
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    
+    # Determine 12h trend direction (using EMA slope)
+    trend_up = np.zeros(len(ema_20_12h_aligned), dtype=bool)
+    trend_down = np.zeros(len(ema_20_12h_aligned), dtype=bool)
+    for i in range(1, len(ema_20_12h_aligned)):
+        if not np.isnan(ema_20_12h_aligned[i]) and not np.isnan(ema_20_12h_aligned[i-1]):
+            trend_up[i] = ema_20_12h_aligned[i] > ema_20_12h_aligned[i-1]
+            trend_down[i] = ema_20_12h_aligned[i] < ema_20_12h_aligned[i-1]
     
     # Volume filter: 20-period average
     vol_series = pd.Series(volume)
@@ -74,10 +89,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(20, 50), n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
@@ -85,31 +100,33 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes back inside Keltner channel (below upper)
-            if close[i] < upper_keltner[i]:
+            # Exit: price moves back to pivot or breaks below S1
+            if close[i] <= pivot_aligned[i] or close[i] < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside Keltner channel (above lower)
-            if close[i] > lower_keltner[i]:
+            # Exit: price moves back to pivot or breaks above R1
+            if close[i] >= pivot_aligned[i] or close[i] > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume confirmation and weekly trend alignment
+            # Only enter with volume confirmation and 12h trend alignment
             if vol_ok:
-                # Long: price closes above upper Keltner with weekly uptrend
-                if (close[i] > upper_keltner[i] and close[i-1] <= upper_keltner[i-1] and 
-                    weekly_trend_up[i]):
+                # Long: price touches S1/S2 with 12h uptrend
+                if ((abs(close[i] - s1_aligned[i]) < 0.001 * close[i] or 
+                     abs(close[i] - s2_aligned[i]) < 0.001 * close[i]) and 
+                    trend_up[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price closes below lower Keltner with weekly downtrend
-                elif (close[i] < lower_keltner[i] and close[i-1] >= lower_keltner[i-1] and 
-                      weekly_trend_down[i]):
+                # Short: price touches R1/R2 with 12h downtrend
+                elif ((abs(close[i] - r1_aligned[i]) < 0.001 * close[i] or 
+                       abs(close[i] - r2_aligned[i]) < 0.001 * close[i]) and 
+                      trend_down[i]):
                     position = -1
                     signals[i] = -0.25
     
