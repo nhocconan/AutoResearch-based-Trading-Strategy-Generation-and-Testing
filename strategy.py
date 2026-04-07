@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA50 filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band, 12h EMA50 rising (uptrend), and volume > 1.5x 4h average volume
-# Short when price breaks below 4h Donchian lower band, 12h EMA50 falling (downtrend), and volume > 1.5x 4h average volume
-# Exit when trend reverses (12h EMA slope changes sign) or opposite breakout occurs
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper band, 12h close > 12h EMA50 (uptrend), and volume > 1.5x 4h average volume
+# Short when price breaks below 4h Donchian lower band, 12h close < 12h EMA50 (downtrend), and volume > 1.5x 4h average volume
+# Exit when trend reverses (12h close crosses EMA50) or opposite breakout occurs
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 12h EMA50 for trend filter and 4h volume average for confirmation
@@ -54,9 +54,6 @@ def generate_signals(prices):
     ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate EMA slope for trend direction (rising/falling)
-    ema_slope = np.diff(ema_12h_aligned, prepend=ema_12h_aligned[0])
-    
     # 4h volume average for confirmation
     volume_4h = df_4h['volume'].values
     volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
@@ -92,8 +89,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (EMA slope negative) or breaks below lower band
-            elif ema_slope[i] < 0 or close[i] < lower_aligned[i]:
+            # Exit: trend reverses (price below EMA50) or breaks below lower band
+            elif close[i] < ema_12h_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -105,8 +102,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: trend reverses (EMA slope positive) or breaks above upper band
-            elif ema_slope[i] > 0 or close[i] > upper_aligned[i]:
+            # Exit: trend reverses (price above EMA50) or breaks above upper band
+            elif close[i] > ema_12h_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -114,16 +111,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: price breaks above upper band, EMA slope positive (uptrend), volume spike
+            # Long: price breaks above upper band, price above EMA50 (uptrend), volume spike
             if (close[i] > upper_aligned[i] and
-                ema_slope[i] > 0 and
+                close[i] > ema_12h_aligned[i] and
                 volume[i] > 1.5 * volume_ma_4h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower band, EMA slope negative (downtrend), volume spike
+            # Short: price breaks below lower band, price below EMA50 (downtrend), volume spike
             elif (close[i] < lower_aligned[i] and
-                  ema_slope[i] < 0 and
+                  close[i] < ema_12h_aligned[i] and
                   volume[i] > 1.5 * volume_ma_4h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
