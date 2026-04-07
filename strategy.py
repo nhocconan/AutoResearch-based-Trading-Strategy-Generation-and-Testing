@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) breakout with weekly volume confirmation and momentum filter
-# Hypothesis: Breakouts with higher timeframe volume confirmation capture strong trends, while momentum filter avoids false breakouts in chop.
-# Works in bull via breakouts, in bear via momentum-based mean reversion when price reverts to mean after overextension.
-# Target: 20-50 trades/year to minimize fee drag.
-name = "4h_donchian20_1w_volume_mom_v1"
-timeframe = "4h"
+# Strategy: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
+# Hypothesis: Weekly trend ensures directional bias, daily breakout captures momentum, volume confirms strength.
+# Works in bull via trend-aligned breakouts, in bear via volatility-filtered mean reversion at bands.
+# Target: 10-25 trades/year to minimize fee drag.
+name = "1d_donchian20_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,27 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for volume confirmation and momentum
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly 20-period volume moving average
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Calculate weekly 50-period EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate weekly RSI(14) for momentum filter
-    delta = pd.Series(df_1w['close']).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate ATR(14) for volatility filter and position sizing
+    # Calculate daily 20-period volume moving average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Calculate ATR(14) for volatility filter and stop sizing
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -59,37 +59,38 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > weekly average volume
-        vol_confirm = volume[i] > vol_ma_1w_aligned[i]
+        # Volume confirmation: current daily volume > daily average volume
+        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
-        # Momentum filter: only trade when weekly RSI is not extreme (avoid overextended moves)
-        mom_filter = (rsi_1w_aligned[i] > 30) and (rsi_1w_aligned[i] < 70)
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
+        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
         
         if position == 1:  # Long position
-            # Exit: price touches opposite band OR momentum turns bearish
-            if close[i] <= lowest_low[i] or rsi_1w_aligned[i] < 30:
+            # Exit: price touches opposite band OR volatility drops OR trend reverses
+            if close[i] <= lowest_low[i] or not vol_filter or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches opposite band OR momentum turns bullish
-            if close[i] >= highest_high[i] or rsi_1w_aligned[i] > 70:
+            # Exit: price touches opposite band OR volatility drops OR trend reverses
+            if close[i] >= highest_high[i] or not vol_filter or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + momentum filter
-            if close[i] > highest_high[i] and vol_confirm and mom_filter:
+            # Enter long: price breaks above upper band + volume confirmation + volatility filter + weekly uptrend
+            if close[i] > highest_high[i] and vol_confirm and vol_filter and close[i] > ema_50_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + momentum filter
-            elif close[i] < lowest_low[i] and vol_confirm and mom_filter:
+            # Enter short: price breaks below lower band + volume confirmation + volatility filter + weekly downtrend
+            elif close[i] < lowest_low[i] and vol_confirm and vol_filter and close[i] < ema_50_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
