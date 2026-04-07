@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
+4h_camarilla_pivot_1d_volume_v2
 Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
 Long when price breaks above R4 with volume confirmation (bullish continuation).
 Short when price breaks below S4 with volume confirmation (bearish continuation).
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
+name = "4h_camarilla_pivot_1d_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
