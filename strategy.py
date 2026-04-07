@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_weekly_pivot_volume_v1
-Hypothesis: Use weekly pivot points from weekly timeframe to determine trend direction, with 60-period volume moving average confirmation on 6h timeframe. Enter long when price breaks above weekly R1 with volume confirmation, short when price breaks below weekly S1. Exit on opposite pivot level breach. Designed for 50-150 total trades over 4 years (~12-37/year) to minimize fee drag while capturing trending moves in both bull and bear markets.
+12h_camarilla_pivot_volume_filter_v1
+Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from the previous daily session with volume confirmation to capture institutional-driven reversals at key support/resistance levels. Works in both bull and bear markets by fading extremes at pivot levels (L4/S4 for longs, H3/H4 for shorts) with volume filtering to avoid false breaks. Targets 50-150 total trades over 4 years (~12-37/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,36 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly pivot points (using 1w timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get daily OHLC for Camarilla pivot calculation (use 1d timeframe)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly pivots: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    # H4 = Close + 1.5 * (High - Low)
+    # H3 = Close + 1.0 * (High - Low)
+    # L3 = Close - 1.0 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # Calculate pivot levels
+    H4 = close_1d + 1.5 * (high_1d - low_1d)
+    H3 = close_1d + 1.0 * (high_1d - low_1d)
+    L3 = close_1d - 1.0 * (high_1d - low_1d)
+    L4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align weekly pivots to 6h timeframe (shifted by 1 for completed weekly bars)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # Align to 12h timeframe (shifted by 1 day to avoid look-ahead)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Volume filter: 60-period average on 6h timeframe
+    # Volume filter: 20-period average on 12h timeframe
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=60, min_periods=60).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(H3_aligned[i]) or 
+            np.isnan(L3_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
@@ -60,29 +68,33 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below weekly pivot
-            if close[i] < pivot_aligned[i]:
+            # Exit: price reaches H3 (take profit) or breaks below L4 (stop)
+            if close[i] >= H3_aligned[i] or close[i] <= L4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above weekly pivot
-            if close[i] > pivot_aligned[i]:
+            # Exit: price reaches L3 (take profit) or breaks above H4 (stop)
+            if close[i] <= L3_aligned[i] or close[i] >= H4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Breakout above R1: go long
-                if close[i] > r1_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Breakdown below S1: go short
-                elif close[i] < s1_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+                # Long entry: price touches or goes below L4 with rejection (close > L4)
+                if close[i] <= L4_aligned[i] and close[i] > L4_aligned[i] * 0.999:  # touched L4
+                    # Additional confirmation: price closing back above L4 (bullish rejection)
+                    if i > 0 and close[i] > close[i-1]:
+                        position = 1
+                        signals[i] = 0.25
+                # Short entry: price touches or goes above H4 with rejection (close < H4)
+                elif close[i] >= H4_aligned[i] and close[i] < H4_aligned[i] * 1.001:  # touched H4
+                    # Additional confirmation: price closing back below H4 (bearish rejection)
+                    if i > 0 and close[i] < close[i-1]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
