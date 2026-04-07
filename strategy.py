@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_donchian_breakout_1w_trend_volume_v1
-Hypothesis: Uses daily Donchian channel breakout with weekly EMA trend filter and volume confirmation. 
-Long when price breaks above upper Donchian(20) with volume > 1.5x 20-day average and price > weekly EMA50.
-Short when price breaks below lower Donchian(20) with volume > 1.5x 20-day average and price < weekly EMA50.
-Exit when price crosses the 10-day EMA in the opposite direction.
-Designed to capture strong trends while filtering out choppy markets. Works in both bull and bear markets by following weekly trend.
+6h_ado_v1
+Hypothesis: Uses ADO (Average Directional Oscillator) on 6h with 12h trend filter to capture trend continuation and mean reversion in different regimes. Long when ADO > 0 and price above 12h EMA50, short when ADO < 0 and price below 12h EMA50. Includes volume confirmation to avoid false signals. Designed to work in trending markets (ADO captures trend strength) and ranging markets (mean reversion at extremes) by using 12h trend filter to align with higher timeframe direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_ado_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,67 +23,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Donchian Channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate ADO (Average Directional Oscillator) = (DI+ - DI-) / (DI+ + DI-) * 100
+    # Using 14-period for DI calculation
+    period = 14
     
-    # Daily 10-period EMA for exit
-    close_s = pd.Series(close)
-    ema_10 = close_s.ewm(span=10, min_periods=10, adjust=False).values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values using Wilder's smoothing (EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # Initialize with SMA of first 'period' values
+            result[period-1] = np.nanmean(data[:period])
+            # Apply Wilder's smoothing
+            for i in range(period, len(data)):
+                if not np.isnan(data[i]):
+                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+                else:
+                    result[i] = result[i-1]
+        return result
+    
+    tr_smoothed = wilders_smoothing(tr, period)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    # ADX and ADO
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period)
+    ado = plus_di - minus_di  # This is the ADO (-100 to +100)
+    
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume confirmation: current volume > 1.5x 20-day average volume
-    volume_s = pd.Series(volume)
-    vol_ma_20 = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(period*2, n):  # Start after warmup
         # Skip if data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_10[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(ado[i]) or np.isnan(tr_smoothed[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(close[i]) or np.isnan(vol_ma[i]) or tr_smoothed[i] == 0):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: Price crosses below 10-day EMA
-            if close[i] < ema_10[i]:
+            # Exit: ADO turns negative or trend changes
+            if ado[i] < 0 or close[i] < ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above 10-day EMA
-            if close[i] > ema_10[i]:
+            # Exit: ADO turns positive or trend changes
+            if ado[i] > 0 or close[i] > ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
-            vol_ok = volume[i] > 1.5 * vol_ma_20[i]
-            
-            # Long: Break above upper Donchian with volume and above weekly EMA50
-            if (high[i] > high_20[i] and  # Breakout condition
-                vol_ok and
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: ADO positive (bullish momentum) and price above 12h EMA50 (uptrend)
+            if ado[i] > 0 and close[i] > ema_50_12h_aligned[i] and vol_confirmed:
                 position = 1
                 signals[i] = 0.25
-            # Short: Break below lower Donchian with volume and below weekly EMA50
-            elif (low[i] < low_20[i] and  # Breakdown condition
-                  vol_ok and
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: ADO negative (bearish momentum) and price below 12h EMA50 (downtrend)
+            elif ado[i] < 0 and close[i] < ema_50_12h_aligned[i] and vol_confirmed:
                 position = -1
                 signals[i] = -0.25
     
