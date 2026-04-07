@@ -3,153 +3,110 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d KAMA + RSI + Chop Filter
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
-# RSI(14) filters entries to avoid overbought/oversold extremes.
-# Chop filter (Choppiness Index) avoids ranging markets where trends fail.
-# Designed for 1d timeframe with low trade frequency (<25/year).
-# Works in bull via KAMA uptrend + RSI < 70, in bear via KAMA downtrend + RSI > 30.
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Strategy: 6h Ehlers Fisher Transform + Weekly Trend Filter + Volume Spike
+# Hypothesis: Fisher Transform identifies extreme price reversals with low lag.
+# Weekly trend filter ensures alignment with higher-timeframe momentum.
+# Volume spike confirms institutional participation in the reversal.
+# Designed for 6h timeframe with low trade frequency (12-37/year).
+# Works in bull via Fisher long signals + weekly uptrend + volume, 
+# in bear via Fisher short signals + weekly downtrend + volume.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_fisher_transform_1w_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for chop filter
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # KAMA (Kaufman Adaptive Moving Average) on daily close
-    # ER (Efficiency Ratio) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    # SC = [ER * (fastest - slowest) + slowest]^2
-    # KAMA = prevKAMA + SC * (price - prevKAMA)
-    def kama(data, er_period=10, fast=2, slow=30):
-        if len(data) < er_period:
-            return np.full_like(data, np.nan, dtype=float)
-        # Calculate change and volatility
-        change = np.abs(np.subtract(data[er_period:], data[:-er_period]))
-        volatility = np.sum(np.abs(np.diff(data)), axis=0) if len(data) > 1 else 0
-        # For array calculation, we need to compute volatility over rolling window
-        er = np.full_like(data, np.nan, dtype=float)
-        for i in range(er_period, len(data)):
-            if np.sum(np.abs(np.diff(data[i-er_period:i+1]))) > 0:
-                er[i] = np.abs(data[i] - data[i-er_period]) / np.sum(np.abs(np.diff(data[i-er_period:i+1])))
+    # Ehlers Fisher Transform (9-period)
+    # Step 1: Normalize price to [-1, 1] range over lookback period
+    def normalize_price(high, low, lookback=9):
+        nn = np.zeros_like(high)
+        hh = np.zeros_like(high)
+        for i in range(len(high)):
+            if i < lookback - 1:
+                nn[i] = low[:i+1].min()
+                hh[i] = high[:i+1].max()
             else:
-                er[i] = 0
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # Initialize KAMA
-        kama_vals = np.full_like(data, np.nan, dtype=float)
-        kama_vals[er_period] = np.mean(data[:er_period+1])  # Start with average
-        for i in range(er_period+1, len(data)):
-            if not np.isnan(sc[i]):
-                kama_vals[i] = kama_vals[i-1] + sc[i] * (data[i] - kama_vals[i-1])
-            else:
-                kama_vals[i] = kama_vals[i-1]
-        return kama_vals
+                nn[i] = low[i-lookback+1:i+1].min()
+                hh[i] = high[i-lookback+1:i+1].max()
+        # Avoid division by zero
+        diff = hh - nn
+        diff[diff == 0] = 1e-10
+        return 2 * ((high - nn) / diff - 0.5)
     
-    kama_vals = kama(close)
+    # Step 2: Apply Gaussian smoothing
+    def gaussian_smooth(values, alpha=0.33):
+        result = np.zeros_like(values)
+        result[0] = values[0]
+        for i in range(1, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # RSI(14) on daily close
-    def rsi(data, period=14):
-        if len(data) < period + 1:
-            return np.full_like(data, np.nan, dtype=float)
-        delta = np.diff(data)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(data, np.nan, dtype=float)
-        avg_loss = np.full_like(data, np.nan, dtype=float)
-        # First average
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        # Subsequent averages (Wilder's smoothing)
-        for i in range(period+1, len(data)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi_vals = np.full_like(data, np.nan, dtype=float)
-        rsi_vals[period:] = 100 - (100 / (1 + rs[period:]))
-        return rsi_vals
+    # Step 3: Fisher Transform
+    price_norm = normalize_price(high, low, 9)
+    smoothed = gaussian_smooth(price_norm, 0.33)
+    # Clamp to prevent math domain error
+    smoothed = np.clip(smoothed, -0.999, 0.999)
+    fisher = 0.5 * np.log((1 + smoothed) / (1 - smoothed))
     
-    rsi_vals = rsi(close)
+    # Weekly trend filter: EMA(20) of weekly close
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Choppiness Index on weekly data
-    def chop(data_high, data_low, data_close, period=14):
-        if len(data_close) < period:
-            return np.full_like(data_close, np.nan, dtype=float)
-        # True Range
-        tr1 = np.subtract(data_high[1:], data_low[1:])
-        tr2 = np.abs(np.subtract(data_high[1:], data_close[:-1]))
-        tr3 = np.abs(np.subtract(data_low[1:], data_close[:-1]))
-        tr = np.maximum(np.maximum(tr1, tr2), tr3)
-        tr = np.concatenate([[np.nan], tr])  # Align with close index
-        # Sum of TR over period
-        tr_sum = np.full_like(data_close, np.nan, dtype=float)
-        for i in range(period, len(data_close)):
-            tr_sum[i] = np.nansum(tr[i-period+1:i+1])
-        # Highest high and lowest low over period
-        hh = np.full_like(data_close, np.nan, dtype=float)
-        ll = np.full_like(data_close, np.nan, dtype=float)
-        for i in range(period-1, len(data_close)):
-            hh[i] = np.max(data_high[i-period+1:i+1])
-            ll[i] = np.min(data_low[i-period+1:i+1])
-        # Chop calculation
-        chop_vals = np.full_like(data_close, np.nan, dtype=float)
-        for i in range(period-1, len(data_close)):
-            if tr_sum[i] > 0 and (hh[i] - ll[i]) > 0:
-                chop_vals[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(period)
-            else:
-                chop_vals[i] = np.nan
-        return chop_vals
-    
-    chop_vals = chop(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_vals)
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
+    vol_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(fisher[i]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Check volume confirmation
+        vol_ok = vol_spike[i]
+        
         if position == 1:  # Long position
-            # Exit: KAMA turns down OR RSI overbought OR chop becomes low (trending)
-            if (close[i] < kama_vals[i]) or (rsi_vals[i] > 70) or (chop_aligned[i] < 38.2):
+            # Exit: Fisher crosses below zero OR weekly trend turns bearish
+            if fisher[i] < 0 or close[i] < ema_20_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:  # Short position
-            # Exit: KAMA turns up OR RSI oversold OR chop becomes low (trending)
-            if (close[i] > kama_vals[i]) or (rsi_vals[i] < 30) or (chop_aligned[i] < 38.2):
+            # Exit: Fisher crosses above zero OR weekly trend turns bullish
+            if fisher[i] > 0 or close[i] > ema_20_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:  # Flat, look for entry
-            # Chop filter: only enter when market is ranging (chop > 61.8)
-            if chop_aligned[i] > 61.8:
-                # Uptrend: price above KAMA AND RSI not overbought
-                if (close[i] > kama_vals[i]) and (rsi_vals[i] < 70):
+            if vol_ok:
+                # Long: Fisher crosses above -0.5 (oversold bounce) with weekly uptrend
+                if fisher[i] > -0.5 and (i == 20 or fisher[i-1] <= -0.5) and close[i] > ema_20_1w_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Downtrend: price below KAMA AND RSI not oversold
-                elif (close[i] < kama_vals[i]) and (rsi_vals[i] > 30):
+                    signals[i] = 0.28
+                # Short: Fisher crosses below 0.5 (overbought reversal) with weekly downtrend
+                elif fisher[i] < 0.5 and (i == 20 or fisher[i-1] >= 0.5) and close[i] < ema_20_1w_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.28
     
     return signals
