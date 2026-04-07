@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Uses 1-day volume for confirmation and 1-day ADX for trend strength
 # Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "4h_donchian20_1d_vol_adx_v3"
+name = "4h_donchian20_1d_vol_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,7 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume confirmation and ADX trend filter
+    # 1-day data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
