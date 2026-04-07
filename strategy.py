@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter - Version 1
-Hypothesis: Donchian channel breakouts capture volatility expansion, while 1-day trend (price > 50 EMA) filters for directional moves, reducing whipsaws in ranging markets. Volume confirmation (>1.5x average) ensures institutional participation. Works in both bull and bear markets by trading breakouts in the direction of the daily trend.
+6h Camarilla Pivot + 1d EMA Trend + Volume Confirmation
+Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
+identify institutional support/resistance. In 6h timeframe, we fade at R3/S3 when 
+price rejects extreme levels, and breakout continuation at R4/S4 when price 
+breaks with volume. 1d EMA(50) filters for higher timeframe trend alignment. 
+Volume > 1.5x average confirms institutional participation. Works in bull/bear 
+by adapting to pivot structure - mean reversion in ranges, breakout in trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_filter_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,9 +28,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla Pivot levels from previous day
+    # Typical Price = (H + L + C) / 3
+    typical_price = (high + low + close) / 3.0
+    # Use previous day's values for today's pivot (avoid look-ahead)
+    prev_typical = np.roll(typical_price, 1)
+    prev_typical[0] = np.nan  # First value has no previous
+    
+    # Calculate pivot and ranges
+    pivot = prev_typical
+    range_val = high - low
+    prev_range = np.roll(range_val, 1)
+    prev_range[0] = np.nan
+    
+    # Camarilla levels (based on previous day)
+    r4 = pivot + (prev_range * 1.1 / 2)
+    r3 = pivot + (prev_range * 1.1 / 4)
+    s3 = pivot - (prev_range * 1.1 / 4)
+    s4 = pivot - (prev_range * 1.1 / 2)
     
     # Volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -40,37 +60,57 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_50_aligned[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(r4[i]) or 
+            np.isnan(s4[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR trend reverses (price < EMA50)
-            if close[i] < donch_low[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price breaks below S3 (mean reversion fail) OR 
+            # price breaks above R4 and fails (bull trap) OR trend reverses
+            if (close[i] < s3[i] or 
+                (close[i] > r4[i] and close[i] < r4[i-1]) or  # Failed breakout
+                close[i] < ema_50_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR trend reverses (price > EMA50)
-            if close[i] > donch_high[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price breaks above R3 (mean reversion fail) OR
+            # price breaks below S4 and fails (bear trap) OR trend reverses
+            if (close[i] > r3[i] or 
+                (close[i] < s4[i] and close[i] > s4[i-1]) or  # Failed breakout
+                close[i] > ema_50_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: breakout above Donchian high + price > EMA50 + volume filter
-            if (close[i] > donch_high[i-1] and 
-                close[i] > ema_50_aligned[i] and 
+            # Long mean reversion: price rejects S3 with volume
+            if (close[i] <= s3[i] and 
+                close[i] > s3[i-1] and  # Rejection bounce
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.30
-            # Short: breakout below Donchian low + price < EMA50 + volume filter
-            elif (close[i] < donch_low[i-1] and 
+                signals[i] = 0.25
+            # Short mean reversion: price rejects R3 with volume
+            elif (close[i] >= r3[i] and 
+                  close[i] < r3[i-1] and  # Rejection rejection
+                  vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
+            # Long breakout: price breaks R4 with volume and trend alignment
+            elif (close[i] > r4[i] and 
+                  close[i] > ema_50_aligned[i] and 
+                  vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short breakout: price breaks S4 with volume and trend alignment
+            elif (close[i] < s4[i] and 
                   close[i] < ema_50_aligned[i] and 
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
