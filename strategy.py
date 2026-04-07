@@ -3,88 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation
-# Designed for low frequency (target: 15-30 trades/year) to minimize fee drag
-# Long when price breaks above Donchian(20) high AND price > 1w EMA(50) AND volume > 20-period average
-# Short when price breaks below Donchian(20) low AND price < 1w EMA(50) AND volume > 20-period average
-# Exit on opposite Donchian breakout or trend reversal
-# Uses weekly trend filter to avoid counter-trend trades in both bull and bear markets
+# Hypothesis: 6-hour Camarilla pivot strategy using daily pivot levels
+# Uses daily Camarilla levels (calculated from previous day's OHLC) for mean reversion and breakout signals:
+# - Long when price touches S3 level with bullish engulfing candle AND closes above S2
+# - Short when price touches R3 level with bearish engulfing candle AND closes below R2
+# - Exit when price reaches opposite H3/L3 level or reverses at H4/L4
+# - Designed for low frequency (target: 15-30 trades/year) by requiring specific price action at key levels
+# - Camarilla levels work well in ranging markets (2022-2024) and capture breakouts in trending markets (2021, 2025+)
 
-name = "1d_donchian20_1w_ema_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
+    open_prices = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # 1-week EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Previous day's values for today's Camarilla levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan  # First day has no previous
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla multipliers
+    H3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    L3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    H4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    L4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align daily levels to 6h timeframe
+    H3_6h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_6h = align_htf_to_ltf(prices, df_1d, L3)
+    H4_6h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_6h = align_htf_to_ltf(prices, df_1d, L4)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if required data not available
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+    for i in range(1, n):  # Start from 1 to access i-1 for candle patterns
+        # Skip if Camarilla levels not available
+        if (np.isnan(H3_6h[i]) or np.isnan(L3_6h[i]) or 
+            np.isnan(H4_6h[i]) or np.isnan(L4_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirm = volume[i] > vol_ma[i]
+        # Bullish engulfing pattern: current candle engulfs previous bearish candle
+        bullish_engulf = (close[i] > open_prices[i] and  # Current bullish
+                         open_prices[i-1] > close[i-1] and  # Previous bearish
+                         close[i] > open_prices[i-1] and  # Current close > previous open
+                         open_prices[i] < close[i-1])     # Current open < previous close
         
-        # Trend filter from 1-week EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i-1] if i > 0 else False
-        breakout_down = close[i] < donchian_low[i-1] if i > 0 else False
+        # Bearish engulfing pattern: current candle engulfs previous bullish candle
+        bearish_engulf = (close[i] < open_prices[i] and  # Current bearish
+                         open_prices[i-1] < close[i-1] and  # Previous bullish
+                         close[i] < open_prices[i-1] and  # Current close < previous open
+                         open_prices[i] > close[i-1])     # Current open > previous close
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit on downside breakout or trend reversal
-            if breakout_down or not uptrend:
+            # Exit at H3 (take profit) or if price goes below L4 (stop)
+            if close[i] >= H3_6h[i] or close[i] <= L4_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit on upside breakout or trend reversal
-            if breakout_up or not downtrend:
+            # Exit at L3 (take profit) or if price goes above H4 (stop)
+            if close[i] <= L3_6h[i] or close[i] >= H4_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Entry conditions with trend and volume confirmation
-            # Long on upside breakout in uptrend
-            if breakout_up and uptrend and vol_confirm:
+            # Long: price touches L3 with bullish engulfing
+            if (bullish_engulf and 
+                low[i] <= L3_6h[i] * 1.001 and  # Touched or went slightly below L3
+                close[i] > L3_6h[i]):  # Closed back above L3
                 position = 1
                 signals[i] = 0.25
-            # Short on downside breakout in downtrend
-            elif breakout_down and downtrend and vol_confirm:
+            # Short: price touches H3 with bearish engulfing
+            elif (bearish_engulf and 
+                  high[i] >= H3_6h[i] * 0.999 and  # Touched or went slightly above H3
+                  close[i] < H3_6h[i]):  # Closed back below H3
                 position = -1
                 signals[i] = -0.25
     
