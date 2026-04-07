@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mts_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Channel Breakout with 12h Volume and 1d ADX Trend Filter
-# Hypothesis: Donchian breakouts capture breakout momentum; 12h volume confirms institutional participation; 
-# 1d ADX > 25 ensures trending market to avoid false breakouts in ranging markets. 
-# Works in bull via upper breakouts, in bear via lower breakdowns. 
-# Target: 20-40 trades/year to minimize fee drag.
-name = "4h_donchian20_12h_volume_1d_adx_filter_v1"
-timeframe = "4h"
+# Strategy: 1h EMA Pullback with 4h Trend and 1d Volume Filter
+# Hypothesis: In trending markets (4h EMA alignment), pullbacks to 1h EMA offer high-probability entries.
+# 1d volume filter ensures institutional participation. Works in bull (long pullbacks) and bear (short pullbacks).
+# Target: 15-35 trades/year to avoid fee drag.
+name = "1h_ema_pullback_4h_trend_1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,97 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h volume moving average
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # 4h EMA(50) for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 1d ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d volume SMA(20) for institutional participation filter
+    vol_1d = df_1d['volume'].values
+    vol_sma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1h EMA(21) for pullback entries
+    close_s = pd.Series(close)
+    ema_1h = close_s.ewm(span=21, adjust=False).mean().values
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(adx_aligned[i])):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1h[i]) or 
+            np.isnan(vol_sma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 12h average volume
-        vol_confirm = volume[i] > vol_ma_12h_aligned[i]
+        # Trend filter: 4h EMA slope (rising/falling)
+        if i >= 51:
+            ema_4h_prev = ema_4h_aligned[i-1]
+            ema_4h_curr = ema_4h_aligned[i]
+            trend_up = ema_4h_curr > ema_4h_prev
+            trend_down = ema_4h_curr < ema_4h_prev
+        else:
+            trend_up = trend_down = False
         
-        # Trend filter: 1d ADX > 25 indicates trending market
-        trend_filter = adx_aligned[i] > 25
+        # Volume filter: current 1h volume > 1d average volume
+        vol_filter = volume[i] > vol_sma_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower (20-period low)
-            if close[i] < lowest_low[i]:
+            # Exit: price closes below 1h EMA (trend resumption failed)
+            if close[i] < ema_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper (20-period high)
-            if close[i] > highest_high[i]:
+            # Exit: price closes above 1h EMA (trend resumption failed)
+            if close[i] > ema_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short
         else:  # Flat, look for entry
-            # Enter long: price closes above Donchian upper + volume + trend
-            if close[i] > highest_high[i] and vol_confirm and trend_filter:
+            # Enter long: 4h uptrend + price pulls back to/near 1h EMA + volume
+            if trend_up and close[i] <= ema_1h[i] * 1.005 and vol_filter:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price closes below Donchian lower + volume + trend
-            elif close[i] < lowest_low[i] and vol_confirm and trend_filter:
+                signals[i] = 0.20
+            # Enter short: 4h downtrend + price bounces to/near 1h EMA + volume
+            elif trend_down and close[i] >= ema_1h[i] * 0.995 and vol_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
