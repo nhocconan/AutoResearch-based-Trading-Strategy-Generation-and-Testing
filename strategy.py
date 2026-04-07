@@ -1,119 +1,91 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels derived from daily candles.
-Long when price approaches S3 support with volume spike and daily trend up.
-Short when price approaches R3 resistance with volume spike and daily trend down.
-Exit when price reaches opposite pivot level (S1/R1).
-Designed for 15-25 trades/year to minimize fee decay while capturing institutional reversal points.
-Works in both bull/bear markets as Camarilla adapts to volatility and daily trend filter avoids counter-trend trades.
+6h_triple_ema_reversion_v1
+Hypothesis: On 6-hour timeframe, price reverts to the mean during overextended moves.
+Uses triple EMA (8,21,50) alignment with RSI extreme and Bollinger Band width filter.
+Long when EMA8 > EMA21 > EMA50 (bullish alignment) AND RSI < 30 AND BB width < 0.05 (low volatility).
+Short when EMA8 < EMA21 < EMA50 (bearish alignment) AND RSI > 70 AND BB width < 0.05.
+Exit when EMA8 crosses back toward EMA21.
+Designed for low-frequency, high-conviction trades in ranging markets with volatility filter to avoid chop.
+Works in both bull/bear markets as it fades extremes during low volatility regardless of trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "6h_triple_ema_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate EMAs
+    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate daily OHLC
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    # R4 = Close + ((High - Low) * 1.1/2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # R2 = Close + ((High - Low) * 1.1/6)
-    # R1 = Close + ((High - Low) * 1.1/12)
-    # S1 = Close - ((High - Low) * 1.1/12)
-    # S2 = Close - ((High - Low) * 1.1/6)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    
-    camarilla_r3 = daily_close + ((daily_high - daily_low) * 1.1 / 4)
-    camarilla_s3 = daily_close - ((daily_high - daily_low) * 1.1 / 4)
-    camarilla_r1 = daily_close + ((daily_high - daily_low) * 1.1 / 12)
-    camarilla_s1 = daily_close - ((daily_high - daily_low) * 1.1 / 12)
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Daily trend filter using EMA(20)
-    daily_ema20 = pd.Series(daily_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    daily_ema20_aligned = align_htf_to_ltf(prices, df_1d, daily_ema20)
-    
-    # Determine daily trend direction (using price vs EMA)
-    daily_trend_up = daily_close > daily_ema20
-    daily_trend_down = daily_close < daily_ema20
-    daily_trend_up_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up)
-    daily_trend_down_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_down)
-    
-    # Volume filter: 20-period average on 12h timeframe
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate Bollinger Band width (20,2)
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / sma20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(20, 50), n):
+    for i in range(max(50, 20), n):
         # Skip if data not available
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(daily_ema20_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
+            np.isnan(rsi[i]) or np.isnan(bb_width[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        # Low volatility filter (avoid choppy markets)
+        vol_filter = bb_width[i] < 0.05
         
         if position == 1:  # Long position
-            # Exit: price reaches S1 (support 1)
-            if close[i] <= s1_12h[i]:
+            # Exit: EMA8 crosses back below EMA21 (mean reversion)
+            if ema8[i] < ema21[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R1 (resistance 1)
-            if close[i] >= r1_12h[i]:
+            # Exit: EMA8 crosses back above EMA21 (mean reversion)
+            if ema8[i] > ema21[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume confirmation and daily trend alignment
-            if vol_ok:
-                # Long: price near S3 with daily uptrend
-                if (close[i] <= s3_12h[i] * 1.005 and  # within 0.5% of S3
-                    daily_trend_up_aligned[i]):
+            # Only enter with low volatility filter
+            if vol_filter:
+                # Bullish EMA alignment + RSI oversold
+                if (ema8[i] > ema21[i] > ema50[i] and rsi[i] < 30):
                     position = 1
                     signals[i] = 0.25
-                # Short: price near R3 with daily downtrend
-                elif (close[i] >= r3_12h[i] * 0.995 and  # within 0.5% of R3
-                      daily_trend_down_aligned[i]):
+                # Bearish EMA alignment + RSI overbought
+                elif (ema8[i] < ema21[i] < ema50[i] and rsi[i] > 70):
                     position = -1
                     signals[i] = -0.25
     
