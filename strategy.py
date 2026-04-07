@@ -1,138 +1,137 @@
 #!/usr/bin/env python3
 """
-1d_camarilla_pivot_1w_trend_volume_v1
-Hypothesis: On 1d timeframe, use weekly Camarilla pivot levels to identify key support/resistance. Fade at R3/S3 levels (mean reversion) and breakout continuation at R4/S4 levels (trend following). Filter by weekly EMA trend and volume confirmation to avoid false signals. Works in both bull and bear markets by adapting to market structure - mean reversion in ranging markets, trend following in strong trends. Target: 30-100 total trades over 4 years (7-25/year) to balance opportunity with fee minimization.
+6h_triple_ema_trend_filter_v1
+Hypothesis: Use triple exponential moving averages (8, 21, 55) on 6h timeframe with 1d ADX filter to identify strong trends. Enter long when EMA8 > EMA21 > EMA55 and ADX > 25, short when EMA8 < EMA21 < EMA55 and ADX > 25. Exit when EMA cross reverses or ADX drops below 20. This captures momentum while avoiding whipsaws in ranging markets. Works in both bull and bear markets by requiring strong trend confirmation (ADX > 25). Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity with fee minimization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_pivot_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_triple_ema_trend_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate EMA on weekly timeframe for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 1d ADX for trend strength filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ADX components
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
     
-    # Previous week's OHLC for pivot calculation
-    pp_1w = np.zeros_like(high_1w)
-    r1_1w = np.zeros_like(high_1w)
-    s1_1w = np.zeros_like(high_1w)
-    r2_1w = np.zeros_like(high_1w)
-    s2_1w = np.zeros_like(high_1w)
-    r3_1w = np.zeros_like(high_1w)
-    s3_1w = np.zeros_like(high_1w)
-    r4_1w = np.zeros_like(high_1w)
-    s4_1w = np.zeros_like(high_1w)
-    
-    for i in range(1, len(df_1w)):
-        # Previous week's values
-        ph = high_1w[i-1]
-        pl = low_1w[i-1]
-        pc = close_1w[i-1]
+    for i in range(1, len(df_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
         
-        # Pivot point
-        pp = (ph + pl + pc) / 3
-        pp_1w[i] = pp
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
         
-        # Camarilla levels
-        range_ = ph - pl
-        r1_1w[i] = pc + (range_ * 1.1 / 12)
-        s1_1w[i] = pc - (range_ * 1.1 / 12)
-        r2_1w[i] = pc + (range_ * 1.1 / 6)
-        s2_1w[i] = pc - (range_ * 1.1 / 6)
-        r3_1w[i] = pc + (range_ * 1.1 / 4)
-        s3_1w[i] = pc - (range_ * 1.1 / 4)
-        r4_1w[i] = pc + (range_ * 1.1 / 2)
-        s4_1w[i] = pc - (range_ * 1.1 / 2)
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
     
-    # Align Camarilla levels to 1d timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
     
-    # Calculate volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr = np.zeros_like(high_1d)
+    plus_di = np.zeros_like(high_1d)
+    minus_di = np.zeros_like(high_1d)
+    
+    # Initial values
+    atr[period] = np.mean(tr[1:period+1])
+    plus_dm_sum = np.sum(plus_dm[1:period+1])
+    minus_dm_sum = np.sum(minus_dm[1:period+1])
+    
+    for i in range(period + 1, len(df_1d)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
+        minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
+        plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+        minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+    
+    # Calculate DX and ADX
+    dx = np.zeros_like(high_1d)
+    adx = np.zeros_like(high_1d)
+    
+    for i in range(period + 1, len(df_1d)):
+        di_sum = plus_di[i] + minus_di[i]
+        dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum if di_sum != 0 else 0
+    
+    # Smooth DX to get ADX
+    adx[2*period] = np.mean(dx[period+1:2*period+1])
+    for i in range(2*period + 1, len(df_1d)):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate EMAs on 6h timeframe
+    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if data not available
-        if (np.isclose(pp_aligned[i], 0) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
+    for i in range(55, n):
+        # Skip if ADX not available
+        if np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: above average volume
-        vol_ok = volume[i] > vol_ma[i]
+        # Trend strength filter
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20
         
-        # Trend filter: price above/below weekly EMA
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
+        # EMA alignment
+        ema8_above_21 = ema8[i] > ema21[i]
+        ema21_above_55 = ema21[i] > ema55[i]
+        ema8_below_21 = ema8[i] < ema21[i]
+        ema21_below_55 = ema21[i] < ema55[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below S3 (mean reversion failure) or above R4 (take profit)
-            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
+            # Exit: EMA cross down OR trend weakens
+            if not (ema8_above_21 and ema21_above_55) or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 (mean reversion failure) or below S4 (take profit)
-            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
+            # Exit: EMA cross up OR trend weakens
+            if not (ema8_below_21 and ema21_below_55) or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Mean reversion fade at R3/S3
-                if close[i] > r3_aligned[i] and below_ema:
-                    # Fade rejection at R3 - go short
-                    position = -1
-                    signals[i] = -0.25
-                elif close[i] < s3_aligned[i] and above_ema:
-                    # Fade rejection at S3 - go long
+            if strong_trend:
+                # Strong uptrend
+                if ema8_above_21 and ema21_above_55:
                     position = 1
                     signals[i] = 0.25
-                # Breakout continuation at R4/S4
-                elif close[i] > r4_aligned[i] and above_ema:
-                    # Break above R4 with trend - go long
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < s4_aligned[i] and below_ema:
-                    # Break below S4 with trend - go short
+                # Strong downtrend
+                elif ema8_below_21 and ema21_below_55:
                     position = -1
                     signals[i] = -0.25
     
