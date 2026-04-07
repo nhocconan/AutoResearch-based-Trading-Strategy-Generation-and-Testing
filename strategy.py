@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla Pivot Reversal with Weekly Trend Filter
-# Hypothesis: Camarilla pivot levels (R3/S3) act as strong reversal zones in ranging markets.
-# Weekly trend filter ensures we only take reversals aligned with higher timeframe direction.
-# Works in both bull and bear markets by fading extremes in the direction of weekly trend.
-# Targets 15-30 trades/year with high-probability mean-reversion entries.
+# Strategy: 12h Donchian(20) Breakout with 1d EMA100 Trend Filter and Volume Confirmation
+# Hypothesis: Donchian breakouts capture volatility expansion moves aligned with daily trend.
+# Volume confirmation ensures breakouts have institutional participation.
+# Works in both bull and bear markets by only taking trades aligned with higher timeframe trend.
+# Targets 15-25 trades/year with disciplined entries to avoid overtrading.
 
-name = "6h_camarilla_pivot_weekly_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,72 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: EMA50 on weekly timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Daily data for Camarilla pivot calculation
+    # 1d EMA100 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We'll use the previous day's close as base for simplicity
-    # Actually, Camarilla uses: R3 = Close + (High-Low)*1.1/4, S3 = Close - (High-Low)*1.1/4
+    ema100_1d = pd.Series(df_1d['close'].values).ewm(span=100, adjust=False).mean().values
+    ema100_12h = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Get previous day's OHLC (already completed daily bar)
-    prev_day_close = df_1d['close'].values
-    prev_day_high = df_1d['high'].values
-    prev_day_low = df_1d['low'].values
+    # 12-period ATR(14) for volatility measurement (used in exit)
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla R3 and S3 levels
-    rang = prev_day_high - prev_day_low
-    r3 = prev_day_close + (rang * 1.1 / 4)
-    s3 = prev_day_close - (rang * 1.1 / 4)
-    
-    # Align to 6h timeframe (these levels are fixed for the entire day)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    # 20-period SMA for volume average
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):  # Start from 1 to have previous bar data
+    for i in range(100, n):  # Start after warmup for ATR and volume SMA
         # Skip if required data not available
-        if (np.isnan(ema50_6h[i]) or 
-            np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i])):
+        if (np.isnan(ema100_12h[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        
         if position == 1:  # Long position
-            # Exit: price reaches S3 level or weekly trend turns bearish
-            if close[i] <= s3_6h[i] or close[i] < ema50_6h[i]:
+            # Exit: price closes below 1d EMA100 OR ATR-based trailing stop
+            if close[i] < ema100_12h[i] or close[i] < high[max(0, i-3):i+1].max() - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price reaches R3 level or weekly trend turns bullish
-            if close[i] >= r3_6h[i] or close[i] > ema50_6h[i]:
+            # Exit: price closes above 1d EMA100 OR ATR-based trailing stop
+            if close[i] > ema100_12h[i] or close[i] > low[max(0, i-3):i+1].min() + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat, look for entry at R3/S3 reversals
-            # Long: price touches/bounces off S3 in uptrend
-            if (low[i] <= s3_6h[i] and close[i] > s3_6h[i] and 
-                close[i] > ema50_6h[i]):  # Weekly uptrend filter
+        else:  # Flat, look for entry
+            # Long: price breaks above 20-period high + volume confirmation + uptrend
+            if (close[i] > high[max(0, i-20):i].max() and 
+                vol_confirm and 
+                close[i] > ema100_12h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches/bounces off R3 in downtrend
-            elif (high[i] >= r3_6h[i] and close[i] < r3_6h[i] and 
-                  close[i] < ema50_6h[i]):  # Weekly downtrend filter
+            # Short: price breaks below 20-period low + volume confirmation + downtrend
+            elif (close[i] < low[max(0, i-20):i].min() and 
+                  vol_confirm and 
+                  close[i] < ema100_12h[i]):
                 position = -1
                 signals[i] = -0.25
     
