@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Spike + Chop Filter
-Hypothesis: Breakouts above/below Donchian channels capture momentum with trend filter.
-Uses 1d EMA50 as trend filter, volume spikes for confirmation, and chop filter to avoid ranging markets.
-Target: 12-37 trades/year per symbol to minimize fee drag.
-Works in both bull and bear by following the trend filter.
+4h Donchian Breakout with 1d Trend Filter and Volume Spike
+Hypothesis: Breakouts above/below Donchian channels capture momentum.
+Using 1d EMA50 as trend filter provides stronger trend identification.
+Volume spikes confirm institutional participation.
+This should work in both bull and bear regimes by following the trend.
+Target: 20-50 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_chop_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,44 +40,12 @@ def generate_signals(prices):
     ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Chop Filter (using 1d data)
-    df_1d_chop = get_htf_data(prices, '1d')
-    high_1d = df_1d_chop['high'].values
-    low_1d = df_1d_chop['low'].values
-    close_1d = df_1d_chop['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # ATR (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chopping Index (14-period)
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_h = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_l = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (max_h - min_l)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d_chop, chop)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
-            continue
-        
-        # Avoid trading in choppy markets (chop > 61.8)
-        if chop_aligned[i] > 61.8:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
