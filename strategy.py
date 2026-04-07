@@ -5,9 +5,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Strategy: 12h Daily Donchian Breakout with Volume and ADX Filter
 # Hypothesis: Donchian(20) breakouts in direction of daily ADX > 25 trend with volume
-# confirmation capture momentum moves. Daily trend filter reduces whipsaws, volume
-# confirms breakout strength. Target: 15-30 trades/year (60-120 total over 4 years)
-# to minimize fee drift while maintaining edge in both bull and bear markets.
+# confirmation capture momentum moves. Daily trend filter reduces whipsaws in both
+# bull and bear markets. Volume confirms breakout strength. Target: 12-37 trades/year.
 
 name = "12h_daily_donchian_breakout_volume_adx_v3"
 timeframe = "12h"
@@ -53,9 +52,7 @@ def generate_signals(prices):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) < period:
             return result
-        # First value is simple average
         result[period-1] = np.nansum(data[1:period]) / period
-        # Subsequent values
         for i in range(period, len(data)):
             if not np.isnan(result[i-1]):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
