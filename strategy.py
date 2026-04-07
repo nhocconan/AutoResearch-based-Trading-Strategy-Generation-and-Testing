@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_trend_volume_v4
-Hypothesis: Refined Camarilla strategy with tighter entry conditions to reduce trade count and improve robustness.
-Uses S3/R3 for mean reversion in trending markets and S4/R4 for breakouts in strong trends.
-Volume confirmation and EMA trend filter prevent false signals. Designed for 15-30 trades/year.
+1d_1w_fibonacci_extension_volume_v1
+Hypothesis: On daily timeframe, use weekly Fibonacci extension levels (127.2%, 161.8%) from weekly swing high/low for breakout entries in trending markets, and Fibonacci retracement levels (38.2%, 61.8%) for mean reversion in ranging markets. Volume confirmation filters false signals. Weekly trend filter (EMA200) adapts to bull/bear regimes. Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag while capturing major moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_trend_volume_v4"
-timeframe = "4h"
+name = "1d_1w_fibonacci_extension_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,90 +23,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for Fibonacci levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily OHLC for pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Calculate weekly swing points (using 20-period lookback for pivot detection)
+    # We'll use rolling max/min to identify significant swing points
+    window = 20
+    high_max = pd.Series(high_1w).rolling(window=window, min_periods=window).max().values
+    low_min = pd.Series(low_1w).rolling(window=window, min_periods=window).min().values
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # Calculate Fibonacci levels based on recent swing
+    # For extension: use swing from low_min to high_max
+    # For retracement: use swing from high_max to low_min
+    diff = high_max - low_min
     
-    # Align daily levels to 4h timeframe
-    r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Fibonacci extension levels (for breakouts)
+    ext_127 = low_min + diff * 1.272
+    ext_162 = low_min + diff * 1.618
     
-    # 30-period volume average on 4h (more stringent)
-    vol_sma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Fibonacci retracement levels (for mean reversion)
+    ret_382 = high_max - diff * 0.382
+    ret_618 = high_max - diff * 0.618
+    
+    # Weekly EMA200 for trend filter (slow MA for regime detection)
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False).mean().values
+    
+    # Align weekly levels to daily timeframe
+    ext_127_d = align_htf_to_ltf(prices, df_1w, ext_127)
+    ext_162_d = align_htf_to_ltf(prices, df_1w, ext_162)
+    ret_382_d = align_htf_to_ltf(prices, df_1w, ret_382)
+    ret_618_d = align_htf_to_ltf(prices, df_1w, ret_618)
+    ema200_1w_d = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Daily volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):  # Start after enough data for indicators
         # Skip if required data not available
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or 
-            np.isnan(ema50_4h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(ext_127_d[i]) or np.isnan(ext_162_d[i]) or 
+            np.isnan(ret_382_d[i]) or np.isnan(ret_618_d[i]) or 
+            np.isnan(ema200_1w_d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (more stringent)
-        vol_confirm = volume[i] > 2.0 * vol_sma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 OR price breaks above R4 with weak momentum
-            if close[i] < s3_4h[i] or (close[i] > r4_4h[i] and close[i] < ema50_4h[i]):
+            # Exit: price breaks below 61.8% retracement (mean reversion fail) OR
+            # price reaches 161.8% extension and weekly trend is weak (close < EMA200)
+            if close[i] < ret_618_d[i] or (close[i] > ext_162_d[i] and close[i] < ema200_1w_d[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 OR price breaks below S4 with weak momentum
-            if close[i] > r3_4h[i] or (close[i] < s4_4h[i] and close[i] > ema50_4h[i]):
+            # Exit: price breaks above 38.2% retracement (mean reversion fail) OR
+            # price reaches 161.8% extension (from high) and weekly trend is strong (close > EMA200)
+            # For shorts, we invert the extension logic
+            if close[i] > ret_382_d[i] or (close[i] < ext_162_d[i] and close[i] > ema200_1w_d[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion longs at S3 in uptrend (price > EMA) with volume
-            if (close[i] <= s3_4h[i] and 
+            # Mean reversion long at 61.8% retracement in uptrend (price > EMA200)
+            if (close[i] <= ret_618_d[i] and 
                 vol_confirm and 
-                close[i] > ema50_4h[i]):
+                close[i] > ema200_1w_d[i]):
                 position = 1
                 signals[i] = 0.25
-            # Mean reversion shorts at R3 in downtrend (price < EMA) with volume
-            elif (close[i] >= r3_4h[i] and 
+            # Mean reversion short at 38.2% retracement in downtrend (price < EMA200)
+            elif (close[i] >= ret_382_d[i] and 
                   vol_confirm and 
-                  close[i] < ema50_4h[i]):
+                  close[i] < ema200_1w_d[i]):
                 position = -1
                 signals[i] = -0.25
-            # Breakout longs at R4 in strong uptrend (price well above EMA)
-            elif (close[i] >= r4_4h[i] and 
+            # Breakout long above 127.2% extension in uptrend
+            elif (close[i] >= ext_127_d[i] and 
                   vol_confirm and 
-                  close[i] > ema50_4h[i] * 1.01):  # 1% above EMA
+                  close[i] > ema200_1w_d[i]):
                 position = 1
                 signals[i] = 0.25
-            # Breakout shorts at S4 in strong downtrend (price well below EMA)
-            elif (close[i] <= s4_4h[i] and 
+            # Breakout short below 127.2% extension (calculated from high) in downtrend
+            # For short breakout, we use extension from high downward
+            elif (close[i] <= (high_max[i] - diff[i] * 0.272) and  # Equivalent to -27.2% extension from high
                   vol_confirm and 
-                  close[i] < ema50_4h[i] * 0.99):  # 1% below EMA
+                  close[i] < ema200_1w_d[i]):
                 position = -1
                 signals[i] = -0.25
     
