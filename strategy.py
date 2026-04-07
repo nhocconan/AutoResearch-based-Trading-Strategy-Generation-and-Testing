@@ -1,103 +1,86 @@
 #!/usr/bin/env python3
 """
-4h_river_2_bank_v1
-Hypothesis: Price moves between support/resistance "banks" (prior session high/low) with mean-reversion tendency. Enter long when price touches prior 12h low with bullish rejection (close > open) and volume > 1.3x average, short when touches prior 12h high with bearish rejection (close < open) and volume > 1.3x average. Uses 12h trend filter (price above/below 50-period EMA) to avoid counter-trend trades. Designed for ~25-40 trades/year to minimize fee drag while capturing mean-reversion in ranging markets and pullbacks in trends.
+1h_mean_reversion_v1
+Hypothesis: Mean reversion on 1h timeframe works in both bull and bear markets by buying oversold conditions and selling overbought conditions. Uses 4h trend filter to avoid counter-trend trades and RSI(2) for extreme mean reversion signals. Volume confirmation filters out low-quality signals. Target: 15-30 trades/year to minimize fee drag while capturing mean reversion moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_river_2_bank_v1"
-timeframe = "4h"
+name = "1h_mean_reversion_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Calculate 50-period EMA for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate RSI(2) for extreme mean reversion
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 12h data for reference levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate 4h trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    sma_50_4h = pd.Series(close_4h).rolling(window=50, min_periods=50).mean().values
+    sma_50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_50_4h)
     
-    # Calculate 12h EMA for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Volume filter: above average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(2, n):
         # Skip if data not available
-        if (np.isnan(ema_50[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]) or np.isnan(open_price[i]) or
-            np.isnan(high_12h[-1]) or np.isnan(low_12h[-1])):
+        if (np.isnan(rsi[i]) or np.isnan(sma_50_4h_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.0
             continue
         
-        # Get prior completed 12h bar levels
-        idx_12h = (i // 48) - 1  # 48 = 4h bars in 12h (shifted by 1 for completed bar)
-        if idx_12h < 0:
-            signals[i] = 0.0
-            continue
-            
-        prior_12h_high = high_12h[idx_12h]
-        prior_12h_low = low_12h[idx_12h]
-        
-        # Volume confirmation: > 1.3x average volume
-        vol_ok = volume[i] > (vol_ma[i] * 1.3)
-        
-        # Candlestick rejection: bullish = close > open, bearish = close < open
-        bullish_rejection = close[i] > open_price[i]
-        bearish_rejection = close[i] < open_price[i]
+        # Volume confirmation: > average volume
+        vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below prior 12h low (break of support)
-            if close[i] < prior_12h_low:
+            # Exit: RSI crosses above 50 (mean reversion complete)
+            if rsi[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above prior 12h high (break of resistance)
-            if close[i] > prior_12h_high:
+            # Exit: RSI crosses below 50 (mean reversion complete)
+            if rsi[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: touch prior 12h low with bullish rejection + price > 12h EMA50
-                if (low[i] <= prior_12h_low * 1.001 and  # Allow small tolerance for touch
-                    bullish_rejection and 
-                    close[i] > ema_50_12h_aligned[i]):
+                # Long: RSI < 10 (extremely oversold) + price below 4h SMA50
+                if rsi[i] < 10 and close[i] < sma_50_4h_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short: touch prior 12h high with bearish rejection + price < 12h EMA50
-                elif (high[i] >= prior_12h_high * 0.999 and  # Allow small tolerance for touch
-                      bearish_rejection and 
-                      close[i] < ema_50_12h_aligned[i]):
+                    signals[i] = 0.20
+                # Short: RSI > 90 (extremely overbought) + price above 4h SMA50
+                elif rsi[i] > 90 and close[i] > sma_50_4h_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
