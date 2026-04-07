@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_rsi_divergence_1d_trend_volume_v1
-Hypothesis: On 4h timeframe, combine daily trend filter with RSI divergence signals for high-probability reversals. Uses daily EMA50/EMA200 trend filter, RSI(14) with bearish/bullish divergence detection, and volume confirmation. Enters short on bearish divergence (price higher high, RSI lower high) in downtrend; enters long on bullish divergence (price lower low, RSI higher low) in uptrend. Exits on opposite divergence or trend reversal. Designed for 15-30 trades/year with strict entry conditions to minimize fee drag while capturing major reversals in both bull and bear markets.
+daily_donchian_20_breakout_1w_trend_volume_v1
+Hypothesis: On daily timeframe, breakout above/below 20-day Donchian channel with weekly trend filter (EMA20 > EMA50) and volume confirmation (volume > 1.5x 20-day average). Enter long on upper band breakout, short on lower band breakout. Exit on opposite band touch or trend reversal. This captures medium-term momentum while avoiding false breakouts in low-volume, ranging markets. Works in bull via breakout continuation and in bear via short breakdowns. Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_divergence_1d_trend_volume_v1"
-timeframe = "4h"
+name = "daily_donchian_20_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,64 +23,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily EMA50 and EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly trend filter: EMA20 > EMA50 for uptrend
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Weekly timeframe data for trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
+    # Weekly EMA20 and EMA50 for stronger trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # Align to 4h timeframe (shifted by 1 day)
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Volume confirmation (20-period average on 4h = ~1.3 days)
+    # Volume confirmation: 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Track recent highs/lows for divergence detection
-    lookback = 10  # Look back 10 periods (~2.5 days) for swing points
-    
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_4h[i]) or np.isnan(ema200_1d_4h[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or i < lookback):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema20[i]) or np.isnan(ema50[i]) or
+            np.isnan(weekly_ema20_aligned[i]) or np.isnan(weekly_ema50_aligned[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Determine trend based on daily EMA50 vs EMA200
-        uptrend = ema50_1d_4h[i] > ema200_1d_4h[i]
-        downtrend = ema50_1d_4h[i] < ema200_1d_4h[i]
+        # Trend filter: both daily and weekly EMAs agree
+        daily_uptrend = ema20[i] > ema50[i]
+        weekly_uptrend = weekly_ema20_aligned[i] > weekly_ema50_aligned[i]
+        daily_downtrend = ema20[i] < ema50[i]
+        weekly_downtrend = weekly_ema20_aligned[i] < weekly_ema50_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit on bearish divergence (potential reversal)
-            if downtrend:  # Only check for bearish div in downtrend context
-                # Find recent price high and RSI high
-                price_high_idx = np.argmax(high[i-lookback:i+1]) + i - lookback
-                rsi_high_idx = np.argmax(rsi[i-lookback:i+1]) + i - lookback
-                if (price_high_idx == i and rsi_high_idx < i and  # Current bar is price high
-                    rsi[i] < rsi[rsi_high_idx]):  # RSI lower than previous high
-                    exit_long = True
-            # Exit on trend reversal to downtrend
-            elif not uptrend:
+            # Exit if price touches lower Donchian band (contrarian exit)
+            if close[i] <= low_20[i]:
+                exit_long = True
+            # Exit if trend turns down on both timeframes
+            elif not daily_uptrend and not weekly_uptrend:
                 exit_long = True
             
             if exit_long:
@@ -92,16 +86,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit on bullish divergence (potential reversal)
-            if uptrend:  # Only check for bullish div in uptrend context
-                # Find recent price low and RSI low
-                price_low_idx = np.argmin(low[i-lookback:i+1]) + i - lookback
-                rsi_low_idx = np.argmin(rsi[i-lookback:i+1]) + i - lookback
-                if (price_low_idx == i and rsi_low_idx < i and  # Current bar is price low
-                    rsi[i] > rsi[rsi_low_idx]):  # RSI higher than previous low
-                    exit_short = True
-            # Exit on trend reversal to uptrend
-            elif not downtrend:
+            # Exit if price touches upper Donchian band (contrarian exit)
+            if close[i] >= high_20[i]:
+                exit_short = True
+            # Exit if trend turns up on both timeframes
+            elif not daily_downtrend and not weekly_downtrend:
                 exit_short = True
             
             if exit_short:
@@ -110,67 +99,22 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            bullish_div = False
-            if uptrend or (not downtrend and not uptrend):  # Allow in uptrend or sideways
-                # Find two most recent price lows
-                window = high[i-lookback*2:i+1]  # Look further back for two points
-                if len(window) >= lookback*2:
-                    price_lows = []
-                    rsi_lows = []
-                    # Find local minima in price
-                    for j in range(i-lookback*2, i+1):
-                        if j >= lookback and j < n:
-                            is_low = True
-                            for k in range(max(lookback, j-5), min(n, j+6)):
-                                if k != j and low[k] <= low[j]:
-                                    is_low = False
-                                    break
-                            if is_low:
-                                price_lows.append((j, low[j]))
-                                rsi_lows.append((j, rsi[j]))
-                    
-                    # Need at least two lows
-                    if len(price_lows) >= 2:
-                        # Get two most recent lows
-                        (price_low1, rsi_low1) = price_lows[-2]
-                        (price_low2, rsi_low2) = price_lows[-1]
-                        # Bullish div: lower price low, higher RSI low
-                        if price_low2 < price_low1 and rsi_low2 > rsi_low1:
-                            bullish_div = True
+            # Long entry: price breaks above upper Donchian band with uptrend and volume
+            long_entry = False
+            if (close[i] > high_20[i] and close[i-1] <= high_20[i-1] and
+                daily_uptrend and weekly_uptrend and vol_confirm):
+                long_entry = True
             
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            bearish_div = False
-            if downtrend or (not downtrend and not uptrend):  # Allow in downtrend or sideways
-                # Find two most recent price highs
-                price_highs = []
-                rsi_highs = []
-                # Find local maxima in price
-                for j in range(i-lookback*2, i+1):
-                    if j >= lookback and j < n:
-                        is_high = True
-                        for k in range(max(lookback, j-5), min(n, j+6)):
-                            if k != j and high[k] >= high[j]:
-                                is_high = False
-                                break
-                        if is_high:
-                            price_highs.append((j, high[j]))
-                            rsi_highs.append((j, rsi[j]))
-                
-                # Need at least two highs
-                if len(price_highs) >= 2:
-                    # Get two most recent highs
-                    (price_high1, rsi_high1) = price_highs[-2]
-                    (price_high2, rsi_high2) = price_highs[-1]
-                    # Bearish div: higher price high, lower RSI high
-                    if price_high2 > price_high1 and rsi_high2 < rsi_high1:
-                        bearish_div = True
+            # Short entry: price breaks below lower Donchian band with downtrend and volume
+            short_entry = False
+            if (close[i] < low_20[i] and close[i-1] >= low_20[i-1] and
+                daily_downtrend and weekly_downtrend and vol_confirm):
+                short_entry = True
             
-            # Volume confirmation required for entry
-            if bullish_div and vol_confirm:
+            if long_entry:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_div and vol_confirm:
+            elif short_entry:
                 position = -1
                 signals[i] = -0.25
     
