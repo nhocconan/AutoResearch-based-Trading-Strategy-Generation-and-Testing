@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-week EMA(21) trend filter and volume confirmation
-# Designed for low frequency (target: 20-30 trades/year) to minimize fee drag
-# Uses 1-week EMA to capture long-term trend, avoiding counter-trend trades in both bull and bear markets
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation
+# Designed for low frequency (target: 12-37 trades/year) to minimize fee drag
+# Works in both bull and bear markets by aligning with higher timeframe trend (1d EMA)
+# Donchian breakouts capture strong momentum moves; EMA filter avoids counter-trend trades
 # Volume confirmation ensures breakouts have institutional participation
-# Simple, robust logic with discrete position sizing to reduce churn
 
-name = "4h_donchian20_1w_ema_volume_v2"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,14 +24,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week EMA trend filter (more stable than daily)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -45,7 +45,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
             np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
@@ -53,11 +53,11 @@ def generate_signals(prices):
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend filter from 1-week EMA
-        uptrend = close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_21_1w_aligned[i]
+        # Trend filter from 1d EMA
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout conditions (using previous bar's levels)
+        # Donchian breakout conditions
         breakout_up = close[i] > donchian_high[i-1] if i > 0 else False
         breakout_down = close[i] < donchian_low[i-1] if i > 0 else False
         
