@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour Bollinger Band breakout with 4-hour trend filter, volume confirmation, and session filter (08-20 UTC)
-# Long when price breaks above upper BB(20,2) on 1h, 4h close > 4h EMA50 (uptrend), volume > 1.5x 1h average volume, and time in session
-# Short when price breaks below lower BB(20,2) on 1h, 4h close < 4h EMA50 (downtrend), volume > 1.5x 1h average volume, and time in session
-# Exit when price returns to middle BB(20) or trend changes
-# Stoploss at 2.0 * ATR(14)
-# Position size: 0.20 (20% of capital)
-# Uses 4h EMA50 for trend filter and 1h volume average for confirmation
-# Target: 60-150 total trades over 4 years (15-37/year)
+# Hypothesis: 6h price action relative to weekly pivot levels with volume confirmation
+# Go long when price crosses above weekly R3 with volume > 1.5x 6h average volume
+# Go short when price crosses below weekly S3 with volume > 1.5x 6h average volume
+# Exit when price returns to weekly pivot (PP) or reverses at opposite extreme
+# Pivot levels calculated from previous week: PP = (H+L+C)/3, R3 = H + 2*(PP-L), S3 = L - 2*(H-PP)
+# Uses weekly pivot for directional bias and 6s for entry timing with volume filter
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1h_bb_breakout_4h_ema50_vol_session_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_r3s3_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +25,30 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = pd.to_datetime(prices['open_time'])
     
-    # Session filter: 08-20 UTC
-    hours = open_time.dt.hour.values
-    
-    # 1h Bollinger Bands (20,2)
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    
-    # 1h EMA50 for exit condition
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly data for pivot levels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot points: PP, R3, S3
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # 1h volume average for confirmation
+    # Pivot point: PP = (H + L + C) / 3
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # R3 = High + 2*(PP - Low)
+    r3 = weekly_high + 2.0 * (pp - weekly_low)
+    # S3 = Low - 2*(High - PP)
+    s3 = weekly_low - 2.0 * (weekly_high - pp)
+    
+    # Align weekly pivot levels to 6h timeframe (shifted by 1 week for look-ahead prevention)
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    
+    # 6h volume average for confirmation
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
@@ -69,11 +67,11 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or 
-            np.isnan(ema50[i]) or np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_ma[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ma[i]) or 
             np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -84,50 +82,43 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to middle BB or trend changes
-            elif close[i] <= bb_middle[i] or close[i] < ema50_4h_aligned[i]:
+            # Exit: price returns to weekly pivot or reverses at S3
+            elif close[i] <= pp_aligned[i] or close[i] <= s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to middle BB or trend changes
-            elif close[i] >= bb_middle[i] or close[i] > ema50_4h_aligned[i]:
+            # Exit: price returns to weekly pivot or reverses at R3
+            elif close[i] >= pp_aligned[i] or close[i] >= r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries with BB breakout, trend alignment, volume confirmation, and session filter
-            # Bullish breakout: price breaks above upper BB
-            bullish_breakout = close[i] > bb_upper[i] and close[i-1] <= bb_upper[i-1]
-            # Bearish breakout: price breaks below lower BB
-            bearish_breakout = close[i] < bb_lower[i] and close[i-1] >= bb_lower[i-1]
+            # Look for entries: price crosses weekly R3/S3 with volume confirmation
+            # Bullish breakout: price crosses above R3
+            bullish_break = close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1]
+            # Bearish breakdown: price crosses below S3
+            bearish_break = close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1]
             
-            # Session filter: 08-20 UTC
-            in_session = 8 <= hours[i] <= 20
-            
-            # Long: bullish breakout, 4h uptrend, volume spike, in session
-            if (bullish_breakout and
-                close[i] > ema50_4h_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i] and
-                in_session):
-                signals[i] = 0.20
+            # Long: bullish breakout above R3 with volume spike
+            if (bullish_break and
+                volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: bearish breakout, 4h downtrend, volume spike, in session
-            elif (bearish_breakout and
-                  close[i] < ema50_4h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i] and
-                  in_session):
-                signals[i] = -0.20
+            # Short: bearish breakdown below S3 with volume spike
+            elif (bearish_break and
+                  volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
