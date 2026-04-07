@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_rsi_divergence_4h1d_momentum_v1
-Hypothesis: RSI divergence (RSI vs price) on 1h timeframe filtered by 4h momentum and 1d trend.
-Long: Bullish RSI divergence (higher low in RSI, lower low in price) with 4h RSI > 50 and price above 1d EMA50.
-Short: Bearish RSI divergence (lower high in RSI, higher high in price) with 4h RSI < 50 and price below 1d EMA50.
-Designed for 15-25 trades/year on 1h timeframe with high-conviction signals that work in both bull and bear markets.
+6h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Camarilla pivot levels from weekly timeframe provide strong support/resistance.
+Buy at S3/S4 level with bullish weekly trend and volume confirmation.
+Sell at R3/R4 level with bearish weekly trend and volume confirmation.
+Weekly trend filter prevents counter-trend trading in strong moves.
+Designed for 15-25 trades/year on 6h timeframe with clear reversal/continuation logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_divergence_4h1d_momentum_v1"
-timeframe = "1h"
+name = "6h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,92 +23,91 @@ def generate_signals(prices):
     
     # Price and volume data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h data for momentum filter (RSI)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Weekly data for Camarilla pivots and trend
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    delta_4h = np.diff(close_4h, prepend=close_4h[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly Camarilla levels
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # 1h RSI for divergence detection
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla formula: range = H - L
+    # Resistance levels: R3 = C + (H-L)*1.1/2, R4 = C + (H-L)*1.1
+    # Support levels: S3 = C - (H-L)*1.1/2, S4 = C - (H-L)*1.1
+    weekly_range = weekly_high - weekly_low
+    r3 = weekly_close + weekly_range * 1.1 / 2
+    r4 = weekly_close + weekly_range * 1.1
+    s3 = weekly_close - weekly_range * 1.1 / 2
+    s4 = weekly_close - weekly_range * 1.1
+    
+    # Weekly EMA50 for trend filter
+    ema50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
+    weekly_uptrend = weekly_close > ema50_weekly
+    weekly_downtrend = weekly_close < ema50_weekly
+    
+    # Align weekly data to 6h timeframe (shifted by 1 for completed weekly bars only)
+    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
+    r4_6h = align_htf_to_ltf(prices, df_weekly, r4)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
+    s4_6h = align_htf_to_ltf(prices, df_weekly, s4)
+    weekly_uptrend_6h = align_htf_to_ltf(prices, df_weekly, weekly_uptrend.astype(float))
+    weekly_downtrend_6h = align_htf_to_ltf(prices, df_weekly, weekly_downtrend.astype(float))
+    
+    # Volume confirmation: 24-period average (4 days of 6h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(24, n):
         # Skip if data not available
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or np.isnan(close[i]) or np.isnan(close[i-1])):
+        if (np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(weekly_uptrend_6h[i]) or np.isnan(weekly_downtrend_6h[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # RSI divergence detection (requires lookback of at least 5 periods)
-        if i >= 5:
-            # Bullish divergence: RSI makes higher low, price makes lower low
-            bullish_div = (
-                rsi[i] > rsi[i-5] and  # RSI higher low
-                close[i] < close[i-5]   # Price lower low
-            )
-            # Bearish divergence: RSI makes lower high, price makes higher high
-            bearish_div = (
-                rsi[i] < rsi[i-5] and  # RSI lower high
-                close[i] > close[i-5]   # Price higher high
-            )
-        else:
-            bullish_div = False
-            bearish_div = False
-        
-        # Momentum and trend filters
-        bullish_momentum = rsi_4h_aligned[i] > 50
-        bearish_momentum = rsi_4h_aligned[i] < 50
-        above_1d_ema50 = close[i] > ema50_1d_aligned[i]
-        below_1d_ema50 = close[i] < ema50_1d_aligned[i]
+        # Volume confirmation: current volume above average
+        vol_confirmed = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: bearish divergence or momentum turns bearish
-            if bearish_div or not bullish_momentum:
+            # Exit: price reaches R3/R4 or weekly trend turns bearish
+            if close[i] >= r3_6h[i] or weekly_downtrend_6h[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish divergence or momentum turns bullish
-            if bullish_div or not bearish_momentum:
+            # Exit: price reaches S3/S4 or weekly trend turns bullish
+            if close[i] <= s3_6h[i] or weekly_uptrend_6h[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: bullish divergence with bullish momentum and uptrend
-            if bullish_div and bullish_momentum and above_1d_ema50:
-                position = 1
-                signals[i] = 0.20
-            # Short: bearish divergence with bearish momentum and downtrend
-            elif bearish_div and bearish_momentum and below_1d_ema50:
-                position = -1
-                signals[i] = -0.20
+            # Long: price at S3/S4 level with bullish weekly trend and volume confirmation
+            if vol_confirmed and weekly_uptrend_6h[i] > 0.5:
+                if close[i] <= s3_6h[i] * 1.005:  # Within 0.5% of S3
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] <= s4_6h[i] * 1.005:  # Within 0.5% of S4
+                    position = 1
+                    signals[i] = 0.25
+            
+            # Short: price at R3/R4 level with bearish weekly trend and volume confirmation
+            elif vol_confirmed and weekly_downtrend_6h[i] > 0.5:
+                if close[i] >= r3_6h[i] * 0.995:  # Within 0.5% of R3
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] >= r4_6h[i] * 0.995:  # Within 0.5% of R4
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
