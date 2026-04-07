@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-"""
-4h Donchian Breakout with 1d Trend Filter and Volume Spike
-Long when price breaks above Donchian(20) high and price > 1d EMA50; 
-Short when price breaks below Donchian(20) low and price < 1d EMA50.
-Exit when price crosses EMA50. Uses volume spike for entry confirmation.
-Designed to capture breakouts in trending markets while avoiding chop.
-"""
+# ================================================================
+# 4h Donchian Breakout with 1d Trend Filter and Volume Spike
+# Hypothesis: Breakouts above/below Donchian channels capture momentum.
+# In bull markets, upward breakouts outperform; in bear markets, downward breakouts outperform.
+# The 1d EMA50 filter ensures we only take breakouts in the direction of the higher timeframe trend,
+# reducing false signals in chop. Volume spikes confirm institutional participation.
+# This combination should work in both bull and bear regimes by following the trend.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
+# ================================================================
 
 import numpy as np
 import pandas as pd
