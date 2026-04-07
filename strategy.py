@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-6h 3-Day Range Breakout with Volume Confirmation
-Long when price breaks above 3-day high with above-average volume
-Short when price breaks below 3-day low with above-average volume
-Exit when price returns to middle of 3-day range
-Works in trending markets (both bull and bear) by capturing breakouts with volume confirmation
+1D Parabolic SAR with Volume Filter
+Long when Parabolic SAR flips below price with above-average volume
+Short when Parabolic SAR flips above price with above-average volume
+Exit when SAR flips opposite direction
+Parabolic SAR works in trending markets (both bull and bear) and volume filter reduces whipsaws
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_3day_range_breakout_volume_v1"
-timeframe = "6h"
+name = "1d_parabolic_sar_volume_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 50:
         return np.zeros(n)
     
@@ -26,56 +26,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 3-day lookback (12 bars for 6h timeframe: 3 days * 4 bars/day)
-    lookback = 12
+    # === Parabolic SAR ===
+    # Initialize
+    psar = np.zeros(n)
+    bull = True  # True for long, False for short
+    af = 0.02    # acceleration factor
+    max_af = 0.2
+    ep = high[0] if bull else low[0]  # extreme point
+    psar[0] = low[0] if bull else high[0]
     
-    # Rolling max/min for 3-day range
-    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate SAR
+    for i in range(1, n):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is within prior period's range
+            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR is within prior period's range
+            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+        
+        # Reverse if price crosses SAR
+        reverse = False
+        if bull and low[i] < psar[i]:
+            bull = False
+            reverse = True
+            ep = low[i]
+            af = 0.02
+        elif not bull and high[i] > psar[i]:
+            bull = True
+            reverse = True
+            ep = high[i]
+            af = 0.02
+        
+        if reverse:
+            psar[i] = ep  # SAR at reversal point is the extreme point
+        else:
+            # Update extreme point and acceleration factor
+            if bull:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
     
-    # Middle of range for exit signal
-    range_mid = (high_max + low_min) / 2.0
-    
-    # Volume confirmation - 20-period average
+    # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
-        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ratio[i]):
+    for i in range(20, n):
+        if np.isnan(psar[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to middle of range
-            if close[i] <= range_mid[i]:
+            # Exit: SAR flips above price (trend reversal)
+            if psar[i] > close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to middle of range
-            if close[i] >= range_mid[i]:
+            # Exit: SAR flips below price (trend reversal)
+            if psar[i] < close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Need expanding volume (above average)
-            if vol_ratio[i] < 1.5:
+            if vol_ratio[i] < 1.3:
                 signals[i] = 0.0
                 continue
             
-            # Entry: breakout of 3-day range with volume confirmation
-            if close[i] > high_max[i]:
-                # Break above 3-day high -> long
+            # Entry: SAR flip with volume confirmation
+            if close[i] > psar[i]:
+                # Price above SAR -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < low_min[i]:
-                # Break below 3-day low -> short
+            elif close[i] < psar[i]:
+                # Price below SAR -> short
                 position = -1
                 signals[i] = -0.25
     
