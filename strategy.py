@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Spike
-Hypothesis: Breakouts above/below Donchian channels capture momentum.
-Using 1d EMA50 as trend filter provides stronger trend identification.
-Volume spikes confirm institutional participation.
-This should work in both bull and bear regimes by following the trend.
-Target: 20-50 trades/year per symbol to minimize fee drag.
+6h Camarilla Pivot with 1d EMA Trend and Volume Confirmation
+Hypothesis: Camarilla pivot levels from daily timeframe identify key support/resistance.
+Price breaking above R4 or below S4 with 1d EMA trend alignment and volume confirmation
+captures strong momentum moves. Works in bull/bear by following higher timeframe trend.
+Target: 15-35 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,11 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume Spike Detector
+    # Volume Spike Detector (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 1.5)
     
@@ -40,11 +35,30 @@ def generate_signals(prices):
     ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
+    # Previous day's OHLC for Camarilla calculation
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels for previous day
+    # R4 = Close + 1.5 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    camarilla_r4 = prev_day_close + 1.5 * (prev_day_high - prev_day_low)
+    camarilla_s4 = prev_day_close - 1.5 * (prev_day_high - prev_day_low)
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(ema_50_aligned[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -64,14 +78,14 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: breakout above Donchian high + price above 1d EMA50 + volume spike
-            if (close[i] > high_roll[i-1] and 
+            # Long: break above R4 + price above 1d EMA50 + volume spike
+            if (close[i] > camarilla_r4_aligned[i] and 
                 close[i] > ema_50_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: breakout below Donchian low + price below 1d EMA50 + volume spike
-            elif (close[i] < low_roll[i-1] and 
+            # Short: break below S4 + price below 1d EMA50 + volume spike
+            elif (close[i] < camarilla_s4_aligned[i] and 
                   close[i] < ema_50_aligned[i] and 
                   vol_spike[i]):
                 position = -1
