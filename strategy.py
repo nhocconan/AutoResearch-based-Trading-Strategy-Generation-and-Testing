@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1d_trend_volume_v3
-Hypothesis: Donchian channel breakouts on 4h, filtered by 1d EMA50 trend and volume spikes,
-capture strong momentum moves in both bull and bear markets. Uses tight entry conditions
-(breakout + trend + volume) to limit trades to ~20-50/year, avoiding fee drag.
+4h_atr_breakout_1d_trend_volume_v2
+Hypothesis: ATR breakouts aligned with daily trend and volume capture strong moves.
+Breakouts above ATR-based upper/lower bands with volume confirmation and daily EMA50 trend filter
+work in both bull and bear markets by trading in direction of daily trend.
+Targets 20-50 trades/year with disciplined entries to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v3"
+name = "4h_atr_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,17 +26,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
+    # ATR calculation (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR-based bands (2.5 * ATR)
+    atr_mult = 2.5
+    upper_band = close + atr_mult * atr
+    lower_band = close - atr_mult * atr
+    
+    # Daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
     ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Donchian channel (20-period) on 4h
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 20-period SMA for volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,39 +56,40 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema50_4h[i]) or 
-            np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or 
+        if (np.isnan(atr[i]) or 
+            np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or 
+            np.isnan(ema50_4h[i]) or 
             np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume
-        vol_confirm = volume[i] > 2.0 * vol_sma[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian low OR trend turns down
-            if close[i] <= low_min[i] or close[i] < ema50_4h[i]:
+            # Exit: price closes below lower band OR trend turns down
+            if close[i] < lower_band[i] or close[i] < ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.30
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian high OR trend turns up
-            if close[i] >= high_max[i] or close[i] > ema50_4h[i]:
+            # Exit: price closes above upper band OR trend turns up
+            if close[i] > upper_band[i] or close[i] > ema50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.30
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high + volume confirmation + uptrend
-            if (close[i] > high_max[i] and 
+            # Long: price breaks above upper band + volume confirmation + uptrend
+            if (close[i] > upper_band[i] and 
                 vol_confirm and 
                 close[i] > ema50_4h[i]):
                 position = 1
                 signals[i] = 0.30
-            # Short: price breaks below Donchian low + volume confirmation + downtrend
-            elif (close[i] < low_min[i] and 
+            # Short: price breaks below lower band + volume confirmation + downtrend
+            elif (close[i] < lower_band[i] and 
                   vol_confirm and 
                   close[i] < ema50_4h[i]):
                 position = -1
