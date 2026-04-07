@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Elder Ray + 1d ADX Trend Filter
-# Hypothesis: Use Elder Ray (Bull/Bear Power) on 6h with 1d ADX > 25 to confirm trend strength.
-# Long when Bull Power > 0 and Bear Power < 0 in strong trend; Short when Bear Power > 0 and Bull Power < 0.
-# Works in bull/bear by only taking trades in strong trends (ADX > 25), avoiding chop.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Strategy: 12h Donchian Breakout + Volume + 1w ADX Trend Filter
+# Hypothesis: Breakout trades in direction of weekly trend with volume confirmation.
+# Works in bull/bear by filtering with weekly ADX > 25. Target: 50-150 total trades over 4 years.
 
-name = "6h_elder_ray_1d_adx_trend_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1w_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,103 +20,102 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for ADX trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Get weekly data for ADX trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Calculate EMA(13) for Elder Ray (6h)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Calculate ADX on daily data
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate ADX(14) on weekly data
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
     # True Range
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First value has no previous close
+    tr1 = high_w[1:] - low_w[1:]
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    up_move = high_daily - np.roll(high_daily, 1)
-    down_move = np.roll(low_daily, 1) - low_daily
-    up_move[0] = np.nan
-    down_move[0] = np.nan
+    dm_plus = np.where((high_w[1:] - high_w[:-1]) > (low_w[:-1] - low_w[1:]), 
+                       np.maximum(high_w[1:] - high_w[:-1], 0), 0)
+    dm_minus = np.where((low_w[:-1] - low_w[1:]) > (high_w[1:] - high_w[:-1]), 
+                        np.maximum(low_w[:-1] - low_w[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values (using Wilder's smoothing, equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(arr, period):
+    # Smoothed values
+    def _wilder_smoothing(arr, period):
         result = np.full_like(arr, np.nan)
         if len(arr) < period:
             return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        first_avg = np.nansum(arr[1:period+1])
+        result[period] = first_avg
+        for i in range(period+1, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    atr_period = 14
-    tr_atr = wilders_smoothing(tr, atr_period)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, atr_period)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, atr_period)
+    atr = _wilder_smoothing(tr, 14)
+    dm_plus_smooth = _wilder_smoothing(dm_plus, 14)
+    dm_minus_smooth = _wilder_smoothing(dm_minus, 14)
     
-    # Avoid division by zero
-    plus_di = np.where(tr_atr != 0, 100 * plus_dm_smoothed / tr_atr, 0)
-    minus_di = np.where(tr_atr != 0, 100 * minus_dm_smoothed / tr_atr, 0)
+    # DI and DX
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = _wilder_smoothing(dx, 14)
     
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smoothing(dx, atr_period)
+    # Align ADX to 12h
+    adx_12h = align_htf_to_ltf(prices, df_weekly, adx)
     
-    # Align ADX to 6h
-    adx_6h = align_htf_to_ltf(prices, df_daily, adx)
+    # Donchian(20) on 12h data
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume filter: 12h volume > 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(lookback, n):
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_6h[i]) or np.isnan(ema_13[i])):
+        if (np.isnan(adx_12h[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Strong trend filter: ADX > 25
-        strong_trend = adx_6h[i] > 25
+        # Trend filter: weekly ADX > 25
+        trending = adx_12h[i] > 25
+        
+        # Volume confirmation
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit: trend weakens or Bear Power becomes positive
-            if not strong_trend or bear_power[i] > 0:
+            # Exit: price touches opposite band or trend weakens
+            if low[i] <= lowest_low[i] or not (trending and vol_ok):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: trend weakens or Bull Power becomes positive
-            if not strong_trend or bull_power[i] > 0:
+            # Exit: price touches opposite band or trend weakens
+            if high[i] >= highest_high[i] or not (trending and vol_ok):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Enter long: Bull Power > 0 and Bear Power < 0 in strong uptrend
-            if strong_trend and bull_power[i] > 0 and bear_power[i] < 0:
-                position = 1
-                signals[i] = 0.25
-            # Enter short: Bear Power > 0 and Bull Power < 0 in strong downtrend
-            elif strong_trend and bear_power[i] > 0 and bull_power[i] < 0:
-                position = -1
-                signals[i] = -0.25
+            # Breakout in direction of weekly trend with volume
+            if trending and vol_ok:
+                if high[i] > highest_high[i-1]:  # Upward breakout
+                    position = 1
+                    signals[i] = 0.25
+                elif low[i] < lowest_low[i-1]:  # Downward breakout
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
