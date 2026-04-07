@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h ATR Breakout with Daily Trend Filter
-Long when price breaks above ATR-based upper band with daily uptrend
-Short when price breaks below ATR-based lower band with daily downtrend
-Exit when price crosses opposite band or trend reverses
-Designed for low-frequency trading (12-37 trades/year) with volatility filtering
+4h Donchian Breakout with Volume Confirmation and 12h Trend Filter
+Long when price breaks above Donchian upper with volume spike and 12h trend up
+Short when price breaks below Donchian lower with volume spike and 12h trend down
+Exit on opposite breakout or volume drop
+Works in both bull and bear markets by following the 12h trend
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_atr_breakout_daily_trend_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_12h_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,63 +26,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === ATR Calculation (14-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === Donchian Channel (20-period) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === ATR Bands (2.5 * ATR) ===
-    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    upper_band = ma + 2.5 * atr
-    lower_band = ma - 2.5 * atr
+    # === Volume confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === Daily Trend Filter (using 1d data) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 12h Trend Filter (EMA 50) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below lower band OR daily trend turns down
-            if close[i] < lower_band[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price breaks below Donchian lower
+            if close[i] < donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above upper band OR daily trend turns up
-            if close[i] > upper_band[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price breaks above Donchian upper
+            if close[i] > donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volatility filter (ATR not too low)
-            if atr[i] < 0.5 * np.nanmedian(atr[max(0, i-50):i]):
+            # Need volume spike
+            if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: breakout with daily trend alignment
-            if close[i] > upper_band[i] and close[i] > ema_50_1d_aligned[i]:
-                # Break above upper band with daily uptrend -> long
+            # Entry: Donchian breakout with 12h trend confirmation
+            if close[i] > donch_high[i] and ema_12h_aligned[i] > ema_12h_aligned[i-1]:
+                # Breakout above upper band with rising 12h trend -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < lower_band[i] and close[i] < ema_50_1d_aligned[i]:
-                # Break below lower band with daily downtrend -> short
+            elif close[i] < donch_low[i] and ema_12h_aligned[i] < ema_12h_aligned[i-1]:
+                # Breakdown below lower band with falling 12h trend -> short
                 position = -1
                 signals[i] = -0.25
     
