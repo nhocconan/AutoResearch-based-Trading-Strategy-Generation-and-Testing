@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour strategy with 4-hour trend filter and 1-day volume confirmation
-# Uses 4-hour Donchian(20) breakout for direction, confirmed by 1-day volume surge (>1.5x 20-day avg)
-# Entry timing on 1-hour: price must close outside Donchian bands for confirmation
-# Exit: reverse signal or stoploss at 2.5*ATR(14)
-# Position size: 0.20 (20% of capital) to manage drawdown
-# Session filter: 08:00-20:00 UTC to avoid low-volume periods
-# Target: 60-150 total trades over 4 years (15-37/year)
+# Hypothesis: 1-hour RSI(14) mean reversion with 4-hour ADX(14) trend filter and session filter (08-20 UTC)
+# Long when RSI < 30 (oversold) + 4h ADX < 25 (weak trend/range) + within active session
+# Short when RSI > 70 (overbought) + 4h ADX < 25 (weak trend/range) + within active session
+# Exit when RSI crosses back to 50 (mean reversion complete)
+# Stoploss at 2.0 * ATR(14) on 1h timeframe
+# Position size: 0.20 (20% of capital)
+# Uses 4h ADX for regime detection to avoid trending markets where mean reversion fails
+# Target: 100-200 total trades over 4 years (25-50/year) with session filter reducing noise
 
-name = "1h_donchian20_1d_vol_4h_trend_v1"
+name = "1h_rsi14_4h_adx14_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -24,54 +25,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4-hour data for trend filter (Donchian direction)
+    # 4-hour data for ADX trend filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    # 1-day data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 4-hour Donchian channels (20-period)
+    # Calculate 4-hour ADX (14-period)
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
+    close_4h = df_4h['close'].values
     
-    # 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma_1d = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    
-    # 1-hour ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # True Range
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Directional Movement
+    up_move = np.diff(high_4h, prepend=high_4h[0])
+    down_move = np.diff(low_4h, prepend=low_4h[0]) * -1  # invert to positive
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # RSI(14) on 1-hour timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # ATR(14) for stoploss on 1-hour timeframe
+    tr1_1h = high - low
+    tr2_1h = np.abs(high - np.roll(close, 1))
+    tr3_1h = np.abs(low - np.roll(close, 1))
+    tr2_1h[0] = tr1_1h[0]
+    tr3_1h[0] = tr1_1h[0]
+    tr_1h = np.maximum(tr1_1h, np.maximum(tr2_1h, tr3_1h))
+    atr = pd.Series(tr_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Session filter: 08:00-20:00 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
-        # Skip if required data not available or outside session
-        if (np.isnan(highest_high_4h_aligned[i]) or np.isnan(lowest_low_4h_aligned[i]) or 
-            np.isnan(volume_ma_1d_aligned[i]) or np.isnan(atr[i]) or
-            not in_session[i]):
+    for i in range(14, n):
+        # Skip if required data not available
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.20
             else:
@@ -79,43 +102,45 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Reverse signal: price closes below 4h Donchian low
-            elif close[i] < lowest_low_4h_aligned[i]:
+            # Exit: RSI crosses back to 50 (mean reversion complete)
+            elif rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Reverse signal: price closes above 4h Donchian high
-            elif close[i] > highest_high_4h_aligned[i]:
+            # Exit: RSI crosses back to 50 (mean reversion complete)
+            elif rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries: 4h Donchian breakout with 1d volume confirmation
-            # Volume filter: current volume > 1.5x 20-day average
-            volume_filter = volume[i] > 1.5 * volume_ma_1d_aligned[i]
+            # Look for entries: RSI extreme + weak trend (ADX < 25) + session filter
+            rsi_oversold = rsi[i] < 30
+            rsi_overbought = rsi[i] > 70
+            weak_trend = adx_aligned[i] < 25
+            session_ok = in_session[i]
             
-            # Long: price closes above 4h Donchian high + volume filter
-            if close[i] > highest_high_4h_aligned[i] and volume_filter:
+            # Long: RSI oversold + weak trend + session
+            if rsi_oversold and weak_trend and session_ok:
                 signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
-            # Short: price closes below 4h Donchian low + volume filter
-            elif close[i] < lowest_low_4h_aligned[i] and volume_filter:
+            # Short: RSI overbought + weak trend + session
+            elif rsi_overbought and weak_trend and session_ok:
                 signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
