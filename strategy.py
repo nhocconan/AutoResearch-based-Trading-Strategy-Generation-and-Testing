@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian Breakout with Weekly Trend Filter
-# Hypothesis: Donchian(20) breakouts in direction of weekly EMA(50) trend capture momentum with minimal trades.
-# Weekly trend filter prevents counter-trend trades during reversals. Breakouts provide clear entry/exit.
-# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+# Strategy: 12h Donchian Breakout with Weekly Trend Filter and Volume Confirmation
+# Hypothesis: Donchian(20) breakouts in direction of weekly EMA(50) trend, confirmed by volume spike (1.5x average), capture momentum with low trade frequency.
+# Weekly trend filter prevents counter-trend trades. Volume confirmation adds confluence to reduce false breakouts.
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 
-name = "12h_donchian_breakout_weekly_trend_v1"
+name = "12h_donchian_breakout_weekly_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -21,6 +21,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get weekly data for EMA trend filter
     df_weekly = get_htf_data(prices, '1w')
@@ -38,12 +39,15 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
+    # Volume average (20-period) for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_avg[i]):
             signals[i] = 0.0
             continue
         
@@ -62,13 +66,14 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Donchian breakout in direction of weekly trend
+            # Donchian breakout in direction of weekly trend with volume confirmation
+            vol_spike = volume[i] > 1.5 * vol_avg[i]
             if close[i] > ema_50_aligned[i]:  # Uptrend
-                if high[i] > highest_high[i]:  # Break above upper band
+                if high[i] > highest_high[i] and vol_spike:  # Break above upper band with volume
                     position = 1
                     signals[i] = 0.25
             else:  # Downtrend
-                if low[i] < lowest_low[i]:  # Break below lower band
+                if low[i] < lowest_low[i] and vol_spike:  # Break below lower band with volume
                     position = -1
                     signals[i] = -0.25
     
