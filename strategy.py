@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1w_volume_v1"
-timeframe = "12h"
+name = "4h_keltner_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,62 +18,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for Keltner channel
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous week
-    prev_high = df_1w['high'].values
-    prev_low = df_1w['low'].values
-    prev_close = df_1w['close'].values
+    # Calculate Keltner Channel on daily: EMA(20) +/- ATR(20)
+    daily_close = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    H4 = prev_close + 1.5 * (prev_high - prev_low)
-    H3 = prev_close + 1.0 * (prev_high - prev_low)
-    H2 = prev_close + 0.5 * (prev_high - prev_low)
-    H1 = prev_close + 0.25 * (prev_high - prev_low)
-    L1 = prev_close - 0.25 * (prev_high - prev_low)
-    L2 = prev_close - 0.5 * (prev_high - prev_low)
-    L3 = prev_close - 1.0 * (prev_high - prev_low)
-    L4 = prev_close - 1.5 * (prev_high - prev_low)
+    # EMA(20)
+    ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align all levels to 12h timeframe (shifted by 1 week for lookback)
-    H4_12h = align_htf_to_ltf(prices, df_1w, H4)
-    H3_12h = align_htf_to_ltf(prices, df_1w, H3)
-    H2_12h = align_htf_to_ltf(prices, df_1w, H2)
-    H1_12h = align_htf_to_ltf(prices, df_1w, H1)
-    L1_12h = align_htf_to_ltf(prices, df_1w, L1)
-    L2_12h = align_htf_to_ltf(prices, df_1w, L2)
-    L3_12h = align_htf_to_ltf(prices, df_1w, L3)
-    L4_12h = align_htf_to_ltf(prices, df_1w, L4)
+    # ATR(20)
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: volume > 1.8x 25-period average
+    # Keltner bands
+    upper = ema20 + 2.0 * atr20
+    lower = ema20 - 2.0 * atr20
+    
+    # Align to 4h timeframe (shifted by 1 day for lookback)
+    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20)
+    upper_4h = align_htf_to_ltf(prices, df_1d, upper)
+    lower_4h = align_htf_to_ltf(prices, df_1d, lower)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=25, min_periods=25).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(25, n):
-        # Skip if any pivot level is not ready
-        if (np.isnan(H4_12h[i]) or np.isnan(H3_12h[i]) or np.isnan(H2_12h[i]) or 
-            np.isnan(H1_12h[i]) or np.isnan(L1_12h[i]) or np.isnan(L2_12h[i]) or 
-            np.isnan(L3_12h[i]) or np.isnan(L4_12h[i]) or np.isnan(vol_ma[i])):
+    for i in range(20, n):
+        # Skip if any value is not ready
+        if (np.isnan(ema20_4h[i]) or np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below L2 (strong support broken)
-            if close[i] < L2_12h[i]:
+            # Exit: price closes below EMA20 (trend reversal)
+            if close[i] < ema20_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H2 (strong resistance broken)
-            if close[i] > H2_12h[i]:
+            # Exit: price closes above EMA20 (trend reversal)
+            if close[i] > ema20_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,12 +83,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
                 
-            # Long entry: price breaks above H3 with volume
-            if close[i] > H3_12h[i] and close[i-1] <= H3_12h[i-1]:
+            # Long entry: price breaks above upper Keltner band with volume (bullish breakout)
+            if close[i] > upper_4h[i] and close[i-1] <= upper_4h[i-1]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below L3 with volume
-            elif close[i] < L3_12h[i] and close[i-1] >= L3_12h[i-1]:
+            # Short entry: price breaks below lower Keltner band with volume (bearish breakout)
+            elif close[i] < lower_4h[i] and close[i-1] >= lower_4h[i-1]:
                 position = -1
                 signals[i] = -0.25
     
