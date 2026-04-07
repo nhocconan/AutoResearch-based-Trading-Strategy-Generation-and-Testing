@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_ema_volume_v1
-Hypothesis: On 12h timeframe, use Camarilla pivot levels from 1d for entry signals, filtered by 1d EMA50 trend and volume confirmation.
+4h_camarilla_pivot_1d_ema_volume_v2
+Hypothesis: On 4h timeframe, use Camarilla pivot levels from 1d for entry signals, filtered by 1d EMA trend and volume confirmation.
 - In uptrend (price > 1d EMA50): long at S3 (support), exit at S4 (breakdown) or trend reversal
 - In downtrend (price < 1d EMA50): short at R3 (resistance), exit at R4 (breakout) or trend reversal
 Volume confirms genuine tests of pivot levels. This strategy fades at S3/R3 in ranging markets
 and captures breakouts at S4/R4 in trending markets, adapting to both bull and bear regimes.
-Target: 12-37 trades/year (~50-150 total over 4 years).
+Target: 20-50 trades/year (~80-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1d_ema_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     # 1d EMA50 for trend filter
     ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
     
-    # Align 1d EMA50 to 12h timeframe
+    # Align 1d EMA50 to 4h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
     # Calculate Camarilla pivot levels from previous day
@@ -61,7 +61,7 @@ def generate_signals(prices):
     s3 = pivot - (range_val * 1.1 / 4)
     s4 = pivot - (range_val * 1.1 / 2)
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
@@ -72,13 +72,13 @@ def generate_signals(prices):
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
     
-    # Volume confirmation (2-period average on 12h = 1 day)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume confirmation (6-period average on 4h = 1 day)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if required data not available
         if (np.isnan(ema_50_aligned[i]) or np.isnan(pivot_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
@@ -87,8 +87,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit: price breaks below S4 (breakdown) or trend turns bearish
