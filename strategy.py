@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend and Volume Filter
-Long when price breaks above Donchian upper band with 1d EMA uptrend and volume spike
-Short when price breaks below Donchian lower band with 1d EMA downtrend and volume spike
-Exit when price crosses opposite Donchian band
-Designed for fewer trades (target: 50-100/year) with strong trend filtering
+1d Bollinger Band Squeeze Breakout with Weekly Trend Filter
+Long when price breaks above upper BB during low volatility (squeeze) and weekly trend is up
+Short when price breaks below lower BB during low volatility and weekly trend is down
+Exit when price returns to middle BB or volatility expands
+Bollinger Squeeze captures low volatility breakouts which work in both bull and bear markets
+Weekly trend filter ensures we trade with the higher timeframe momentum
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_bollinger_squeeze_breakout_weekly_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,60 +22,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Bollinger Bands (20, 2) ===
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean().values
+    dev = close_s.rolling(window=20, min_periods=20).std().values
+    upper_band = basis + 2.0 * dev
+    lower_band = basis - 2.0 * dev
     
-    # === 1d EMA Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === Bollinger Band Width (for squeeze detection) ===
+    bb_width = (upper_band - lower_band) / (basis + 1e-10)
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze_condition = bb_width < 0.5 * bb_width_ma  # Low volatility squeeze
     
-    # === Volume Spike Filter ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
+    # === Weekly Trend Filter (using 1h data as proxy for weekly trend) ===
+    # Get weekly data (using 1h as closest available)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
+        return np.zeros(n)
+    
+    # Weekly EMA trend (using 50-period EMA on 1h data as proxy)
+    close_1h = pd.Series(df_1h['close'].values)
+    ema_50_1h = close_1h.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_50_1h)
+    
+    # Weekly trend direction
+    weekly_uptrend = ema_50_1h_aligned > close  # Price above weekly EMA = uptrend
+    weekly_downtrend = ema_50_1h_aligned < close  # Price below weekly EMA = downtrend
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(squeeze_condition[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian band
-            if close[i] < donchian_low[i]:
+            # Exit: price returns to middle band or volatility expands (squeeze ends)
+            if close[i] <= basis[i] or not squeeze_condition[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian band
-            if close[i] > donchian_high[i]:
+            # Exit: price returns to middle band or volatility expands
+            if close[i] >= basis[i] or not squeeze_condition[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume spike (above average)
-            if vol_ratio[i] < 1.5:
+            # Need low volatility squeeze
+            if not squeeze_condition[i]:
                 signals[i] = 0.0
                 continue
             
-            # Long entry: price breaks above upper band with 1d EMA uptrend
-            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+            # Entry: Bollinger Band breakout with weekly trend alignment
+            if close[i] > upper_band[i] and weekly_uptrend[i]:
+                # Break above upper band during uptrend -> long
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower band with 1d EMA downtrend
-            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+            elif close[i] < lower_band[i] and weekly_downtrend[i]:
+                # Break below lower band during downtrend -> short
                 position = -1
                 signals[i] = -0.25
     
