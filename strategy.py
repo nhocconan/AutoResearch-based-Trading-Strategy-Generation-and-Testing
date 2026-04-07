@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot levels from daily high-low-close + volume confirmation + volatility filter
-# Long when price closes above Camarilla H4 level (resistance) with volume > 1.5x average and ATR(14) > 0.5*ATR(50)
-# Short when price closes below Camarilla L4 level (support) with volume > 1.5x average and ATR(14) > 0.5*ATR(50)
-# Exit when price touches Camarilla H3/L3 levels or volatility drops below threshold
+# Hypothesis: 6-hour Exponential Moving Average Crossover with Daily Trend Filter and Volume Confirmation
+# Long when EMA(20) > EMA(50), price > EMA(50), and daily close > weekly close (bullish bias)
+# Short when EMA(20) < EMA(50), price < EMA(50), and daily close < weekly close (bearish bias)
+# Volume must be > 1.2x 20-period average for confirmation
+# Exit when EMA crossover reverses or volume dries up
 # Position size: 0.25 (25% of capital)
-# Uses daily Camarilla levels for structure, volume for confirmation, ATR ratio for volatility regime filter
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Uses EMA crossover for momentum, higher timeframe for trend bias, volume for confirmation
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "4h_camarilla_daily_vol_volat_v1"
-timeframe = "4h"
+name = "6h_ema_crossover_daily_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,91 +27,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
+    # EMA calculations
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Volume average for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
+    # Weekly data for stronger trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
+        # Fallback to daily if weekly not available
+        weekly_trend = np.zeros(len(prices))
+    else:
+        close_weekly = df_weekly['close'].values
+        weekly_trend = align_htf_to_ltf(prices, df_weekly, close_weekly)
     
-    # Camarilla levels: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    range_daily = high_daily - low_daily
-    camarilla_h4 = close_daily + 1.1 * range_daily / 2
-    camarilla_l4 = close_daily - 1.1 * range_daily / 2
-    camarilla_h3 = close_daily + 1.1 * range_daily / 4
-    camarilla_l3 = close_daily - 1.1 * range_daily / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l3)
-    
-    # 4h volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Align daily close to 6h timeframe
+    daily_close_aligned = align_htf_to_ltf(prices, df_daily, close_daily)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i])):
-            if position != 0:
-                signals[i] = position * 0.25
+        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(daily_close_aligned[i])):
+            if len(df_weekly) >= 2 and np.isnan(weekly_trend[i]):
+                if position != 0:
+                    signals[i] = position * 0.25
+                else:
+                    signals[i] = 0.0
+                continue
+            elif len(df_weekly) < 2:
+                # No weekly data, continue with available data
+                pass
             else:
-                signals[i] = 0.0
-            continue
+                if position != 0:
+                    signals[i] = position * 0.25
+                else:
+                    signals[i] = 0.0
+                continue
         
-        # Volatility filter: require ATR(14) > 0.5 * ATR(50) to avoid low-volatility chop
-        vol_filter = atr14[i] > 0.5 * atr50[i]
+        # Volume confirmation: volume > 1.2x average
+        vol_confirm = volume[i] > 1.2 * volume_ma[i]
+        
+        # Trend filter: daily close > weekly close for bullish bias, < for bearish
+        if len(df_weekly) >= 2:
+            bullish_bias = daily_close_aligned[i] > weekly_trend[i]
+            bearish_bias = daily_close_aligned[i] < weekly_trend[i]
+        else:
+            # Fallback: use daily close vs its own 10-period MA for trend
+            daily_ma10 = pd.Series(close_daily).rolling(window=10, min_periods=10).mean().values
+            daily_ma10_aligned = align_htf_to_ltf(prices, df_daily, daily_ma10)
+            bullish_bias = daily_close_aligned[i] > daily_ma10_aligned[i]
+            bearish_bias = daily_close_aligned[i] < daily_ma10_aligned[i]
         
         if position == 1:  # long position
-            # Exit: price touches H3 level or volatility drops
-            if close[i] <= h3_aligned[i] or not vol_filter:
+            # Exit: EMA crossover reverses or volume dries up
+            if ema20[i] <= ema50[i] or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price touches L3 level or volatility drops
-            if close[i] >= l3_aligned[i] or not vol_filter:
+            # Exit: EMA crossover reverses or volume dries up
+            if ema20[i] >= ema50[i] or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and volatility filter
-            # Long: price closes above H4 level, volume > 1.5x average, volatility sufficient
-            if (close[i] > h4_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i] and
-                vol_filter):
+            # Look for entries with EMA crossover, volume confirmation, and trend bias
+            # Long: EMA(20) > EMA(50), price > EMA(50), bullish bias, volume confirmation
+            if (ema20[i] > ema50[i] and
+                close[i] > ema50[i] and
+                bullish_bias and
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
-                entry_price = close[i]
-            # Short: price closes below L4 level, volume > 1.5x average, volatility sufficient
-            elif (close[i] < l4_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i] and
-                  vol_filter):
+            # Short: EMA(20) < EMA(50), price < EMA(50), bearish bias, volume confirmation
+            elif (ema20[i] < ema50[i] and
+                  close[i] < ema50[i] and
+                  bearish_bias and
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
-                entry_price = close[i]
     
     return signals
