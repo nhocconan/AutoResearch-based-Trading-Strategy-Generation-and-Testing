@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout + 1w EMA Trend + Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 1d capture major trend moves. 
-1w EMA(20) filters for long-term trend alignment. Volume > 2x average 
-confirms institutional participation. Works in bull/bear by only taking 
-breakouts in direction of weekly trend, avoiding counter-trend whipsaws.
-Target: 50-100 total trades over 4 years (12-25/year).
+4h Donchian Breakout + 12h Trend + Volume Confirmation
+Hypothesis: Donchian channel breakouts capture momentum in both bull and bear markets.
+Trend filtered by 12h EMA(21) ensures directional alignment. Volume > 1.5x average
+confirms institutional participation. Stops when price closes below/above entry bar's
+extreme. Designed for low trade frequency (<50/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_ema_volume_v1"
-timeframe = "1d"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,54 +26,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) - use previous values to avoid look-ahead
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Donchian channel (20-period) - using previous period's values to avoid look-ahead
+    donchian_len = 20
+    high_max = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
+    low_min = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
     
-    # Volume filter (>2x 30-period average)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (vol_ma * 2.0)
+    # Shift by 1 to use only completed periods
+    upper = np.roll(high_max, 1)
+    lower = np.roll(low_min, 1)
+    upper[0] = np.nan
+    lower[0] = np.nan
     
-    # 1w EMA(20) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_20 = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # 12h EMA(21) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema_21 = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21)
+    
+    # Volume filter (>1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(donchian_len, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_21_aligned[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below 20-day low OR trend reverses
-            if close[i] < low_20[i] or close[i] < ema_20_aligned[i]:
+            # Exit: price closes below entry bar's low or trend reverses
+            if close[i] < lower[i] or close[i] < ema_21_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 20-day high OR trend reverses
-            if close[i] > high_20[i] or close[i] > ema_20_aligned[i]:
+            # Exit: price closes above entry bar's high or trend reverses
+            if close[i] > upper[i] or close[i] > ema_21_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long breakout: price breaks above 20-day high with volume and trend alignment
-            if (close[i] > high_20[i] and 
-                close[i] > ema_20_aligned[i] and 
+            # Long breakout: price closes above upper band with volume and trend alignment
+            if (close[i] > upper[i] and 
+                close[i] > ema_21_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakout: price breaks below 20-day low with volume and trend alignment
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_20_aligned[i] and 
+            # Short breakout: price closes below lower band with volume and trend alignment
+            elif (close[i] < lower[i] and 
+                  close[i] < ema_21_aligned[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
