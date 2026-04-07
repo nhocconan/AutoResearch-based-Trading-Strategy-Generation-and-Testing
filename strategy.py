@@ -3,120 +3,113 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA trend with 1-week RSI filter and volume confirmation
-# Uses KAMA's adaptive smoothing to reduce whipsaw in choppy markets
-# RSI filter avoids overbought/oversold extremes, volume confirms conviction
-# Designed for low trade frequency (target: 50-100 total over 4 years) to minimize fee drag
-# Works in bull/bear via trend filter and volatility-adjusted position sizing
+# Hypothesis: 6-hour Ichimoku Cloud system with 12-hour trend filter
+# Uses Ichimoku (Tenkan-sen, Kijun-sen, Senkou Span A/B) from 6h data
+# Trend filter from 12h EMA cross to avoid counter-trend trades
+# Only trades when price is above/both Kumo (cloud) with TK cross in same direction
+# Designed to work in both bull and bear markets via trend filter and cloud support/resistance
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "daily_kama_rsi_vol_v1"
-timeframe = "1d"
+name = "6h_ichimoku_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1-week data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # 12-hour data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA (adaptive moving average) on daily
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    for i in range(1, len(volatility)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility[0] = np.abs(close[0] - close[0])  # Will be updated properly below
+    # Calculate 12h EMA(25) and EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Recalculate volatility properly (10-period sum of absolute changes)
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    volatility[:10] = volatility[10] if len(close) > 10 else 0
+    # Ichimoku calculations (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Avoid division by zero
-    volatility = np.where(volatility == 0, 1e-10, volatility)
-    er = change / volatility
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # RSI(14) on weekly
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = np.where(np.isnan(rsi_1w), 50, rsi_1w)  # Handle initial values
-    
-    # Align weekly RSI to daily
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # Not used for signals as it requires future data
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after KAMA warmup
+    for i in range(52, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
+            np.isnan(ema_25_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Determine if price is above or below cloud
+        # Cloud top is the higher of Senkou Span A and B
+        # Cloud bottom is the lower of Senkou Span A and B
+        cloud_top = np.maximum(senkou_span_a[i], senkou_span_b[i])
+        cloud_bottom = np.minimum(senkou_span_a[i], senkou_span_b[i])
+        
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # TK Cross: Tenkan-sen crossing Kijun-sen
+        tk_cross_up = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
+        tk_cross_down = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
+        
+        # Trend filter from 12h EMA
+        uptrend_12h = ema_25_12h_aligned[i] > ema_50_12h_aligned[i]
+        downtrend_12h = ema_25_12h_aligned[i] < ema_50_12h_aligned[i]
+        
         if position == 1:  # long position
-            # Exit: price crosses below KAMA OR RSI > 70 (overbought)
-            if close[i] < kama[i] or rsi_1w_aligned[i] > 70:
+            # Exit: price closes below cloud or TK cross down
+            if close[i] < cloud_bottom or tk_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above KAMA OR RSI < 30 (oversold)
-            if close[i] > kama[i] or rsi_1w_aligned[i] < 30:
+            # Exit: price closes above cloud or TK cross up
+            if close[i] > cloud_top or tk_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Long: price above KAMA, RSI < 50 (not overbought), volume confirmation
-            if (close[i] > kama[i] and 
-                rsi_1w_aligned[i] < 50 and 
-                volume[i] > 1.5 * vol_avg[i]):
+            # Long: price above cloud + TK cross up + 12h uptrend
+            if price_above_cloud and tk_cross_up and uptrend_12h:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI > 50 (not oversold), volume confirmation
-            elif (close[i] < kama[i] and 
-                  rsi_1w_aligned[i] > 50 and 
-                  volume[i] > 1.5 * vol_avg[i]):
+            # Short: price below cloud + TK cross down + 12h downtrend
+            elif price_below_cloud and tk_cross_down and downtrend_12h:
                 signals[i] = -0.25
                 position = -1
     
