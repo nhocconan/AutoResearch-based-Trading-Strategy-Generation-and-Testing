@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 4H Donchian Breakout with Volume Confirmation and 1D Trend Filter
-Long when price breaks above Donchian upper channel with volume surge AND 1D EMA trend up
-Short when price breaks below Donchian lower channel with volume surge AND 1D EMA trend down
-Exit when price crosses back to Donchian middle line
+Long when price breaks above Donchian(20) upper band with expanding volume AND 1d EMA trend up
+Short when price breaks below Donchian(20) lower band with expanding volume AND 1d EMA trend down
+Exit when price crosses back to middle line (10-period EMA)
+Uses ATR-based bands that adapt to volatility, reducing false breakouts in ranging markets.
 """
 
 import numpy as np
@@ -26,15 +27,15 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # === Donchian Channels (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    middle_line = (highest_high + lowest_low) / 2
+    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_middle = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
     
-    # === 1D trend filter (EMA 21) ===
+    # === 1d trend filter (EMA 21) ===
     df_1d = get_htf_data(prices, '1d')
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
@@ -43,14 +44,14 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(middle_line[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
+            np.isnan(donch_middle[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price crosses back below middle line
-            if close[i] < middle_line[i]:
+            if close[i] < donch_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -58,24 +59,24 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price crosses back above middle line
-            if close[i] > middle_line[i]:
+            if close[i] > donch_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume surge (above average)
-            if vol_ratio[i] < 1.5:
+            # Need expanding volume (above average)
+            if vol_ratio[i] < 1.2:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume surge AND 1D trend filter
-            if close[i] > highest_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper channel with rising 1D EMA -> long
+            # Entry: Donchian breakout with volume confirmation AND 1d trend filter
+            if close[i] > donch_upper[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Breakout above upper channel with rising 1d EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < lowest_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower channel with falling 1D EMA -> short
+            elif close[i] < donch_lower[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Breakdown below lower channel with falling 1d EMA -> short
                 position = -1
                 signals[i] = -0.25
     
