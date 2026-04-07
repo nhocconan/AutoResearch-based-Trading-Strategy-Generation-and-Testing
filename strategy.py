@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h 12h/1d Pivot Breakout with Volume Filter
-# Hypothesis: 12h and 1d pivot levels act as strong support/resistance. Price breaking above R1 or below S1 with volume confirms institutional participation, leading to continuation. Works in both bull and bear markets: In bull, breaks above R1 continue up; breaks below S1 get bought (mean reversion). In bear, breaks below S1 continue down; breaks above R1 get sold (mean reversion). Volume filter ensures only institutional participation triggers entries. Target: 20-50 trades/year (80-200 over 4 years).
+# Strategy: 12h Donchian Breakout with Volume and ADX Filter
+# Hypothesis: Donchian channel breakouts capture strong trends. Volume confirms institutional participation.
+# ADX > 25 filters for trending markets, avoiding whipsaws in ranging conditions.
+# Works in both bull and bear markets: breakouts in direction of trend are followed, while false breakouts are filtered.
+# Target: 15-35 trades/year (60-140 over 4 years).
 
-name = "4h_12h_1d_pivot_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -21,102 +24,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for ADX calculation (trend strength filter)
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate 12h data (previous bar's OHLC)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate ADX on daily data
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Shift by 1 to use previous bar's data (avoid look-ahead)
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_high_12h[0] = prev_high_12h[1] if len(prev_high_12h) > 1 else 0
-    prev_low_12h[0] = prev_low_12h[1] if len(prev_low_12h) > 1 else 0
-    prev_close_12h[0] = prev_close_12h[1] if len(prev_close_12h) > 1 else 0
+    # True Range
+    tr1 = np.abs(daily_high[1:] - daily_low[1:])
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with original index
     
-    # Calculate 12h pivot points
-    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3.0
-    r1_12h = (2 * pivot_12h) - prev_low_12h
-    s1_12h = (2 * pivot_12h) - prev_high_12h
+    # Directional Movement
+    dm_plus = np.where((daily_high[1:] - daily_high[:-1]) > (daily_low[:-1] - daily_low[1:]), 
+                       np.maximum(daily_high[1:] - daily_high[:-1], 0), 0)
+    dm_minus = np.where((daily_low[:-1] - daily_low[1:]) > (daily_high[1:] - daily_high[:-1]), 
+                        np.maximum(daily_low[:-1] - daily_low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Get 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period])  # Skip index 0 (nan)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Calculate 1d data (previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = prev_high_1d[1] if len(prev_high_1d) > 1 else 0
-    prev_low_1d[0] = prev_low_1d[1] if len(prev_low_1d) > 1 else 0
-    prev_close_1d[0] = prev_close_1d[1] if len(prev_close_1d) > 1 else 0
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
     
-    # Calculate 1d pivot points
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    r1_1d = (2 * pivot_1d) - prev_low_1d
-    s1_1d = (2 * pivot_1d) - prev_high_1d
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
     
-    # Align to 4h timeframe (use previous bar's levels)
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate Donchian channels (20-period) on 12h data
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Volume filter: volume > 1.3x 30-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(lookback, n):
         # Skip if required data not available
-        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
-            np.isnan(s1_12h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls to either pivot or volume drops
-            if close[i] <= pivot_12h_aligned[i] or close[i] <= pivot_1d_aligned[i] or not vol_filter[i]:
+            # Exit: price falls to Donchian low or ADX weakens
+            if low[i] <= lowest_low[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises to either pivot or volume drops
-            if close[i] >= pivot_12h_aligned[i] or close[i] >= pivot_1d_aligned[i] or not vol_filter[i]:
+            # Exit: price rises to Donchian high or ADX weakens
+            if high[i] >= highest_high[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above either R1 with volume
-            if ((high[i] > r1_12h_aligned[i] or high[i] > r1_1d_aligned[i]) and 
-                (close[i] > r1_12h_aligned[i] or close[i] > r1_1d_aligned[i]) and 
-                vol_filter[i]):
+            # Long: price breaks above Donchian high with volume and strong trend
+            if high[i] > highest_high[i] and vol_filter[i] and adx_aligned[i] > 25:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below either S1 with volume
-            elif ((low[i] < s1_12h_aligned[i] or low[i] < s1_1d_aligned[i]) and 
-                  (close[i] < s1_12h_aligned[i] or close[i] < s1_1d_aligned[i]) and 
-                  vol_filter[i]):
+            # Short: price breaks below Donchian low with volume and strong trend
+            elif low[i] < lowest_low[i] and vol_filter[i] and adx_aligned[i] > 25:
                 position = -1
                 signals[i] = -0.25
     
