@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1w_trend_volume_v1
-Hypothesis: Camarilla pivot levels from weekly timeframe provide strong support/resistance.
-Buy at S3/S4 level with bullish weekly trend and volume confirmation.
-Sell at R3/R4 level with bearish weekly trend and volume confirmation.
-Weekly trend filter prevents counter-trend trading in strong moves.
-Designed for 15-25 trades/year on 6h timeframe with clear reversal/continuation logic.
+12h_camarilla_pivot_1d_volume_filter_v1
+Hypothesis: Camarilla pivot levels from 1d timeframe with volume confirmation on 12h.
+Enter long when price touches S3 level with volume > 20-period average.
+Enter short when price touches R3 level with volume > 20-period average.
+Exit when price moves back to P level or opposite S/R level.
+Works in both bull and bear markets by capturing mean reversion at extreme levels.
+Target: 15-30 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1w_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close."""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    s3 = close - (range_val * 1.1 / 2)
+    s2 = close - (range_val * 1.1 / 4)
+    s1 = close - (range_val * 1.1 / 6)
+    r1 = close + (range_val * 1.1 / 6)
+    r2 = close + (range_val * 1.1 / 4)
+    r3 = close + (range_val * 1.1 / 2)
+    return pivot, s1, s2, s3, r1, r2, r3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -27,48 +40,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivots and trend
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate Camarilla levels for each 1d bar
+    pivots = np.full(len(df_1d), np.nan)
+    s1 = np.full(len(df_1d), np.nan)
+    s2 = np.full(len(df_1d), np.nan)
+    s3 = np.full(len(df_1d), np.nan)
+    r1 = np.full(len(df_1d), np.nan)
+    r2 = np.full(len(df_1d), np.nan)
+    r3 = np.full(len(df_1d), np.nan)
     
-    # Camarilla formula: range = H - L
-    # Resistance levels: R3 = C + (H-L)*1.1/2, R4 = C + (H-L)*1.1
-    # Support levels: S3 = C - (H-L)*1.1/2, S4 = C - (H-L)*1.1
-    weekly_range = weekly_high - weekly_low
-    r3 = weekly_close + weekly_range * 1.1 / 2
-    r4 = weekly_close + weekly_range * 1.1
-    s3 = weekly_close - weekly_range * 1.1 / 2
-    s4 = weekly_close - weekly_range * 1.1
+    for i in range(len(df_1d)):
+        p, s1_, s2_, s3_, r1_, r2_, r3_ = calculate_camarilla(
+            df_1d['high'].iloc[i], 
+            df_1d['low'].iloc[i], 
+            df_1d['close'].iloc[i]
+        )
+        pivots[i] = p
+        s1[i] = s1_
+        s2[i] = s2_
+        s3[i] = s3_
+        r1[i] = r1_
+        r2[i] = r2_
+        r3[i] = r3_
     
-    # Weekly EMA50 for trend filter
-    ema50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
-    weekly_uptrend = weekly_close > ema50_weekly
-    weekly_downtrend = weekly_close < ema50_weekly
+    # Align Camarilla levels to 12h timeframe
+    pivots_aligned = align_htf_to_ltf(prices, df_1d, pivots)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Align weekly data to 6h timeframe (shifted by 1 for completed weekly bars only)
-    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
-    r4_6h = align_htf_to_ltf(prices, df_weekly, r4)
-    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
-    s4_6h = align_htf_to_ltf(prices, df_weekly, s4)
-    weekly_uptrend_6h = align_htf_to_ltf(prices, df_weekly, weekly_uptrend.astype(float))
-    weekly_downtrend_6h = align_htf_to_ltf(prices, df_weekly, weekly_downtrend.astype(float))
-    
-    # Volume confirmation: 24-period average (4 days of 6h bars)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(weekly_uptrend_6h[i]) or np.isnan(weekly_downtrend_6h[i]) or
+        if (np.isnan(pivots_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
@@ -77,37 +94,28 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches R3/R4 or weekly trend turns bearish
-            if close[i] >= r3_6h[i] or weekly_downtrend_6h[i] > 0.5:
+            # Exit: price returns to pivot level or reaches S1
+            if close[i] >= pivots_aligned[i] or close[i] <= s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches S3/S4 or weekly trend turns bullish
-            if close[i] <= s3_6h[i] or weekly_uptrend_6h[i] > 0.5:
+            # Exit: price returns to pivot level or reaches R1
+            if close[i] <= pivots_aligned[i] or close[i] >= r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price at S3/S4 level with bullish weekly trend and volume confirmation
-            if vol_confirmed and weekly_uptrend_6h[i] > 0.5:
-                if close[i] <= s3_6h[i] * 1.005:  # Within 0.5% of S3
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] <= s4_6h[i] * 1.005:  # Within 0.5% of S4
-                    position = 1
-                    signals[i] = 0.25
-            
-            # Short: price at R3/R4 level with bearish weekly trend and volume confirmation
-            elif vol_confirmed and weekly_downtrend_6h[i] > 0.5:
-                if close[i] >= r3_6h[i] * 0.995:  # Within 0.5% of R3
-                    position = -1
-                    signals[i] = -0.25
-                elif close[i] >= r4_6h[i] * 0.995:  # Within 0.5% of R4
-                    position = -1
-                    signals[i] = -0.25
+            # Long: price touches S3 level with volume confirmation
+            if (close[i] <= s3_aligned[i] * 1.001 and close[i] >= s3_aligned[i] * 0.999) and vol_confirmed:
+                position = 1
+                signals[i] = 0.25
+            # Short: price touches R3 level with volume confirmation
+            elif (close[i] >= r3_aligned[i] * 0.999 and close[i] <= r3_aligned[i] * 1.001) and vol_confirmed:
+                position = -1
+                signals[i] = -0.25
     
     return signals
