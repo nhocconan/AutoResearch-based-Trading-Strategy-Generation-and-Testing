@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout + Weekly Trend + Volume Confirmation
-Hypothesis: Daily Donchian breakouts capture momentum while weekly trend filter ensures directional alignment.
-Volume > 1.5x average confirms institutional participation. Designed for low trade frequency (7-25/year) to minimize fee drift.
+12h Donchian Breakout + 1d Trend + Volume Confirmation
+Hypothesis: Donchian channel breakouts on 12h capture medium-term momentum. 
+Trend filtered by daily EMA(21) ensures directional alignment. Volume > 1.5x average
+confirms institutional participation. Designed for low trade frequency (<40/year) 
+to minimize fee drift and work in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -35,10 +37,10 @@ def generate_signals(prices):
     upper[0] = np.nan
     lower[0] = np.nan
     
-    # Weekly EMA(21) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_21 = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
+    # 1d EMA(21) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_21 = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21)
     
     # Volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,7 +57,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below entry bar's low or trend reverses
+            # Exit: price closes below entry band or trend reverses
             if close[i] < lower[i] or close[i] < ema_21_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -63,7 +65,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above entry bar's high or trend reverses
+            # Exit: price closes above entry band or trend reverses
             if close[i] > upper[i] or close[i] > ema_21_aligned[i]:
                 position = 0
                 signals[i] = 0.0
