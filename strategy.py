@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_donchian_20_1w_trend_volume_v1
-Hypothesis: On daily timeframe, use 20-day Donchian channels with weekly trend filter and volume confirmation.
-Long when price closes above 20-day high with weekly EMA(50) trending up and volume > 1.5x 20-day average.
-Short when price closes below 20-day low with weekly EMA(50) trending down and volume > 1.5x 20-day average.
-Exit when price closes back inside the Donchian channel.
-Designed for 10-25 trades/year to minimize fee dust while capturing strong trends with institutional validation.
-Works in both bull/bear markets as Donchian adapts to volatility and weekly trend filter avoids counter-trend trades.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 6-hour timeframe, use daily Camarilla pivot levels with EMA trend filter and volume confirmation.
+Long when price breaks above R4 with daily EMA(50) trending up and volume > 1.5x 20-period average.
+Short when price breaks below S4 with daily EMA(50) trending down and volume > 1.5x 20-period average.
+Exit when price returns to the Pivot Point (PP) level.
+Designed for 15-35 trades/year to minimize fee drag while capturing strong breakouts with institutional levels.
+Works in both bull/bear markets as Camarilla levels adapt to volatility and daily trend filter avoids counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_20_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,33 +28,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily OHLC for Camarilla pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Determine weekly trend direction (using EMA slope)
-    weekly_trend_up = np.zeros(len(ema_50_1w_aligned), dtype=bool)
-    weekly_trend_down = np.zeros(len(ema_50_1w_aligned), dtype=bool)
-    for i in range(1, len(ema_50_1w_aligned)):
-        if not np.isnan(ema_50_1w_aligned[i]) and not np.isnan(ema_50_1w_aligned[i-1]):
-            weekly_trend_up[i] = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]
-            weekly_trend_down[i] = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]
+    # Calculate Camarilla pivot levels
+    # PP = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate Donchian Channels on 1d timeframe (20-period)
-    donchian_period = 20
-    # Highest high over last donchian_period periods
-    high_roll = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    # Lowest low over last donchian_period periods
-    low_roll = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Camarilla levels
+    r4 = pp + (range_1d * 1.5)
+    r3 = pp + (range_1d * 1.25)
+    r2 = pp + (range_1d * 1.1666)
+    r1 = pp + (range_1d * 1.0833)
+    s1 = pp - (range_1d * 1.0833)
+    s2 = pp - (range_1d * 1.1666)
+    s3 = pp - (range_1d * 1.25)
+    s4 = pp - (range_1d * 1.5)
     
-    # Volume filter: 20-day average
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Determine daily trend direction (using EMA slope)
+    daily_trend_up = np.zeros(len(ema_50_1d_aligned), dtype=bool)
+    daily_trend_down = np.zeros(len(ema_50_1d_aligned), dtype=bool)
+    for i in range(1, len(ema_50_1d_aligned)):
+        if not np.isnan(ema_50_1d_aligned[i]) and not np.isnan(ema_50_1d_aligned[i-1]):
+            daily_trend_up[i] = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            daily_trend_down[i] = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
+    
+    # Align Camarilla levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume filter: 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -63,8 +80,9 @@ def generate_signals(prices):
     
     for i in range(max(20, 50), n):
         # Skip if data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
@@ -72,31 +90,31 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes back inside Donchian channel (below upper band)
-            if close[i] < high_roll[i]:
+            # Exit: price returns to or below Pivot Point
+            if close[i] <= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside Donchian channel (above lower band)
-            if close[i] > low_roll[i]:
+            # Exit: price returns to or above Pivot Point
+            if close[i] >= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume confirmation and weekly trend alignment
+            # Only enter with volume confirmation and daily trend alignment
             if vol_ok:
-                # Long: price closes above 20-day high with weekly uptrend
-                if (close[i] > high_roll[i] and close[i-1] <= high_roll[i-1] and 
-                    weekly_trend_up[i]):
+                # Long: price breaks above R4 with daily uptrend
+                if (close[i] > r4_aligned[i] and close[i-1] <= r4_aligned[i-1] and 
+                    daily_trend_up[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price closes below 20-day low with weekly downtrend
-                elif (close[i] < low_roll[i] and close[i-1] >= low_roll[i-1] and 
-                      weekly_trend_down[i]):
+                # Short: price breaks below S4 with daily downtrend
+                elif (close[i] < s4_aligned[i] and close[i-1] >= s4_aligned[i-1] and 
+                      daily_trend_down[i]):
                     position = -1
                     signals[i] = -0.25
     
