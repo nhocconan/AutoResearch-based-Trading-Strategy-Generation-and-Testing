@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_williams_alligator_1w_trend_volume_v1
-Hypothesis: Williams Alligator identifies trend direction on 1w. Price above/below Alligator jaws (13-period SMA) 
-indicates trend bias. Enter long when price crosses above teeth (8-period SMA) with volume confirmation in uptrend,
-enter short when price crosses below teeth in downtrend. Williams Alligator is trend-following but smooth, 
-reducing whipsaw in choppy markets. Works in bull by following uptrend, in bear by following downtrend.
-Target: 12-37 trades/year on 12h timeframe.
+1h_price_position_4h1d_trend_volume_v1
+Hypothesis: Use price position within 4h ATR-based channel for mean reversion in ranging markets,
+filtered by 1d trend direction. Enter when price reaches channel extremes (oversold/overbought)
+with volume confirmation, following the 1d trend. Works in bull/bear by aligning with higher timeframe trend.
+Target: 15-35 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_williams_alligator_1w_trend_volume_v1"
-timeframe = "12h"
+name = "1h_price_position_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,73 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for Williams Alligator trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 4h data for channel calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Williams Alligator components on 1w
-    # Jaw: 13-period SMMA (smoothed moving average) - we'll use EMA as approximation
-    # Teeth: 8-period SMMA
-    # Lips: 5-period SMMA
-    close_1w = df_1w['close'].values
-    jaw = pd.Series(close_1w).ewm(span=13, adjust=False).mean().values  # Jaw (13)
-    teeth = pd.Series(close_1w).ewm(span=8, adjust=False).mean().values   # Teeth (8)
-    lips = pd.Series(close_1w).ewm(span=5, adjust=False).mean().values    # Lips (5)
+    # 4h ATR(14) for channel width
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align 1w Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # 4h SMA(20) for channel center
+    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation (20-period average on 12h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Channel bounds: SMA ± ATR
+    upper_channel = sma_20 + atr_14
+    lower_channel = sma_20 - atr_14
+    
+    # Align 4h channel to 1h
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
+    sma_aligned = align_htf_to_ltf(prices, df_4h, sma_20)
+    
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 1d EMA50 for trend filter
+    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    
+    # Volume confirmation (24-period average on 1h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(sma_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x average volume
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Determine trend based on Alligator alignment
-        # Uptrend: Lips > Teeth > Jaw (all aligned upward)
-        # Downtrend: Lips < Teeth < Jaw (all aligned downward)
-        is_uptrend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        is_downtrend = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price crosses below teeth OR trend changes to downtrend
-            if close[i] < teeth_aligned[i] or not is_uptrend:
+            # Exit: price returns to SMA or breaks below lower channel
+            if close[i] >= sma_aligned[i] or close[i] <= lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # Short position
-            # Exit: price crosses above teeth OR trend changes to uptrend
-            if close[i] > teeth_aligned[i] or not is_downtrend:
+            # Exit: price returns to SMA or breaks above upper channel
+            if close[i] <= sma_aligned[i] or close[i] >= upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price crosses above teeth with volume and uptrend
-            if (close[i] > teeth_aligned[i] and 
-                close[i-1] <= teeth_aligned[i-1] and  # crossed above teeth
-                vol_confirm and is_uptrend):
+            # Long entry: price at lower channel with volume and uptrend (price > EMA50)
+            if (close[i] <= lower_aligned[i] and vol_confirm and 
+                close[i] > ema_50_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price crosses below teeth with volume and downtrend
-            elif (close[i] < teeth_aligned[i] and 
-                  close[i-1] >= teeth_aligned[i-1] and  # crossed below teeth
-                  vol_confirm and is_downtrend):
+                signals[i] = 0.20
+            # Short entry: price at upper channel with volume and downtrend (price < EMA50)
+            elif (close[i] >= upper_aligned[i] and vol_confirm and 
+                  close[i] < ema_50_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
