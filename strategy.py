@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with daily ADX filter and volume confirmation
-# Uses daily ADX to filter trend strength (ADX > 25) and Donchian channel breakouts for entries
-# Volume confirmation ensures breakouts are genuine
-# Designed for low frequency (target: 12-37 trades/year) to minimize fee impact
-# Works in both bull/bear via trend filter: only trade in direction of daily trend
+# Hypothesis: 1h strategy using 4h trend (EMA21) and 1d volatility regime (ATR ratio) for direction,
+# with 1h RSI pullback entries. Designed for low frequency (15-30 trades/year) to avoid fee drag.
+# Works in bull/bear: trend filter aligns with higher timeframe, volatility regime avoids chop,
+# RSI pullback provides precise entries. Uses session filter (08-20 UTC) to reduce noise.
 
-name = "12h_donchian20_daily_adx_volume_v1"
-timeframe = "12h"
+name = "1h_ema21_atr_ratio_rsi_pullback_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,102 +23,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for ADX and trend filter
+    # Session filter: 08-20 UTC (pre-market to London close)
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
+    # 4h trend filter: EMA21
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    
+    # 1d volatility regime: ATR ratio (current ATR / 20-period average ATR)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period)
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(low_1d)
-    for i in range(1, len(high_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff and low_diff > 0 else 0
+    # Calculate True Range and ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First period
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(high_1d, 1)), 
-                               np.abs(low_1d - np.roll(low_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]  # First period TR
-    
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
-    
-    plus_di = np.where(atr != 0, 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / atr, 0)
-    minus_di = np.where(atr != 0, 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / atr, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Daily EMA50 for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Donchian channel (20-period) on 12h timeframe
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h RSI for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if required data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i])):
+        # Skip if required data not available or outside session
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(rsi[i]) or not session_mask[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: price vs 4h EMA21
+        uptrend = close[i] > ema_21_4h_aligned[i]
+        downtrend = close[i] < ema_21_4h_aligned[i]
         
-        # Trend direction from daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volatility regime: avoid extreme volatility (ratio > 2.0) and dead zone (ratio < 0.5)
+        vol_regime_ok = (atr_ratio_aligned[i] >= 0.5) & (atr_ratio_aligned[i] <= 2.0)
         
-        # Volume confirmation
-        vol_confirm = volume[i] > vol_ma[i]
+        # RSI conditions for pullback entries
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > donchian_high[i-1]  # Break above previous high
-        breakout_short = close[i] < donchian_low[i-1]  # Break below previous low
-        
-        # Exit conditions: reverse Donchian breakout or trend weakening
-        exit_long = close[i] < donchian_low[i-1] or adx_aligned[i] < 20
-        exit_short = close[i] > donchian_high[i-1] or adx_aligned[i] < 20
-        
+        # Exit conditions
         if position == 1:  # Long position
-            if exit_long:
+            # Exit on trend reversal or RSI overbought
+            if not uptrend or rsi_overbought:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            if exit_short:
+            # Exit on trend reversal or RSI oversold
+            if not downtrend or rsi_oversold:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long on Donchian breakout with uptrend, strong trend, and volume
-            if breakout_long and uptrend and strong_trend and vol_confirm:
+            # Enter long on uptrend + good volatility + RSI oversold pullback
+            if uptrend and vol_regime_ok and rsi_oversold:
                 position = 1
-                signals[i] = 0.25
-            # Enter short on Donchian breakdown with downtrend, strong trend, and volume
-            elif breakout_short and downtrend and strong_trend and vol_confirm:
+                signals[i] = 0.20
+            # Enter short on downtrend + good volatility + RSI overbought pullback
+            elif downtrend and vol_regime_ok and rsi_overbought:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
