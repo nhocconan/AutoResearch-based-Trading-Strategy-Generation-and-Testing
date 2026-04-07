@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with daily volume confirmation and weekly ADX trend filter
-# Designed for low trade frequency (12-37 trades/year) to minimize fee drag
-# Uses Donchian(20) breakouts for trend following, daily volume spike for confirmation,
-# and weekly ADX > 25 to filter for trending markets only
-# Works in bull markets via breakout momentum and in bear markets via filtered trend following
+# Hypothesis: Daily Donchian breakout with weekly volume filter and ATR volatility scaling
+# Uses Donchian(20) channels for breakout signals, weekly average volume to confirm
+# institutional interest, and ATR-based volatility scaling to reduce position size
+# during high volatility periods. Designed for low trade frequency (target: 15-25 trades/year)
+# to minimize fee drag while capturing major trends in both bull and bear markets.
 
-name = "12h_donchian20_daily_volume_weekly_adx_v1"
-timeframe = "12h"
+name = "daily_donchian20_weekly_vol_scaled_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,82 +24,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Weekly data for ADX filter
+    # Weekly data for volume filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Donchian channels (20-period)
+    # Calculate Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate weekly average volume
+    vol_1w = df_1w['volume'].values
+    vol_avg_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
     
-    # Weekly ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # ATR(20) for volatility scaling
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM and TR
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) > 0, dx, 0)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+            np.isnan(vol_avg_1w_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x average
-        vol_idx = i // 2  # Approximate mapping from 12h to daily (2x 12h bars per day)
-        if vol_idx >= len(vol_ma_1d_aligned):
-            continue
-        volume_confirmed = volume[i] > 1.5 * vol_ma_1d_aligned[vol_idx]
+        # Volatility regime: scale position size inversely with volatility
+        vol_ratio = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
+        vol_scale = np.clip(1.0 / vol_ratio, 0.5, 1.0)  # scale between 0.5 and 1.0
+        base_size = 0.25
         
-        # Trend filter: weekly ADX > 25
-        trending = adx_aligned[i] > 25
+        # Volume confirmation: current volume > weekly average volume
+        vol_confirm = volume[i] > vol_avg_1w_aligned[i]
         
-        # Long signal: price breaks above Donchian upper band
-        if close[i] > highest_high[i] and volume_confirmed and trending:
-            signals[i] = 0.25
-        # Short signal: price breaks below Donchian lower band
-        elif close[i] < lowest_low[i] and volume_confirmed and trending:
-            signals[i] = -0.25
+        # Donchian breakout signals
+        long_breakout = close[i] > highest_high[i-1]  # break above previous high
+        short_breakout = close[i] < lowest_low[i-1]   # break below previous low
+        
+        # Long conditions: bullish breakout with volume confirmation
+        if long_breakout and vol_confirm:
+            signals[i] = base_size * vol_scale
+        # Short conditions: bearish breakout with volume confirmation
+        elif short_breakout and vol_confirm:
+            signals[i] = -base_size * vol_scale
         else:
             signals[i] = 0.0
     
