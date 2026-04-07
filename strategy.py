@@ -1,22 +1,23 @@
+# 12h_donchian20_1d_volume_regime_v1
+# Donchian breakout strategy with volume confirmation and regime filter
+# Uses daily timeframe for trend filter and 12h for entry timing
+# Long: Price breaks above Donchian(20) high + above daily EMA50 + volume > average
+# Short: Price breaks below Donchian(20) low + below daily EMA50 + volume > average
+# Designed for low frequency (target: 20-40 trades/year) to minimize fee impact
+# Works in both bull/bear via trend filter - only trades in direction of higher timeframe trend
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA trend with weekly RSI filter and volume confirmation
-# Uses KAMA (Kaufman Adaptive Moving Average) to capture trend direction with lower lag in volatile markets
-# Weekly RSI filter avoids counter-trend trades in strong weekly trends
-# Volume confirmation ensures institutional participation
-# Designed for low frequency (target: 10-25 trades/year) to minimize fee impact
-# Works in bull markets via trend following, in bear markets via avoiding false signals during downtrends
-
-name = "daily_kama_weekly_rsi_volume_v1"
-timeframe = "1d"
+name = "12h_donchian20_1d_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,85 +26,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter (RSI)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate weekly RSI(14)
-    delta_1w = np.diff(close_1w, prepend=close_1w[0])
-    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
-    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
-    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False).mean().values
-    rs_1w = avg_gain_1w / (avg_loss_1w + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily KAMA trend
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
-    # Fix dimensions: volatility should be same length as change
-    volatility = pd.Series(volume).rolling(window=10, min_periods=1).sum().values  # proxy for volatility
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    # Alternative vectorized approach for stability
-    kama = pd.Series(close).ewm(alpha=sc, adjust=False).mean().values
+    # 12h Donchian channels (20-period)
+    # We need to calculate Donchian on 12h data, but we can use the current prices directly
+    # since we're already on 12h timeframe
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation (20-day average)
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_roll[i]) or 
+            np.isnan(low_roll[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Trend direction from KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Trend filter from daily EMA
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Weekly trend filter: avoid extremes
-        rsi_overbought = rsi_1w_aligned[i] > 70
-        rsi_oversold = rsi_1w_aligned[i] < 30
-        rsi_neutral = (rsi_1w_aligned[i] >= 30) & (rsi_1w_aligned[i] <= 70)
+        # Donchian breakout conditions
+        breakout_long = close[i] > high_roll[i]
+        breakout_short = close[i] < low_roll[i]
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit on trend reversal or weekly overbought
-            if (close[i] < kama[i]) or rsi_overbought:
+            # Exit on reverse breakout or trend change
+            if breakout_short or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on trend reversal or weekly oversold
-            if (close[i] > kama[i]) or rsi_oversold:
+            # Exit on reverse breakout or trend change
+            if breakout_long or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long in uptrend with weekly not overbought
-            if price_above_kama and (not rsi_overbought) and vol_confirm:
+            # Long entry: Donchian breakout + uptrend + volume
+            if breakout_long and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short in downtrend with weekly not oversold
-            elif price_below_kama and (not rsi_oversold) and vol_confirm:
+            # Short entry: Donchian breakdown + downtrend + volume
+            elif breakout_short and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
