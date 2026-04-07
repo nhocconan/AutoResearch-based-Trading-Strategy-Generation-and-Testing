@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian breakout with weekly trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high + weekly close > weekly open (bullish weekly candle) + volume > 1.5x 20-day average volume
-# Short when price breaks below Donchian(20) low + weekly close < weekly open (bearish weekly candle) + volume > 1.5x 20-day average volume
-# Exit when price crosses Donchian midline (mean reversion) or volume < 0.5x average volume (low conviction)
-# Stoploss at 2.0 * ATR(10)
-# Position size: 0.30 (30% of capital)
-# Uses 1-day Donchian channels for breakouts and weekly trend filter
-# Target: 50-100 total trades over 4 years (12-25/year)
+# Hypothesis: 6-hour Donchian(20) breakout + 1-day volatility regime (ATR ratio) + volume confirmation
+# Long when price breaks above Donchian(20) high + 1-day ATR(10)/ATR(30) > 0.8 (rising volatility) + volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) low + same volatility/volume conditions
+# Exit when price crosses Donchian(10) midpoint or volatility drops (ATR ratio < 0.6)
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses 1-day ATR ratio for regime and volume for confirmation
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "1d_donchian20_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_donchian20_1d_atr_ratio_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,50 +27,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1-day data for ATR ratio and regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly trend: bullish if close > open, bearish if close < open
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open
+    # Calculate 1-day ATR(10) and ATR(30)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly trend to daily
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    # True Range for 1-day
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2_1d[0] = tr1_1d[0]
+    tr3_1d[0] = tr1_1d[0]
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     
-    # 1-day Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    atr10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr30_1d = pd.Series(tr_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    atr_ratio_1d = atr10_1d / (atr30_1d + 1e-10)
     
-    # 10-period ATR for stoploss
+    # Align ATR ratio to 6h
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # 6-hour Donchian channels
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid_10 = (donchian_high_20 + donchian_low_20) / 2
+    
+    # 6-period ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 20-day average volume for volume filter
-    volume_series = pd.Series(volume)
-    avg_volume = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(weekly_bullish_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
+            np.isnan(donchian_mid_10[i]) or np.isnan(atr_ratio_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_avg[i])):
             if position != 0:
-                signals[i] = position * 0.30
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -81,39 +90,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses Donchian midline (mean reversion) or low volume
-            elif close[i] < donchian_mid[i] or volume[i] < 0.5 * avg_volume[i]:
+            # Exit: price crosses Donchian midpoint or low volatility regime
+            elif close[i] < donchian_mid_10[i] or atr_ratio_1d_aligned[i] < 0.6:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses Donchian midline (mean reversion) or low volume
-            elif close[i] > donchian_mid[i] or volume[i] < 0.5 * avg_volume[i]:
+            # Exit: price crosses Donchian midpoint or low volatility regime
+            elif close[i] > donchian_mid_10[i] or atr_ratio_1d_aligned[i] < 0.6:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with weekly trend and volume confirmation
-            # Volume filter: volume > 1.5x 20-day average volume (high conviction)
-            high_conviction = volume[i] > 1.5 * avg_volume[i]
+            # Look for entries: Donchian breakout with volatility and volume confirmation
+            # Volatility filter: ATR ratio > 0.8 (rising volatility)
+            vol_regime = atr_ratio_1d_aligned[i] > 0.8
+            # Volume filter: current volume > 1.5x 20-period average
+            vol_confirm = volume[i] > 1.5 * vol_avg[i]
             
-            # Long: break above Donchian high + weekly bullish + high conviction volume
-            if close[i] > donchian_high[i] and weekly_bullish_aligned[i] > 0.5 and high_conviction:
-                signals[i] = 0.30
+            # Long: price breaks above Donchian(20) high + volatility + volume
+            if close[i] > donchian_high_20[i] and vol_regime and vol_confirm:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: break below Donchian low + weekly bearish + high conviction volume
-            elif close[i] < donchian_low[i] and weekly_bullish_aligned[i] < 0.5 and high_conviction:
-                signals[i] = -0.30
+            # Short: price breaks below Donchian(20) low + volatility + volume
+            elif close[i] < donchian_low_20[i] and vol_regime and vol_confirm:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
