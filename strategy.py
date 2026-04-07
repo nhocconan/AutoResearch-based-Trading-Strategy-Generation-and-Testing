@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly Pivot Breakout with Volume Filter
+# Strategy: 6h Weekly Pivot Breakout with Volume Filter
 # Hypothesis: Weekly pivot levels are strong institutional support/resistance.
 # Price breaking above weekly R1 with volume indicates bullish continuation.
 # Price breaking below weekly S1 with volume indicates bearish continuation.
 # Works in both bull and bear markets: In bull, breaks above R1 continue up; breaks below S1 get bought (mean reversion).
 # In bear, breaks below S1 continue down; breaks above R1 get sold (mean reversion).
 # Volume filter ensures only institutional participation triggers entries.
-# Target: 7-25 trades/year (30-100 over 4 years).
+# Target: 12-37 trades/year (50-150 over 4 years).
 
-name = "1d_weekly_pivot_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_weekly_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,7 +52,7 @@ def generate_signals(prices):
     weekly_r2 = weekly_pivot + (prev_weekly_high - prev_weekly_low)
     weekly_s2 = weekly_pivot - (prev_weekly_high - prev_weekly_low)
     
-    # Align to 1d timeframe (use previous week's levels)
+    # Align to 6h timeframe (use previous week's levels)
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
