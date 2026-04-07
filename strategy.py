@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h EMA Pullback with 4h Trend and 1d Volume Confirmation
-# Hypothesis: In trending markets (4h EMA21), price pulls back to 1h EMA50 during strong volume (1d average), offering high-probability entries.
-# Works in bull/bear by following 4h trend. Target: 20-40 trades/year (80-160 total) via strict 3-condition confluence.
+# Strategy: 6h Ichimoku Cloud with Weekly Trend Filter
+# Hypothesis: Ichimoku (Tenkan/Kijun cross + Cloud) provides high-probability entries
+# when aligned with weekly trend. Works in bull/bear by following higher-timeframe trend.
+# Target: 15-35 trades/year (60-140 total over 4 years).
 
-name = "1h_ema_pullback_4h_trend_1d_volume_v1"
-timeframe = "1h"
+name = "6h_ichimoku_weekly_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,70 +18,90 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_weekly = df_weekly['close'].values
     
-    # Get 1d data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    volume_1d = df_1d['volume'].values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    highest_tenkan = pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max().values
+    lowest_tenkan = pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min().values
+    tenkan = (highest_tenkan + lowest_tenkan) / 2
     
-    # 1h EMA50 for entry
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    highest_kijun = pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max().values
+    lowest_kijun = pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min().values
+    kijun = (highest_kijun + lowest_kijun) / 2
     
-    # 4h EMA21 for trend
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = (tenkan + kijun) / 2
     
-    # 1d average volume (20-period)
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=10).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    highest_senkou_b = pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max().values
+    lowest_senkou_b = pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min().values
+    senkou_span_b = (highest_senkou_b + lowest_senkou_b) / 2
+    
+    # Weekly EMA(50) for trend filter
+    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False).mean().values
+    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
+    vol_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(max(tenkan_period, kijun_period, senkou_span_b_period), n):
         # Skip if required data not available
-        if (np.isnan(ema_50[i]) or np.isnan(ema_21_4h_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_span_a[i]) or
+            np.isnan(senkou_span_b[i]) or np.isnan(ema_50_weekly_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1h volume > 1.5x 1d average volume
-        vol_condition = volume[i] > (1.5 * vol_avg_1d_aligned[i])
+        # Check volume confirmation
+        vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below EMA50 or trend changes to down
-            if close[i] < ema_50[i] or close[i] < ema_21_4h_aligned[i]:
+            # Exit: Tenkan crosses below Kijun OR price falls below Cloud
+            if tenkan[i] < kijun[i] or close[i] < senkou_span_a[i] or close[i] < senkou_span_b[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above EMA50 or trend changes to up
-            if close[i] > ema_50[i] or close[i] > ema_21_4h_aligned[i]:
+            # Exit: Tenkan crosses above Kijun OR price rises above Cloud
+            if tenkan[i] > kijun[i] or close[i] > senkou_span_a[i] or close[i] > senkou_span_b[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_condition:
-                # Pullback to EMA50 in uptrend: buy near support
-                if close[i] >= ema_50[i] * 0.998 and close[i] <= ema_50[i] * 1.002 and close[i] > ema_21_4h_aligned[i]:
+            if vol_ok:
+                # Bullish: Tenkan crosses above Kijun AND price above Cloud AND weekly uptrend
+                if (tenkan[i] > kijun[i] and 
+                    close[i] > senkou_span_a[i] and close[i] > senkou_span_b[i] and
+                    close[i] > ema_50_weekly_aligned[i]):
                     position = 1
-                    signals[i] = 0.20
-                # Pullback to EMA50 in downtrend: sell near resistance
-                elif close[i] >= ema_50[i] * 0.998 and close[i] <= ema_50[i] * 1.002 and close[i] < ema_21_4h_aligned[i]:
+                    signals[i] = 0.25
+                # Bearish: Tenkan crosses below Kijun AND price below Cloud AND weekly downtrend
+                elif (tenkan[i] < kijun[i] and 
+                      close[i] < senkou_span_a[i] and close[i] < senkou_span_b[i] and
+                      close[i] < ema_50_weekly_aligned[i]):
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
