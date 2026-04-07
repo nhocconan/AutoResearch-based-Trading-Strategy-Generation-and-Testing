@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1h RSI(2) Pullback with 4h Trend Filter and Volume Spike
-RSI(2) < 10 = oversold pullback in uptrend (long)
-RSI(2) > 90 = overbought bounce in downtrend (short)
-4h EMA50 defines trend: price > EMA50 = uptrend, price < EMA50 = downtrend
-Volume must be > 1.5x 20-period average to confirm momentum
-Target: 60-150 total trades over 4 years (15-37/year)
+Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
+Long when price breaks above 20-period Donchian high and 1d close > 1d EMA50.
+Short when price breaks below 20-period Donchian low and 1d close < 1d EMA50.
+Volume must be above 20-period average to confirm breakout strength.
+Exit when price crosses back through Donchian midpoint or trend reverses.
+Position size: 0.25. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi2_pullback_4h_trend_volume_v1"
-timeframe = "1h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,75 +27,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H TREND FILTER (HTF) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
+    # === DAILY TREND FILTER (HTF) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
-    ema4h_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema4h_50)  # already shifted
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # === RSI(2) CALCULATION ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === DONCHIAN CHANNELS (LTF) ===
+    donchian_len = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[1] = gain[1]
-    avg_loss[1] = loss[1]
-    for i in range(2, n):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === VOLUME SPIKE FILTER ===
+    # === VOLUME CONFIRMATION (LTF) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        if np.isnan(ema4h_50_aligned[i]) or np.isnan(vol_ma[i]):
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(daily_ema_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 4h EMA50
-        uptrend = close[i] > ema4h_50_aligned[i]
+        # Determine trend direction from daily EMA
+        bull_trend = close[i] > daily_ema_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) or trend turns down
-            if rsi[i] > 70 or not uptrend:
+            # Exit: price crosses below midpoint OR trend turns bearish
+            if close[i] < donchian_mid[i] or not bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) or trend turns up
-            if rsi[i] < 30 or uptrend:
+            # Exit: price crosses above midpoint OR trend turns bullish
+            if close[i] > donchian_mid[i] or bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
             # Need volume confirmation
-            if volume[i] <= vol_ma[i] * 1.5:
+            if volume[i] <= vol_ma[i]:
                 signals[i] = 0.0
                 continue
             
-            # Entry logic based on 4h trend
-            if uptrend:
-                # In uptrend: long RSI(2) pullback (<10)
-                if rsi[i] < 10:
+            # Entry logic based on daily trend
+            if bull_trend:
+                # In bull market: long when price breaks above Donchian high
+                if close[i] > donchian_high[i]:
                     position = 1
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:
-                # In downtrend: short RSI(2) bounce (>90)
-                if rsi[i] > 90:
+                # In bear market: short when price breaks below Donchian low
+                if close[i] < donchian_low[i]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
