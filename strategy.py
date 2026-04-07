@@ -3,118 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Camarilla Pivot Reversal with Volume Confirmation and 1d Trend Filter
-# Hypothesis: Price reversals at Camarilla pivot levels (S3/S4 for long, R3/R4 for short) 
-# with volume spikes and aligned daily trend work across bull/bear markets.
-# Uses 1d EMA for trend filter and Camarilla levels from prior day for entries.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+# Strategy: 4h RSI Pullback with 12h EMA Trend Filter
+# Hypothesis: RSI(14) pullbacks in direction of 12h EMA(50) trend capture mean reversion within trends.
+# Uses 12h EMA for trend filter (works in bull/bear) and RSI for precise entries.
+# Target: 20-35 trades/year (80-140 total over 4 years) to minimize fee drag.
 
-name = "12h_camarilla_pivot_reversal_1d_trend_v1"
-timeframe = "12h"
+name = "4h_rsi_pullback_12h_ema_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate EMA(50) on 12h close
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: 
-    #   S1 = C - (H-L)*1.1/12
-    #   S2 = C - (H-L)*1.1/6
-    #   S3 = C - (H-L)*1.1/4
-    #   S4 = C - (H-L)*1.1/2
-    #   R4 = C + (H-L)*1.1/2
-    #   R3 = C + (H-L)*1.1/4
-    #   R2 = C + (H-L)*1.1/6
-    #   R1 = C + (H-L)*1.1/12
-    camarilla_S4 = np.full(n, np.nan)
-    camarilla_S3 = np.full(n, np.nan)
-    camarilla_R3 = np.full(n, np.nan)
-    camarilla_R4 = np.full(n, np.nan)
+    # Align 12h EMA to 4h
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    for i in range(1, len(df_1d)):
-        # Use previous day's OHLC
-        prev_high = df_1d['high'].iloc[i-1]
-        prev_low = df_1d['low'].iloc[i-1]
-        prev_close = df_1d['close'].iloc[i-1]
-        
-        range_hl = prev_high - prev_low
-        if range_hl <= 0:
-            continue
-            
-        # Calculate levels
-        s4 = prev_close - (range_hl * 1.1 / 2)
-        s3 = prev_close - (range_hl * 1.1 / 4)
-        r3 = prev_close + (range_hl * 1.1 / 4)
-        r4 = prev_close + (range_hl * 1.1 / 2)
-        
-        # Map to 12h timeframe: each 1d bar = 2 bars of 12h
-        start_idx = i * 2
-        end_idx = start_idx + 2
-        if end_idx <= n:
-            camarilla_S4[start_idx:end_idx] = s4
-            camarilla_S3[start_idx:end_idx] = s3
-            camarilla_R3[start_idx:end_idx] = r3
-            camarilla_R4[start_idx:end_idx] = r4
+    # RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate volume average (20-period) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    # Wilder's smoothing for RSI
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[1:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    avg_gain = wilders_smoothing(gain, 14)
+    avg_loss = wilders_smoothing(loss, 14)
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_S3[i]) or np.isnan(camarilla_S4[i]) or
-            np.isnan(camarilla_R3[i]) or np.isnan(camarilla_R4[i])):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition (at least 1.5x average)
-        vol_spike = volume[i] > (vol_ma[i] * 1.5)
-        
         if position == 1:  # Long position
-            # Exit: price reaches S3 (take profit) or trend changes to down
-            if close[i] >= camarilla_S3[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: RSI reaches overbought or trend changes
+            if rsi[i] >= 70 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price reaches R3 (take profit) or trend changes to up
-            if close[i] <= camarilla_R3[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: RSI reaches oversold or trend changes
+            if rsi[i] <= 30 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price at S4 with volume spike in uptrend
-            if (close[i] <= camarilla_S4[i] and vol_spike and 
-                close[i] > ema_50_1d_aligned[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: price at R4 with volume spike in downtrend
-            elif (close[i] >= camarilla_R4[i] and vol_spike and 
-                  close[i] < ema_50_1d_aligned[i]):
-                position = -1
-                signals[i] = -0.25
+            # RSI pullback in direction of 12h trend
+            if close[i] > ema_50_aligned[i]:  # Uptrend
+                if rsi[i] <= 40:  # Pullback to buy
+                    position = 1
+                    signals[i] = 0.25
+            else:  # Downtrend
+                if rsi[i] >= 60:  # Pullback to sell
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
