@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA trend with weekly RSI filter and volume confirmation
-# KAMA adapts to market noise, reducing whipsaws in choppy markets.
-# Weekly RSI filters for extreme conditions in higher timeframe trend.
-# Volume confirmation ensures institutional participation.
-# Designed for low frequency in 1d timeframe (7-25 trades/year).
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 12h Donchian(20) breakout with daily volume confirmation and ADX trend filter
+# Donchian breakouts capture strong trending moves. Volume confirms institutional participation.
+# ADX filter ensures we only trade in trending markets (ADX > 25), avoiding whipsaws in chop.
+# Designed for low frequency in 12h timeframe (12-37 trades/year).
+# Works in bull markets (breakouts to upside) and bear markets (breakouts to downside).
 
-name = "daily_kama_weekly_rsi_volume_v1"
-timeframe = "1d"
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,83 +24,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get daily data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_1w = pd.Series(df_1w['close'].values)
-    delta = close_1w.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = (100 - (100 / (1 + rs))).values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate daily ADX(14)
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
     
-    # Calculate daily KAMA(10,2,30)
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(10))
-    volatility = abs(close_s.diff(1)).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    sc = sc.fillna(0)
-    kama = [np.nan] * len(close)
-    for i in range(1, len(close)):
-        if np.isnan(sc.iloc[i]) or np.isnan(kama[i-1]):
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-    kama = np.array(kama)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Volume confirmation (20-day average)
+    # Directional Movement
+    up_move = high_1d - high_1d.shift(1)
+    down_move = low_1d.shift(1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    plus_dm_ma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean()
+    minus_dm_ma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean()
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False).mean()
+    adx_values = adx.values
+    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Calculate 12h Donchian(20) - using rolling window on 12h data
+    # We need to calculate this on the 12h data directly
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Daily trend: price relative to KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # Weekly RSI filter: avoid extremes
-        rsi_not_overbought = rsi_1w_aligned[i] < 70
-        rsi_not_oversold = rsi_1w_aligned[i] > 30
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous period's low
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Exit conditions
+        # ADX trend filter: only trade when trending (ADX > 25)
+        trending = adx_12h_aligned[i] > 25
+        
+        # Exit conditions: exit when opposite breakout occurs or trend weakens
         if position == 1:  # Long position
-            # Exit if price crosses below KAMA or RSI becomes overbought
-            if not price_above_kama or rsi_1w_aligned[i] >= 70:
+            # Exit if breakdown occurs or ADX drops below 20 (trend weakening)
+            if breakout_down or adx_12h_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit if price crosses above KAMA or RSI becomes oversold
-            if not price_below_kama or rsi_1w_aligned[i] <= 30:
+            # Exit if breakout occurs or ADX drops below 20 (trend weakening)
+            if breakout_up or adx_12h_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price above KAMA + RSI not overbought + volume confirmation
-            if price_above_kama and rsi_not_overbought and vol_confirm:
+            # Enter long: breakout up + volume confirmation + trending market
+            if breakout_up and vol_confirm and trending:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price below KAMA + RSI not oversold + volume confirmation
-            elif price_below_kama and rsi_not_oversold and vol_confirm:
+            # Enter short: breakdown down + volume confirmation + trending market
+            elif breakout_down and vol_confirm and trending:
                 position = -1
                 signals[i] = -0.25
     
