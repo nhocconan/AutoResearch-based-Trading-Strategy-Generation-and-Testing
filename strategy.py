@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Choppiness Index (14) regime filter with 1-day Donchian(20) breakout and volume confirmation
-# In trending markets (CHOP < 38.2): trade breakouts in direction of trend (price > EMA50 for long, < EMA50 for short)
-# In ranging markets (CHOP > 61.8): fade extremes (short at Donchian high, long at Donchian low)
-# Volume confirmation: current volume > 1.5x 20-period average
-# Stoploss: 2.0 * ATR(14)
-# Position size: 0.25
-# Designed to work in both bull and bear regimes by adapting to market conditions
+# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and 1-day ADX trend filter
+# Long when price breaks above 4h Donchian high + daily volume > 1.2x 20-day average + daily ADX > 20
+# Short when price breaks below 4h Donchian low + daily volume > 1.2x 20-day average + daily ADX > 20
+# Exit when price crosses opposite Donchian level or ADX falls below 15
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "12h_chop_regime_donchian20_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_vol_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,12 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for HTF indicators
+    # 1-day data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Choppiness Index (14) - measures ranging vs trending markets
+    # Daily volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    
+    # Daily ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -42,34 +48,33 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Smoothed values
+    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Choppiness Index: 100 * log10(tr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(tr_sum / range_hl) / np.log10(14)
-    chop = np.where(np.isnan(chop), 50.0, chop)  # neutral when undefined
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # EMA(50) for trend direction
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # 20-period Donchian channels (12h)
+    # 4-hour Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (20-period average)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -84,20 +89,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(chop_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
-        
-        chop_val = chop_aligned[i]
-        ema_val = ema_50_aligned[i]
-        vol_ma = volume_ma[i]
         
         if position == 1:  # long position
             # Stoploss: 2.0 * ATR
@@ -105,93 +106,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit conditions based on regime
-            elif chop_val < 38.2:  # trending - exit if trend reverses
-                if close[i] < ema_val:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                else:
-                    signals[i] = 0.25
-            elif chop_val > 61.8:  # ranging - exit at opposite Donchian
-                if close[i] > lowest_low[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # transition - use Donchian exit
-                if close[i] < lowest_low[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit: price crosses below Donchian low OR ADX < 15 (trend weakening)
+            elif close[i] < lowest_low[i] or adx_aligned[i] < 15:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            else:
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit conditions based on regime
-            elif chop_val < 38.2:  # trending - exit if trend reverses
-                if close[i] > ema_val:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                else:
-                    signals[i] = -0.25
-            elif chop_val > 61.8:  # ranging - exit at opposite Donchian
-                if close[i] < highest_high[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                else:
-                    signals[i] = -0.25
-            else:  # transition - use Donchian exit
-                if close[i] > highest_high[i]:
-                    signals[i] = 0.0
-                    position = 0
-                    entry_price = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit: price crosses above Donchian high OR ADX < 15 (trend weakening)
+            elif close[i] > highest_high[i] or adx_aligned[i] < 15:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            else:
+                signals[i] = -0.25
         else:
-            # Look for entries based on regime
-            vol_filter = volume[i] > 1.5 * vol_ma
+            # Look for entries: Donchian breakout with volume confirmation and ADX trend filter
+            # Volume filter: volume > 1.2x 20-day average
+            volume_filter = volume[i] > 1.2 * volume_ma_aligned[i]
+            # Trend filter: daily ADX > 20 (trending market)
+            adx_filter = adx_aligned[i] > 20
             
-            if chop_val < 38.2:  # trending market
-                # Long: price > EMA50 and breaks above Donchian high
-                if close[i] > ema_val and close[i] > highest_high[i] and vol_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: price < EMA50 and breaks below Donchian low
-                elif close[i] < ema_val and close[i] < lowest_low[i] and vol_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-            elif chop_val > 61.8:  # ranging market
-                # Long: price breaks below Donchian low (mean reversion)
-                if close[i] < lowest_low[i] and vol_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: price breaks above Donchian high (mean reversion)
-                elif close[i] > highest_high[i] and vol_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-            else:  # transition regime - use Donchian breakouts with EMA filter
-                # Long: price above EMA50 and breaks above Donchian high
-                if close[i] > ema_val and close[i] > highest_high[i] and vol_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: price below EMA50 and breaks below Donchian low
-                elif close[i] < ema_val and close[i] < lowest_low[i] and vol_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
+            # Long: price breaks above Donchian high + volume filter + ADX filter
+            if close[i] > highest_high[i] and volume_filter and adx_filter:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short: price breaks below Donchian low + volume filter + ADX filter
+            elif close[i] < lowest_low[i] and volume_filter and adx_filter:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
     
     return signals
-</think>
