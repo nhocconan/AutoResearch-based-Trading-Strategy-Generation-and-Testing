@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation
-# Designed for low frequency (target: 12-37 trades/year) to minimize fee drag
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation
+# Designed for low frequency (target: 20-50 trades/year) to minimize fee drag
 # Works in both bull and bear markets by aligning with higher timeframe trend (1d EMA)
 # Donchian breakouts capture strong momentum moves; EMA filter avoids counter-trend trades
 # Volume confirmation ensures breakouts have institutional participation
 
-name = "12h_donchian20_1d_ema_volume_v1"
-timezone = "12h"
+name = "4h_donchian20_1d_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
