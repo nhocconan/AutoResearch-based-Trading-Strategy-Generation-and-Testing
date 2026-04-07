@@ -1,77 +1,102 @@
 #!/usr/bin/env python3
 """
-12h_donchian_20_1d_trend_volume_v1
-Hypothesis: On 12-hour timeframe, use Donchian channel (20) breakouts for entries, filtered by daily trend (EMA20 > EMA50) and volume confirmation (>1.5x average). Exit when price crosses the opposite Donchian band or trend reverses. Designed to capture medium-term trends in both bull and bear markets with low trade frequency to minimize fee drag.
+6h_ichimoku_cloud_1d_trend_v1
+Hypothesis: On 6-hour timeframe, use Ichimoku Cloud components from daily timeframe for trend direction and 6h TK Cross for entry timing.
+Enter long when 6h Tenkan-sen crosses above Kijun-sen AND price is above daily Kumo (cloud).
+Enter short when 6h Tenkan-sen crosses below Kijun-sen AND price is below daily Kumo (cloud).
+Exit when TK Cross reverses or price crosses Kumo in opposite direction.
+Ichimoku provides multi-layered trend support/resistance that works in both trending and ranging markets.
+Daily timeframe filter ensures alignment with higher timeframe trend, reducing whipsaw.
+Target: 20-40 trades/year to minimize fee drag while capturing sustained moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_20_1d_trend_volume_v1"
-timezone = "12h"
+name = "6h_ichimoku_cloud_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian channel (20) calculation
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Ichimoku on 6h timeframe for TK Cross
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Get daily data for trend filter (calculate once before loop)
+    # Get daily data for Kumo (Cloud)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate EMA20 and EMA50 on daily close
-    daily_close = df_1d['close'].values
-    daily_close_s = pd.Series(daily_close)
-    ema20_1d = daily_close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50_1d = daily_close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate Ichimoku components on daily
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Align to 12h timeframe (shifted by 1 day to avoid look-ahead)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Tenkan-sen and Kijun-sen for daily
+    d_tenkan = (pd.Series(d_high).rolling(window=9, min_periods=9).max() + 
+                pd.Series(d_low).rolling(window=9, min_periods=9).min()) / 2
+    d_kijun = (pd.Series(d_high).rolling(window=26, min_periods=26).max() + 
+               pd.Series(d_low).rolling(window=26, min_periods=26).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
+    d_senkou_a = ((d_tenkan + d_kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
+    period52_high = pd.Series(d_high).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(d_low).rolling(window=52, min_periods=52).min()
+    d_senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Align daily components to 6h timeframe (shifted by 1 day to avoid look-ahead)
+    d_senkou_a_aligned = align_htf_to_ltf(prices, df_1d, d_senkou_a.values)
+    d_senkou_b_aligned = align_htf_to_ltf(prices, df_1d, d_senkou_b.values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(26, n):  # Start after Kijun warmup
         # Skip if required data not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(tenkan_sen.iloc[i]) or np.isnan(kijun_sen.iloc[i]) or
+            np.isnan(d_senkou_a_aligned[i]) or np.isnan(d_senkou_b_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # TK Cross signals
+        tk_cross_above = (tenkan_sen.iloc[i] > kijun_sen.iloc[i]) and (tenkan_sen.iloc[i-1] <= kijun_sen.iloc[i-1])
+        tk_cross_below = (tenkan_sen.iloc[i] < kijun_sen.iloc[i]) and (tenkan_sen.iloc[i-1] >= kijun_sen.iloc[i-1])
         
-        # Trend filter from daily: up if EMA20 > EMA50, down if EMA20 < EMA50
-        trend_up = ema20_1d_aligned[i] > ema50_1d_aligned[i]
-        trend_down = ema20_1d_aligned[i] < ema50_1d_aligned[i]
+        # Kumo (Cloud) boundaries
+        senkou_top = np.maximum(d_senkou_a_aligned[i], d_senkou_b_aligned[i])
+        senkou_bottom = np.minimum(d_senkou_a_aligned[i], d_senkou_b_aligned[i])
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > senkou_top
+        price_below_cloud = close[i] < senkou_bottom
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when price crosses below lower Donchian band
-            if close[i] < lower[i]:
+            # Exit when TK Cross turns bearish
+            if tk_cross_below:
                 exit_long = True
-            # Exit on trend reversal
-            elif not trend_up:
+            # Exit when price drops below cloud
+            elif price_below_cloud:
                 exit_long = True
             
             if exit_long:
@@ -83,11 +108,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when price crosses above upper Donchian band
-            if close[i] > upper[i]:
+            # Exit when TK Cross turns bullish
+            if tk_cross_above:
                 exit_short = True
-            # Exit on trend reversal
-            elif not trend_down:
+            # Exit when price rises above cloud
+            elif price_above_cloud:
                 exit_short = True
             
             if exit_short:
@@ -96,11 +121,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price crosses above upper Donchian band, daily trend up, volume confirmation
-            long_entry = (close[i] > upper[i]) and (close[i-1] <= upper[i-1]) and trend_up and vol_confirm
+            # Long entry: TK Cross bullish AND price above cloud
+            long_entry = tk_cross_above and price_above_cloud
             
-            # Short entry: price crosses below lower Donchian band, daily trend down, volume confirmation
-            short_entry = (close[i] < lower[i]) and (close[i-1] >= lower[i-1]) and trend_down and vol_confirm
+            # Short entry: TK Cross bearish AND price below cloud
+            short_entry = tk_cross_below and price_below_cloud
             
             if long_entry:
                 position = 1
