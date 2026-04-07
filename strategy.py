@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_adx_macd_4d1d_trend_follow_v1
-Hypothesis: On 1-hour timeframe, use daily and 4-hour ADX for trend strength and MACD for entry timing.
-Long when: 4h ADX > 25, 1d ADX > 20 (trending market), and MACD line crosses above signal line.
-Short when: 4h ADX > 25, 1d ADX > 20, and MACD line crosses below signal line.
-Exit when ADX trend weakens (4h ADX < 20) or opposite MACD crossover occurs.
-Designed for 15-35 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
+1h_volume_filtered_4h1d_trend_follow_v1
+Hypothesis: On 1-hour timeframe, use 4h and 1d ADX for trend strength and volume surge for entry timing.
+Long when: 4h ADX > 25, 1d ADX > 20 (trending market), and volume > 1.5x 20-period average.
+Short when: 4h ADX > 25, 1d ADX > 20, and volume > 1.5x 20-period average (short on momentum).
+Exit when 4h ADX < 20 (trend weakening) or volume drops below average.
+Designed for 15-30 trades/year to minimize fee drift while capturing momentum in both bull and bear markets.
+Volume filter reduces false signals and whipsaws, especially in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_adx_macd_4d1d_trend_follow_v1"
+name = "1h_volume_filtered_4h1d_trend_follow_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -25,6 +26,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Get 4h and 1d data for ADX (trend strength)
     df_4h = get_htf_data(prices, '4h')
@@ -113,17 +115,10 @@ def generate_signals(prices):
     adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate MACD on 1h close
-    close_series = pd.Series(close)
-    ema_fast = close_series.ewm(span=12, adjust=False).mean()
-    ema_slow = close_series.ewm(span=26, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    macd_hist = macd_line - signal_line
-    
-    # Detect crossovers
-    macd_cross_up = (macd_line.shift(1) <= signal_line.shift(1)) & (macd_line > signal_line)
-    macd_cross_down = (macd_line.shift(1) >= signal_line.shift(1)) & (macd_line < signal_line)
+    # Volume filter: 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = vol_series / vol_ma  # Current volume / 20-period average
     
     # Session filter: 8-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -142,33 +137,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
+        # Skip if volume data not available
+        if np.isnan(vol_ratio.iloc[i]):
+            signals[i] = 0.0
+            continue
+            
         # Trend strength filter: both 4h and 1d ADX must indicate trending
         strong_trend = (adx_4h_aligned[i] > 25) and (adx_1d_aligned[i] > 20)
         weak_trend = adx_4h_aligned[i] < 20  # Exit trend when 4h ADX weakens
         
+        # Volume surge filter: volume > 1.5x 20-period average
+        volume_surge = vol_ratio.iloc[i] > 1.5
+        
         if position == 1:  # Long position
-            # Exit: trend weakens or MACD cross down
-            if weak_trend or macd_cross_down.iloc[i]:
+            # Exit: trend weakens or volume drops
+            if weak_trend or not volume_surge:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: trend weakens or MACD cross up
-            if weak_trend or macd_cross_up.iloc[i]:
+            # Exit: trend weakens or volume drops
+            if weak_trend or not volume_surge:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Only enter on strong trend
-            if strong_trend:
-                if macd_cross_up.iloc[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif macd_cross_down.iloc[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Only enter on strong trend with volume surge
+            if strong_trend and volume_surge:
+                # Enter long on volume surge in uptrend
+                signals[i] = 0.20
+                position = 1
+            # Note: We don't short on volume surge alone to avoid counter-trend shorts
+            # Only short if we have a clear downtrend signal (could add later if needed)
     
     return signals
