@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_bollinger_bounce_1d_trend_volume_v1
-Hypothesis: On 4h timeframe, enter long when price touches lower Bollinger Band during uptrend (price above 1d SMA50) with volume > 1.5x average, enter short when price touches upper Bollinger Band during downtrend (price below 1d SMA50) with volume > 1.5x average. Uses 1d SMA50 trend filter to avoid counter-trend trades. Bollinger Bands provide mean-reversion signals within trending markets, targeting 20-40 trades/year to minimize fee drag while capturing bounces in trending markets.
+12h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: On 12h timeframe, enter long when price touches weekly Camarilla L3 with price above weekly SMA50 and volume > 1.8x average, enter short when price touches weekly H3 with price below weekly SMA50 and volume > 1.8x average. Uses weekly trend filter and volume confirmation to capture mean-reversion bounces within the weekly trend. Target: 20-30 trades/year to minimize fee drag while capturing institutional reversal points.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_bollinger_bounce_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,65 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
+    # Calculate weekly Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Weekly high, low, close for Camarilla calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Camarilla levels for each week
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w)
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w)
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # Weekly SMA50 for trend filter
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d SMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(bb_period, n):  # Start after Bollinger Bands warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not available
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(close[i]) or 
-            np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(sma_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: > 1.5x average volume
-        vol_ok = volume[i] > (vol_ma[i] * 1.5)
+        # Volume confirmation: > 1.8x average volume
+        vol_ok = volume[i] > (vol_ma[i] * 1.8)
         
         if position == 1:  # Long position
-            # Exit: price moves back to middle band or trend changes
-            if close[i] >= sma[i] or close[i] < sma_50_1d_aligned[i]:
+            # Exit: price moves above weekly SMA50 or touches H3 (take profit)
+            if close[i] >= sma_50_1w_aligned[i] or high[i] >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves back to middle band or trend changes
-            if close[i] <= sma[i] or close[i] > sma_50_1d_aligned[i]:
+            # Exit: price moves below weekly SMA50 or touches L3 (take profit)
+            if close[i] <= sma_50_1w_aligned[i] or low[i] <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: price touches lower Bollinger Band in uptrend (price above 1d SMA50)
-                if (low[i] <= lower_band[i] and 
-                    close[i] > sma_50_1d_aligned[i]):
+                # Long: price touches L3 in uptrend (close above weekly SMA50)
+                if (low[i] <= camarilla_l3_aligned[i] * 1.001 and  # Allow small tolerance
+                    close[i] > sma_50_1w_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price touches upper Bollinger Band in downtrend (price below 1d SMA50)
-                elif (high[i] >= upper_band[i] and 
-                      close[i] < sma_50_1d_aligned[i]):
+                # Short: price touches H3 in downtrend (close below weekly SMA50)
+                elif (high[i] >= camarilla_h3_aligned[i] * 0.999 and  # Allow small tolerance
+                      close[i] < sma_50_1w_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
