@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla Pivot + Weekly Trend + Volume Confirmation
-# Hypothesis: Camarilla pivot levels (R3/S3 for reversal, R4/S4 for breakout) combined with
-# weekly trend filter and volume confirmation captures institutional activity at key levels.
+# Strategy: 12h Camarilla Pivot + Daily Trend + Volume Confirmation
+# Hypothesis: Camarilla pivot levels (R3/S3 for reversal, R4/S4 for breakout) on 12h timeframe
+# combined with daily trend filter and volume confirmation captures institutional activity at key levels.
 # Works in bull via R4 breakouts, in bear via S4 breakdowns, and ranges via R3/S3 reversals.
-# Target: 15-30 trades/year to minimize fee drag.
-name = "6h_camarilla_pivot_weekly_trend_volume_v1"
-timeframe = "6h"
+# Target: 12-37 trades/year to minimize fee drag.
+name = "12h_camarilla_pivot_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -45,33 +45,28 @@ def generate_signals(prices):
     s3 = pp - range_hl * 1.1 / 4.0
     s4 = pp - range_hl * 1.1 / 2.0
     
-    # Align Camarilla levels to 6h timeframe
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align Camarilla levels to 12h timeframe
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Get weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Get daily trend filter
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=21, adjust=False).mean().values
+    daily_ema_12h = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Weekly EMA(21) for trend
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=21, adjust=False).mean().values
-    weekly_ema_6h = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # Volume confirmation: 6h volume > 20-period average
+    # Volume confirmation: 12h volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(weekly_ema_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_12h[i]) or np.isnan(r3_12h[i]) or 
+            np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
+            np.isnan(daily_ema_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,36 +74,36 @@ def generate_signals(prices):
         vol_confirm = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 (reversal level) or weekly trend turns bearish
-            if close[i] < s3_6h[i] or close[i] < weekly_ema_6h[i]:
+            # Exit: price closes below S3 (reversal level) or daily trend turns bearish
+            if close[i] < s3_12h[i] or close[i] < daily_ema_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above R3 (reversal level) or weekly trend turns bullish
-            if close[i] > r3_6h[i] or close[i] > weekly_ema_6h[i]:
+            # Exit: price closes above R3 (reversal level) or daily trend turns bullish
+            if close[i] > r3_12h[i] or close[i] > daily_ema_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above R4 (breakout) with volume and bullish weekly trend
-            if close[i] > r4_6h[i] and vol_confirm and close[i] > weekly_ema_6h[i]:
+            # Enter long: price closes above R4 (breakout) with volume and bullish daily trend
+            if close[i] > r4_12h[i] and vol_confirm and close[i] > daily_ema_12h[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 (breakdown) with volume and bearish weekly trend
-            elif close[i] < s4_6h[i] and vol_confirm and close[i] < weekly_ema_6h[i]:
+            # Enter short: price closes below S4 (breakdown) with volume and bearish daily trend
+            elif close[i] < s4_12h[i] and vol_confirm and close[i] < daily_ema_12h[i]:
                 position = -1
                 signals[i] = -0.25
             # Enter long: price closes above R3 (reversal from oversold) with volume
-            elif close[i] > r3_6h[i] and vol_confirm and close[i] < weekly_ema_6h[i]:
-                # Counter-trend long in bearish weekly trend
+            elif close[i] > r3_12h[i] and vol_confirm and close[i] < daily_ema_12h[i]:
+                # Counter-trend long in bearish daily trend
                 position = 1
                 signals[i] = 0.20
             # Enter short: price closes below S3 (reversal from overbought) with volume
-            elif close[i] < s3_6h[i] and vol_confirm and close[i] > weekly_ema_6h[i]:
-                # Counter-trend short in bullish weekly trend
+            elif close[i] < s3_12h[i] and vol_confirm and close[i] > daily_ema_12h[i]:
+                # Counter-trend short in bullish daily trend
                 position = -1
                 signals[i] = -0.20
     
