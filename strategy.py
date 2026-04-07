@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-1h_momentum_4h1d_volume_v1
-Hypothesis: In trending markets (4h/1d aligned), 1h momentum with volume confirmation captures trend continuation. 
-Uses 4h EMA for trend direction, 1h RSI for momentum entry, and volume spike for confirmation. 
-Designed for low trade frequency (15-37/year) to minimize fee drag. Works in bull/bear by only trading with higher timeframe trend.
+6h_donchian_breakout_1w_trend_volume_v1
+Hypothesis: Donchian channel breakouts with weekly trend filter and volume capture
+institutional moves. Weekly trend determines bias (long/short), Donchian(20) provides
+entry/exit levels, volume confirms breakout strength. Works in bull (breakouts continue)
+and bear (breakdowns continue) by trading with weekly trend. Targets 15-30 trades/year
+by requiring confluence of Donchian breakout, volume spike, and weekly trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_momentum_4h1d_volume_v1"
-timeframe = "1h"
+name = "6h_donchian_breakout_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,76 +27,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Weekly data for Donchian calculation and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    ema40_4h = pd.Series(df_4h['close'].values).ewm(span=40, adjust=False).mean().values
-    ema40_4h_aligned = align_htf_to_ltf(prices, df_4h, ema40_4h)
     
-    # 1d EMA for higher timeframe trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly Donchian(20): highest high and lowest low of past 20 weeks
+    high_20w = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # 1h RSI for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
     
-    # 1h volume spike filter
+    # Align to 6h timeframe (shift by 1 week for completed bars only)
+    high_20w_6h = align_htf_to_ltf(prices, df_1w, high_20w)
+    low_20w_6h = align_htf_to_ltf(prices, df_1w, low_20w)
+    ema50_1w_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # 20-period volume average (6-period)
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema40_4h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or 
+        if (np.isnan(high_20w_6h[i]) or 
+            np.isnan(low_20w_6h[i]) or 
+            np.isnan(ema50_1w_6h[i]) or 
             np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 2.0x average volume
+        vol_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: trend turns down OR RSI overbought
-            if close[i] < ema40_4h_aligned[i] or rsi[i] > 70:
+            # Exit: price breaks below weekly Donchian low OR trend turns down
+            if close[i] < low_20w_6h[i] or close[i] < ema50_1w_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: trend turns up OR RSI oversold
-            if close[i] > ema40_4h_aligned[i] or rsi[i] < 30:
+            # Exit: price breaks above weekly Donchian high OR trend turns up
+            if close[i] > high_20w_6h[i] or close[i] > ema50_1w_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price above 4h/1d EMA + RSI momentum + volume
-            if (close[i] > ema40_4h_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                rsi[i] > 55 and rsi[i] < 70 and 
-                vol_confirm):
+            # Long: price breaks above weekly Donchian high + volume + uptrend
+            if (close[i] > high_20w_6h[i] and 
+                vol_confirm and 
+                close[i] > ema50_1w_6h[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: price below 4h/1d EMA + RSI momentum + volume
-            elif (close[i] < ema40_4h_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  rsi[i] < 45 and rsi[i] > 30 and 
-                  vol_confirm):
+                signals[i] = 0.25
+            # Short: price breaks below weekly Donchian low + volume + downtrend
+            elif (close[i] < low_20w_6h[i] and 
+                  vol_confirm and 
+                  close[i] < ema50_1w_6h[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
