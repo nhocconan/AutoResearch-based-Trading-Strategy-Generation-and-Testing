@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_rolling_std_momentum_12h_trend_volume_v1
-Hypothesis: Price momentum relative to rolling standard deviation on 4h combined with 12h trend filter and volume confirmation captures persistent moves in both bull and bear markets. Uses normalized momentum (z-score) to avoid scale issues. Target: 20-40 trades/year.
+1h_rsi_pullback_4h1d_volume_v1
+Hypothesis: RSI pullbacks (RSI<30 for long, RSI>70 for short) combined with 4h/1d trend filters and volume confirmation on 1h timeframe. Uses 4h EMA50 and 1d EMA200 for trend direction. Volume filter requires current volume > 1.5x 20-period average. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rolling_std_momentum_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_rsi_pullback_4h1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,35 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h data for intermediate trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = df_12h['close'].ewm(span=50, adjust=False).mean()
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h.values)
+    # 4h EMA50 for trend filter
+    ema_4h_50 = df_4h['close'].ewm(span=50, adjust=False).mean()
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50.values)
     
-    # 4h momentum normalized by volatility (z-score of returns)
-    returns = np.diff(np.log(close), prepend=0)
-    lookback = 20
-    mean_return = pd.Series(returns).rolling(window=lookback, min_periods=lookback).mean().values
-    std_return = pd.Series(returns).rolling(window=lookback, min_periods=lookback).std().values
-    # Avoid division by zero
-    std_return = np.where(std_return == 0, 1e-10, std_return)
-    z_score = (returns - mean_return) / std_return
-    z_score = np.nan_to_num(z_score, nan=0.0)
+    # 1d data for long-term trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Volume confirmation (20-period average on 4h)
+    # 1d EMA200 for trend filter
+    ema_1d_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200.values)
+    
+    # RSI(14) on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Neutral RSI when no loss
+    
+    # Volume confirmation (20-period average on 1h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(z_score[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_50_aligned[i]) or 
+            np.isnan(ema_1d_200_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -59,29 +68,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: momentum turns negative or trend breaks
-            if z_score[i] < 0 or close[i] < ema_50_12h_aligned[i]:
+            # Exit: RSI rises above 70 or price breaks below 4h EMA50 or 1d EMA200
+            if (rsi[i] > 70 or close[i] < ema_4h_50_aligned[i] or 
+                close[i] < ema_1d_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # Short position
-            # Exit: momentum turns positive or trend breaks
-            if z_score[i] > 0 or close[i] > ema_50_12h_aligned[i]:
+            # Exit: RSI falls below 30 or price breaks above 4h EMA50 or 1d EMA200
+            if (rsi[i] < 30 or close[i] > ema_4h_50_aligned[i] or 
+                close[i] > ema_1d_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: positive momentum, with volume and price above EMA50
-            if (z_score[i] > 0.5 and vol_confirm and 
-                close[i] > ema_50_12h_aligned[i]):
+            # Long entry: RSI < 30 (oversold), with volume and price above both EMAs
+            if (rsi[i] < 30 and vol_confirm and 
+                close[i] > ema_4h_50_aligned[i] and 
+                close[i] > ema_1d_200_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: negative momentum, with volume and price below EMA50
-            elif (z_score[i] < -0.5 and vol_confirm and 
-                  close[i] < ema_50_12h_aligned[i]):
+                signals[i] = 0.20
+            # Short entry: RSI > 70 (overbought), with volume and price below both EMAs
+            elif (rsi[i] > 70 and vol_confirm and 
+                  close[i] < ema_4h_50_aligned[i] and 
+                  close[i] < ema_1d_200_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
