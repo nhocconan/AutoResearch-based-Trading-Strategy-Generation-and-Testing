@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.8x 20-period average + weekly ADX > 22
-# Short when price breaks below 20-period Donchian low + volume > 1.8x 20-period average + weekly ADX > 22
+# Hypothesis: 1-day Donchian(20) breakout with 1-week volume confirmation and 1-week ADX trend filter
+# Long when price breaks above 20-period Donchian high + weekly volume > 1.8x 20-period average + weekly ADX > 22
+# Short when price breaks below 20-period Donchian low + weekly volume > 1.8x 20-period average + weekly ADX > 22
 # Exit when price crosses 4-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 1-day volume for confirmation and 1-week ADX for trend strength
+# Uses 1-week volume for confirmation and 1-week ADX for trend strength
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_vol_1w_adx_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_vol_1w_adx_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,21 +27,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1-week data for ADX trend filter
+    # 1-week data for volume confirmation and ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Calculate 1-week volume average (20-period)
+    volume_1w = df_1w['volume'].values
+    volume_1w_s = pd.Series(volume_1w)
+    volume_ma = volume_1w_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma)
     
     # Calculate 1-week ADX (14-period)
     high_1w = df_1w['high'].values
