@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h EMA Pullback with 4h/1d Trend Filter and Session Filter
-# Hypothesis: In trending markets (4h EMA > 4h SMA for bull, < for bear),
-# buy pullbacks to 1h EMA(20) in bull trend or sell rallies to 1h EMA(20) in bear trend.
-# Volume confirms institutional participation. Session filter (08-20 UTC) avoids low-liquidity hours.
-# Uses 4h/1d for trend direction, 1h for entry timing. Target: 15-37 trades/year (60-150 over 4 years).
-name = "1h_ema_pullback_4h1d_trend_volume_session_v1"
-timeframe = "1h"
+# Strategy: 6h Elder Ray Power + Weekly Trend + Volume Confirmation
+# Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures
+# bull/bear strength relative to trend. Combined with weekly trend (EMA50 > SMA50 = bull),
+# we go long when Bull Power > 0 and rising in bull regime, short when Bear Power > 0
+# and rising in bear regime. Volume confirms institutional participation.
+# 6h timeframe balances responsiveness and noise. Target: 12-37 trades/year (50-150 over 4 years).
+name = "6h_elder_ray_weekly_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -23,82 +24,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for trend filters
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 2 or len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1h EMA(20) for entry timing
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).values
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # 4h EMA(20) and SMA(20) for trend filter
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).values
-    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    ema_20_4h_1h = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    sma_20_4h_1h = align_htf_to_ltf(prices, df_4h, sma_20_4h)
-    
-    # 1d EMA(50) and SMA(50) for stronger trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    ema_50_1d_1h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    sma_50_1d_1h = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # Weekly trend filter: EMA50 > SMA50 = bullish
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    weekly_ema50_6h = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    weekly_sma50_6h = align_htf_to_ltf(prices, df_1w, weekly_sma50)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_filter = volume > (vol_ma * 1.5)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(ema_20[i]) or np.isnan(ema_20_4h_1h[i]) or np.isnan(sma_20_4h_1h[i]) or
-            np.isnan(ema_50_1d_1h[i]) or np.isnan(sma_50_1d_1h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(weekly_ema50_6h[i]) or np.isnan(weekly_sma50_6h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend regime: require both 4h and 1d to agree
-        bull_4h = ema_20_4h_1h[i] > sma_20_4h_1h[i]
-        bear_4h = ema_20_4h_1h[i] < sma_20_4h_1h[i]
-        bull_1d = ema_50_1d_1h[i] > sma_50_1d_1h[i]
-        bear_1d = ema_50_1d_1h[i] < sma_50_1d_1h[i]
-        
-        bull_regime = bull_4h and bull_1d
-        bear_regime = bear_4h and bear_1d
+        # Determine trend regime from weekly data
+        bull_regime = weekly_ema50_6h[i] > weekly_sma50_6h[i]  # Bullish when EMA > SMA
+        bear_regime = weekly_ema50_6h[i] < weekly_sma50_6h[i]  # Bearish when EMA < SMA
         
         if position == 1:  # Long position
-            # Exit: price breaks below 1h EMA(20) or trend turns bearish
-            if close[i] < ema_20[i] or not bull_regime:
+            # Exit: Bull Power <= 0 (weakening bullish momentum) or trend reversal
+            if bull_power[i] <= 0 or not bull_regime:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price breaks above 1h EMA(20) or trend turns bullish
-            if close[i] > ema_20[i] or not bear_regime:
+            # Exit: Bear Power <= 0 (weakening bearish momentum) or trend reversal
+            if bear_power[i] <= 0 or not bear_regime:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume and session
-            if vol_filter[i] and session_filter[i]:
-                # Bull regime: buy pullback to EMA(20)
-                if bull_regime and close[i] <= ema_20[i]:
-                    # Additional confirmation: price closing above EMA(20) next bar (handled via signal at next bar)
-                    position = 1
-                    signals[i] = 0.20
-                # Bear regime: sell rally to EMA(20)
-                elif bear_regime and close[i] >= ema_20[i]:
-                    position = -1
-                    signals[i] = -0.20
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Bull regime: look for long when Bull Power > 0 and rising
+                if bull_regime and bull_power[i] > 0:
+                    # Check if Bull Power is rising (current > previous)
+                    if i > 30 and bull_power[i] > bull_power[i-1]:
+                        position = 1
+                        signals[i] = 0.25
+                # Bear regime: look for short when Bear Power > 0 and rising
+                elif bear_regime and bear_power[i] > 0:
+                    # Check if Bear Power is rising (current > previous)
+                    if i > 30 and bear_power[i] > bear_power[i-1]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
