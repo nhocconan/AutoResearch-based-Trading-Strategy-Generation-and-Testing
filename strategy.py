@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Weekly Pivot Breakout with Volume Filter
+# Strategy: 1d Weekly Pivot Breakout with Volume Filter
 # Hypothesis: Weekly pivot levels act as major support/resistance. Price breaking above R1 with volume indicates institutional buying, leading to continuation. Price breaking below S1 with volume indicates institutional selling, leading to continuation. Works in both bull and bear markets because: In bull, breaks above R1 continue up; breaks below S1 get bought (mean reversion). In bear, breaks below S1 continue down; breaks above R1 get sold (mean reversion). Volume filter ensures only institutional participation triggers entries.
-# Target: 12-30 trades/year (48-120 over 4 years).
+# Target: 7-25 trades/year (30-100 over 4 years).
 
-name = "6h_weekly_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "1d_weekly_pivot_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,20 +44,14 @@ def generate_signals(prices):
     # Pivot = (High + Low + Close) / 3
     # R1 = (2 * Pivot) - Low
     # S1 = (2 * Pivot) - High
-    # R2 = Pivot + (High - Low)
-    # S2 = Pivot - (High - Low)
     weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
     weekly_r1 = (2 * weekly_pivot) - prev_weekly_low
     weekly_s1 = (2 * weekly_pivot) - prev_weekly_high
-    weekly_r2 = weekly_pivot + (prev_weekly_high - prev_weekly_low)
-    weekly_s2 = weekly_pivot - (prev_weekly_high - prev_weekly_low)
     
-    # Align to 6h timeframe (use previous week's levels)
+    # Align to 1d timeframe (use previous week's levels)
     pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
     s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -70,8 +64,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
