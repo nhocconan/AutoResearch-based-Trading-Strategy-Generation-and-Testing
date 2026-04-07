@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
-Long when price breaks above Donchian(20) upper band with expanding volume AND 1d EMA trend up
-Short when price breaks below Donchian(20) lower band with expanding volume AND 1d EMA trend down
-Exit when price crosses back to Donchian middle line
-Uses Donchian channels for clear breakout levels, volume for confirmation, and 1d EMA for trend filter.
+6H Trend Reversal with RSI Momentum and Volume Confirmation
+Long when RSI crosses above 30 from below with volume spike AND price above 100 EMA
+Short when RSI crosses below 70 from above with volume spike AND price below 100 EMA
+Exit when RSI crosses 70 (long) or 30 (short)
+Designed to capture reversals in both bull and bear markets with strict entry filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "4h"
+name = "6h_rsi_reversal_volume_ema100_filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -26,57 +26,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # === RSI (14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === EMA 100 filter ===
+    ema_100 = pd.Series(close).ewm(span=100, adjust=False, min_periods=100).mean().values
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
-    
-    # === 1d trend filter (EMA 21) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+    for i in range(100, n):
+        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or 
+            np.isnan(ema_100[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below middle line
-            if close[i] < donch_mid[i]:
+            # Exit: RSI crosses above 70
+            if rsi[i] >= 70 and rsi[i-1] < 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above middle line
-            if close[i] > donch_mid[i]:
+            # Exit: RSI crosses below 30
+            if rsi[i] <= 30 and rsi[i-1] > 30:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need expanding volume (above average)
-            if vol_ratio[i] < 1.2:
+            # Need volume spike
+            if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation AND 1d trend filter
-            if close[i] > donch_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Breakout above upper channel with rising 1d EMA -> long
+            # Entry conditions
+            # Long: RSI crosses above 30 from below AND price above EMA100
+            if rsi[i] > 30 and rsi[i-1] <= 30 and close[i] > ema_100[i]:
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donch_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Breakdown below lower channel with falling 1d EMA -> short
+            # Short: RSI crosses below 70 from above AND price below EMA100
+            elif rsi[i] < 70 and rsi[i-1] >= 70 and close[i] < ema_100[i]:
                 position = -1
                 signals[i] = -0.25
     
