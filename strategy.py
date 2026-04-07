@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
 name = "12h_donchian20_1d_vol_1w_adx_v1"
 timeframe = "12h"
