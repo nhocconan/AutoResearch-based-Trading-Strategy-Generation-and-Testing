@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_volume_filtered_4h1d_trend_follow_v1
-Hypothesis: On 1-hour timeframe, use 4h and 1d ADX for trend strength and volume surge for entry timing.
-Long when: 4h ADX > 25, 1d ADX > 20 (trending market), and volume > 1.5x 20-period average.
-Short when: 4h ADX > 25, 1d ADX > 20, and volume > 1.5x 20-period average (short on momentum).
-Exit when 4h ADX < 20 (trend weakening) or volume drops below average.
-Designed for 15-30 trades/year to minimize fee drift while capturing momentum in both bull and bear markets.
-Volume filter reduces false signals and whipsaws, especially in ranging markets.
+4h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from 1-day for mean reversion entry in ranging markets.
+Long when price touches S3 support with volume confirmation in low volatility regime.
+Short when price touches R3 resistance with volume confirmation in low volatility regime.
+Exit on opposite touch or volatility expansion.
+Designed for 20-40 trades/year to minimize fee drag while capturing mean reversion in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_filtered_4h1d_trend_follow_v1"
-timeframe = "1h"
+name = "4h_camarilla_pivot_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,35 +27,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for ADX (trend strength)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX for 4h
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Camarilla pivot levels for 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    # Previous day's values (shifted by 1 for no look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla calculations
+    range_ = prev_high - prev_low
+    r3 = prev_close + range_ * 1.1 / 2
+    s3 = prev_close - range_ * 1.1 / 2
+    
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate ATR for volatility regime filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    plus_dm = np.concatenate([[np.nan], np.maximum(high_4h[1:] - high_4h[:-1], 0)])
-    minus_dm = np.concatenate([[np.nan], np.maximum(low_4h[:-1] - low_4h[1:], 0)])
-    
-    # Fix where both are positive
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    # Smoothed values (Wilder's smoothing = alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    atr_period = 14
+    alpha = 1.0 / atr_period
     
     def wilders_smoothing(arr):
         smoothed = np.full_like(arr, np.nan)
@@ -73,104 +79,85 @@ def generate_signals(prices):
                     smoothed[i] = smoothed[i-1] + alpha * (arr[i] - smoothed[i-1])
         return smoothed
     
-    tr_smoothed = wilders_smoothing(tr)
-    plus_dm_smoothed = wilders_smoothing(plus_dm)
-    minus_dm_smoothed = wilders_smoothing(minus_dm)
+    atr = wilders_smoothing(tr)
     
-    # DI values
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    # Calculate ATR percentile for regime (20-period lookback)
+    atr_ma = np.full_like(atr, np.nan)
+    for i in range(len(atr)):
+        if i < 20:
+            atr_ma[i] = np.nan
+        else:
+            window = atr[max(0, i-19):i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                atr_ma[i] = np.mean(valid)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_4h = wilders_smoothing(dx)
+    atr_ratio = np.full_like(atr, np.nan)
+    for i in range(len(atr)):
+        if np.isnan(atr[i]) or np.isnan(atr_ma[i]) or atr_ma[i] == 0:
+            atr_ratio[i] = np.nan
+        else:
+            atr_ratio[i] = atr[i] / atr_ma[i]
     
-    # Calculate ADX for 1d (same calculation)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Volume moving average for confirmation
+    vol_ma = np.full_like(volume, np.nan, dtype=np.float64)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.nan
+        else:
+            window = volume[max(0, i-19):i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                vol_ma[i] = np.mean(valid)
     
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    
-    plus_dm_1d = np.concatenate([[np.nan], np.maximum(high_1d[1:] - high_1d[:-1], 0)])
-    minus_dm_1d = np.concatenate([[np.nan], np.maximum(low_1d[:-1] - low_1d[1:], 0)])
-    
-    plus_dm_1d = np.where((plus_dm_1d > minus_dm_1d) & (plus_dm_1d > 0), plus_dm_1d, 0)
-    minus_dm_1d = np.where((minus_dm_1d > plus_dm_1d) & (minus_dm_1d > 0), minus_dm_1d, 0)
-    
-    tr_smoothed_1d = wilders_smoothing(tr_1d)
-    plus_dm_smoothed_1d = wilders_smoothing(plus_dm_1d)
-    minus_dm_smoothed_1d = wilders_smoothing(minus_dm_1d)
-    
-    plus_di_1d = 100 * plus_dm_smoothed_1d / tr_smoothed_1d
-    minus_di_1d = 100 * minus_dm_smoothed_1d / tr_smoothed_1d
-    
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d)
-    
-    # Align ADX to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume filter: 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = vol_series / vol_ma  # Current volume / 20-period average
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_ratio = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if np.isnan(volume[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0:
+            volume_ratio[i] = np.nan
+        else:
+            volume_ratio[i] = volume[i] / vol_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after ADX warmup
-        if not in_session[i]:
+    for i in range(30, n):  # Start after warmup
+        # Skip if data not available
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
             
-        # Skip if ADX data not available
-        if np.isnan(adx_4h_aligned[i]) or np.isnan(adx_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        # Skip if volume data not available
-        if np.isnan(vol_ratio.iloc[i]):
-            signals[i] = 0.0
-            continue
-            
-        # Trend strength filter: both 4h and 1d ADX must indicate trending
-        strong_trend = (adx_4h_aligned[i] > 25) and (adx_1d_aligned[i] > 20)
-        weak_trend = adx_4h_aligned[i] < 20  # Exit trend when 4h ADX weakens
+        # Volatility regime filter: only trade in low volatility (mean reversion works better)
+        low_vol = atr_ratio[i] < 1.2
         
-        # Volume surge filter: volume > 1.5x 20-period average
-        volume_surge = vol_ratio.iloc[i] > 1.5
+        # Volume confirmation: above average volume
+        vol_confirm = volume_ratio[i] > 1.1
         
         if position == 1:  # Long position
-            # Exit: trend weakens or volume drops
-            if weak_trend or not volume_surge:
+            # Exit: price touches R3 or volatility expands
+            if close[i] >= r3_aligned[i] or not low_vol:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend weakens or volume drops
-            if weak_trend or not volume_surge:
+            # Exit: price touches S3 or volatility expands
+            if close[i] <= s3_aligned[i] or not low_vol:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter on strong trend with volume surge
-            if strong_trend and volume_surge:
-                # Enter long on volume surge in uptrend
-                signals[i] = 0.20
-                position = 1
-            # Note: We don't short on volume surge alone to avoid counter-trend shorts
-            # Only short if we have a clear downtrend signal (could add later if needed)
+            # Only enter in low volatility with volume confirmation
+            if low_vol and vol_confirm:
+                # Long at S3 support
+                if close[i] <= s3_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short at R3 resistance
+                elif close[i] >= r3_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
