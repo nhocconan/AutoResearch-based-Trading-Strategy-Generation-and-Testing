@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Strategy: 1d Donchian(20) Breakout + 1w Trend + Volume Spike
+# 1d Donchian(20) Breakout + 1w Trend + Volume Spike
 # Hypothesis: Donchian breakouts capture strong directional moves. 1w trend filter ensures
 # alignment with higher-timeframe momentum. Volume spikes confirm institutional participation.
 # Works in bull markets via breakouts above upper band + uptrend, in bear via breakouts
 # below lower band + downtrend. Designed for low trade frequency to minimize fee drag.
 # Target: 7-25 trades/year (30-100 total over 4 years) for 1d timeframe.
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "1d_donchian20_1w_trend_volume_v1"
 timeframe = "1d"
