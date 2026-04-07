@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly Pivot Breakout with Volume and Trend Filter
-# Hypothesis: Weekly pivot levels (R1/S1, R2/S2) act as weekly support/resistance.
+# Strategy: 6h Monthly Pivot Breakout with Volume and Trend Filter
+# Hypothesis: Monthly pivot levels (R1/S1, R2/S2) act as strong support/resistance.
 # Breakouts above R2 with volume and trend confirmation indicate bullish continuation.
 # Breakdowns below S2 with volume and trend confirmation indicate bearish continuation.
-# Uses 1w trend filter (price above/below 50 EMA) to avoid counter-trend trades.
-# Volume filter ensures institutional participation. Works in bull/bear markets by
-# aligning with trend: in bull, only long breakouts; in bear, only short breakdowns.
-# Target: 7-25 trades/year (28-100 over 4 years).
+# Uses 1d trend filter (price above/below 50 EMA) to avoid counter-trend trades.
+# Volume filter ensures institutional participation. Monthly pivots are more stable
+# and less prone to noise than daily pivots, reducing false breakouts.
+# Target: 10-30 trades/year (40-120 over 4 years).
 
-name = "1d_weekly_pivot_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_monthly_pivot_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,37 +27,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get monthly data for pivot calculation
+    df_monthly = get_htf_data(prices, '1M')
+    if len(df_monthly) < 2:
         return np.zeros(n)
     
-    # Calculate weekly data (previous week's OHLC)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate monthly data (previous month's OHLC)
+    monthly_high = df_monthly['high'].values
+    monthly_low = df_monthly['low'].values
+    monthly_close = df_monthly['close'].values
     
-    # Shift by 1 to use previous week's data (avoid look-ahead)
-    prev_weekly_high = np.roll(weekly_high, 1)
-    prev_weekly_low = np.roll(weekly_low, 1)
-    prev_weekly_close = np.roll(weekly_close, 1)
-    prev_weekly_high[0] = prev_weekly_high[1] if len(prev_weekly_high) > 1 else 0
-    prev_weekly_low[0] = prev_weekly_low[1] if len(prev_weekly_low) > 1 else 0
-    prev_weekly_close[0] = prev_weekly_close[1] if len(prev_weekly_close) > 1 else 0
+    # Shift by 1 to use previous month's data (avoid look-ahead)
+    prev_monthly_high = np.roll(monthly_high, 1)
+    prev_monthly_low = np.roll(monthly_low, 1)
+    prev_monthly_close = np.roll(monthly_close, 1)
+    prev_monthly_high[0] = prev_monthly_high[1] if len(prev_monthly_high) > 1 else 0
+    prev_monthly_low[0] = prev_monthly_low[1] if len(prev_monthly_low) > 1 else 0
+    prev_monthly_close[0] = prev_monthly_close[1] if len(prev_monthly_close) > 1 else 0
     
-    # Calculate weekly pivot points
-    weekly_range = prev_weekly_high - prev_weekly_low
-    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
-    weekly_r1 = weekly_pivot + (weekly_range * 1.0 / 2)
-    weekly_s1 = weekly_pivot - (weekly_range * 1.0 / 2)
-    weekly_r2 = weekly_pivot + weekly_range
-    weekly_s2 = weekly_pivot - weekly_range
+    # Calculate monthly pivot points
+    monthly_range = prev_monthly_high - prev_monthly_low
+    monthly_pivot = (prev_monthly_high + prev_monthly_low + prev_monthly_close) / 3.0
+    monthly_r1 = monthly_pivot + (monthly_range * 1.0 / 2)
+    monthly_s1 = monthly_pivot - (monthly_range * 1.0 / 2)
+    monthly_r2 = monthly_pivot + monthly_range
+    monthly_s2 = monthly_pivot - monthly_range
     
-    # Align to 1d timeframe (use previous week's levels)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    # Align to 6h timeframe (use previous month's levels)
+    monthly_r2_aligned = align_htf_to_ltf(prices, df_monthly, monthly_r2)
+    monthly_s2_aligned = align_htf_to_ltf(prices, df_monthly, monthly_s2)
     
-    # 1w trend filter: price above/below 50 EMA
+    # 1d trend filter: price above/below 50 EMA
     close_series = pd.Series(close)
     ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
@@ -71,33 +71,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(weekly_r2_aligned[i]) or np.isnan(weekly_s2_aligned[i]) or 
+        if (np.isnan(monthly_r2_aligned[i]) or np.isnan(monthly_s2_aligned[i]) or 
             np.isnan(ema_50[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls to S1 or trend turns bearish or volume drops
-            if (close[i] <= weekly_s2_aligned[i] or close[i] < ema_50[i] or not vol_filter[i]):
+            # Exit: price falls to S2 or trend turns bearish or volume drops
+            if (close[i] <= monthly_s2_aligned[i] or close[i] < ema_50[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises to R1 or trend turns bullish or volume drops
-            if (close[i] >= weekly_r2_aligned[i] or close[i] > ema_50[i] or not vol_filter[i]):
+            # Exit: price rises to R2 or trend turns bullish or volume drops
+            if (close[i] >= monthly_r2_aligned[i] or close[i] > ema_50[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
             # Long: price breaks above R2 with volume and bullish trend
-            if ((high[i] > weekly_r2_aligned[i] or close[i] > weekly_r2_aligned[i]) and 
+            if ((high[i] > monthly_r2_aligned[i] or close[i] > monthly_r2_aligned[i]) and 
                 close[i] > ema_50[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
             # Short: price breaks below S2 with volume and bearish trend
-            elif ((low[i] < weekly_s2_aligned[i] or close[i] < weekly_s2_aligned[i]) and 
+            elif ((low[i] < monthly_s2_aligned[i] or close[i] < monthly_s2_aligned[i]) and 
                   close[i] < ema_50[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
