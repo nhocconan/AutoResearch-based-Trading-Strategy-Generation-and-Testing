@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_ichimoku_cloud_1d_trend_volume_v1
-Hypothesis: Use Ichimoku cloud from 1d timeframe for trend filtering, with TK cross on 6h for entry signals and volume confirmation. The cloud acts as dynamic support/resistance, providing high-probability entries in both bull and bear markets. Long when price > cloud, TK crosses bullish, and volume confirms; short when price < cloud, TK crosses bearish, and volume confirms. This reduces false signals and captures strong trends with proper filtering.
+4h_cci_breakout_12h_trend_volume_v5
+Hypothesis: On 4h timeframe, use 12h CCI for trend strength and direction, with 12h EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_1d_trend_volume_v1"
-timeframe = "6h"
+name = "4h_cci_breakout_12h_trend_volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,88 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Ichimoku cloud
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # 12h data for CCI and EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate CCI on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Typical price
+    tp_12h = (high_12h + low_12h + close_12h) / 3
+    # SMA of typical price
+    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
+    # Mean deviation
+    md = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # CCI calculation
+    cci_12h = (tp_12h - sma_tp) / (0.015 * md)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # 12h EMA for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Align indicators to 4h timeframe
+    cci_12h_4h = align_htf_to_ltf(prices, df_12h, cci_12h)
+    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
-    cloud_bottom = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
-    
-    # TK Cross signals on 6h
-    # Tenkan-sen crossing above Kijun-sen (bullish)
-    tk_bullish = (tenkan_sen_6h > kijun_sen_6h) & (tenkan_sen_6h <= kijun_sen_6h)
-    # Tenkan-sen crossing below Kijun-sen (bearish)
-    tk_bearish = (tenkan_sen_6h < kijun_sen_6h) & (tenkan_sen_6h >= kijun_sen_6h)
-    # Fix the crossover detection (proper edge detection)
-    tk_bullish = (tenkan_sen_6h > kijun_sen_6h) & (np.roll(tenkan_sen_6h, 1) <= np.roll(kijun_sen_6h, 1))
-    tk_bearish = (tenkan_sen_6h < kijun_sen_6h) & (np.roll(tenkan_sen_6h, 1) >= np.roll(kijun_sen_6h, 1))
-    # Handle first element
-    tk_bullish[0] = False
-    tk_bearish[0] = False
-    
-    # Volume confirmation (20-period average on 6h)
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(26, n):  # Start after Kijun period
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+        if (np.isnan(cci_12h_4h[i]) or np.isnan(ema_12h_4h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Price position relative to cloud
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
+        # Trend direction from EMA
+        uptrend = close[i] > ema_12h_4h[i]
+        downtrend = close[i] < ema_12h_4h[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price drops below cloud
-            if price_below_cloud:
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_12h_4h[i]) < 10:
                 exit_long = True
-            # Exit if TK turns bearish
-            elif tk_bearish[i]:
+            # Exit if CCI goes below -100 (strong reversal)
+            elif cci_12h_4h[i] < -100:
                 exit_long = True
-            # Exit if TK cross is bearish (Tenkan < Kijun)
-            elif tenkan_sen_6h[i] < kijun_sen_6h[i]:
+            # Exit if trend turns down
+            elif downtrend and cci_12h_4h[i] < 0:
                 exit_long = True
             
             if exit_long:
@@ -116,14 +91,14 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price rises above cloud
-            if price_above_cloud:
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_12h_4h[i]) < 10:
                 exit_short = True
-            # Exit if TK turns bullish
-            elif tk_bullish[i]:
+            # Exit if CCI goes above +100 (strong reversal)
+            elif cci_12h_4h[i] > 100:
                 exit_short = True
-            # Exit if TK cross is bullish (Tenkan > Kijun)
-            elif tenkan_sen_6h[i] > kijun_sen_6h[i]:
+            # Exit if trend turns up
+            elif uptrend and cci_12h_4h[i] > 0:
                 exit_short = True
             
             if exit_short:
@@ -134,15 +109,17 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Long entry conditions
             long_entry = False
-            # Price above cloud, TK bullish cross, and volume confirmation
-            if price_above_cloud and tk_bullish[i] and vol_confirm:
-                long_entry = True
+            # CCI breaks above +100 with uptrend and volume confirmation
+            if cci_12h_4h[i] > 100 and cci_12h_4h[i-1] <= 100:
+                if uptrend and vol_confirm:
+                    long_entry = True
             
             # Short entry conditions
             short_entry = False
-            # Price below cloud, TK bearish cross, and volume confirmation
-            if price_below_cloud and tk_bearish[i] and vol_confirm:
-                short_entry = True
+            # CCI breaks below -100 with downtrend and volume confirmation
+            if cci_12h_4h[i] < -100 and cci_12h_4h[i-1] >= -100:
+                if downtrend and vol_confirm:
+                    short_entry = True
             
             if long_entry:
                 position = 1
