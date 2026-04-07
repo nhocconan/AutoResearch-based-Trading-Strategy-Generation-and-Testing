@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation
 # Donchian breakouts capture momentum in trending markets while avoiding whipsaws.
-# Daily trend filter ensures trades align with higher timeframe direction.
+# Weekly trend filter ensures trades align with higher timeframe direction.
 # Volume confirmation filters for institutional participation.
-# Designed for low frequency: target 20-50 trades/year to minimize fee drag.
+# Designed for low frequency: target 25-35 trades/year to minimize fee drag.
 # Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 
-name = "4h_donchian20_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian20_weekly_trend_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,15 +25,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly EMA(20) for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_1w = close_1w.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate Donchian channels (20-period)
     high_series = pd.Series(high)
@@ -50,7 +50,7 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after Donchian warmup
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -58,9 +58,9 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_high[i-1]  # Break above previous period high
         breakout_down = close[i] < donchian_low[i-1]  # Break below previous period low
         
-        # Daily trend filter: price above/below EMA(50)
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Weekly trend filter: price above/below EMA(20)
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
         # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
