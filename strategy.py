@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_donchian_breakout_1w_trend_volume_v2
-Hypothesis: Weekly trend filter + daily Donchian breakout with volume confirmation.
-Long when price breaks above daily Donchian(20) with volume > average and price above weekly EMA50.
-Short when price breaks below daily Donchian(20) with volume > average and price below weekly EMA50.
-Designed for 15-25 trades/year on 1d with clear logic that works in bull and bear markets.
+12h_camarilla_pivot_1d_volume_v1
+Hypothesis: Camarilla pivot levels from 1-day timeframe provide strong support/resistance.
+Price touching S3/R3 levels with volume confirmation triggers mean-reversion trades.
+Works in both bull and bear markets as it fades extremes at statistically significant levels.
+Designed for 12h timeframe with ~20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v2"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,63 +26,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1D data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Daily Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day's OHLC
+    # S1 = C - (H-L)*1.12/12, S2 = C - (H-L)*1.12/6, S3 = C - (H-L)*1.12/4
+    # R1 = C + (H-L)*1.12/12, R2 = C + (H-L)*1.12/6, R3 = C + (H-L)*1.12/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate levels (using previous day's data)
+    hl_range = high_1d - low_1d
+    s3 = close_1d - hl_range * 1.12 / 4.0
+    s2 = close_1d - hl_range * 1.12 / 6.0
+    s1 = close_1d - hl_range * 1.12 / 12.0
+    r1 = close_1d + hl_range * 1.12 / 12.0
+    r2 = close_1d + hl_range * 1.12 / 6.0
+    r3 = close_1d + hl_range * 1.12 / 4.0
+    
+    # Align to 12h timeframe (shifted by 1 for previous day's levels)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    
+    # Volume confirmation: 24-period average (2 days of 12h data)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if data not available
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(s3_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume above average
         vol_confirmed = volume[i] > vol_ma[i]
         
-        # Donchian breakout conditions (using previous bar's levels)
-        bullish_breakout = close[i] > high_max[i-1]
-        bearish_breakout = close[i] < low_min[i-1]
-        
-        # Weekly trend filter
-        above_1w_ema50 = close[i] > ema50_1w_aligned[i]
-        below_1w_ema50 = close[i] < ema50_1w_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: bearish breakout or trend turns bearish
-            if bearish_breakout or below_1w_ema50:
+            # Exit: price reaches S1 (take profit) or breaks below S3 (stop)
+            if close[i] <= s1_12h[i] or close[i] < s3_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish breakout or trend turns bullish
-            if bullish_breakout or above_1w_ema50:
+            # Exit: price reaches R1 (take profit) or breaks above R3 (stop)
+            if close[i] >= r1_12h[i] or close[i] > r3_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: bullish Donchian breakout with volume confirmation and bullish trend
-            if bullish_breakout and vol_confirmed and above_1w_ema50:
+            # Long: price touches S3 with volume confirmation (mean reversion up)
+            if abs(close[i] - s3_12h[i]) < (hl_range[i-1] * 0.001 if i > 0 and not np.isnan(hl_range[i-1]) else 0.01) and vol_confirmed:
                 position = 1
                 signals[i] = 0.25
-            # Short: bearish Donchian breakout with volume confirmation and bearish trend
-            elif bearish_breakout and vol_confirmed and below_1w_ema50:
+            # Short: price touches R3 with volume confirmation (mean reversion down)
+            elif abs(close[i] - r3_12h[i]) < (hl_range[i-1] * 0.001 if i > 0 and not np.isnan(hl_range[i-1]) else 0.01) and vol_confirmed:
                 position = -1
                 signals[i] = -0.25
     
