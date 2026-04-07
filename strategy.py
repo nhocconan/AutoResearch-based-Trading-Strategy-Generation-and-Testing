@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Ehlers Fisher Transform + Weekly Trend Filter + Volume Spike
-# Hypothesis: Fisher Transform identifies extreme price reversals with low lag.
-# Weekly trend filter ensures alignment with higher-timeframe momentum.
-# Volume spike confirms institutional participation in the reversal.
-# Designed for 6h timeframe with low trade frequency (12-37/year).
-# Works in bull via Fisher long signals + weekly uptrend + volume, 
-# in bear via Fisher short signals + weekly downtrend + volume.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Strategy: 12h Camarilla Pivot Reversal + Daily Trend + Volume Spike
+# Hypothesis: Camarilla pivot levels (L3, L4, H3, H4) act as strong support/resistance.
+# In ranging markets, price reverses at these levels with volume confirmation.
+# Daily trend filter (EMA50) ensures trades align with higher-timeframe momentum.
+# Designed for 12h timeframe with low trade frequency (12-37/year).
+# Works in bull via long at L3/L4 in uptrend, short at H3/H4 in downtrend.
+# Works in bear via short at H3/H4 in downtrend, long at L3/L4 in uptrend retracements.
 
-name = "6h_fisher_transform_1w_volume_trend_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,57 +26,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Ehlers Fisher Transform (9-period)
-    # Step 1: Normalize price to [-1, 1] range over lookback period
-    def normalize_price(high, low, lookback=9):
-        nn = np.zeros_like(high)
-        hh = np.zeros_like(high)
-        for i in range(len(high)):
-            if i < lookback - 1:
-                nn[i] = low[:i+1].min()
-                hh[i] = high[:i+1].max()
-            else:
-                nn[i] = low[i-lookback+1:i+1].min()
-                hh[i] = high[i-lookback+1:i+1].max()
-        # Avoid division by zero
-        diff = hh - nn
-        diff[diff == 0] = 1e-10
-        return 2 * ((high - nn) / diff - 0.5)
+    # Calculate Camarilla pivot levels from previous day
+    # Formula: 
+    # H4 = close + 1.5*(high - low)
+    # H3 = close + 1.1*(high - low)
+    # L3 = close - 1.1*(high - low)
+    # L4 = close - 1.5*(high - low)
+    # Using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Step 2: Apply Gaussian smoothing
-    def gaussian_smooth(values, alpha=0.33):
-        result = np.zeros_like(values)
-        result[0] = values[0]
-        for i in range(1, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
+    # Calculate pivot levels
+    hl_range = prev_high - prev_low
+    H4 = prev_close + 1.5 * hl_range
+    H3 = prev_close + 1.1 * hl_range
+    L3 = prev_close - 1.1 * hl_range
+    L4 = prev_close - 1.5 * hl_range
     
-    # Step 3: Fisher Transform
-    price_norm = normalize_price(high, low, 9)
-    smoothed = gaussian_smooth(price_norm, 0.33)
-    # Clamp to prevent math domain error
-    smoothed = np.clip(smoothed, -0.999, 0.999)
-    fisher = 0.5 * np.log((1 + smoothed) / (1 - smoothed))
+    # Align pivot levels to 12h timeframe (shifted by 1 day to avoid look-ahead)
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Weekly trend filter: EMA(20) of weekly close
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Daily trend filter: EMA(50) of daily close
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.8 * vol_ma)
+    # Volume confirmation: volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=15).mean().values
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(fisher[i]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -85,28 +77,28 @@ def generate_signals(prices):
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: Fisher crosses below zero OR weekly trend turns bearish
-            if fisher[i] < 0 or close[i] < ema_20_1w_aligned[i]:
+            # Exit: price crosses below L3 OR daily trend turns bearish
+            if close[i] < L3_12h[i] or close[i] < ema_50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: Fisher crosses above zero OR weekly trend turns bullish
-            if fisher[i] > 0 or close[i] > ema_20_1w_aligned[i]:
+            # Exit: price crosses above H3 OR daily trend turns bullish
+            if close[i] > H3_12h[i] or close[i] > ema_50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: Fisher crosses above -0.5 (oversold bounce) with weekly uptrend
-                if fisher[i] > -0.5 and (i == 20 or fisher[i-1] <= -0.5) and close[i] > ema_20_1w_aligned[i]:
+                # Long: price touches L4 with daily uptrend (bullish reversal)
+                if (close[i] <= L4_12h[i] * 1.002) and (i == 50 or close[i-1] > L4_12h[i-1] * 1.002) and close[i] > ema_50_12h[i]:
                     position = 1
-                    signals[i] = 0.28
-                # Short: Fisher crosses below 0.5 (overbought reversal) with weekly downtrend
-                elif fisher[i] < 0.5 and (i == 20 or fisher[i-1] >= 0.5) and close[i] < ema_20_1w_aligned[i]:
+                    signals[i] = 0.25
+                # Short: price touches H4 with daily downtrend (bearish reversal)
+                elif (close[i] >= H4_12h[i] * 0.998) and (i == 50 or close[i-1] < H4_12h[i-1] * 0.998) and close[i] < ema_50_12h[i]:
                     position = -1
-                    signals[i] = -0.28
+                    signals[i] = -0.25
     
     return signals
