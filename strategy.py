@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
-# Hypothesis: Weekly trend filter ensures we trade with the dominant trend, while daily breakouts capture momentum.
-# Volume confirmation filters out false breakouts. Works in bull via breakouts with trend, in bear via trend-following shorts.
-# Target: 10-25 trades/year to minimize fee drag.
-name = "1d_donchian20_1w_trend_volume_v9"
-timeframe = "1d"
+# Strategy: 6h Elder Ray Index with 1d trend filter and volume confirmation
+# Hypothesis: Elder Ray measures bull/bear power relative to EMA13. Combined with 1d trend filter
+# (price above/below EMA50) and volume confirmation, it captures strong directional moves
+# while avoiding chop. Works in bull via bull power signals, in bear via bear power signals.
+# Target: 12-37 trades/year to minimize fee drag.
+name = "6h_elder_ray_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,61 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for trend filter and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly 20-period EMA for trend
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate EMA13 for Elder Ray (6-period EMA approximation for 6h)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False).mean().values
     
-    # Calculate daily Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate daily 20-period volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily EMA50 for trend filter
+    daily_close = df_1d['close'].values
+    daily_close_s = pd.Series(daily_close)
+    ema50_1d = daily_close_s.ewm(span=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate daily volume moving average for confirmation
+    daily_volume = df_1d['volume'].values
+    vol_ma_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA
-        trend_up = close[i] > ema_1w_aligned[i]
-        trend_down = close[i] < ema_1w_aligned[i]
-        
-        # Volume confirmation: current volume > 20-day average
-        vol_confirm = volume[i] > vol_ma[i]
+        # Volume confirmation: current 6h volume > daily average volume
+        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price touches lower band OR trend turns down
-            if close[i] <= lowest_low[i] or not trend_up:
+            # Exit: bear power becomes positive (bulls losing control) OR trend fails
+            if bear_power[i] > 0 or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches upper band OR trend turns up
-            if close[i] >= highest_high[i] or not trend_down:
+            # Exit: bull power becomes negative (bears losing control) OR trend fails
+            if bull_power[i] < 0 or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + uptrend + volume confirmation
-            if close[i] > highest_high[i] and trend_up and vol_confirm:
+            # Enter long: bull power positive (bulls in control) + uptrend + volume confirmation
+            if bull_power[i] > 0 and close[i] > ema50_1d_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + downtrend + volume confirmation
-            elif close[i] < lowest_low[i] and trend_down and vol_confirm:
+            # Enter short: bear power negative (bears in control) + downtrend + volume confirmation
+            elif bear_power[i] < 0 and close[i] < ema50_1d_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
