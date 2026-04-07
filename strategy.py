@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly Camarilla Pivot with Volume and Trend Filter
-# Hypothesis: Price reacting at weekly Camarilla pivot levels (S3/S2 for reversal, R3/R4 for breakout)
-# with volume confirmation and trend filter (price vs 50 EMA) works in both bull and bear markets.
-# In bull markets: buy at S3/S2 reversals, sell at R3/R4 breakouts.
-# In bear markets: sell at R3/R2 reversals, buy at S3/S4 breakouts.
-# Target: 20-50 trades/year (80-200 over 4 years) on daily timeframe.
+# Strategy: 12h Daily Donchian Breakout with Volume and ADX Filter
+# Hypothesis: 12h price breaking out of 20-period Donchian channels with
+# volume confirmation and ADX > 25 works in both bull and bear markets.
+# In bull markets: buy breakouts above upper channel.
+# In bear markets: sell breakdowns below lower channel.
+# Target: 15-30 trades/year (60-120 over 4 years) - within 50-150 total limit.
 
-name = "1d_weekly_camarilla_pivot_volume_trend_v1"
-timeframe = "1d"
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,105 +25,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
+    # Get daily data for Donchian channels
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels
-    # Based on previous week's OHLC
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate 20-period Donchian channels on daily data
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
     
-    # Calculate pivot and support/resistance levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    range_hl = weekly_high - weekly_low
+    # Upper and lower channels (20-period high/low)
+    upper_channel = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    r4 = pivot + (range_hl * 1.1 / 2)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
-    
-    # Shift by 1 to use previous week's data (avoid look-ahead)
-    pivot = np.roll(pivot, 1)
-    r4 = np.roll(r4, 1)
-    r3 = np.roll(r3, 1)
-    s3 = np.roll(s3, 1)
-    s4 = np.roll(s4, 1)
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    upper_channel = np.roll(upper_channel, 1)
+    lower_channel = np.roll(lower_channel, 1)
     
     # Handle first element
-    if len(pivot) > 1:
-        pivot[0] = pivot[1]
-        r4[0] = r4[1]
-        r3[0] = r3[1]
-        s3[0] = s3[1]
-        s4[0] = s4[1]
+    if len(upper_channel) > 1:
+        upper_channel[0] = upper_channel[1]
+        lower_channel[0] = lower_channel[1]
     else:
-        pivot[0] = 0
-        r4[0] = 0
-        r3[0] = 0
-        s3[0] = 0
-        s4[0] = 0
+        upper_channel[0] = 0
+        lower_channel[0] = 0
     
-    # Align to 1d timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
-    
-    # Trend filter: price vs 50 EMA
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_channel)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
     
+    # ADX filter: ADX > 25 indicates trending market
+    # Calculate ADX components
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        else:
+            plus_dm[i] = 0
+            
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+        else:
+            minus_dm[i] = 0
+            
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Smooth the values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    adx_filter = adx > 25
+    
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_50[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: reversal at R3 or breakout failure at R4
-            if (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or \
-               (high[i] <= r4_aligned[i] and close[i] < r4_aligned[i] * 0.995) or \
-               close[i] < ema_50[i] or not vol_filter[i]:
+            # Exit: price crosses below lower channel or ADX weakens
+            if close[i] < lower_aligned[i] or not adx_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30  # Maintain long
+                signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit conditions: reversal at S3 or breakout failure at S4
-            if (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or \
-               (low[i] >= s4_aligned[i] and close[i] > s4_aligned[i] * 1.005) or \
-               close[i] > ema_50[i] or not vol_filter[i]:
+            # Exit: price crosses above upper channel or ADX weakens
+            if close[i] > upper_aligned[i] or not adx_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30  # Maintain short
+                signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: reversal at S3 or breakout above R4 with volume
-            if ((low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or \
-                (high[i] > r4_aligned[i] and close[i] > r4_aligned[i])) and \
-               close[i] > ema_50[i] and vol_filter[i]:
+            # Long entry: breakout above upper channel with volume and ADX
+            if close[i] > upper_aligned[i] and vol_filter[i] and adx_filter[i]:
                 position = 1
-                signals[i] = 0.30
-            # Short entry: reversal at R3 or breakdown below S4 with volume
-            elif ((high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or \
-                  (low[i] < s4_aligned[i] and close[i] < s4_aligned[i])) and \
-                 close[i] < ema_50[i] and vol_filter[i]:
+                signals[i] = 0.25
+            # Short entry: breakdown below lower channel with volume and ADX
+            elif close[i] < lower_aligned[i] and vol_filter[i] and adx_filter[i]:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
