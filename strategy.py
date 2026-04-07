@@ -3,101 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily donchian channel breakout with weekly ADX trend filter and volume confirmation
-# Uses Donchian(20) breakout for entry signals, weekly ADX(14) to filter for trending markets,
-# and volume spike confirmation to avoid false breakouts. Designed for low trade frequency
-# (target: 15-25 trades/year) to minimize fee drag. Works in bull markets via trend breakouts
-# and in bear markets via breakdowns, with ADX filter preventing trades in sideways markets.
+# Hypothesis: 1h EMA crossover (12/26) with 4h trend filter and daily volatility filter
+# Uses EMA(12)/EMA(26) crossover for entry timing on 1h, 4h EMA(50) for trend direction,
+# and daily ATR(14) for volatility filtering to avoid choppy markets.
+# Designed for low trade frequency (target: 15-37 trades/year) by requiring
+# alignment of 1h momentum with 4h trend and low volatility regime.
+# Works in bull markets via trend-following EMA crossovers and in bear markets
+# by filtering trades to only those aligned with higher timeframe trend.
 
-name = "daily_donchian20_weekly_adx_volume_v1"
-timeframe = "1d"
+name = "ema_crossover_4h_trend_vol_filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Weekly data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily data for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate weekly ADX(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # EMA(12) and EMA(26) for 1h momentum
+    ema12 = pd.Series(close).ewm(span=12, adjust=False).values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False).values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # 4h EMA(50) for trend direction
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume spike detection (daily)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = np.where(volume_ma > 0, volume / volume_ma, 1.0)
-    volume_spike = volume_ratio > 1.5  # 50% above average
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False).values
+    atr_ma_50 = pd.Series(atr_14).ewm(span=50, adjust=False).values
+    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
     
     signals = np.zeros(n)
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(atr_ma_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade in trending markets (ADX > 25)
-        trending = adx_1w_aligned[i] > 25
+        # EMA crossover signal
+        bullish_cross = ema12[i] > ema26[i]
+        bearish_cross = ema12[i] < ema26[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > high_20[i-1]  # Break above 20-day high
-        breakdown_down = close[i] < low_20[i-1]  # Break below 20-day low
+        # 4h trend filter
+        uptrend_4h = close[i] > ema50_4h_aligned[i]
+        downtrend_4h = close[i] < ema50_4h_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = volume_spike[i]
+        # Daily volatility filter: only trade when volatility is below average
+        low_volatility = atr_14[i] < atr_ma_50_aligned[i]
         
-        # Long: bullish breakout with volume in trending market
-        if trending and breakout_up and vol_confirmed:
-            signals[i] = 0.25
-        # Short: bearish breakdown with volume in trending market
-        elif trending and breakdown_down and vol_confirmed:
-            signals[i] = -0.25
+        # Entry conditions: EMA crossover aligned with 4h trend and low volatility
+        if bullish_cross and uptrend_4h and low_volatility:
+            signals[i] = 0.20
+        elif bearish_cross and downtrend_4h and low_volatility:
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
