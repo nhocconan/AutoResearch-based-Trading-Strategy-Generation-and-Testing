@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_ema_volume_v2
-Hypothesis: Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4 with volume confirmation and daily EMA20 trend filter.
-In ranging markets, price tends to revert from R3/S3. In trending markets, breaks of R4/S4 with volume indicate continuation.
-Works in both bull and bear by adapting to market structure via volume and trend filters.
-Target: 12-37 trades/year on 12h with strict entry conditions.
+4h_donchian_breakout_12h_trend_volume_v1
+Hypothesis: Donchian(20) breakout on 4h with 12h EMA20 trend filter and volume confirmation.
+In trending markets, breakouts of the 20-bar high/low with volume and trend alignment
+capture momentum. In ranging markets, the trend filter prevents false breakouts.
+Volume confirmation ensures breakouts are supported by participation.
+Works in both bull and bear by adapting to trend via 12h EMA filter.
+Target: 20-50 trades/year on 4h with strict entry conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_ema_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -26,37 +28,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using classic Camarilla formulas based on previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 12h EMA20 for trend filter
+    ema20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # Pivot point and support/resistance levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 2)
-    r4 = pivot + (range_hl * 1.1)
-    s4 = pivot - (range_hl * 1.1)
-    
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Daily EMA20 for trend filter
-    ema20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Donchian channels (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,53 +49,42 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average
-        vol_spike = volume[i] > (vol_ma[i] * 1.3)
+        # Volume confirmation: current volume > 1.5x average
+        vol_spike = volume[i] > (vol_ma[i] * 1.5)
         
         # Trend filter
-        above_ema20 = close[i] > ema20_1d_aligned[i]
-        below_ema20 = close[i] < ema20_1d_aligned[i]
+        above_ema20 = close[i] > ema20_12h_aligned[i]
+        below_ema20 = close[i] < ema20_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches S3 (mean reversion) or trend turns bearish with volume
-            if close[i] <= s3_aligned[i] or (below_ema20 and vol_spike):
+            # Exit: price closes below Donchian low or trend turns bearish with volume
+            if close[i] < low_min[i] or (below_ema20 and vol_spike):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R3 (mean reversion) or trend turns bullish with volume
-            if close[i] >= r3_aligned[i] or (above_ema20 and vol_spike):
+            # Exit: price closes above Donchian high or trend turns bullish with volume
+            if close[i] > high_max[i] or (above_ema20 and vol_spike):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Fade at R3/S3: sell at R3, buy at S3 in ranging markets
-            # But only if volume confirms and trend is not strong
-            if close[i] >= r3_aligned[i] and vol_spike and not above_ema20:
-                # Potential short at R3 rejection
-                position = -1
-                signals[i] = -0.25
-            elif close[i] <= s3_aligned[i] and vol_spike and not below_ema20:
-                # Potential long at S3 bounce
+            # Breakout entry with volume and trend confirmation
+            if close[i] > high_max[i] and vol_spike and above_ema20:
+                # Bullish breakout with volume and uptrend
                 position = 1
-                signals[i] = 0.25
-            # Breakout continuation at R4/S4 with volume and trend
-            elif close[i] > r4_aligned[i] and vol_spike and above_ema20:
-                # Bullish breakout with volume and trend
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < s4_aligned[i] and vol_spike and below_ema20:
-                # Bearish breakout with volume and trend
+                signals[i] = 0.30
+            elif close[i] < low_min[i] and vol_spike and below_ema20:
+                # Bearish breakout with volume and downtrend
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
