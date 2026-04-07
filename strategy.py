@@ -1,19 +1,50 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_12h_trend_volume_v1
-Hypothesis: Camarilla pivot levels from 12h act as institutional support/resistance.
-Price retesting these levels with volume and 12h trend alignment offers high-probability entries.
-In bull markets, buy near S3/S4 with trend up; in bear markets, sell near R3/R4 with trend down.
-Targets 20-50 trades/year by requiring confluence of pivot retest, volume, and trend.
+6h_supertrend_1w_trend_volume_v1
+Hypothesis: Supertrend on 1w defines major trend (bull/bear), 6h Supertrend provides entry timing with volume confirmation.
+In bull markets (1w Supertrend up), go long when 6h Supertrend flips up with volume; in bear markets (1w Supertrend down), go short when 6h Supertrend flips down with volume.
+Uses ATR-based trailing stops via Supertrend logic. Targets 15-30 trades/year by requiring weekly trend alignment and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_12h_trend_volume_v1"
-timeframe = "4h"
+name = "6h_supertrend_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator. Returns (supertrend, direction) where direction: 1=uptrend, -1=downtrend"""
+    hl2 = (high + low) / 2
+    atr = pd.Series(high - low).rolling(window=period, min_periods=period).mean()
+    atr = pd.Series(np.maximum(high - low, np.maximum(abs(high - pd.Series(close).shift(1)), abs(low - pd.Series(close).shift(1))))).rolling(window=period, min_periods=period).mean()
+    
+    upperband = hl2 + multiplier * atr
+    lowerband = hl2 - multiplier * atr
+    
+    supertrend = np.full_like(close, np.nan, dtype=float)
+    direction = np.full_like(close, 1, dtype=float)  # start with uptrend
+    
+    for i in range(period, len(close)):
+        if close[i-1] > supertrend[i-1]:
+            supertrend[i] = max(lowerband[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upperband[i], supertrend[i-1])
+        
+        if close[i] > upperband[i-1]:
+            direction[i] = 1
+        elif close[i] < lowerband[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+        if direction[i] == 1 and supertrend[i] < supertrend[i-1]:
+            supertrend[i] = upperband[i]
+        if direction[i] == -1 and supertrend[i] > supertrend[i-1]:
+            supertrend[i] = lowerband[i]
+            
+    return supertrend, direction
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,36 +57,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h OHLC for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 1w Supertrend for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 12h bar
-    # H, L, C from previous completed 12h bar
-    h_12h = df_12h['high'].values
-    l_12h = df_12h['low'].values
-    c_12h = df_12h['close'].values
+    st_1w, dir_1w = supertrend(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, period=10, multiplier=3.0)
+    st_1w_6h = align_htf_to_ltf(prices, df_1w, st_1w)
+    dir_1w_6h = align_htf_to_ltf(prices, df_1w, dir_1w)
     
-    # Camarilla multipliers
-    # Resistance levels: R3 = C + (H-L)*1.1/2, R4 = C + (H-L)*1.1
-    # Support levels: S3 = C - (H-L)*1.1/2, S4 = C - (H-L)*1.1
-    r3_12h = c_12h + (h_12h - l_12h) * 1.1 / 2
-    r4_12h = c_12h + (h_12h - l_12h) * 1.1
-    s3_12h = c_12h - (h_12h - l_12h) * 1.1 / 2
-    s4_12h = c_12h - (h_12h - l_12h) * 1.1
+    # 6h Supertrend for entry timing
+    st_6h, dir_6h = supertrend(high, low, close, period=10, multiplier=3.0)
     
-    # Align to 4h (previous 12h bar's levels act as support/resistance)
-    r3_4h = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_4h = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s3_4h = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_4h = align_htf_to_ltf(prices, df_12h, s4_12h)
-    
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # 20-period volume average
+    # 20-period SMA for volume average
     vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -63,11 +77,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema50_4h[i]) or 
-            np.isnan(r3_4h[i]) or 
-            np.isnan(r4_4h[i]) or 
-            np.isnan(s3_4h[i]) or 
-            np.isnan(s4_4h[i]) or 
+        if (np.isnan(st_1w_6h[i]) or np.isnan(dir_1w_6h[i]) or 
+            np.isnan(st_6h[i]) or np.isnan(dir_6h[i]) or 
             np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
@@ -76,33 +87,30 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 OR trend turns down
-            if close[i] < s3_4h[i] or close[i] < ema50_4h[i]:
+            # Exit: 6h Supertrend flips down OR weekly trend turns down
+            if dir_6h[i] == -1 or dir_1w_6h[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 OR trend turns up
-            if close[i] > r3_4h[i] or close[i] > ema50_4h[i]:
+            # Exit: 6h Supertrend flips up OR weekly trend turns up
+            if dir_6h[i] == 1 or dir_1w_6h[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price near S3/S4 (within 0.5%) + volume + uptrend
-            near_s3 = abs(close[i] - s3_4h[i]) / s3_4h[i] < 0.005
-            near_s4 = abs(close[i] - s4_4h[i]) / s4_4h[i] < 0.005
-            if ((near_s3 or near_s4) and 
+            # Long: 6h Supertrend flips up + volume + weekly uptrend
+            if (dir_6h[i] == 1 and dir_6h[i-1] == -1 and  # fresh flip up
                 vol_confirm and 
-                close[i] > ema50_4h[i]):
+                dir_1w_6h[i] == 1):
                 position = 1
                 signals[i] = 0.25
-            # Short: price near R3/R4 (within 0.5%) + volume + downtrend
-            elif ((abs(close[i] - r3_4h[i]) / r3_4h[i] < 0.005 or 
-                   abs(close[i] - r4_4h[i]) / r4_4h[i] < 0.005) and 
+            # Short: 6h Supertrend flips down + volume + weekly downtrend
+            elif (dir_6h[i] == -1 and dir_6h[i-1] == 1 and  # fresh flip down
                   vol_confirm and 
-                  close[i] < ema50_4h[i]):
+                  dir_1w_6h[i] == -1):
                 position = -1
                 signals[i] = -0.25
     
