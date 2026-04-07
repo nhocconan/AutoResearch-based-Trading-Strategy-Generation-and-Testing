@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ADX filter
-# Hypothesis: Donchian breakouts capture momentum moves; volume confirms institutional participation;
-# ADX filters for trending regimes to avoid chop. Works in bull via upward breakouts, in bear via
-# downward breakdowns. Target: 12-37 trades/year to minimize fee drag.
-name = "12h_donchian20_volume_adx_v2"
-timeframe = "12h"
+# Strategy: 4h Donchian breakout with daily volume confirmation and ATR-based exit
+# Hypothesis: Donchian breakouts capture volatility expansion; volume confirms institutional participation.
+# Works in bull via upward breakouts, in bear via downward breakdowns. ATR adapts to volatility regime.
+# Target: 20-50 trades/year to minimize fee drag.
+name = "4h_donchian20_1d_volume_atr_exit_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume confirmation and ADX
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -32,73 +32,54 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate daily ADX(14)
-    plus_dm = np.zeros(len(df_1d))
-    minus_dm = np.zeros(len(df_1d))
-    tr = np.zeros(len(df_1d))
-    for i in range(1, len(df_1d)):
-        high_diff = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
-        low_diff = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(
-            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-        )
-    tr[0] = max(
-        df_1d['high'].iloc[0] - df_1d['low'].iloc[0],
-        abs(df_1d['high'].iloc[0] - df_1d['close'].iloc[0]),
-        abs(df_1d['low'].iloc[0] - df_1d['close'].iloc[0])
-    )
-    
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 12h Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate ATR(12) for exit condition
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after Donchian period
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
+        # Volume confirmation: current 4h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
-        # ADX filter: trending market (ADX > 25)
-        adx_filter = adx_aligned[i] > 25
+        
+        # Calculate Donchian channels (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.max(high[:i])
+            lowest_low = np.min(low[:i])
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band
-            if close[i] < donch_low[i]:
+            # Exit: price closes below entry - ATR (mean reversion signal)
+            if close[i] < (prices['open'].iloc[i] - atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band
-            if close[i] > donch_high[i]:
+            # Exit: price closes above entry + ATR (mean reversion signal)
+            if close[i] > (prices['open'].iloc[i] + atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price closes above Donchian upper band + volume + ADX
-            if close[i] > donch_high[i] and vol_confirm and adx_filter:
+            # Enter long: price breaks above Donchian high + volume confirmation
+            if close[i] > highest_high and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian lower band + volume + ADX
-            elif close[i] < donch_low[i] and vol_confirm and adx_filter:
+            # Enter short: price breaks below Donchian low + volume confirmation
+            elif close[i] < lowest_low and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
