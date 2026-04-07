@@ -1,16 +1,55 @@
 #!/usr/bin/env python3
 """
-4h_volatility_breakout_1d_trend_v1
-Hypothesis: On 4-hour timeframe, breakout from ATR-based volatility channels (upper/lower bands = close ± ATR*multiplier) with 1-day trend filter (close > SMA50 for long, close < SMA50 for short) and volume confirmation (volume > 20-period average). Captures explosive moves in both bull and bear regimes while avoiding whipsaws in sideways markets. Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+12h_supertrend_1d_trend_v1
+Hypothesis: On 12-hour timeframe, use Supertrend indicator with 1-day trend filter to capture medium-term trends while avoiding whipsaws. Supertrend adapts to volatility via ATR, providing dynamic support/resistance. The 1-day trend filter ensures we only trade in the direction of the higher timeframe trend, improving win rate in both bull and bear markets. Designed for 50-150 total trades over 4 years (~12-37/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_1d_trend_v1"
-timeframe = "4h"
+name = "12h_supertrend_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_atr(high, low, close, period):
+    """Calculate Average True Range"""
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]  # First TR is just high-low
+    atr = np.zeros_like(tr)
+    atr[:period] = np.nan
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
+
+def supertrend(high, low, close, period=10, multiplier=3):
+    """Calculate Supertrend indicator"""
+    atr = calculate_atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = np.full_like(close, np.nan, dtype=float)
+    direction = np.full_like(close, np.nan, dtype=float)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close)):
+        if close[i] > supertrend[i-1]:
+            direction[i] = 1
+        else:
+            direction[i] = -1
+            
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+            
+    return supertrend, direction
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,61 +62,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for volatility channels (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 12h Supertrend
+    st_period = 10
+    st_multiplier = 3
+    supertrend_val, st_direction = supertrend(high, low, close, st_period, st_multiplier)
     
-    # Volatility channels: close ± ATR * multiplier
-    atr_multiplier = 2.5
-    upper_band = close + atr * atr_multiplier
-    lower_band = close - atr * atr_multiplier
+    # 1d trend filter (using EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume filter: 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # 1-day trend filter: SMA50
-    close_series = pd.Series(close)
-    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(max(st_period, 50, 20), n):
         # Skip if data not available
-        if (np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(sma_50[i])):
+        if (np.isnan(supertrend_val[i]) or np.isnan(st_direction[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Volume confirmation
+        # Volume confirmation: require volume above average
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below lower band OR trend turns bearish
-            if close[i] < lower_band[i] or close[i] < sma_50[i]:
+            # Exit: Supertrend turns bearish OR 1d trend turns bearish
+            if st_direction[i] == -1 or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper band OR trend turns bullish
-            if close[i] > upper_band[i] or close[i] > sma_50[i]:
+            # Exit: Supertrend turns bullish OR 1d trend turns bullish
+            if st_direction[i] == 1 or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Breakout long: price closes above upper band with bullish trend
-                if close[i] > upper_band[i] and close[i] > sma_50[i]:
+                # Bullish entry: Supertrend bullish AND price above 1d EMA50
+                if st_direction[i] == 1 and close[i] > ema_50_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Breakout short: price closes below lower band with bearish trend
-                elif close[i] < lower_band[i] and close[i] < sma_50[i]:
+                # Bearish entry: Supertrend bearish AND price below 1d EMA50
+                elif st_direction[i] == -1 and close[i] < ema_50_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
