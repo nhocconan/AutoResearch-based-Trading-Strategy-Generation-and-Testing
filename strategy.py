@@ -1,134 +1,142 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_ema_volume_v3
-Hypothesis: On 4h timeframe, use Camarilla pivot levels from 1d for entry signals, filtered by 1d EMA trend and volume confirmation.
-- In uptrend (price > 1d EMA50): long at S3 (support), exit at S4 (breakdown) or trend reversal
-- In downtrend (price < 1d EMA50): short at R3 (resistance), exit at R4 (breakout) or trend reversal
-Volume confirms genuine tests of pivot levels. This strategy fades at S3/R3 in ranging markets
-and captures breakouts at S4/R4 in trending markets, adapting to both bull and bear regimes.
-Target: 20-50 trades/year (~80-200 total over 4 years).
-Enhanced with tighter entry conditions to reduce overtrading and improve win rate.
+6h_adaptive_volume_profile_v1
+Hypothesis: On 6h timeframe, use volume profile to identify high-volume nodes (HVN) as support/resistance.
+In uptrend (price > 1w EMA200): long when price pulls back to HVN with volume confirmation.
+In downtrend (price < 1w EMA200): short when price rallies to HVN with volume confirmation.
+Uses volume-weighted average price (VWAP) over 20 periods to define fair value, and trades mean reversion
+to HVN levels identified from 1d volume profile. Designed to work in both bull (buy dips) and bear (sell rallies)
+markets by adapting to the higher timeframe trend.
+Target: 12-37 trades/year (~50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_ema_volume_v3"
-timeframe = "4h"
+name = "6h_adaptive_volume_profile_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    volume = volumes = prices['volume'].values
     
-    # 1d data for pivot calculation and trend filter
+    # 1d data for volume profile
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
+    # 1w EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    ema_200 = df_1w['close'].ewm(span=200, adjust=False).mean()
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200.values)
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    # Calculate volume profile from 1d data (previous 20 days)
+    # We'll use the volume-weighted average price as our fair value reference
+    # and identify high volume nodes
+    def calculate_vwap(high, low, close, volume, window):
+        """Calculate VWAP over a window"""
+        typical_price = (high + low + close) / 3.0
+        vwap_num = np.convolve(typical_price * volume, np.ones(window), 'same')
+        vwap_den = np.convolve(volume, np.ones(window), 'same')
+        # Avoid division by zero
+        vwap_den = np.where(vwap_den == 0, 1, vwap_den)
+        return vwap_num / vwap_den
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1)
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
+    # Calculate 20-period VWAP on 1d data
+    vwap_20d = calculate_vwap(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        df_1d['volume'].values,
+        20
+    )
     
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Identify high volume nodes: days where volume > 1.5x 20-day average volume
+    vol_ma_20d = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
+    high_volume_days = df_1d['volume'].values > 1.5 * vol_ma_20d
     
-    # Camarilla levels
-    # Resistance levels
-    r1 = pivot + (range_val * 1.1 / 12)
-    r2 = pivot + (range_val * 1.1 / 6)
-    r3 = pivot + (range_val * 1.1 / 4)
-    r4 = pivot + (range_val * 1.1 / 2)
-    # Support levels
-    s1 = pivot - (range_val * 1.1 / 12)
-    s2 = pivot - (range_val * 1.1 / 6)
-    s3 = pivot - (range_val * 1.1 / 4)
-    s4 = pivot - (range_val * 1.1 / 2)
+    # For each high volume day, the typical price is a potential HVN
+    hvn_prices = np.where(
+        high_volume_days,
+        (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0,
+        np.nan
+    )
     
-    # Align all levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
+    # We'll use the most recent significant HVN as our reference
+    # For simplicity, we'll use the VWAP itself as dynamic fair value
+    # and look for deviations from it
+    vwap_20d_aligned = align_htf_to_ltf(prices, df_1d, vwap_20d)
     
-    # Volume confirmation (6-period average on 4h = 1 day)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # 6-period VWAP on 6h data for entry timing
+    typical_price_6h = (high + low + close) / 3.0
+    vwap_num = np.convolve(typical_price_6h * volume, np.ones(6), 'same')
+    vwap_den = np.convolve(volume, np.ones(6), 'same')
+    vwap_den = np.where(vwap_den == 0, 1, vwap_den)
+    vwap_6h = vwap_num / vwap_den
+    
+    # Standard deviation of price from VWAP for volatility normalization
+    price_dev = typical_price_6h - vwap_6h
+    # Use 20-period rolling std dev of price deviation
+    price_dev_series = pd.Series(price_dev)
+    dev_std = price_dev_series.rolling(window=20, min_periods=20).std().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(vwap_20d_aligned[i]) or
+            np.isnan(vwap_6h[i]) or np.isnan(dev_std[i]) or dev_std[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_ma_6h = np.convolve(volume, np.ones(6), 'same')[i] if i >= 5 else volume[i]
+        vol_ma_6h = max(vol_ma_6h, 1e-10)  # Avoid division by zero
+        vol_confirm = volume[i] > 1.3 * vol_ma_6h
+        
+        # Calculate z-score of price deviation from VWAP
+        if dev_std[i] > 0:
+            z_score = price_dev[i] / dev_std[i]
+        else:
+            z_score = 0
         
         if position == 1:  # Long position
-            # Exit: price breaks below S4 (breakdown) or trend turns bearish
-            if close[i] < s4_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price returns to VWAP (mean reversion) or trend turns bearish
+            if z_score >= -0.1 or close[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R4 (breakout) or trend turns bullish
-            if close[i] > r4_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price returns to VWAP (mean reversion) or trend turns bullish
+            if z_score <= 0.1 or close[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price tests S3 with volume in uptrend (tighter condition)
-            if (close[i] <= s3_aligned[i] * 1.002 and close[i] >= s3_aligned[i] * 0.998 and  # near S3
-                vol_confirm and 
-                close[i] > ema_50_aligned[i] * 1.001):  # stronger uptrend filter
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price tests R3 with volume in downtrend (tighter condition)
-            elif (close[i] >= r3_aligned[i] * 0.998 and close[i] <= r3_aligned[i] * 1.002 and  # near R3
-                  vol_confirm and 
-                  close[i] < ema_50_aligned[i] * 0.999):  # stronger downtrend filter
-                position = -1
-                signals[i] = -0.25
-            # Long breakout: price breaks above R4 with volume in uptrend
-            elif (close[i] > r4_aligned[i] and
-                  vol_confirm and 
-                  close[i] > ema_50_aligned[i] * 1.001):  # stronger uptrend filter
-                position = 1
-                signals[i] = 0.25
-            # Short breakdown: price breaks below S4 with volume in downtrend
-            elif (close[i] < s4_aligned[i] and
-                  vol_confirm and 
-                  close[i] < ema_50_aligned[i] * 0.999):  # stronger downtrend filter
-                position = -1
-                signals[i] = -0.25
+            # Only trade in direction of higher timeframe trend
+            if close[i] > ema_200_aligned[i]:  # Uptrend
+                # Long when price deviates significantly below VWAP (oversold)
+                if z_score <= -1.5 and vol_confirm:
+                    position = 1
+                    signals[i] = 0.25
+            else:  # Downtrend
+                # Short when price deviates significantly above VWAP (overbought)
+                if z_score >= 1.5 and vol_confirm:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
