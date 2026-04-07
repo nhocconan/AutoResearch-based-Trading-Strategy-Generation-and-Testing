@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_cci_mean_reversion_1d_trend_volume_v1
-Hypothesis: CCI(20) identifies overbought/oversold conditions on 4h. 
-Long when CCI < -100 and price above 1d EMA50 (oversold + uptrend).
-Short when CCI > 100 and price below 1d EMA50 (overbought + downtrend).
-Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend.
-Target: 20-40 trades/year.
+12h_trix_signal_1w_trend_volume_v1
+Hypothesis: TRIX(15) on 12h captures momentum; long when TRIX > 0 and price above 1w EMA50,
+short when TRIX < 0 and price below 1w EMA50. Volume confirmation ensures momentum is real.
+Weekly trend filter adapts to bull/bear markets. Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_mean_reversion_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_trix_signal_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,63 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
+    # 1w EMA50 for trend filter
+    ema_50 = df_1w['close'].ewm(span=50, adjust=False).mean()
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50.values)
     
-    # CCI(20) on 4h
-    typical_price = (high + low + close) / 3.0
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
-    cci = (typical_price - tp_mean) / (0.015 * tp_std)
+    # TRIX(15) on 12h: triple EMA of percent change
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - previous value
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.pct_change(periods=1) * 100  # as percentage
     
-    # Volume confirmation (20-period average on 4h)
+    # Volume confirmation (20-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(15, n):
         # Skip if required data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(trix.iloc[i]) if hasattr(trix, 'iloc') else np.isnan(trix[i]) or 
+            np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        trix_val = trix.iloc[i] if hasattr(trix, 'iloc') else trix[i]
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: CCI crosses above -50 or price breaks below EMA50
-            if cci[i] > -50 or close[i] < ema_50_aligned[i]:
+            # Exit: TRIX turns negative or price breaks below weekly EMA50
+            if trix_val < 0 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: CCI crosses below 50 or price breaks above EMA50
-            if cci[i] < 50 or close[i] > ema_50_aligned[i]:
+            # Exit: TRIX turns positive or price breaks above weekly EMA50
+            if trix_val > 0 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI < -100 with volume and price above EMA50
-            if (cci[i] < -100 and vol_confirm and 
+            # Long entry: TRIX positive with volume and price above weekly EMA50
+            if (trix_val > 0 and vol_confirm and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI > 100 with volume and price below EMA50
-            elif (cci[i] > 100 and vol_confirm and 
+            # Short entry: TRIX negative with volume and price below weekly EMA50
+            elif (trix_val < 0 and vol_confirm and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
