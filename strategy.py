@@ -1,20 +1,21 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_cci_momentum_1d_trend_volume_v1
-Hypothesis: CCI(20) captures momentum on 6h. Long when CCI > 100 and price above 1d EMA200 (uptrend). Short when CCI < -100 and price below 1d EMA200 (downtrend). Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend. Target: 15-30 trades/year.
+4h_donchian_breakout_1w_trend_volume_v1
+Hypothesis: Breakouts of 20-period Donchian channels on 4h, filtered by 1-week EMA200 trend and volume confirmation, capture trending moves in both bull and bear markets. Volatility filter avoids choppy periods. Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_momentum_1d_trend_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1w_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -23,64 +24,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA200 for trend filter
-    ema_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
+    # 1w EMA200 for trend filter
+    ema_200 = df_1w['close'].ewm(span=200, adjust=False).mean()
     
-    # Align 1d EMA200 to 6h timeframe
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200.values)
+    # Align 1w EMA200 to 4h timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200.values)
     
-    # CCI(20) on 6h: (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
-    tp = (high + low + close) / 3.0
-    tp_series = pd.Series(tp)
-    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
-    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (tp - sma_tp.values) / (0.015 * mad.values)
-    cci = np.nan_to_num(cci, nan=0.0)
+    # Donchian Channel (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max()
+    lower = low_series.rolling(window=20, min_periods=20).min()
     
-    # Volume confirmation (20-period average on 6h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Donchian breakout signals
+    breakout_up = (close > upper.shift(1)).astype(float)  # Break above prior upper band
+    breakout_dn = (close < lower.shift(1)).astype(float)  # Break below prior lower band
+    
+    # Volatility filter: ATR(14) < 50th percentile of ATR(50) to avoid chop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    atr_median = pd.Series(atr).rolling(window=50, min_periods=50).median()
+    vol_filter = (atr < atr_median).astype(float)  # Low volatility regime
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = (volume > 1.5 * vol_ma).astype(float)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma[i]) or 
+            vol_ma[i] <= 0 or np.isnan(atr[i]) or np.isnan(atr_median[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
-        
         if position == 1:  # Long position
-            # Exit: CCI drops below 100 or price breaks below EMA200
-            if cci[i] < 100 or close[i] < ema_200_aligned[i]:
+            # Exit: price breaks below lower Donchian band or trend fails
+            if close[i] < lower.iloc[i] or close[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: CCI rises above -100 or price breaks above EMA200
-            if cci[i] > -100 or close[i] > ema_200_aligned[i]:
+            # Exit: price breaks above upper Donchian band or trend fails
+            if close[i] > upper.iloc[i] or close[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI > 100, with volume and price above EMA200
-            if (cci[i] > 100 and vol_confirm and 
-                close[i] > ema_200_aligned[i]):
+            # Long entry: Donchian breakout up, with trend, volume, and low volatility
+            if (breakout_up.iloc[i] and 
+                close[i] > ema_200_aligned[i] and 
+                vol_confirm.iloc[i] and 
+                vol_filter.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI < -100, with volume and price below EMA200
-            elif (cci[i] < -100 and vol_confirm and 
-                  close[i] < ema_200_aligned[i]):
+            # Short entry: Donchian breakout down, with trend, volume, and low volatility
+            elif (breakout_dn.iloc[i] and 
+                  close[i] < ema_200_aligned[i] and 
+                  vol_confirm.iloc[i] and 
+                  vol_filter.iloc[i]):
                 position = -1
                 signals[i] = -0.25
     
