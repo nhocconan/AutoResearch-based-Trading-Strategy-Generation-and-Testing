@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: Daily 20-period Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-# Hypothesis: Daily Donchian(20) breakouts aligned with weekly trend (price > weekly SMA50) and volume > 1.5x average capture sustained moves in both bull and bear markets.
-# Weekly trend filter reduces whipsaws, volume confirmation ensures breakout strength.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+# Strategy: 6h Daily Williams %R + Volume Spike Reversal
+# Hypothesis: In 6h timeframe, extreme Williams %R readings (< -80 or > -20) 
+# combined with volume spikes (>2x 20-period average) signal exhaustion and 
+# impending reversals. Uses daily Williams %R for higher timeframe context to 
+# avoid counter-trend traps. Works in both bull/bear markets by fading extremes 
+# rather than chasing trends. Target: 20-35 trades/year (80-140 total over 4 years).
 
-name = "daily_donchian20_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_daily_williamsr_volume_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,65 +25,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get daily data for Williams %R
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Weekly SMA50 for trend filter
-    weekly_close = df_weekly['close'].values
-    weekly_close_series = pd.Series(weekly_close)
-    weekly_sma50 = weekly_close_series.rolling(window=50, min_periods=50).mean().values
+    # Calculate Williams %R on daily data (14-period)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Align weekly SMA50 to daily
-    weekly_sma50_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma50)
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
     
-    # Daily Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where((highest_high - lowest_low) != 0,
+                          ((highest_high - daily_close) / (highest_high - lowest_low)) * -100, 
+                          -50)  # Neutral when range is zero
     
-    # Volume filter: volume > 1.5x 20-day average
+    # Williams %R signals: > -20 = overbought, < -80 = oversold
+    williams_r_overbought = williams_r > -20
+    williams_r_oversold = williams_r < -80
+    
+    # Align daily Williams %R signals to 6h timeframe
+    williams_r_overbought_aligned = align_htf_to_ltf(prices, df_daily, williams_r_overbought.astype(float))
+    williams_r_oversold_aligned = align_htf_to_ltf(prices, df_daily, williams_r_oversold.astype(float))
+    
+    # Volume filter on 6h: volume > 2x 20-period average (strong spike)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(weekly_sma50_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r_overbought_aligned[i]) or 
+            np.isnan(williams_r_oversold_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls back below Donchian low or weekly trend turns bearish
-            if close[i] < donchian_low[i] or close[i] < weekly_sma50_aligned[i]:
+            # Exit: Williams %R returns from oversold or volume spike fades
+            if williams_r_oversold_aligned[i] == False or volume_spike[i] == False:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises back above Donchian high or weekly trend turns bullish
-            if close[i] > donchian_high[i] or close[i] > weekly_sma50_aligned[i]:
+            # Exit: Williams %R returns from overbought or volume spike fades
+            if williams_r_overbought_aligned[i] == False or volume_spike[i] == False:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Weekly trend filter: price above weekly SMA50 for long, below for short
-            if close[i] > weekly_sma50_aligned[i]:
-                # Long entry: breakout above Donchian high with volume
-                if high[i] > donchian_high[i] and close[i] > donchian_high[i] and vol_filter[i]:
-                    position = 1
-                    signals[i] = 0.25
-            elif close[i] < weekly_sma50_aligned[i]:
-                # Short entry: breakdown below Donchian low with volume
-                if low[i] < donchian_low[i] and close[i] < donchian_low[i] and vol_filter[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Fade extremes with volume confirmation
+            if williams_r_overbought_aligned[i] and volume_spike[i]:
+                # Short at daily overbought + volume spike (expecting reversal down)
+                position = -1
+                signals[i] = -0.25
+            elif williams_r_oversold_aligned[i] and volume_spike[i]:
+                # Long at daily oversold + volume spike (expecting reversal up)
+                position = 1
+                signals[i] = 0.25
     
     return signals
