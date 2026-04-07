@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_ema_crossover_4h1d_volume_v1
-Hypothesis: On 1-hour timeframe, use EMA crossover (fast 12, slow 26) for entry signals, 
-filtered by 4h EMA trend direction and daily volume confirmation. Exit when price 
-reverses across the fast EMA or volume confirmation fails. 
-Designed for moderate frequency (15-37 trades/year) with trend-following edge in both bull and bear markets.
+4h_donchian_20_1d_trend_volume_v6
+Hypothesis: On 4-hour timeframe, use Donchian channel (20) breakout with 1-day trend filter and volume confirmation.
+Enter long when price breaks above Donchian upper band with price above 1-day EMA(50) and volume > 1.5x average.
+Enter short when price breaks below Donchian lower band with price below 1-day EMA(50) and volume > 1.5x average.
+Exit when price touches opposite Donchian band or trend reverses.
+Designed for low frequency (20-50 trades/year) to minimize fee drag while capturing strong breakouts with trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_ema_crossover_4h1d_volume_v1"
-timeframe = "1h"
+name = "4h_donchian_20_1d_trend_volume_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,70 +27,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate fast and slow EMA on 1h
-    ema_fast = pd.Series(close).ewm(span=12, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=26, adjust=False).mean().values
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA trend (21-period)
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Get daily data for volume filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-day average volume
-    vol_20d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_20d)
+    # Calculate daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 20-period average volume for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(26, n):  # Start after slow EMA warmup
-        # Skip if 4h trend or daily volume not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(vol_20d_aligned[i]):
+    for i in range(20, n):  # Start after Donchian warmup
+        # Skip if daily EMA not available
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(vol_avg[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        vol_confirm = volume[i] > 1.5 * vol_20d_aligned[i]
-        
-        # EMA crossover signals
-        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
         if position == 1:  # Long position
-            # Exit when EMA crosses down OR volume confirmation fails
-            if ema_cross_down or not vol_confirm:
+            # Exit when price touches or goes below lower Donchian band OR trend turns bearish
+            if close[i] <= donchian_lower[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when EMA crosses up OR volume confirmation fails
-            if ema_cross_up or not vol_confirm:
+            # Exit when price touches or goes above upper Donchian band OR trend turns bullish
+            if close[i] >= donchian_upper[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA crosses up, price above 4h EMA (uptrend), with volume confirmation
-            long_entry = ema_cross_up and (close[i] > ema_4h_aligned[i]) and vol_confirm
-            # Short entry: EMA crosses down, price below 4h EMA (downtrend), with volume confirmation
-            short_entry = ema_cross_down and (close[i] < ema_4h_aligned[i]) and vol_confirm
+            # Long entry: price breaks above upper Donchian band with price above 1-day EMA(50) and volume confirmation
+            long_entry = (close[i] > donchian_upper[i]) and (close[i] > ema_50_1d_aligned[i]) and vol_confirm
+            # Short entry: price breaks below lower Donchian band with price below 1-day EMA(50) and volume confirmation
+            short_entry = (close[i] < donchian_lower[i]) and (close[i] < ema_50_1d_aligned[i]) and vol_confirm
             
             if long_entry:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
