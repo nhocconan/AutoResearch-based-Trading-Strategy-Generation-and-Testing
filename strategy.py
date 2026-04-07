@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_volume_price_action_v1
-Hypothesis: On 4h timeframe, use price action near swing highs/lows with volume confirmation and ATR filter. Enter long when price makes higher low with volume > 1.5x average; enter short when price makes lower high with volume > 1.5x average. Exit on opposite signal or ATR-based stop. Works in bull/bear via price action structure. Targets 20-40 trades/year to minimize fee drag.
+4h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 4h timeframe, use daily Camarilla pivot levels with volume confirmation. 
+Enter long when price breaks above H3 with volume > 1.5x average; enter short when price breaks below L3 with volume > 1.5x average. 
+Exit on opposite signal or when price returns to Pivot level. Works in bull/bear via mean reversion at extreme levels. 
+Targets 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_price_action_v1"
+name = "4h_camarilla_pivot_1d_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,16 +36,35 @@ def generate_signals(prices):
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Swing points: higher low and lower high
-    # Higher low: current low > previous low AND previous low < low before that
-    hl = np.zeros(n, dtype=bool)
-    hh = np.zeros(n, dtype=bool)  # lower high: current high < previous high AND previous high > high before that
+    # Get daily data for Camarilla pivots (calculate once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    for i in range(2, n):
-        if low[i] > low[i-1] and low[i-1] < low[i-2]:
-            hl[i] = True
-        if high[i] < high[i-1] and high[i-1] > high[i-2]:
-            hh[i] = True
+    # Calculate Camarilla levels for each day: based on previous day's OHLC
+    # H4 = Close + 1.5*(High-Low), H3 = Close + 1.0*(High-Low), etc.
+    # L3 = Close - 1.0*(High-Low), L4 = Close - 1.5*(High-Low)
+    # Pivot = (High + Low + Close)/3
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate pivot levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels
+    H3 = pivot + 1.0 * range_val
+    L3 = pivot - 1.0 * range_val
+    H4 = pivot + 1.5 * range_val
+    L4 = pivot - 1.5 * range_val
+    
+    # Align to 4h timeframe (shifted by 1 day to avoid look-ahead)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -50,7 +72,8 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(atr[i]) or atr[i] <= 0 or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -60,12 +83,11 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit on short signal (lower high with volume)
-            if hh[i] and vol_confirm:
+            # Exit on short signal (price breaks below L3 with volume)
+            if close[i] < L3_aligned[i] and vol_confirm:
                 exit_long = True
-            # Exit on ATR-based stop: price drops 2*ATR from entry
-            # Track entry price implicitly through position holding
-            elif i > 20 and close[i] < close[i-1] - 2.0 * atr[i]:
+            # Exit when price returns to pivot level (mean reversion)
+            elif abs(close[i] - pivot_aligned[i]) < 0.5 * atr[i]:
                 exit_long = True
             
             if exit_long:
@@ -77,11 +99,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit on long signal (higher low with volume)
-            if hl[i] and vol_confirm:
+            # Exit on long signal (price breaks above H3 with volume)
+            if close[i] > H3_aligned[i] and vol_confirm:
                 exit_short = True
-            # Exit on ATR-based stop: price rises 2*ATR from entry
-            elif i > 20 and close[i] > close[i-1] + 2.0 * atr[i]:
+            # Exit when price returns to pivot level (mean reversion)
+            elif abs(close[i] - pivot_aligned[i]) < 0.5 * atr[i]:
                 exit_short = True
             
             if exit_short:
@@ -90,11 +112,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: higher low with volume confirmation
-            long_entry = hl[i] and vol_confirm
+            # Long entry: price breaks above H3 with volume confirmation
+            long_entry = close[i] > H3_aligned[i] and vol_confirm
             
-            # Short entry: lower high with volume confirmation
-            short_entry = hh[i] and vol_confirm
+            # Short entry: price breaks below L3 with volume confirmation
+            short_entry = close[i] < L3_aligned[i] and vol_confirm
             
             if long_entry:
                 position = 1
