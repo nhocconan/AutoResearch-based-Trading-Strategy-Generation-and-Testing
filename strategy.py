@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(2) mean reversion with 4-hour EMA50 trend filter and volume confirmation
-# Long when RSI(2) < 10, price > 4h EMA50 (uptrend), and volume > 1.5x 1h average volume
-# Short when RSI(2) > 90, price < 4h EMA50 (downtrend), and volume > 1.5x 1h average volume
-# Exit when RSI(2) > 50 (long) or < 50 (short) or trend reverses
-# Stoploss at 2.0 * ATR(14)
-# Position size: 0.20 (20% of capital)
-# Uses 4h EMA50 for trend filter and 1h volume average for confirmation
-# Target: 75-150 total trades over 4 years (19-38/year)
+# Hypothesis: 6-hour Donchian(20) breakout with 1-week EMA200 trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band, weekly close > weekly EMA200 (uptrend), and volume > 2x 6h average volume
+# Short when price breaks below 6h Donchian lower band, weekly close < weekly EMA200 (downtrend), and volume > 2x 6h average volume
+# Exit when trend reverses (weekly close crosses EMA200) or opposite breakout occurs
+# Stoploss at 2.5 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses weekly EMA200 for trend filter and 6h volume average for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1h_rsi2_4h_ema50_vol_v1"
-timeframe = "1h"
+name = "6h_donchian20_1w_ema200_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,26 +27,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(2) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/2, adjust=False).mean()
-    loss_ma = pd.Series(loss).ewm(alpha=1/2, adjust=False).mean()
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 6h data for Donchian channels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # 1h volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h Donchian(20) channels
+    high_series = pd.Series(high_6h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_6h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian bands to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
+    
+    # 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=200, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # 6h volume average for confirmation
+    volume_6h = df_6h['volume'].values
+    volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -63,54 +74,55 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_6h_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: RSI > 50 or trend reverses (price below EMA50)
-            elif rsi[i] > 50 or close[i] < ema_4h_aligned[i]:
+            # Exit: trend reverses (price below weekly EMA200) or breaks below lower band
+            elif close[i] < ema_1w_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: RSI < 50 or trend reverses (price above EMA50)
-            elif rsi[i] < 50 or close[i] > ema_4h_aligned[i]:
+            # Exit: trend reverses (price above weekly EMA200) or breaks above upper band
+            elif close[i] > ema_1w_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
             # Look for entries with volume confirmation and trend alignment
-            # Long: RSI(2) < 10, price > 4h EMA50 (uptrend), volume spike
-            if (rsi[i] < 10 and
-                close[i] > ema_4h_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i]):
-                signals[i] = 0.20
+            # Long: price breaks above upper band, price above weekly EMA200 (uptrend), volume spike
+            if (close[i] > upper_aligned[i] and
+                close[i] > ema_1w_aligned[i] and
+                volume[i] > 2.0 * volume_ma_6h_aligned[i]):
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: RSI(2) > 90, price < 4h EMA50 (downtrend), volume spike
-            elif (rsi[i] > 90 and
-                  close[i] < ema_4h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i]):
-                signals[i] = -0.20
+            # Short: price breaks below lower band, price below weekly EMA200 (downtrend), volume spike
+            elif (close[i] < lower_aligned[i] and
+                  close[i] < ema_1w_aligned[i] and
+                  volume[i] > 2.0 * volume_ma_6h_aligned[i]):
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
