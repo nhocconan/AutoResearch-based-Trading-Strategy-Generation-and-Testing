@@ -7,7 +7,6 @@ Short when price breaks below 20-period Donchian low with daily EMA(50) trending
 Exit when price returns to the Donchian midpoint.
 Designed for 20-40 trades/year to minimize fee drag while capturing strong trends with institutional validation.
 Works in both bull/bear markets as Donchian channels adapt to volatility and daily trend filter avoids counter-trend trades.
-This version adds early exit on trend reversal to improve trade frequency and reduce drawdown.
 """
 
 import numpy as np
@@ -72,16 +71,16 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to Donchian midpoint OR daily trend turns down
-            if close[i] <= donchian_mid[i] or not daily_trend_up[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] <= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian midpoint OR daily trend turns up
-            if close[i] >= donchian_mid[i] or not daily_trend_down[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] >= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
