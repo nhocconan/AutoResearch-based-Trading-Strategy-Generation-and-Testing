@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly RSI filter and ATR-based volatility sizing
-# Uses Donchian channel breakouts for trend following, filtered by weekly RSI extremes to avoid
-# counter-trend entries. Position size scales inversely with volatility (ATR ratio) to reduce
-# risk during high volatility periods. Designed for low trade frequency (<25/year) to minimize
-# fee drag while capturing major trends in both bull and bear markets.
+# Hypothesis: 6h timeframe with 12h trend filter and volume confirmation
+# Uses 12h EMA(34) for trend direction, 6h RSI(14) for momentum exhaustion,
+# and volume spike (>1.5x 20-period average) for entry confirmation.
+# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
+# Works in bull markets via trend continuation and in bear markets via mean reversion at extremes.
 
-name = "daily_donchian20_weekly_rsi_vol_scaled_v1"
-timeframe = "1d"
+name = "6h_ema34_rsi_volume_spike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,66 +22,53 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 12h EMA(34) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 35:
         return np.zeros(n)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
+    # 6h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    rsi = 100 - (100 / (1 + rs))
     
-    # ATR(14) for volatility scaling
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume spike detection (>1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
+    vol_spike = vol_ratio > 1.5
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(rsi_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: scale position size inversely with volatility
-        vol_ratio = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
-        vol_scale = np.clip(1.0 / vol_ratio, 0.5, 1.5)  # scale between 0.5 and 1.5
-        base_size = 0.25
+        # Trend direction from 12h EMA
+        bullish_trend = close[i] > ema_12h_aligned[i]
+        bearish_trend = close[i] < ema_12h_aligned[i]
         
-        # Donchian breakout conditions
-        bullish_breakout = close[i] > highest_high[i-1]
-        bearish_breakout = close[i] < lowest_low[i-1]
+        # RSI conditions for momentum exhaustion
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Weekly RSI filter: avoid extreme counter-trend entries
-        rsi_value = rsi_1w_aligned[i]
-        not_overbought = rsi_value < 70   # Avoid shorting in overbought
-        not_oversold = rsi_value > 30     # Avoid going long in oversold
-        
-        # Long: bullish breakout AND not overbought (allows pullbacks in uptrend)
-        if bullish_breakout and not_overbought:
-            signals[i] = base_size * vol_scale
-        # Short: bearish breakout AND not oversold (allows bounces in downtrend)
-        elif bearish_breakout and not_oversold:
-            signals[i] = -base_size * vol_scale
+        # Long conditions: bullish trend + RSI oversold + volume spike
+        if bullish_trend and rsi_oversold and vol_spike[i]:
+            signals[i] = 0.25
+        # Short conditions: bearish trend + RSI overbought + volume spike
+        elif bearish_trend and rsi_overbought and vol_spike[i]:
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
