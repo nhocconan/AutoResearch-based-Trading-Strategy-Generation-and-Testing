@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_pivot_volume_v2"
-timeframe = "12h"
+name = "4h_donchian20_1d_pivot_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
