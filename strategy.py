@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h RSI Pullback with 4h/1d Trend Filter
-# Hypothesis: In strong trends (4h EMA50 > EMA200 and 1d close > SMA50), 
-# RSI pullbacks on 1f provide high-probability entries with low drawdown.
-# Uses 4h/1d for trend direction, 1h for timing. Session filter (08-20 UTC) reduces noise.
-# Target: 15-35 trades/year (60-140 total) to minimize fee drag.
+# Strategy: 6h Weekly Pivot Range Breakout with Volume Confirmation
+# Hypothesis: Price breaking above weekly R4 or below S4 with volume surge continues in breakout direction.
+# Uses weekly pivot levels for structural support/resistance and volume to filter false breakouts.
+# Works in bull/bear markets by trading breakouts in direction of weekly trend.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "1h_rsi_pullback_4h1d_trend_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_range_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,89 +22,56 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
+    # Calculate weekly pivot points (using prior week's data)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Pivot point calculations
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
+    r4 = weekly_high + 3 * (pivot - weekly_low)
+    s4 = weekly_low - 3 * (weekly_high - pivot)
     
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # Align weekly pivot levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
     
-    # 1h RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Volume moving average (20-period)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(150, n):  # warmup for 200 EMA
+    for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_4h_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(rsi[i])):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i]):
+            continue
+        
+        # Volume surge condition (current volume > 1.5x average)
+        volume_surge = volume[i] > 1.5 * volume_ma[i]
+        
+        # Breakout conditions
+        bullish_breakout = close[i] > r4_aligned[i] and volume_surge
+        bearish_breakout = close[i] < s4_aligned[i] and volume_surge
+        
+        if bullish_breakout:
+            signals[i] = 0.25
+        elif bearish_breakout:
+            signals[i] = -0.25
+        else:
             signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend determination
-        uptrend_4h = ema_50_4h_aligned[i] > ema_200_4h_aligned[i]
-        uptrend_1d = close[i] > sma_50_1d_aligned[i]
-        
-        downtrend_4h = ema_50_4h_aligned[i] < ema_200_4h_aligned[i]
-        downtrend_1d = close[i] < sma_50_1d_aligned[i]
-        
-        if position == 1:  # Long position
-            # Exit: RSI overbought or trend fails
-            if rsi[i] >= 70 or not (uptrend_4h and uptrend_1d):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.20  # Maintain long
-        elif position == -1:  # Short position
-            # Exit: RSI oversold or trend fails
-            if rsi[i] <= 30 or not (downtrend_4h and downtrend_1d):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.20  # Maintain short
-        else:  # Flat, look for entry
-            # Long: uptrend on both timeframes + RSI pullback (oversold)
-            if uptrend_4h and uptrend_1d and rsi[i] <= 30:
-                position = 1
-                signals[i] = 0.20
-            # Short: downtrend on both timeframes + RSI pullback (overbought)
-            elif downtrend_4h and downtrend_1d and rsi[i] >= 70:
-                position = -1
-                signals[i] = -0.20
     
     return signals
