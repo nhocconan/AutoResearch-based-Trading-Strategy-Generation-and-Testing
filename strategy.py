@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Camarilla Pivot Reversal with Volume Confirmation and 12h Trend Filter
-# Hypothesis: Price reversals at Camarilla pivot levels (S3/S4 for longs, R3/R4 for shorts)
-# offer high-probability entries when confirmed by volume spikes and aligned with 12h trend.
-# Works in bull markets (buy dips at S3/S4 in uptrend) and bear markets (sell rallies at R3/R4 in downtrend).
-# Target: 20-50 trades/year (80-200 over 4 years) to avoid fee drag.
+# Strategy: 1h Mean Reversion with 1d Range and Volume Confirmation
+# Hypothesis: Price reverts to the mean of the previous day's range after extreme moves.
+# In both bull and bear markets, price tends to revert to the daily value area (VAH/VAL).
+# Uses 1d value area (VWAP-based) as mean, with volume confirmation and time filter.
+# Target: 15-30 trades/year (60-120 over 4 years).
 
-name = "4h_camarilla_pivot_reversal_volume_trend_v1"
-timeframe = "4h"
+name = "1h_mean_reversion_1d_vwap_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,89 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for VWAP calculation
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla levels
-    prev_close = df_daily['close'].values
-    prev_high = df_daily['high'].values
-    prev_low = df_daily['low'].values
-    prev_range = prev_high - prev_low
+    # Calculate daily VWAP (Volume Weighted Average Price)
+    typical_price = (df_daily['high'] + df_daily['low'] + df_daily['close']) / 3
+    vwap = (typical_price * df_daily['volume']).cumsum() / df_daily['volume'].cumsum()
+    vwap_values = vwap.values
     
-    # Camarilla levels (based on previous day)
-    # S1 = C - (H-L)*1.08/2, S2 = C - (H-L)*1.16/2, S3 = C - (H-L)*1.24/2, S4 = C - (H-L)*1.50/2
-    # R1 = C + (H-L)*1.08/2, R2 = C + (H-L)*1.16/2, R3 = C + (H-L)*1.24/2, R4 = C + (H-L)*1.50/2
-    s3 = prev_close - (prev_range * 1.24 / 2)
-    s4 = prev_close - (prev_range * 1.50 / 2)
-    r3 = prev_close + (prev_range * 1.24 / 2)
-    r4 = prev_close + (prev_range * 1.50 / 2)
+    # Use previous day's VWAP (avoid look-ahead)
+    prev_vwap = np.roll(vwap_values, 1)
+    prev_vwap[0] = prev_vwap[1] if len(prev_vwap) > 1 else vwap_values[0]
     
-    # Handle first day
-    if len(s3) > 1:
-        s3[0] = s3[1]
-        s4[0] = s4[1]
-        r3[0] = r3[1]
-        r4[0] = r4[1]
-    else:
-        s3[0] = s3[0] if len(s3) > 0 else 0
-        s4[0] = s4[0] if len(s4) > 0 else 0
-        r3[0] = r3[0] if len(r3) > 0 else 0
-        r4[0] = r4[0] if len(r4) > 0 else 0
+    # Align to 1h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_daily, prev_vwap)
     
-    # Align Camarilla levels to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
-    
-    # 12h trend filter: EMA50 for trend direction
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h_50 = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
-    
-    # Volume filter: volume > 2.0x 20-period average (strict to reduce trades)
+    # Volume filter: volume > 1.2x 24-period average (to avoid low-volume noise)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2.0 * vol_ma)
+    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_filter = volume > (1.2 * vol_ma)
+    
+    # Session filter: 08-20 UTC (precomputed for efficiency)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if required data not available
-        if (np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+    for i in range(24, n):
+        # Skip if required data not available or outside session
+        if (np.isnan(vwap_aligned[i]) or np.isnan(vol_ma[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below S4 or trend turns bearish or volume drops
-            if (low[i] < s4_aligned[i] or close[i] < ema_12h_aligned[i] or not vol_filter[i]):
+            # Exit: price returns to VWAP or volume drops
+            if (close[i] >= vwap_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.20  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above R4 or trend turns bullish or volume drops
-            if (high[i] > r4_aligned[i] or close[i] > ema_12h_aligned[i] or not vol_filter[i]):
+            # Exit: price returns to VWAP or volume drops
+            if (close[i] <= vwap_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
+                signals[i] = -0.20  # Maintain short
         else:  # Flat, look for entry
-            # Long: price closes below S3 (deep oversold) with volume and bullish 12h trend
-            if (close[i] < s3_aligned[i] and close[i] > ema_12h_aligned[i] and vol_filter[i]):
+            # Long: price is significantly below VWAP with volume confirmation
+            if (close[i] < (vwap_aligned[i] * 0.995) and vol_filter[i]):  # 0.5% below VWAP
                 position = 1
-                signals[i] = 0.25
-            # Short: price closes above R3 (deep overbought) with volume and bearish 12h trend
-            elif (close[i] > r3_aligned[i] and close[i] < ema_12h_aligned[i] and vol_filter[i]):
+                signals[i] = 0.20
+            # Short: price is significantly above VWAP with volume confirmation
+            elif (close[i] > (vwap_aligned[i] * 1.005) and vol_filter[i]):  # 0.5% above VWAP
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
