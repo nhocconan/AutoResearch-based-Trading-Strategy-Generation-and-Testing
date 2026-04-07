@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and Daily Trend Filter
-Long when price breaks above upper Donchian channel (20-period high) with expanding volume AND 1d EMA trend up
-Short when price breaks below lower Donchian channel (20-period low) with expanding volume AND 1d EMA trend down
-Exit when price crosses back to the 20-period midline
-Uses adaptive volatility-based channels and daily trend filter to avoid false breakouts in ranging markets.
+4H Donchian Breakout with Volume Confirmation and 1D Trend Filter
+Long when price breaks above Donchian(20) high with expanding volume AND 1d EMA trend up
+Short when price breaks below Donchian(20) low with expanding volume AND 1d EMA trend down
+Exit when price crosses back to middle line
+Uses Donchian channels that adapt to volatility, reducing false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_1d_trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -26,13 +26,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    # Upper: 20-period high, Lower: 20-period low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # === Donchian Channels (20-period high/low) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # === ATR (14) for volatility filter ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ratio = atr / (pd.Series(atr).rolling(window=50, min_periods=50).mean().values + 1e-10)
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,13 +55,14 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below midline
+            # Exit: price crosses back below middle line
             if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
@@ -61,7 +70,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above midline
+            # Exit: price crosses back above middle line
             if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
@@ -69,16 +78,21 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Need expanding volume (above average)
-            if vol_ratio[i] < 1.2:
+            if vol_ratio[i] < 1.3:
+                signals[i] = 0.0
+                continue
+            
+            # Need volatility expansion (avoid ranging markets)
+            if atr_ratio[i] < 0.8:
                 signals[i] = 0.0
                 continue
             
             # Entry: Donchian breakout with volume confirmation AND 1d trend filter
-            if close[i] > donchian_upper[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
                 # Breakout above upper channel with rising 1d EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donchian_lower[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
                 # Breakdown below lower channel with falling 1d EMA -> short
                 position = -1
                 signals[i] = -0.25
