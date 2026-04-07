@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Daily KAMA with Weekly Trend Filter
-# Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both bull and bear markets.
-# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-# Volume confirmation ensures institutional participation. Target: 15-25 trades/year.
+# Strategy: 6h Daily Pivot Breakout with Volume Filter and Trend Filter
+# Hypothesis: Daily pivot levels (R1/S1, R2/S2) act as intraday support/resistance.
+# Breakouts above R2 with volume and trend confirmation indicate bullish continuation.
+# Breakdowns below S2 with volume and trend confirmation indicate bearish continuation.
+# Uses 1d trend filter (price above/below 50 EMA) to avoid counter-trend trades.
+# Volume filter ensures institutional participation. Works in bull/bear markets by
+# aligning with trend: in bull, only long breakouts; in bear, only short breakdowns.
+# Target: 15-40 trades/year (60-160 over 4 years).
 
-name = "1d_kama_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_daily_pivot_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,47 +27,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get daily data for pivot calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 2:
         return np.zeros(n)
     
-    # Calculate weekly KAMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_close_series = pd.Series(weekly_close)
-    # Efficiency ratio
-    change = abs(weekly_close_series.diff(10))
-    volatility = weekly_close_series.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    # KAMA calculation
-    kama = np.zeros_like(weekly_close)
-    kama[0] = weekly_close[0]
-    for i in range(1, len(weekly_close)):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (weekly_close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    # Trend: 1 if close > KAMA, -1 if close < KAMA
-    weekly_trend = np.where(weekly_close > kama, 1, -1)
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_trend)
+    # Calculate daily data (previous day's OHLC)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Daily KAMA for entry signal
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    prev_daily_high = np.roll(daily_high, 1)
+    prev_daily_low = np.roll(daily_low, 1)
+    prev_daily_close = np.roll(daily_close, 1)
+    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
+    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
+    prev_daily_close[0] = prev_daily_close[1] if len(prev_daily_close) > 1 else 0
+    
+    # Calculate daily pivot points
+    daily_range = prev_daily_high - prev_daily_low
+    daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
+    daily_r1 = daily_pivot + (daily_range * 1.0 / 2)
+    daily_s1 = daily_pivot - (daily_range * 1.0 / 2)
+    daily_r2 = daily_pivot + daily_range
+    daily_s2 = daily_pivot - daily_range
+    
+    # Align to 6h timeframe (use previous day's levels)
+    daily_r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
+    daily_s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
+    
+    # 1d trend filter: price above/below 50 EMA
     close_series = pd.Series(close)
-    change = abs(close_series.diff(10))
-    volatility = close_series.diff(1).abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama_daily = np.zeros(n)
-    kama_daily[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc.iloc[i]):
-            kama_daily[i] = kama_daily[i-1] + sc.iloc[i] * (close[i] - kama_daily[i-1])
-        else:
-            kama_daily[i] = kama_daily[i-1]
+    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
@@ -71,34 +69,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(kama_daily[i]) or np.isnan(weekly_trend_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(daily_r2_aligned[i]) or np.isnan(daily_s2_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below KAMA or weekly trend turns bearish or volume drops
-            if (close[i] < kama_daily[i] or weekly_trend_aligned[i] == -1 or not vol_filter[i]):
+            # Exit: price falls to S1 or trend turns bearish or volume drops
+            if (close[i] <= daily_s2_aligned[i] or close[i] < ema_50[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price crosses above KAMA or weekly trend turns bullish or volume drops
-            if (close[i] > kama_daily[i] or weekly_trend_aligned[i] == 1 or not vol_filter[i]):
+            # Exit: price rises to R1 or trend turns bullish or volume drops
+            if (close[i] >= daily_r2_aligned[i] or close[i] > ema_50[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price crosses above KAMA with weekly bullish trend and volume
-            if (close[i] > kama_daily[i] and weekly_trend_aligned[i] == 1 and vol_filter[i]):
+            # Long: price breaks above R2 with volume and bullish trend
+            if ((high[i] > daily_r2_aligned[i] or close[i] > daily_r2_aligned[i]) and 
+                close[i] > ema_50[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price crosses below KAMA with weekly bearish trend and volume
-            elif (close[i] < kama_daily[i] and weekly_trend_aligned[i] == -1 and vol_filter[i]):
+            # Short: price breaks below S2 with volume and bearish trend
+            elif ((low[i] < daily_s2_aligned[i] or close[i] < daily_s2_aligned[i]) and 
+                  close[i] < ema_50[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
