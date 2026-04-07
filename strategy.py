@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_ema_slope_volume_breakout
-Hypothesis: On 6h timeframe, use EMA slope (rate of change) to detect strong momentum trends combined with volume confirmation. Enter long when EMA20 slope turns positive with price above EMA50 and volume > 2x average; enter short when EMA20 slope turns negative with price below EMA50 and volume > 2x average. Exit when EMA slope reverses or price crosses opposite EMA. This captures institutional momentum moves while avoiding chop. Works in bull/bear via slope direction filter. Targets 15-25 trades/year to minimize fee drag.
+4h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 4h timeframe, use Donchian channel (20) breakout with daily EMA trend filter and volume confirmation. 
+Enter long when price breaks above 20-period high with daily EMA50 > EMA200 and volume > 1.5x average; 
+enter short when price breaks below 20-period low with daily EMA50 < EMA200 and volume > 1.5x average. 
+Exit when price crosses the midline (10-period average of high/low) or trend reverses. 
+This strategy captures breakouts with trend alignment and volume confirmation, targeting 20-40 trades/year.
+Works in bull/bear via daily EMA trend filter. Uses Donchian for clear breakout levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema_slope_volume_breakout"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,39 +28,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate daily EMA50 and EMA200 for trend filter
     ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Calculate EMA20 slope (rate of change over 3 periods)
-    ema20_slope = (ema20 - np.roll(ema20, 3)) / 3
-    ema20_slope[:3] = 0  # First 3 values invalid
+    # Calculate Donchian channel (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume confirmation (24-period average on 6h = 6 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Get daily data for trend filter (using close prices)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily EMA50 and EMA200 from daily closes
+    daily_close = df_1d['close'].values
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema200 = pd.Series(daily_close).ewm(span=200, min_periods=200, adjust=False).mean().values
+    
+    # Align daily EMAs to 4h timeframe (shifted by 1 day for look-ahead prevention)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    ema200_4h = align_htf_to_ltf(prices, df_1d, daily_ema200)
+    
+    # Volume confirmation (6-period average on 4h = 1.5 days)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(ema20_slope[i]) or
+        if (np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema50_4h[i]) or np.isnan(ema200_4h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2x 24-period average
-        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 6-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if EMA20 slope turns negative (momentum loss)
-            if ema20_slope[i] < 0:
+            # Exit if price crosses below midline
+            if close[i] < donchian_mid[i]:
                 exit_long = True
-            # Exit if price crosses below EMA50 (trend change)
-            elif close[i] < ema50[i] and close[i-1] >= ema50[i-1]:
+            # Exit if daily EMA50 crosses below EMA200 (trend reversal)
+            elif ema50_4h[i] < ema200_4h[i] and ema50_4h[i-1] >= ema200_4h[i-1]:
                 exit_long = True
             
             if exit_long:
@@ -67,11 +90,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if EMA20 slope turns positive (momentum loss)
-            if ema20_slope[i] > 0:
+            # Exit if price crosses above midline
+            if close[i] > donchian_mid[i]:
                 exit_short = True
-            # Exit if price crosses above EMA50 (trend change)
-            elif close[i] > ema50[i] and close[i-1] <= ema50[i-1]:
+            # Exit if daily EMA50 crosses above EMA200 (trend reversal)
+            elif ema50_4h[i] > ema200_4h[i] and ema50_4h[i-1] <= ema200_4h[i-1]:
                 exit_short = True
             
             if exit_short:
@@ -80,16 +103,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA20 slope turns positive, price above EMA50, volume confirmation
+            # Long entry: price breaks above Donchian high with daily EMA50 > EMA200 and volume confirmation
             long_entry = False
-            if (ema20_slope[i] > 0 and ema20_slope[i-1] <= 0 and
-                close[i] > ema50[i] and vol_confirm):
+            if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1] and
+                ema50_4h[i] > ema200_4h[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: EMA20 slope turns negative, price below EMA50, volume confirmation
+            # Short entry: price breaks below Donchian low with daily EMA50 < EMA200 and volume confirmation
             short_entry = False
-            if (ema20_slope[i] < 0 and ema20_slope[i-1] >= 0 and
-                close[i] < ema50[i] and vol_confirm):
+            if (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1] and
+                ema50_4h[i] < ema200_4h[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
