@@ -1,84 +1,101 @@
 #!/usr/bin/env python3
 """
-4h_rsi_pullback_1d_trend_volume_v1
-Hypothesis: On 4-hour timeframe, buy RSI pullbacks (RSI<40) in uptrends (price>1d EMA200) and sell RSI bounces (RSI>60) in downtrends (price<1d EMA200) with volume confirmation (volume>1.5x average). This captures mean reversion within the trend, works in bull (buy pullbacks) and bear (sell bounces). Target: 20-40 trades/year to avoid fee drag.
+1d_rsi_pullback_1w_trend_volume_v1
+Hypothesis: On daily timeframe, use weekly RSI to identify pullbacks in the prevailing weekly trend. Enter long when daily RSI < 30 and weekly RSI > 50 in uptrend, short when daily RSI > 70 and weekly RSI < 50 in downtrend. Volume confirmation filters low-volatility noise. Designed for 15-25 trades/year to minimize fee drag while capturing trend resumption after pullbacks in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_pullback_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_rsi_pullback_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    if len(close) >= period:
+        avg_gain[period-1] = np.mean(gain[:period-1])
+        avg_loss[period-1] = np.mean(loss[:period-1])
+        for i in range(period, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:period-1] = np.nan
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter and RSI
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    d_close = df_1d['close'].values
+    w_close = df_1w['close'].values
     
-    # Calculate daily EMA200 for trend filter
-    daily_close_series = pd.Series(d_close)
-    ema200 = daily_close_series.ewm(span=200, adjust=False).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
+    # Calculate weekly RSI for trend filter
+    w_rsi = calculate_rsi(w_close, 14)
     
-    # Calculate 4h RSI (14-period)
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Calculate daily RSI for entry signals
+    d_rsi = calculate_rsi(close, 14)
     
-    # Volume filter: 4h volume > 1.5x 20-period average
+    # Volume filter: daily volume > 1.3x 20-day average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = vol_series / vol_ma
     vol_ratio = vol_ratio.fillna(0).values
     
+    # Align weekly RSI to daily timeframe
+    w_rsi_aligned = align_htf_to_ltf(prices, df_1w, w_rsi)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after EMA200 warmup
-        # Skip if daily EMA not available
-        if np.isnan(ema200_aligned[i]):
+    for i in range(20, n):
+        # Skip if weekly RSI not available
+        if np.isnan(w_rsi_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine market regime based on price vs EMA200
-        uptrend = close[i] > ema200_aligned[i]
-        downtrend = close[i] < ema200_aligned[i]
+        # Skip if daily RSI not available
+        if np.isnan(d_rsi[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Determine weekly trend based on RSI
+        weekly_uptrend = w_rsi_aligned[i] > 50
+        weekly_downtrend = w_rsi_aligned[i] < 50
         
         # Volume confirmation
-        vol_confirmed = vol_ratio[i] > 1.5
+        vol_confirmed = vol_ratio[i] > 1.3
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when RSI reaches overbought (take profit)
-            if rsi[i] >= 60:
+            # Exit when daily RSI reaches overbought (take profit)
+            if d_rsi[i] >= 70:
                 exit_long = True
-            # Exit when trend turns down
-            elif not uptrend:
+            # Exit when weekly trend turns down
+            elif not weekly_uptrend:
                 exit_long = True
             # Exit when volume drops significantly
-            elif vol_ratio[i] < 0.8:
+            elif vol_ratio[i] < 0.7:
                 exit_long = True
             
             if exit_long:
@@ -90,14 +107,14 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when RSI reaches oversold (take profit)
-            if rsi[i] <= 40:
+            # Exit when daily RSI reaches oversold (take profit)
+            if d_rsi[i] <= 30:
                 exit_short = True
-            # Exit when trend turns up
-            elif not downtrend:
+            # Exit when weekly trend turns up
+            elif not weekly_downtrend:
                 exit_short = True
             # Exit when volume drops significantly
-            elif vol_ratio[i] < 0.8:
+            elif vol_ratio[i] < 0.7:
                 exit_short = True
             
             if exit_short:
@@ -106,11 +123,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: RSI pullback (oversold) in uptrend with volume
-            long_entry = (rsi[i] < 40) and uptrend and vol_confirmed
+            # Long entry: daily RSI oversold in weekly uptrend with volume
+            long_entry = (d_rsi[i] < 30) and weekly_uptrend and vol_confirmed
             
-            # Short entry: RSI bounce (overbought) in downtrend with volume
-            short_entry = (rsi[i] > 60) and downtrend and vol_confirmed
+            # Short entry: daily RSI overbought in weekly downtrend with volume
+            short_entry = (d_rsi[i] > 70) and weekly_downtrend and vol_confirmed
             
             if long_entry:
                 position = 1
