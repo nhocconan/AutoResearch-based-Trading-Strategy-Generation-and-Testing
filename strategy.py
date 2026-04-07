@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_camarilla_pivot_1w_trend_volume_v3
-Hypothesis: Weekly Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4 with volume confirmation and weekly EMA20 trend filter.
-In ranging markets, price tends to revert from R3/S3. In trending markets, breaks of R4/S4 with volume indicate continuation.
-Works in both bull and bear by adapting to market structure via volume and trend filters.
-Target: 7-25 trades/year on 1d with strict entry conditions.
+6h_elder_ray_1d_power_v1
+Hypothesis: Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) on 6f with 1d EMA50 trend filter.
+In bull markets (price > EMA50), buy when Bull Power turns positive after being negative.
+In bear markets (price < EMA50), sell when Bear Power turns negative after being positive.
+Uses zero-crossings of power indicators to capture momentum shifts while filtering by higher timeframe trend.
+Works in both bull and bear by aligning with 1d trend direction.
+Target: 12-37 trades/year on 6f with strict entry conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_pivot_1w_trend_volume_v3"
-timeframe = "1d"
+name = "6h_elder_ray_1d_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,98 +22,62 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
-    # Price and volume data
+    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivot and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous week
-    # Using classic Camarilla formulas based on previous week's OHLC
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Calculate EMA13 for Elder Ray (on 6f data)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
     
-    # Pivot point and support/resistance levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 2)
-    r4 = pivot + (range_hl * 1.1)
-    s4 = pivot - (range_hl * 1.1)
-    
-    # Align to 1d timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    
-    # Weekly EMA20 for trend filter
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if np.isnan(ema50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average
-        vol_spike = volume[i] > (vol_ma[i] * 1.3)
-        
         # Trend filter
-        above_ema20 = close[i] > ema20_1w_aligned[i]
-        below_ema20 = close[i] < ema20_1w_aligned[i]
+        above_ema50 = close[i] > ema50_1d_aligned[i]
+        below_ema50 = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches S3 (mean reversion) or trend turns bearish with volume
-            if close[i] <= s3_aligned[i] or (below_ema20 and vol_spike):
+            # Exit: Bear Power turns negative (momentum fading)
+            if bear_power[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R3 (mean reversion) or trend turns bullish with volume
-            if close[i] >= r3_aligned[i] or (above_ema20 and vol_spike):
+            # Exit: Bull Power turns positive (momentum fading)
+            if bull_power[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Fade at R3/S3: sell at R3, buy at S3 in ranging markets
-            # But only if volume confirms and trend is not strong
-            if close[i] >= r3_aligned[i] and vol_spike and not above_ema20:
-                # Potential short at R3 rejection
-                position = -1
-                signals[i] = -0.25
-            elif close[i] <= s3_aligned[i] and vol_spike and not below_ema20:
-                # Potential long at S3 bounce
+            # In uptrend: buy when Bull Power turns positive from negative
+            if above_ema50 and bull_power[i] > 0 and bull_power[i-1] <= 0:
                 position = 1
                 signals[i] = 0.25
-            # Breakout continuation at R4/S4 with volume and trend
-            elif close[i] > r4_aligned[i] and vol_spike and above_ema20:
-                # Bullish breakout with volume and trend
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < s4_aligned[i] and vol_spike and below_ema20:
-                # Bearish breakout with volume and trend
+            # In downtrend: sell when Bear Power turns negative from positive
+            elif below_ema50 and bear_power[i] < 0 and bear_power[i-1] >= 0:
                 position = -1
                 signals[i] = -0.25
     
