@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Index with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Bull Power > 0 + volume > 1.5x 20-day average + weekly ADX > 20
-# Short when Bear Power < 0 + volume > 1.5x 20-day average + weekly ADX > 20
-# Exit when power crosses zero in opposite direction
+# Hypothesis: 6-hour Elder Ray Index (Bull/Bear Power) with 1-day volume confirmation and 1-week ADX trend filter
+# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+# Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) + volume > 1.5x 20-period average + weekly ADX > 20
+# Short when Bear Power > 0 AND Bull Power < 0 (bearish momentum) + volume > 1.5x 20-period average + weekly ADX > 20
+# Exit when Elder Ray signal reverses (Bull Power < 0 for long exit, Bear Power < 0 for short exit)
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses Elder Ray (EMA13-based bull/bear power) for momentum, volume for confirmation, ADX for trend strength
+# Uses 1-day volume for confirmation and 1-week ADX for trend strength
 # Target: 50-150 total trades over 4 years (12-37/year)
 
 name = "6h_elder_ray_1d_vol_1w_adx_v4"
@@ -77,10 +78,12 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Elder Ray Index (13-period EMA)
+    # EMA13 for Elder Ray calculation
     ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -95,10 +98,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(13, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -111,8 +115,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: bull power turns negative
-            elif bull_power[i] <= 0:
+            # Exit: Bull Power becomes negative (momentum fading)
+            elif bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -124,8 +128,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: bear power turns positive
-            elif bear_power[i] >= 0:
+            # Exit: Bear Power becomes negative (momentum fading)
+            elif bear_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -133,18 +137,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Elder Ray signals with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-day average
+            # Volume filter: volume > 1.5x 20-period average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
             # Trend filter: weekly ADX > 20
             trend_filter = adx_aligned[i] > 20
             
-            # Long: bull power positive + volume filter + trend filter
-            if bull_power[i] > 0 and volume_filter and trend_filter:
+            # Long: Bull Power > 0 AND Bear Power < 0 (bullish momentum) + filters
+            if bull_power[i] > 0 and bear_power[i] < 0 and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: bear power negative + volume filter + trend filter
-            elif bear_power[i] < 0 and volume_filter and trend_filter:
+            # Short: Bear Power > 0 AND Bull Power < 0 (bearish momentum) + filters
+            elif bear_power[i] > 0 and bull_power[i] < 0 and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
