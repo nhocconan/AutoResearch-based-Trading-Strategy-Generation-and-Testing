@@ -1,10 +1,12 @@
-# 12h_camarilla_pivot_1d_trend_volume_v1
-# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
-# Price reversals at these levels with volume confirmation and trend alignment capture mean reversion moves.
-# Works in both bull and bear markets by trading in direction of 1d EMA50 trend.
-# Targets 12-37 trades/year with disciplined entries to avoid overtrading.
-
 #!/usr/bin/env python3
+"""
+12h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
+Price reversals at these levels with volume confirmation and trend alignment capture mean reversion moves.
+Works in both bull and bear markets by trading in direction of 1d EMA50 trend.
+Targets 12-37 trades/year with disciplined entries to avoid overtrading.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
