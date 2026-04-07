@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-1h_sr_breakout_4h1d_trend_volume_v1
-Hypothesis: On 1h timeframe, trade breakouts of 4h support/resistance levels with 1d trend filter and volume confirmation. Enter long when price breaks above 4h resistance with 1d EMA50 > EMA200 and volume > 1.5x average; enter short when price breaks below 4h support with 1d EMA50 < EMA200 and volume > 1.5x average. Exit when price returns to 4h midpoint or trend reverses. Uses 4h for structure, 1d for trend filter, 1h for entry timing. Targets 15-35 trades/year to avoid fee drag. Works in bull/bear via 1d trend filter.
+6h_cci_breakout_1d_trend_volume_v1
+Hypothesis: On 6h timeframe, use CCI(20) breakout with daily trend filter and volume confirmation. 
+Enter long when CCI crosses above +100 with daily EMA50 > EMA200 and volume > 1.5x average; 
+enter short when CCI crosses below -100 with daily EMA50 < EMA200 and volume > 1.5x average. 
+Exit when CCI crosses back through zero or trend reverses. 
+CCI captures momentum extremes, daily EMA filter ensures trend alignment, volume confirms institutional participation.
+Works in bull/bear via daily trend filter. Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_sr_breakout_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "6h_cci_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,35 +28,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
-    ema50_1d = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200_1d = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Calculate daily EMA50 and EMA200 for trend filter
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Calculate 4h support/resistance levels (using prior 4h bar's high/low/close)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
+    # Calculate CCI(20) on 6h data
+    typical_price = (high + low + close) / 3
+    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (typical_price - tp_mean) / (0.015 * tp_mad)
+    # Handle division by zero
+    cci = np.where(tp_mad == 0, 0, cci)
     
-    ph_4h = df_4h['high'].values  # previous 4h high
-    pl_4h = df_4h['low'].values   # previous 4h low
-    pc_4h = df_4h['close'].values # previous 4h close
-    
-    # Calculate 4h pivot and ranges
-    pivot_4h = (ph_4h + pl_4h + pc_4h) / 3
-    range_4h = ph_4h - pl_4h
-    
-    # 4h resistance (R1) and support (S1) levels
-    r1_4h = pivot_4h + range_4h
-    s1_4h = pivot_4h - range_4h
-    # Midpoint for exit
-    mid_4h = pivot_4h
-    
-    # Align to 1h timeframe (shifted by 1 bar for look-ahead prevention)
-    r1_4h_1h = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_1h = align_htf_to_ltf(prices, df_4h, s1_4h)
-    mid_4h_1h = align_htf_to_ltf(prices, df_4h, mid_4h)
-    
-    # Volume confirmation (24-period average on 1h = 1 day)
+    # Volume confirmation (24-period average on 6h = 6 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -59,9 +48,8 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if required data not available
-        if (np.isnan(ema50_1d[i]) or np.isnan(ema200_1d[i]) or 
-            np.isnan(r1_4h_1h[i]) or np.isnan(s1_4h_1h[i]) or
-            np.isnan(mid_4h_1h[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(cci[i]) or np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -71,52 +59,52 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price returns to 4h midpoint
-            if close[i] <= mid_4h_1h[i]:
+            # Exit if CCI crosses below zero (momentum fade)
+            if cci[i] < 0 and cci[i-1] >= 0:
                 exit_long = True
-            # Exit if 1d EMA50 crosses below EMA200 (trend reversal)
-            elif ema50_1d[i] < ema200_1d[i] and ema50_1d[i-1] >= ema200_1d[i-1]:
+            # Exit if daily EMA50 crosses below EMA200 (trend reversal)
+            elif ema50[i] < ema200[i] and ema50[i-1] >= ema200[i-1]:
                 exit_long = True
             
             if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price returns to 4h midpoint
-            if close[i] >= mid_4h_1h[i]:
+            # Exit if CCI crosses above zero (momentum fade)
+            if cci[i] > 0 and cci[i-1] <= 0:
                 exit_short = True
-            # Exit if 1d EMA50 crosses above EMA200 (trend reversal)
-            elif ema50_1d[i] > ema200_1d[i] and ema50_1d[i-1] <= ema200_1d[i-1]:
+            # Exit if daily EMA50 crosses above EMA200 (trend reversal)
+            elif ema50[i] > ema200[i] and ema50[i-1] <= ema200[i-1]:
                 exit_short = True
             
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above 4h resistance with 1d uptrend and volume confirmation
+            # Long entry: CCI crosses above +100 with daily EMA50 > EMA200 and volume confirmation
             long_entry = False
-            if (close[i] > r1_4h_1h[i] and close[i-1] <= r1_4h_1h[i-1] and
-                ema50_1d[i] > ema200_1d[i] and vol_confirm):
+            if (cci[i] > 100 and cci[i-1] <= 100 and
+                ema50[i] > ema200[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: price breaks below 4h support with 1d downtrend and volume confirmation
+            # Short entry: CCI crosses below -100 with daily EMA50 < EMA200 and volume confirmation
             short_entry = False
-            if (close[i] < s1_4h_1h[i] and close[i-1] >= s1_4h_1h[i-1] and
-                ema50_1d[i] < ema200_1d[i] and vol_confirm):
+            if (cci[i] < -100 and cci[i-1] >= -100 and
+                ema50[i] < ema200[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
