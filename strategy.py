@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-# Hypothesis: Donchian(20) breakouts on daily timeframe capture strong trends.
-# Weekly EMA filter ensures alignment with higher-timeframe trend.
-# Volume confirmation filters out false breakouts. Works in both bull and bear markets
-# by following weekly trend. Target: 8-20 trades/year (32-80 total over 4 years).
+# Strategy: 6h Camarilla Pivot + 12h EMA Trend + Volume Confirmation
+# Hypothesis: Camarilla pivot levels on 6h act as strong support/resistance in ranging markets.
+# Fade at R3/S3 levels when 12h EMA confirms range-bound market; breakout continuation at R4/S4.
+# Works in both bull and bear by following 12h trend direction for breakouts and fading extremes in ranges.
+# Target: 20-40 trades/year (80-160 total over 4 years).
 
-name = "1d_donchian_breakout_1w_trend_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_12h_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
+    close_12h = df_12h['close'].values
     
-    # Donchian Channel (20) on daily
-    dc_period = 20
+    # 12h EMA(30) for trend filter
+    ema_30_12h = pd.Series(close_12h).ewm(span=30, adjust=False).mean().values
+    ema_30_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_30_12h)
     
-    # Upper band: highest high of last 20 periods
-    upper = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
-    # Lower band: lowest low of last 20 periods
-    lower = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
+    # Calculate Camarilla levels for 6h using previous day's OHLC
+    # We need daily OHLC to calculate Camarilla, so get 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Weekly EMA(20) for trend filter
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
+    prev_day_open = df_1d['open'].shift(1).values
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Align daily data to 6h
+    prev_day_open_6h = align_htf_to_ltf(prices, df_1d, prev_day_open)
+    prev_day_high_6h = align_htf_to_ltf(prices, df_1d, prev_day_high)
+    prev_day_low_6h = align_htf_to_ltf(prices, df_1d, prev_day_low)
+    prev_day_close_6h = align_htf_to_ltf(prices, df_1d, prev_day_close)
+    
+    # Camarilla levels calculation
+    # Range = previous day high - low
+    # Close = previous day close
+    # Levels:
+    # H4 = Close + Range * 1.1/2
+    # H3 = Close + Range * 1.1/4
+    # H2 = Close + Range * 1.1/6
+    # H1 = Close + Range * 1.1/12
+    # L1 = Close - Range * 1.1/12
+    # L2 = Close - Range * 1.1/6
+    # L3 = Close - Range * 1.1/4
+    # L4 = Close - Range * 1.1/2
+    
+    range_1d = prev_day_high_6h - prev_day_low_6h
+    close_1d = prev_day_close_6h
+    
+    # Calculate levels
+    h4 = close_1d + range_1d * 1.1 / 2
+    h3 = close_1d + range_1d * 1.1 / 4
+    h2 = close_1d + range_1d * 1.1 / 6
+    h1 = close_1d + range_1d * 1.1 / 12
+    l1 = close_1d - range_1d * 1.1 / 12
+    l2 = close_1d - range_1d * 1.1 / 6
+    l3 = close_1d - range_1d * 1.1 / 4
+    l4 = close_1d - range_1d * 1.1 / 2
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.8 * vol_ma)
+    vol_spike = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(dc_period, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema_20_weekly_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_30_12h_aligned[i]) or np.isnan(h4[i]) or np.isnan(l4[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(prev_day_close_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -61,28 +97,41 @@ def generate_signals(prices):
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower or trend changes to down
-            if close[i] < lower[i] or close[i] < ema_20_weekly_aligned[i]:
+            # Exit: price crosses below H3 or trend turns bearish
+            if close[i] < h3[i] or close[i] < ema_30_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper or trend changes to up
-            if close[i] > upper[i] or close[i] > ema_20_weekly_aligned[i]:
+            # Exit: price crosses above L3 or trend turns bullish
+            if close[i] > l3[i] or close[i] > ema_30_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Breakout above upper channel with uptrend
-                if close[i] > upper[i] and close[i] > ema_20_weekly_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Breakdown below lower channel with downtrend
-                elif close[i] < lower[i] and close[i] < ema_20_weekly_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+                # Fade at extreme levels in ranging market (price near H3/L3 but not beyond H4/L4)
+                # Only fade if 12h EMA is flat (range-bound) - check if price is near EMA
+                ema_distance = abs(close[i] - ema_30_12h_aligned[i]) / ema_30_12h_aligned[i]
+                if ema_distance < 0.02:  # Price near 12h EMA suggests ranging market
+                    # Fade at H3 (sell) or L3 (buy)
+                    if close[i] > h3[i] and close[i] < h4[i]:
+                        position = -1
+                        signals[i] = -0.25
+                    elif close[i] < l3[i] and close[i] > l4[i]:
+                        position = 1
+                        signals[i] = 0.25
+                else:
+                    # Trending market: breakout continuation
+                    # Buy breakout above H4 in uptrend
+                    if close[i] > h4[i] and close[i] > ema_30_12h_aligned[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    # Sell breakdown below L4 in downtrend
+                    elif close[i] < l4[i] and close[i] < ema_30_12h_aligned[i]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
