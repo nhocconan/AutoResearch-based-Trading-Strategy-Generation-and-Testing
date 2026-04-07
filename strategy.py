@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout + 1d trend filter + volume confirmation
-# Hypothesis: Donchian breakouts capture trend momentum, while the 1d EMA filter
-# ensures alignment with higher timeframe trend, reducing false signals.
-# Volume confirmation ensures breakouts have conviction. This strategy aims
-# for 15-25 trades/year on 12h timeframe, balancing opportunity with cost.
-# Works in bull markets via upside breakouts and bear markets via downside breakouts.
-name = "12h_donchian20_1dtrend_volume_v1"
-timeframe = "12h"
+# Strategy: 4h Donchian Breakout + 12h EMA Trend + Volume Spike
+# Hypothesis: Donchian(20) breakouts capture strong directional moves,
+# filtered by 12h EMA trend direction and volume spikes to avoid false breakouts.
+# Works in bull markets (catching breakouts) and bear markets (short breakdowns).
+# Target: 25-35 trades/year to minimize fee drag on 4h timeframe.
+name = "4h_donchian_breakout_12h_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,52 +27,53 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
-    # Get 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
-    daily_ema_12h = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # 12h EMA(34) for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(daily_ema_12h[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian lower band or trend turns bearish
-            if close[i] < lowest_low[i] or close[i] < daily_ema_12h[i]:
+            # Exit: price breaks below Donchian lower band or trend turns bearish
+            if close[i] < lowest_low[i] or close[i] < ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian upper band or trend turns bullish
-            if close[i] > highest_high[i] or close[i] > daily_ema_12h[i]:
+            # Exit: price breaks above Donchian upper band or trend turns bullish
+            if close[i] > highest_high[i] or close[i] > ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Volume confirmation: vol_ratio > 1.5
+            # Require volume spike for confirmation
             if vol_ratio[i] > 1.5:
-                # Enter long: price breaks above upper band and above 1d EMA
-                if close[i] > highest_high[i] and close[i] > daily_ema_12h[i]:
+                # Enter long: price breaks above Donchian upper band and bullish trend
+                if close[i] > highest_high[i] and close[i] > ema_12h_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short: price breaks below lower band and below 1d EMA
-                elif close[i] < lowest_low[i] and close[i] < daily_ema_12h[i]:
+                # Enter short: price breaks below Donchian lower band and bearish trend
+                elif close[i] < lowest_low[i] and close[i] < ema_12h_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
