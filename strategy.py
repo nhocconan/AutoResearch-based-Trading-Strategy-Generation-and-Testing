@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_heiken_ashi_1d_trend_v1
-Hypothesis: Heikin Ashi candles smoothed on 1d trend filter for trend continuation entries.
-In trending markets, HA candles show consecutive same-color bodies; in ranging markets, they alternate frequently.
-Combines trend following with reduced whipsaw vs regular candlesticks. Works in both bull/bear by
-only taking trades in direction of higher timeframe trend. Target: 15-35 trades/year on 6h.
+4h_camarilla_pivot_1d_volume_v1
+Hypothesis: Camarilla pivot levels from 1-day timeframe provide strong support/resistance levels.
+Price tends to reverse at these levels during ranging markets and break out during trending markets.
+Volume surge confirms the breakout/reversal. Works in both bull/bear by taking reversals at S3/R3
+in ranging markets and breakouts at S4/R4 in trending markets. Target: 20-40 trades/year on 4h.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_heiken_ashi_1d_trend_v1"
-timeframe = "6h"
+name = "4h_camarilla_pivot_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +24,85 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla pivot levels for each day
+    # Using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Heikin Ashi candles
-    ha_close = (open_price + high + low + close) / 4
-    ha_open = np.zeros(n)
-    ha_open[0] = (open_price[0] + close[0]) / 2
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    ha_high = np.maximum.reduce([high, low, ha_open, ha_close])
-    ha_low = np.minimum.reduce([high, low, ha_open, ha_close])
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    # Camarilla levels
+    range_ = prev_high - prev_low
+    s1 = close - (range_ * 1.1 / 12)
+    s2 = close - (range_ * 1.1 / 6)
+    s3 = close - (range_ * 1.1 / 4)
+    s4 = close - (range_ * 1.1 / 2)
+    r1 = close + (range_ * 1.1 / 12)
+    r2 = close + (range_ * 1.1 / 6)
+    r3 = close + (range_ * 1.1 / 4)
+    r4 = close + (range_ * 1.1 / 2)
     
-    # HA trend: consecutive same-color candles (minimum 3 in a row)
-    ha_bullish = ha_close > ha_open
-    ha_bearish = ha_close < ha_open
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     
-    # Count consecutive bullish/bearish candles
-    bullish_streak = np.zeros(n, dtype=int)
-    bearish_streak = np.zeros(n, dtype=int)
-    
-    for i in range(1, n):
-        if ha_bullish[i]:
-            bullish_streak[i] = bullish_streak[i-1] + 1
-            bearish_streak[i] = 0
-        elif ha_bearish[i]:
-            bearish_streak[i] = bearish_streak[i-1] + 1
-            bullish_streak[i] = 0
-        else:
-            bullish_streak[i] = 0
-            bearish_streak[i] = 0
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if trend filter not ready
-        if np.isnan(ema50_1d_aligned[i]):
+    for i in range(20, n):
+        # Skip if pivot levels not ready
+        if np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or \
+           np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price vs daily EMA50
-        above_ema50 = close[i] > ema50_1d_aligned[i]
-        below_ema50 = close[i] < ema50_1d_aligned[i]
+        # Volume surge condition
+        vol_surge = volume[i] > vol_ma[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: trend turns bearish OR HA streak breaks
-            if below_ema50 or ha_bearish[i]:
+            # Exit: price reaches R3 or R4
+            if close[i] >= r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend turns bullish OR HA streak breaks
-            if above_ema50 or ha_bullish[i]:
+            # Exit: price reaches S3 or S4
+            if close[i] <= s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Enter long: bullish HA streak >=3 AND above daily EMA50
-            if bullish_streak[i] >= 3 and above_ema50:
+            # Enter long at S3/S4 with volume surge (bounce)
+            if vol_surge and close[i] <= s3_aligned[i] and close[i] > s4_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: bearish HA streak >=3 AND below daily EMA50
-            elif bearish_streak[i] >= 3 and below_ema50:
+            # Enter short at R3/R4 with volume surge (rejection)
+            elif vol_surge and close[i] >= r3_aligned[i] and close[i] < r4_aligned[i]:
                 position = -1
                 signals[i] = -0.25
+            # Breakout entries: price breaks S4/R4 with volume surge
+            elif vol_surge and close[i] < s4_aligned[i]:
+                position = -1
+                signals[i] = -0.25
+            elif vol_surge and close[i] > r4_aligned[i]:
+                position = 1
+                signals[i] = 0.25
     
     return signals
