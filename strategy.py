@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_price_channel_1w_trend_volume_v1
-Hypothesis: On 1d timeframe, use weekly price channels (Donchian/ATR-based) with volume confirmation.
-- Long when price breaks above upper channel (20-day high + ATR) with volume > 1.5x avg and weekly trend up
-- Short when price breaks below lower channel (20-day low - ATR) with volume > 1.5x avg and weekly trend down
-- Exit on opposite channel touch or trend reversal
-Uses weekly trend filter to avoid counter-trend trades in both bull and bear markets.
-Target: 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag.
+12h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 12h timeframe, use Camarilla pivot levels from 1d for entry signals, filtered by 1d EMA trend and volume confirmation.
+- In uptrend (price > 1d EMA50): long at S3 (support) or S4 breakout, exit at S4 breakdown or trend reversal
+- In downtrend (price < 1d EMA50): short at R3 (resistance) or R4 breakdown, exit at R4 breakout or trend reversal
+- Volume confirms genuine tests of pivot levels. Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_price_channel_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,44 +26,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema_50w = df_1w['close'].ewm(span=50, adjust=False).mean()
-    ema_50w_aligned = align_htf_to_ltf(prices, df_1w, ema_50w.values)
+    # 1d EMA50 for trend filter
+    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
     
-    # Daily Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
-    # Daily ATR(14) for channel width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla pivot levels from previous day
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = df_1d['close'].shift(1)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
     
-    # Dynamic channels: Donchian ± ATR
-    upper_channel = donchian_high + atr
-    lower_channel = donchian_low - atr
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # Volume confirmation (20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels
+    # Resistance levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    r2 = pivot + (range_val * 1.1 / 6)
+    r3 = pivot + (range_val * 1.1 / 4)
+    r4 = pivot + (range_val * 1.1 / 2)
+    # Support levels
+    s1 = pivot - (range_val * 1.1 / 12)
+    s2 = pivot - (range_val * 1.1 / 6)
+    s3 = pivot - (range_val * 1.1 / 4)
+    s4 = pivot - (range_val * 1.1 / 2)
+    
+    # Align all levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
+    
+    # Volume confirmation (4-period average on 12h = 2 days)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(ema_50w_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -73,30 +89,42 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price touches lower channel or weekly trend turns bearish
-            if close[i] <= lower_channel[i] or close[i] < ema_50w_aligned[i]:
+            # Exit: price breaks below S4 (breakdown) or trend turns bearish
+            if close[i] < s4_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price touches upper channel or weekly trend turns bullish
-            if close[i] >= upper_channel[i] or close[i] > ema_50w_aligned[i]:
+            # Exit: price breaks above R4 (breakout) or trend turns bullish
+            if close[i] > r4_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper channel with volume in uptrend
-            if (close[i] > upper_channel[i] and
+            # Long entry: price tests S3 with volume in uptrend
+            if (close[i] <= s3_aligned[i] * 1.005 and close[i] >= s3_aligned[i] * 0.995 and  # near S3
                 vol_confirm and 
-                close[i] > ema_50w_aligned[i]):
+                close[i] > ema_50_aligned[i]):  # uptrend filter
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower channel with volume in downtrend
-            elif (close[i] < lower_channel[i] and
+            # Short entry: price tests R3 with volume in downtrend
+            elif (close[i] >= r3_aligned[i] * 0.995 and close[i] <= r3_aligned[i] * 1.005 and  # near R3
                   vol_confirm and 
-                  close[i] < ema_50w_aligned[i]):
+                  close[i] < ema_50_aligned[i]):  # downtrend filter
+                position = -1
+                signals[i] = -0.25
+            # Long breakout: price breaks above R4 with volume in uptrend
+            elif (close[i] > r4_aligned[i] and
+                  vol_confirm and 
+                  close[i] > ema_50_aligned[i]):  # uptrend filter
+                position = 1
+                signals[i] = 0.25
+            # Short breakdown: price breaks below S4 with volume in downtrend
+            elif (close[i] < s4_aligned[i] and
+                  vol_confirm and 
+                  close[i] < ema_50_aligned[i]):  # downtrend filter
                 position = -1
                 signals[i] = -0.25
     
