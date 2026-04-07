@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour 20-period Donchian channel breakout with 1-day volume confirmation and 1-week trend filter
+# Hypothesis: 12-hour Donchian channel breakout with 1-day volume confirmation and 1-week EMA trend filter
 # Long when price breaks above 20-period Donchian high + volume > 1.5x average + 1-week EMA50 uptrend
 # Short when price breaks below 20-period Donchian low + volume > 1.5x average + 1-week EMA50 downtrend
 # Exit when price crosses the Donchian midline (average of high/low) or volume drops below average
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week EMA50 for trend direction
-# Target: 60-120 total trades over 4 years (15-30/year)
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "6h_donchian20_1d_vol_1w_ema_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_vol_1w_ema_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,7 +49,7 @@ def generate_signals(prices):
     ema50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 6-period ATR(14) for stoploss
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,7 +58,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 6-hour Donchian channel (20-period)
+    # 12-hour Donchian channel (20-period)
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     donchian_high = high_s.rolling(window=20, min_periods=20).max().values
