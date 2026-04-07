@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1d_volume_v1
-# Hypothesis: 12h chart trades on daily Camarilla pivot levels with volume confirmation.
-# Daily Camarilla levels (S1/S2/S3/S4 and R1/R2/R3/R4) act as strong support/resistance.
-# Price breaking through S3/R3 with volume indicates trend continuation; bouncing from S1/R1 with
-# volume indicates mean reversion. Works in both bull (breakouts) and bear (reversals) markets.
-# Uses 12h for entries and 1d for context, targeting 12-37 trades/year.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
+name = "12h_camarilla_pivot_1d_volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -31,19 +24,11 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla pivot levels from previous day
-    # H4 = Close + 1.5 * (High - Low)
-    # H3 = Close + 1.0 * (High - Low)
-    # H2 = Close + 0.5 * (High - Low)
-    # H1 = Close + 0.25 * (High - Low)
-    # L1 = Close - 0.25 * (High - Low)
-    # L2 = Close - 0.5 * (High - Low)
-    # L3 = Close - 1.0 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    
     prev_high = df_1d['high'].values
     prev_low = df_1d['low'].values
     prev_close = df_1d['close'].values
     
+    # Camarilla formulas
     H4 = prev_close + 1.5 * (prev_high - prev_low)
     H3 = prev_close + 1.0 * (prev_high - prev_low)
     H2 = prev_close + 0.5 * (prev_high - prev_low)
@@ -101,19 +86,11 @@ def generate_signals(prices):
                 continue
                 
             # Long entry: price breaks above H3 with volume (bullish breakout)
-            # OR price bounces from L3/L4 with volume (bullish reversal)
-            if ((close[i] > H3_12h[i] and close[i-1] <= H3_12h[i-1]) or  # Breakout above H3
-                ((close[i] > L3_12h[i] and close[i-1] <= L3_12h[i-1]) or  # Bounce from L3
-                 (close[i] > L4_12h[i] and close[i-1] <= L4_12h[i-1])) and  # Bounce from L4
-                close[i] < H2_12h[i]):  # But not above strong resistance
+            if close[i] > H3_12h[i] and close[i-1] <= H3_12h[i-1]:
                 position = 1
                 signals[i] = 0.25
             # Short entry: price breaks below L3 with volume (bearish breakout)
-            # OR price rejects from H3/H4 with volume (bearish reversal)
-            elif ((close[i] < L3_12h[i] and close[i-1] >= L3_12h[i-1]) or  # Breakdown below L3
-                  ((close[i] < H3_12h[i] and close[i-1] >= H3_12h[i-1]) or  # Rejection from H3
-                   (close[i] < H4_12h[i] and close[i-1] >= H4_12h[i-1])) and  # Rejection from H4
-                  close[i] > L2_12h[i]):  # But not below strong support
+            elif close[i] < L3_12h[i] and close[i-1] >= L3_12h[i-1]:
                 position = -1
                 signals[i] = -0.25
     
