@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 4h timeframe, enter long when price breaks above the 1d Camarilla R3 level with above-average volume, short when price breaks below S3 level with above-average volume. Use the 1d ATR percentile to filter for low volatility regimes where breakouts are more likely to succeed. Exit when price returns to the 1d Camarilla Pivot level. Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity with fee minimization.
+12h_breakout_volume_regime_v1
+Hypothesis: On 12h timeframe, enter long when price breaks above the 1-week high with above-average volume and low volatility regime (ATR percentile < 50). Enter short when price breaks below the 1-week low with above-average volume and low volatility. Exit when price returns to the 1-week midpoint or volatility increases. Uses weekly price channels for structural breaks, volume for confirmation, and ATR percentile for regime filtering. Designed to work in both bull (breakouts continue) and bear (mean reversion at extremes) markets by filtering for low volatility breakouts which have higher success rates.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "12h_breakout_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,48 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1-week data for structure
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate weekly high, low, and midpoint
+    weekly_high = high_1w
+    weekly_low = low_1w
+    weekly_mid = (high_1w + low_1w) / 2.0
     
-    # Camarilla levels: R3 = close + 1.1*range/6, S3 = close - 1.1*range/6
-    r3 = close_1d + 1.1 * range_1d / 6.0
-    s3 = close_1d - 1.1 * range_1d / 6.0
-    pivot_level = pivot
+    # Align to 12h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
     
-    # Align to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_level)
-    
-    # Calculate 1d ATR for volatility regime filter
-    if len(df_1d) < 14:
+    # Calculate 1-week ATR for volatility regime filter
+    if len(df_1w) < 14:
         return np.zeros(n)
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # First value NaN
     
     # ATR(14)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR percentile rank (252-day lookback for 1-year)
-    atr_percentile = pd.Series(atr_1d).rolling(window=252, min_periods=50).apply(
+    # ATR percentile rank (52-week lookback for 1-year)
+    atr_percentile = pd.Series(atr_1w).rolling(window=52, min_periods=20).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
     ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile)
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,10 +68,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(weekly_mid_aligned[i]) or np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
@@ -86,28 +83,28 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot level or volatility increases significantly
-            if close[i] <= pivot_aligned[i] or atr_percentile_aligned[i] > 0.8:
+            # Exit: price returns to weekly midpoint or volatility increases significantly
+            if close[i] <= weekly_mid_aligned[i] or atr_percentile_aligned[i] > 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to pivot level or volatility increases significantly
-            if close[i] >= pivot_aligned[i] or atr_percentile_aligned[i] > 0.8:
+            # Exit: price returns to weekly midpoint or volatility increases significantly
+            if close[i] >= weekly_mid_aligned[i] or atr_percentile_aligned[i] > 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if low_vol and vol_ok:
-                # Breakout above R3 with volume - go long
-                if close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i-1]:
+                # Breakout above weekly high with volume - go long
+                if close[i] > weekly_high_aligned[i] and close[i-1] <= weekly_high_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Breakout below S3 with volume - go short
-                elif close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i-1]:
+                # Breakout below weekly low with volume - go short
+                elif close[i] < weekly_low_aligned[i] and close[i-1] >= weekly_low_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
