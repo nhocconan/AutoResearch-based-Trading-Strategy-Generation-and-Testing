@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Pivot Breakout with Volume and ADX Trend Filter
-# Hypothesis: Daily pivot levels (R2/S2) act as significant support/resistance.
-# Breakouts above R2 with volume and strong trend (ADX>20) indicate bullish continuation.
-# Breakdowns below S2 with volume and strong trend indicate bearish continuation.
-# ADX filter avoids choppy markets where breakouts fail. Works in bull/bear by
-# aligning with trend direction. Target: 20-50 trades/year (80-200 over 4 years).
+# Strategy: 6h Weekly Pivot Fade with Volume Divergence
+# Hypothesis: Weekly pivot levels (R3/S3, R4/S4) act as strong support/resistance.
+# Price often reverses from R3/S3 (fade) but breaks through R4/S4 (continuation).
+# Uses volume divergence: weakening volume on approach to R3/S3 increases reversal probability.
+# Works in bull/bear by fading extremes in range and following breakouts in trend.
+# Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "4h_daily_pivot_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "6h_weekly_pivot_fade_volume_divergence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate daily data (previous day's OHLC)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate weekly data (previous week's OHLC)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_close = np.roll(daily_close, 1)
-    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
-    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
-    prev_daily_close[0] = prev_daily_close[1] if len(prev_daily_close) > 1 else 0
+    # Shift by 1 to use previous week's data (avoid look-ahead)
+    prev_weekly_high = np.roll(weekly_high, 1)
+    prev_weekly_low = np.roll(weekly_low, 1)
+    prev_weekly_close = np.roll(weekly_close, 1)
+    prev_weekly_high[0] = prev_weekly_high[1] if len(prev_weekly_high) > 1 else 0
+    prev_weekly_low[0] = prev_weekly_low[1] if len(prev_weekly_low) > 1 else 0
+    prev_weekly_close[0] = prev_weekly_close[1] if len(prev_weekly_close) > 1 else 0
     
-    # Calculate daily pivot points
-    daily_range = prev_daily_high - prev_daily_low
-    daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
-    daily_r2 = daily_pivot + daily_range
-    daily_s2 = daily_pivot - daily_range
+    # Calculate weekly pivot points (R3/S3, R4/S4)
+    weekly_range = prev_weekly_high - prev_weekly_low
+    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
+    weekly_r3 = weekly_pivot + (weekly_range * 1.1)
+    weekly_s3 = weekly_pivot - (weekly_range * 1.1)
+    weekly_r4 = weekly_pivot + (weekly_range * 1.5)
+    weekly_s4 = weekly_pivot - (weekly_range * 1.5)
     
-    # Align to 4h timeframe (use previous day's levels)
-    daily_r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
-    daily_s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
+    # Align to 6h timeframe (use previous week's levels)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
+    weekly_r4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r4)
+    weekly_s4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s4)
     
-    # ADX trend filter (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - low[:-1]), np.absolute(low[1:] - high[:-1]))
-    
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume divergence: decreasing volume on approach to extremes
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_ma_10 = vol_series.rolling(window=10, min_periods=10).mean().values
+    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Volume weakening when short MA < long MA
+    vol_weakening = vol_ma_10 < vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(daily_r2_aligned[i]) or np.isnan(daily_s2_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_r3_aligned[i]) or np.isnan(weekly_s3_aligned[i]) or
+            np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
+            np.isnan(vol_ma_10[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls to S2 or trend weakens (ADX<20) or volume drops
-            if (close[i] <= daily_s2_aligned[i] or adx[i] < 20 or not vol_filter[i]):
+            # Exit: price reaches R4 (take profit) or shows weakness at R3 with volume divergence
+            if (close[i] >= weekly_r4_aligned[i] or 
+                (close[i] >= weekly_r3_aligned[i] and vol_weakening[i])):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises to R2 or trend weakens (ADX<20) or volume drops
-            if (close[i] >= daily_r2_aligned[i] or adx[i] < 20 or not vol_filter[i]):
+            # Exit: price reaches S4 (take profit) or shows weakness at S3 with volume divergence
+            if (close[i] <= weekly_s4_aligned[i] or 
+                (close[i] <= weekly_s3_aligned[i] and vol_weakening[i])):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above R2 with volume and strong trend
-            if ((high[i] > daily_r2_aligned[i] or close[i] > daily_r2_aligned[i]) and 
-                adx[i] > 20 and vol_filter[i]):
+            # Long: price rejects S3 with volume weakening (bullish divergence)
+            if ((low[i] <= weekly_s3_aligned[i] or close[i] <= weekly_s3_aligned[i]) and 
+                vol_weakening[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below S2 with volume and strong trend
-            elif ((low[i] < daily_s2_aligned[i] or close[i] < daily_s2_aligned[i]) and 
-                  adx[i] > 20 and vol_filter[i]):
+            # Short: price rejects R3 with volume weakening (bearish divergence)
+            elif ((high[i] >= weekly_r3_aligned[i] or close[i] >= weekly_r3_aligned[i]) and 
+                  vol_weakening[i]):
                 position = -1
                 signals[i] = -0.25
     
