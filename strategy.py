@@ -1,85 +1,114 @@
 #!/usr/bin/env python3
 """
-1d_weekly_ema_trend_v2
-Hypothesis: On daily timeframe, follow the weekly trend using EMA crossover with volume confirmation.
-Enter long when daily EMA20 crosses above weekly EMA20 and volume is above average.
-Enter short when daily EMA20 crosses below weekly EMA20 and volume is above average.
-Weekly trend filter ensures we only trade in the direction of higher timeframe trend.
-Designed for 1d timeframe to target 10-25 trades/year, minimizing fee drag.
-Works in both bull and bear markets by following the weekly trend.
+6h_volatility_squeeze_breakout_v1
+Hypothesis: In low volatility regimes (Bollinger Band width < 20th percentile), price breaks out of the
+6-hour range with high volume, signaling the start of a new trend. Enter long on breakout above the
+6-hour high with volume confirmation, short on breakdown below the 6-hour low. Use 1d trend filter
+(EMA50) to align with the daily trend and avoid counter-trend trades. Designed for 6h timeframe to
+target 15-30 trades/year, minimizing fee drag. Works in both bull and bear markets by capturing
+breakouts from consolidation and using the daily trend filter for direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_ema_trend_v2"
-timeframe = "1d"
+name = "6h_volatility_squeeze_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily EMA20
-    ema_20d = pd.Series(close).ewm(span=20, min_periods=20).mean().values
+    # Bollinger Bands (20, 2) for volatility squeeze
+    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = ma + 2 * std
+    lower = ma - 2 * std
+    bb_width = upper - lower
     
-    # Weekly EMA20
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Percentile rank of BB width (lookback 50 periods)
+    def percentile_rank(arr, window):
+        pr = np.full_like(arr, np.nan)
+        for i in range(window, len(arr)):
+            window_data = arr[i-window:i]
+            if np.all(np.isnan(window_data)):
+                pr[i] = np.nan
+            else:
+                pr[i] = np.sum(window_data < arr[i]) / np.sum(~np.isnan(window_data)) * 100
+        return pr
+    
+    bb_width_pr = percentile_rank(bb_width, 50)
+    
+    # 6-hour range (highest high, lowest low over 20 periods ~ 5 days)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Daily trend filter: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_20w = pd.Series(close_1w).ewm(span=20, min_periods=20).mean().values
-    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
-    
-    # Volume confirmation: volume > 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1d = df_1d['close'].values
+    ema_50d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(ema_20d[i]) or np.isnan(ema_20w_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(bb_width_pr[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_50d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend direction (based on slope)
-        weekly_uptrend = ema_20w_aligned[i] > ema_20w_aligned[i-1] if i > 0 else False
-        weekly_downtrend = ema_20w_aligned[i] < ema_20w_aligned[i-1] if i > 0 else False
+        # Volatility squeeze condition: BB width < 20th percentile
+        squeeze = bb_width_pr[i] < 20
         
-        # Daily EMA20 crossover signals
-        ema_cross_up = ema_20d[i] > ema_20w_aligned[i] and ema_20d[i-1] <= ema_20w_aligned[i-1]
-        ema_cross_down = ema_20d[i] < ema_20w_aligned[i] and ema_20d[i-1] >= ema_20w_aligned[i-1]
+        # Breakout conditions
+        breakout_up = close[i] > highest_high[i-1] if i > 0 else False
+        breakdown_down = close[i] < lowest_low[i-1] if i > 0 else False
+        
+        # Volume confirmation: volume > 30-period average
+        vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+        vol_confirmed = not np.isnan(vol_ma[i]) and volume[i] > vol_ma[i]
+        
+        # Daily trend filter
+        bullish_trend = ema_50d_aligned[i] > ema_50d_aligned[i-1] if i > 0 else False
+        bearish_trend = ema_50d_aligned[i] < ema_50d_aligned[i-1] if i > 0 else False
         
         if position == 1:  # Long position
-            # Exit: EMA20 crosses below weekly EMA20 or weekly trend turns down
-            if ema_cross_down or not weekly_uptrend:
+            # Exit: price closes below 6-hour VWAP or volatility expands (breakout failed)
+            vwap = (pd.Series(close).rolling(window=10).apply(lambda x: np.average(x, weights=np.ones(len(x))), raw=True)).values
+            if not np.isnan(vwap[i]) and close[i] < vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA20 crosses above weekly EMA20 or weekly trend turns up
-            if ema_cross_up or not weekly_downtrend:
+            # Exit: price closes above 6-hour VWAP or volatility expands
+            vwap = (pd.Series(close).rolling(window=10).apply(lambda x: np.average(x, weights=np.ones(len(x))), raw=True)).values
+            if not np.isnan(vwap[i]) and close[i] > vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: EMA20 crosses above weekly EMA20 with volume confirmation and weekly uptrend
-            if ema_cross_up and vol_ma[i] > 0 and volume[i] > vol_ma[i] and weekly_uptrend:
+            # Long: volatility squeeze + breakout up + volume confirmed + bullish daily trend
+            if squeeze and breakout_up and vol_confirmed and bullish_trend:
                 position = 1
                 signals[i] = 0.25
-            # Short: EMA20 crosses below weekly EMA20 with volume confirmation and weekly downtrend
-            elif ema_cross_down and vol_ma[i] > 0 and volume[i] > vol_ma[i] and weekly_downtrend:
+            # Short: volatility squeeze + breakdown down + volume confirmed + bearish daily trend
+            elif squeeze and breakdown_down and vol_confirmed and bearish_trend:
                 position = -1
                 signals[i] = -0.25
     
