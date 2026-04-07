@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
-# Uses Donchian channel breakouts for trend following, confirmed by 1d EMA trend direction
-# and volume above 20-period average. Includes ATR-based stoploss to limit drawdowns.
-# Designed for moderate trade frequency (target: 19-50 trades/year) to balance signal quality
-# and fee efficiency. Works in bull markets via breakouts and in bear markets via
-# short breakdowns with trend filter alignment.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume-weighted trend filter
+# Uses Donchian channel breakouts confirmed by 1d VWAP trend and volume confirmation.
+# Designed for 25-50 trades/year to minimize fee drag. Works in bull markets via breakouts
+# and in bear markets via short breakdowns with VWAP trend alignment. Includes ATR-based
+# stoploss to limit drawdowns during volatile periods.
 
-name = "4h_donchian20_1d_ema_volume_v1"
+name = "4h_donchian20_1d_vwap_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,14 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter
+    # 1d VWAP trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate 1d VWAP
+    vwap_num = (high_1d + low_1d + close_1d) * volume_1d
+    vwap_den = volume_1d
+    vwap_cumsum = np.cumsum(vwap_num)
+    vol_cumsum = np.cumsum(vwap_den)
+    vwap_1d = vwap_cumsum / vol_cumsum
+    vwap_1d = np.where(vwap_den == 0, np.nan, vwap_1d)
+    vwap_1d = pd.Series(vwap_1d).ffill().bfill().values
     
     # Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -53,10 +62,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(vwap_1d[i]) or np.isnan(vol_ma[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -68,9 +77,9 @@ def generate_signals(prices):
         long_breakout = close[i] > highest_high[i-1]  # Break above previous high
         short_breakout = close[i] < lowest_low[i-1]   # Break below previous low
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from 1d VWAP
+        uptrend = close[i] > vwap_1d[i]
+        downtrend = close[i] < vwap_1d[i]
         
         # Exit conditions: reverse signal or stoploss
         if position == 1:  # Long position
