@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: Daily Camarilla pivot levels act as strong support/resistance. 
-In trending markets (price above/below 200 EMA), price often reverses from 
-S3/S4 or R3/R4 levels. Volume confirms institutional interest at these levels.
-Works in both bull and bear markets by fading extremes with trend filter.
-Target: 15-35 trades/year.
+4h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Camarilla pivot levels from weekly timeframe identify key support/resistance levels.
+Price rejection at these levels with volume confirmation and weekly trend filter provides
+high-probability reversal entries. Works in both bull and bear markets by fading extremes
+at statistically significant levels. Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timezone = "12h"
+name = "4h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,59 +26,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Weekly data for Camarilla pivots and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for previous day
-    # Formula: Based on previous day's high, low, close
-    # Resistance levels: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # Support levels: S4 = C - (H-L)*1.1/2, S3 = C - (H-L)*1.1/4, etc.
-    # Actually: R4 = Close + (High-Low)*1.1/2, R3 = Close + (High-Low)*1.1/4
-    # R2 = Close + (High-Low)*1.1/6, R1 = Close + (High-Low)*1.1/12
-    # S1 = Close - (High-Low)*1.1/12, S2 = Close - (High-Low)*1.1/6
-    # S3 = Close - (High-Low)*1.1/4, S4 = Close - (High-Low)*1.1/2
+    # Calculate Camarilla pivot levels for weekly timeframe
+    # Using previous week's OHLC
+    wk_high = df_1w['high'].shift(1)
+    wk_low = df_1w['low'].shift(1)
+    wk_close = df_1w['close'].shift(1)
     
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    prev_close = df_1d['close'].shift(1)
+    # Typical price for pivot calculation
+    wk_typical = (wk_high + wk_low + wk_close) / 3
+    wk_range = wk_high - wk_low
     
-    # Calculate pivot levels
-    high_low_range = prev_high - prev_low
-    r4 = prev_close + high_low_range * 1.1 / 2
-    r3 = prev_close + high_low_range * 1.1 / 4
-    r2 = prev_close + high_low_range * 1.1 / 6
-    r1 = prev_close + high_low_range * 1.1 / 12
-    s1 = prev_close - high_low_range * 1.1 / 12
-    s2 = prev_close - high_low_range * 1.1 / 6
-    s3 = prev_close - high_low_range * 1.1 / 4
-    s4 = prev_close - high_low_range * 1.1 / 2
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H4 = close + 1.5 * range * 1.1
+    # H3 = close + 1.25 * range * 1.1
+    # H2 = close + 1.166 * range * 1.1
+    # H1 = close + 1.083 * range * 1.1
+    # L1 = close - 1.083 * range * 1.1
+    # L2 = close - 1.166 * range * 1.1
+    # L3 = close - 1.25 * range * 1.1
+    # L4 = close - 1.5 * range * 1.1
     
-    # Daily 200 EMA for trend filter
-    ema_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
+    camarilla_h4 = wk_close + 1.5 * wk_range * 1.1
+    camarilla_h3 = wk_close + 1.25 * wk_range * 1.1
+    camarilla_h2 = wk_close + 1.166 * wk_range * 1.1
+    camarilla_h1 = wk_close + 1.083 * wk_range * 1.1
+    camarilla_l1 = wk_close - 1.083 * wk_range * 1.1
+    camarilla_l2 = wk_close - 1.166 * wk_range * 1.1
+    camarilla_l3 = wk_close - 1.25 * wk_range * 1.1
+    camarilla_l4 = wk_close - 1.5 * wk_range * 1.1
     
-    # Align all daily data to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200.values)
+    # Weekly EMA for trend filter (20-period)
+    ema_20 = df_1w['close'].ewm(span=20, adjust=False).mean()
     
-    # Volume confirmation (24-period average = 12 days on 12h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align all weekly data to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4.values)
+    h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3.values)
+    h2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h2.values)
+    h1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h1.values)
+    l1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l1.values)
+    l2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l2.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3.values)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4.values)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20.values)
+    
+    # Volume confirmation (20-period average = ~10 days on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -87,29 +91,33 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches R3 (take profit) or trend turns bearish
-            if close[i] >= r3_aligned[i] or close[i] < ema_200_aligned[i]:
+            # Exit: price reaches H3 or trend turns bearish
+            if close[i] >= h3_aligned[i] or close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price reaches S3 (take profit) or trend turns bullish
-            if close[i] <= s3_aligned[i] or close[i] > ema_200_aligned[i]:
+            # Exit: price reaches L3 or trend turns bullish
+            if close[i] <= l3_aligned[i] or close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price touches or goes below S4 with volume and bullish trend
-            if (close[i] <= s4_aligned[i] and vol_confirm and 
-                close[i] > ema_200_aligned[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price touches or goes above R4 with volume and bearish trend
-            elif (close[i] >= r4_aligned[i] and vol_confirm and 
-                  close[i] < ema_200_aligned[i]):
-                position = -1
-                signals[i] = -0.25
+            # Long entry: price rejects L3/L4 with volume and bullish weekly trend
+            if (close[i] <= l3_aligned[i] and vol_confirm and 
+                close[i] > ema_20_aligned[i]):
+                # Additional confirmation: price closing above L3
+                if i > 0 and close[i] > low[i]:
+                    position = 1
+                    signals[i] = 0.25
+            # Short entry: price rejects H3/H4 with volume and bearish weekly trend
+            elif (close[i] >= h3_aligned[i] and vol_confirm and 
+                  close[i] < ema_20_aligned[i]):
+                # Additional confirmation: price closing below H3
+                if i > 0 and close[i] < high[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
