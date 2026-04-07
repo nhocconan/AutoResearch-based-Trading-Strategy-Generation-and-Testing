@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, use daily Camarilla pivot levels for mean-reversion entries in ranging markets, with 1d EMA for trend filter and volume confirmation to avoid false signals. Enter long when price touches S3 level in uptrend with volume spike; enter short when price touches R3 level in downtrend with volume spike. Exit when price reaches opposite pivot level or CCI crosses zero. This strategy targets mean-reversion in ranging markets while avoiding counter-trend moves, working in both bull and bear via trend filter. Uses tight entry conditions to limit trades and reduce fee drag.
+4h_cci_breakout_12h_trend_volume_v12
+Hypothesis: On 4h timeframe, use 12h CCI for trend strength and direction, with 12h EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic. Adjusting volume threshold and tightening exit conditions to reduce trade frequency and improve robustness.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_cci_breakout_12h_trend_volume_v12"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,42 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 12h data for CCI and EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate CCI on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's values (shifted by 1 for lookback)
-    ph = np.roll(high_1d, 1)
-    pl = np.roll(low_1d, 1)
-    pc = np.roll(close_1d, 1)
-    ph[0] = ph[1] if len(ph) > 1 else 0
-    pl[0] = pl[1] if len(pl) > 1 else 0
-    pc[0] = pc[1] if len(pc) > 1 else 0
+    # Typical price
+    tp_12h = (high_12h + low_12h + close_12h) / 3
+    # SMA of typical price
+    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
+    # Mean deviation
+    md = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # CCI calculation
+    cci_12h = (tp_12h - sma_tp) / (0.015 * md)
     
-    # Camarilla levels
-    range_ = ph - pl
-    s1 = pc + (range_ * 1.1 / 12)
-    s2 = pc + (range_ * 1.1 / 6)
-    s3 = pc + (range_ * 1.1 / 4)
-    r1 = pc - (range_ * 1.1 / 12)
-    r2 = pc - (range_ * 1.1 / 6)
-    r3 = pc - (range_ * 1.1 / 4)
+    # 12h EMA for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # 1d EMA for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # Align indicators to 4h timeframe
+    cci_12h_4h = align_htf_to_ltf(prices, df_12h, cci_12h)
+    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Align indicators to 12h timeframe
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    ema_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume confirmation (20-period average on 12h)
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -66,26 +57,29 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(s3_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(ema_12h[i]) or
+        if (np.isnan(cci_12h_4h[i]) or np.isnan(ema_12h_4h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 3.0x 20-period average (increased threshold to reduce trades)
+        vol_confirm = volume[i] > 3.0 * vol_ma[i]
         
         # Trend direction from EMA
-        uptrend = close[i] > ema_12h[i]
-        downtrend = close[i] < ema_12h[i]
+        uptrend = close[i] > ema_12h_4h[i]
+        downtrend = close[i] < ema_12h_4h[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price reaches R3 (opposite level)
-            if close[i] >= r3_12h[i]:
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_12h_4h[i]) < 10:
+                exit_long = True
+            # Exit if CCI goes below -100 (strong reversal)
+            elif cci_12h_4h[i] < -100:
                 exit_long = True
             # Exit if trend turns down
-            elif downtrend:
+            elif downtrend and cci_12h_4h[i] < 0:
                 exit_long = True
             
             if exit_long:
@@ -97,11 +91,14 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price reaches S3 (opposite level)
-            if close[i] <= s3_12h[i]:
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_12h_4h[i]) < 10:
+                exit_short = True
+            # Exit if CCI goes above +100 (strong reversal)
+            elif cci_12h_4h[i] > 100:
                 exit_short = True
             # Exit if trend turns up
-            elif uptrend:
+            elif uptrend and cci_12h_4h[i] > 0:
                 exit_short = True
             
             if exit_short:
@@ -112,15 +109,15 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Long entry conditions
             long_entry = False
-            # Price touches S3 level in uptrend with volume confirmation
-            if close[i] <= s3_12h[i] * 1.002:  # Allow 0.2% slippage
+            # CCI breaks above +100 with uptrend and volume confirmation
+            if cci_12h_4h[i] > 100 and cci_12h_4h[i-1] <= 100:
                 if uptrend and vol_confirm:
                     long_entry = True
             
             # Short entry conditions
             short_entry = False
-            # Price touches R3 level in downtrend with volume confirmation
-            if close[i] >= r3_12h[i] * 0.998:  # Allow 0.2% slippage
+            # CCI breaks below -100 with downtrend and volume confirmation
+            if cci_12h_4h[i] < -100 and cci_12h_4h[i-1] >= -100:
                 if downtrend and vol_confirm:
                     short_entry = True
             
