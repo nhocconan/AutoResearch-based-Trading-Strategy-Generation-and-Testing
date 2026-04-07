@@ -1,84 +1,86 @@
 #!/usr/bin/env python3
 """
-1d_ema_trend_reversion_v1
-Hypothesis: On 1d timeframe, enter long when price crosses above EMA20 with RSI < 60 (mean reversion in uptrend) and enter short when price crosses below EMA20 with RSI > 40 (mean reversion in downtrend). Exit on opposite cross. Uses 1w EMA200 trend filter to avoid counter-trend trades. Designed for 10-30 trades/year to minimize fee flood while capturing mean reversion moves in both bull and bear markets.
+12h_donchian_breakout_1w_trend_volume_v1
+Hypothesis: On 12h timeframe, enter long when price breaks above 20-bar Donchian high with above-average volume and weekly trend up (price > weekly SMA50), enter short when price breaks below 20-bar Donchian low with above-average volume and weekly trend down (price < weekly SMA50). Exit when price crosses the 20-bar Donchian midline (mean of high/low channel). Uses weekly trend filter to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee decay while capturing major trend moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_ema_trend_reversion_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMA20
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    # Calculate RSI (14-period)
-    if len(close) < 14:
+    # Calculate 12h Donchian channels (20-period)
+    if len(high) < 20:
         return np.zeros(n)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Donchian high and low
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0  # midline for exit
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    # Volume moving average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 1w EMA200 for trend filter
+    # Calculate weekly SMA50 for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(ema_20[i]) or np.isnan(rsi[i]) or np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i]) or np.isnan(sma50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: above average volume
+        vol_ok = volume[i] > vol_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: price crosses below EMA20
-            if close[i] < ema_20[i] and close[i-1] >= ema_20[i-1]:
+            # Exit: price crosses below Donchian midline
+            if close[i] < donch_mid[i] and close[i-1] >= donch_mid[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA20
-            if close[i] > ema_20[i] and close[i-1] <= ema_20[i-1]:
+            # Exit: price crosses above Donchian midline
+            if close[i] > donch_mid[i] and close[i-1] <= donch_mid[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price crosses above EMA20 with RSI < 60 and above weekly EMA200
-            if close[i] > ema_20[i] and close[i-1] <= ema_20[i-1] and rsi[i] < 60 and close[i] > ema_200_1w_aligned[i]:
-                position = 1
-                signals[i] = 0.25
-            # Short: price crosses below EMA20 with RSI > 40 and below weekly EMA200
-            elif close[i] < ema_20[i] and close[i-1] >= ema_20[i-1] and rsi[i] > 40 and close[i] < ema_200_1w_aligned[i]:
-                position = -1
-                signals[i] = -0.25
+            if vol_ok:
+                # Long: price breaks above Donchian high with weekly uptrend
+                if close[i] > donch_high[i] and close[i-1] <= donch_high[i-1] and close[i] > sma50_1w_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price breaks below Donchian low with weekly downtrend
+                elif close[i] < donch_low[i] and close[i-1] >= donch_low[i-1] and close[i] < sma50_1w_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
