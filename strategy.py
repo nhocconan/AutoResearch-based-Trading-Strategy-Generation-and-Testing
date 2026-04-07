@@ -1,51 +1,46 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_ema_volume_v1
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from daily timeframe with EMA50 trend filter and volume confirmation. Enter long when price breaks above R4 in uptrend with volume > 1.5x average, short when price breaks below S4 in downtrend with volume > 1.5x average. Exit when price touches opposite pivot level (S4 for long, R4 for short). Camarilla levels provide institutional support/resistance that work in both bull/bear markets. Designed for low frequency (12-37 trades/year) to minimize fee drag.
+1d_trix_1w_trend_volume_v1
+Hypothesis: On daily timeframe, use TRIX (15) momentum with weekly EMA40 trend filter and volume confirmation.
+Enter long when TRIX crosses above zero in weekly uptrend with volume > 1.3x average, short when TRIX crosses below zero in weekly downtrend with volume > 1.3x average.
+Exit on opposite TRIX cross. TRIX filters noise and captures momentum shifts; weekly trend ensures alignment with higher timeframe direction.
+Designed for low frequency (7-25 trades/year) to minimize fee drain.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "12h"
+name = "1d_trix_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate weekly EMA40 for trend
+    weekly_close = df_1w['close'].values
+    weekly_ema40 = pd.Series(weekly_close).ewm(span=40, adjust=False, min_periods=40).mean().values
+    weekly_ema40_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema40)
     
-    pivot = (d_high + d_low + d_close) / 3
-    range_val = d_high - d_low
-    
-    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
-    r4 = d_close + range_val * 1.1 / 2
-    s4 = d_close - range_val * 1.1 / 2
-    
-    # Align to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Get EMA50 from 12h for trend filter
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate TRIX(15) on daily close
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period ago, then percent change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
+    trix[0] = 0  # first value has no previous
     
     # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,39 +48,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after EMA50 warmup
-        # Skip if daily data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+    for i in range(40, n):  # Start after EMA40 warmup
+        # Skip if weekly data not available
+        if np.isnan(weekly_ema40_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs EMA50
-        uptrend = close[i] > ema50[i]
-        downtrend = close[i] < ema50[i]
+        # Determine weekly trend
+        weekly_uptrend = weekly_ema40_aligned[i] > np.roll(weekly_ema40_aligned, 1)[i] if i > 0 else False
+        weekly_downtrend = weekly_ema40_aligned[i] < np.roll(weekly_ema40_aligned, 1)[i] if i > 0 else False
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below S4
-            if close[i] <= s4_aligned[i]:
+            # Exit when TRIX crosses below zero
+            if trix[i] < 0 and trix[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above R4
-            if close[i] >= r4_aligned[i]:
+            # Exit when TRIX crosses above zero
+            if trix[i] > 0 and trix[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 in uptrend with volume confirmation
-            long_entry = (close[i] > r4_aligned[i]) and uptrend and vol_confirm
-            # Short entry: price breaks below S4 in downtrend with volume confirmation
-            short_entry = (close[i] < s4_aligned[i]) and downtrend and vol_confirm
+            # Long entry: TRIX crosses above zero in weekly uptrend with volume confirmation
+            long_entry = (trix[i] > 0 and trix[i-1] <= 0) and weekly_uptrend and vol_confirm
+            # Short entry: TRIX crosses below zero in weekly downtrend with volume confirmation
+            short_entry = (trix[i] < 0 and trix[i-1] >= 0) and weekly_downtrend and vol_confirm
             
             if long_entry:
                 position = 1
