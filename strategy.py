@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_cci_trend_reversal_v3
-Hypothesis: On 4h timeframe, enter long when CCI crosses above -100 with above-average volume and price above 50-period EMA, enter short when CCI crosses below +100 with above-average volume and price below 50-period EMA. Exit when CCI crosses zero. Uses 12h CCI trend filter to avoid counter-trend trades. Designed for 20-50 trades/year to minimize fee drag while capturing momentum reversals in both bull and bear markets.
+1h_volume_breakout_mtf_v1
+Hypothesis: On 1h timeframe, enter long when price breaks above the 10-period high with volume > 1.5x average volume and 4h close > 1d close (bullish regime). Enter short when price breaks below the 10-period low with volume > 1.5x average volume and 4h close < 1d close (bearish regime). Exit when price breaks in opposite direction or volume dries up. Uses 4h/1d for trend regime filter and 1h for entry timing to reduce false signals. Target: 15-35 trades/year per symbol to minimize fee drag while capturing momentum bursts in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_trend_reversal_v3"
-timeframe = "4h"
+name = "1h_volume_breakout_mtf_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,93 +23,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h CCI (20-period)
-    if len(close) < 20:
-        return np.zeros(n)
+    # 10-period high/low for breakout
+    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
-    # Typical Price
-    tp = (high + low + close) / 3.0
-    
-    # Moving Average of TP
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    
-    # Mean Deviation
-    md = pd.Series(tp).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    
-    # CCI
-    cci = (tp - ma_tp) / (0.015 * md)
-    
-    # Calculate 50-period EMA for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Volume moving average for confirmation
+    # Volume average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h CCI for trend filter (avoid counter-trend trades)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h and 1d data for regime filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h and 1d close prices for regime
+    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
     
-    # 12h Typical Price
-    tp_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Align HTF closes to 1h timeframe (with shift(1) for completed bars)
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # 12h MA of TP
-    ma_tp_12h = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # 12h Mean Deviation
-    md_12h = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    
-    # 12h CCI
-    cci_12h = (tp_12h - ma_tp_12h) / (0.015 * md_12h)
-    
-    # Align indicators to 4h timeframe
-    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
+    # Session filter: 8-20 UTC (already datetime64 index)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(cci_12h_aligned[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(high_10[i]) or np.isnan(low_10[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(close_4h_aligned[i]) or np.isnan(close_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: above average volume
-        vol_ok = volume[i] > vol_ma[i]
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: >1.5x average volume
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero (momentum exhaustion)
-            if cci[i] < 0 and cci[i-1] >= 0:
+            # Exit: price breaks below 10-period low OR volume dries up
+            if low[i] < low_10[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero (momentum exhaustion)
-            if cci[i] > 0 and cci[i-1] <= 0:
+            # Exit: price breaks above 10-period high OR volume dries up
+            if high[i] > high_10[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: CCI crosses above -100 with price above EMA50 and 12h CCI bullish
-                if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema_50[i] and cci_12h_aligned[i] > 0:
+                # Bullish regime: 4h close > 1d close (bullish longer-term trend)
+                bullish_regime = close_4h_aligned[i] > close_1d_aligned[i]
+                # Bearish regime: 4h close < 1d close (bearish longer-term trend)
+                bearish_regime = close_4h_aligned[i] < close_1d_aligned[i]
+                
+                # Long: break above 10-period high in bullish regime
+                if high[i] > high_10[i] and bullish_regime:
                     position = 1
-                    signals[i] = 0.25
-                # Short: CCI crosses below +100 with price below EMA50 and 12h CCI bearish
-                elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema_50[i] and cci_12h_aligned[i] < 0:
+                    signals[i] = 0.20
+                # Short: break below 10-period low in bearish regime
+                elif low[i] < low_10[i] and bearish_regime:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
