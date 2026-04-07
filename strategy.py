@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_ichimoku_cloud_1d_trend_v1
-Hypothesis: Ichimoku Cloud on daily timeframe provides strong trend direction and support/resistance.
-On 6h timeframe, enter long when price is above cloud with bullish TK cross, 
-enter short when price is below cloud with bearish TK cross.
-Works in trending markets (both bull/bear) by filtering with cloud color and TK cross.
-Avoids range-bound markets via cloud thickness filter.
-Target: 15-30 trades/year on 6h timeframe to minimize fee drag.
+4h_adx_volume_momentum_v1
+Hypothesis: In trending markets (ADX > 25), price momentum combined with volume confirmation provides
+an edge for trend continuation. Enter long when price is above EMA20, ADX rising, and volume above average;
+enter short when price below EMA20, ADX rising, and volume above average. Use 1d trend filter to avoid
+counter-trend trades. Designed for 4h timeframe to target 20-50 trades/year, minimizing fee drag.
+Works in both bull and bear markets by following the daily trend and using ADX to filter ranging conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_1d_trend_v1"
-timeframe = "6h"
+name = "4h_adx_volume_momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,112 +21,111 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for Ichimoku calculation
+    # EMA20 for momentum
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20).mean().values
+    
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros(len(high))
+        minus_dm = np.zeros(len(high))
+        tr = np.zeros(len(high))
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+        atr = np.zeros(len(high))
+        atr[period] = np.nansum(tr[1:period+1]) / period
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros(len(high))
+        minus_di = np.zeros(len(high))
+        dx = np.zeros(len(high))
+        
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                plus_di[i] = 100 * (plus_dm[i] / atr[i])
+                minus_di[i] = 100 * (minus_dm[i] / atr[i])
+                if (plus_di[i] + minus_di[i]) != 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros(len(high))
+        adx[2*period-1] = np.nansum(dx[period:2*period]) / period
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx = calculate_adx(high, low, close, 14)
+    
+    # Volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Daily trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # Ichimoku components (standard periods: 9, 26, 52)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
-                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
-                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    senkou_span_b = ((pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
-                      pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2)
-    
-    # Chikou Span (Lagging Span): current close shifted 26 periods behind
-    # Not used for signals but calculated for completeness
-    
-    # Align Ichimoku components to 6h timeframe (with proper shift for forward-looking components)
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    ema_50d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0 or
+            np.isnan(ema_50d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        tenkan = tenkan_sen_aligned[i]
-        kijun = kijun_sen_aligned[i]
-        span_a = senkou_span_a_aligned[i]
-        span_b = senkou_span_b_aligned[i]
-        
-        # Cloud boundaries (Senkou Span A and B form the cloud)
-        cloud_top = max(span_a, span_b)
-        cloud_bottom = min(span_a, span_b)
-        
-        # Cloud thickness filter: avoid thin clouds (weak support/resistance)
-        cloud_thickness = cloud_top - cloud_bottom
-        if i >= 26:  # Need enough history for thickness calculation
-            # Calculate average cloud thickness over last 26 periods
-            start_idx = max(0, i - 25)
-            thickness_values = []
-            for j in range(start_idx, i + 1):
-                if not (np.isnan(senkou_span_a_aligned[j]) or np.isnan(senkou_span_b_aligned[j])):
-                    t_top = max(senkou_span_a_aligned[j], senkou_span_b_aligned[j])
-                    t_bottom = min(senkou_span_a_aligned[j], senkou_span_b_aligned[j])
-                    thickness_values.append(t_top - t_bottom)
-            if thickness_values:
-                avg_thickness = np.mean(thickness_values[-26:]) if len(thickness_values) >= 26 else np.mean(thickness_values)
-                # Skip if cloud is too thin (less than 0.5% of price)
-                if avg_thickness < 0.005 * close[i]:
-                    signals[i] = 0.0
-                    continue
-        
-        # Determine cloud color (green = bullish, red = bearish)
-        # Green cloud when Span A > Span B, red when Span A < Span B
-        is_bullish_cloud = span_a > span_b
+        # Conditions
+        adx_rising = adx[i] > adx[i-1] if i > 0 else False
+        vol_confirmed = volume[i] > vol_ma[i]
+        above_ema20 = close[i] > ema_20[i]
+        below_ema20 = close[i] < ema_20[i]
+        bullish_trend = ema_50d_aligned[i] > ema_50d_aligned[i-1] if i > 0 else False
+        bearish_trend = ema_50d_aligned[i] < ema_50d_aligned[i-1] if i > 0 else False
         
         if position == 1:  # Long position
-            # Exit: price drops below cloud or TK cross turns bearish
-            if close[i] < cloud_bottom or tenkan < kijun:
+            # Exit: ADX falls below 25 or price crosses below EMA20
+            if adx[i] < 25 or close[i] < ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above cloud or TK cross turns bullish
-            if close[i] > cloud_top or tenkan > kijun:
+            # Exit: ADX falls below 25 or price crosses above EMA20
+            if adx[i] < 25 or close[i] > ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price above cloud, bullish cloud, and bullish TK cross
-            if close[i] > cloud_top and is_bullish_cloud and tenkan > kijun:
+            # Long: ADX > 25 and rising, price above EMA20, volume confirmed, bullish daily trend
+            if adx[i] > 25 and adx_rising and above_ema20 and vol_confirmed and bullish_trend:
                 position = 1
                 signals[i] = 0.25
-            # Short: price below cloud, bearish cloud, and bearish TK cross
-            elif close[i] < cloud_bottom and not is_bullish_cloud and tenkan < kijun:
+            # Short: ADX > 25 and rising, price below EMA20, volume confirmed, bearish daily trend
+            elif adx[i] > 25 and adx_rising and below_ema20 and vol_confirmed and bearish_trend:
                 position = -1
                 signals[i] = -0.25
     
