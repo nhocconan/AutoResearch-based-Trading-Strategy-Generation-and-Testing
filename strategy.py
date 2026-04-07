@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period daily average + weekly ADX > 25
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period daily average + weekly ADX > 25
-# Exit when price crosses 12-period EMA in opposite direction
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour volume confirmation and 1-day ATR volatility filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + ATR(14) < 0.03 * price
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + ATR(14) < 0.03 * price
+# Exit when price crosses 10-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Target: 75-150 total trades over 4 years (19-38/year)
+# Uses 12-hour volume for confirmation and 1-day ATR for volatility filter to avoid choppy markets
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "12h_donchian20_1d_vol_1w_adx_v3"
-timeframe = "12h"
+name = "4h_donchian20_12h_vol_1d_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,64 +27,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume confirmation
+    # 12-hour data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # 1-day data for ATR volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1-week data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 12-hour volume average (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_12h_s = pd.Series(volume_12h)
+    volume_ma = volume_12h_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
     
-    # Calculate 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Calculate 1-day ATR(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1-week ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # 20-period Donchian channels
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12-period EMA for exit
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # 10-period EMA for exit
+    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # ATR(14) for stoploss
+    # ATR(14) for stoploss (4h timeframe)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -99,8 +80,8 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_12[i]) or np.isnan(atr[i])):
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(ema_10[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -113,8 +94,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 12-period EMA
-            elif close[i] < ema_12[i]:
+            # Exit: price crosses below 10-period EMA
+            elif close[i] < ema_10[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -126,27 +107,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 12-period EMA
-            elif close[i] > ema_12[i]:
+            # Exit: price crosses above 10-period EMA
+            elif close[i] > ema_10[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with volume confirmation and ADX filter
+            # Look for entries: Donchian breakout with volume confirmation and volatility filter
             # Volume filter: volume > 1.5x 20-period average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 25
-            trend_filter = adx_aligned[i] > 25
+            # Volatility filter: ATR(14) < 3% of price (avoid choppy markets)
+            vol_filter = atr_1d_aligned[i] < 0.03 * close[i]
             
-            # Long: price breaks above Donchian high + volume filter + trend filter
-            if close[i] > highest_high[i] and volume_filter and trend_filter:
+            # Long: price breaks above Donchian high + volume filter + volatility filter
+            if close[i] > highest_high[i] and volume_filter and vol_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low + volume filter + trend filter
-            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
+            # Short: price breaks below Donchian low + volume filter + volatility filter
+            elif close[i] < lowest_low[i] and volume_filter and vol_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
