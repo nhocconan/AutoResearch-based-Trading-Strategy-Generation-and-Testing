@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout with 1d Volume Confirmation
-# Hypothesis: Price breakouts above/below 4h Donchian(20) channels, confirmed by 1d volume spikes,
-# capture breakout moves in both bull and bear markets. Volume ensures breakout validity.
-# Donchian provides objective trend structure, reducing whipsaw.
-# Target: 20-35 trades/year (80-140 total over 4 years) to minimize fee drag.
+# Strategy: 1d Weekly Pivot Range Breakout with Volume Confirmation
+# Hypothesis: Weekly pivot levels act as strong support/resistance. Breaking above/below
+# the weekly pivot range with volume confirmation captures institutional flow.
+# Uses 1d timeframe with 1h pivot calculation for precision. Designed for low turnover
+# (target: 15-25 trades/year) to minimize fee drag in ranging/bear markets.
 
-name = "4h_donchian_breakout_1d_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_pivot_range_breakout_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,55 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume analysis
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1h data for pivot calculation (more precise than daily)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 10:
         return np.zeros(n)
     
-    # Calculate 20-period average volume on 1d
-    vol_1d = df_1d['volume'].values
-    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly pivot points using prior week's OHLC
+    # Resample 1h to weekly using actual weekly boundaries
+    df_1h_copy = df_1h.copy()
+    df_1h_copy['date'] = pd.to_datetime(df_1h_copy['open_time'])
+    df_1h_copy.set_index('date', inplace=True)
     
-    # Align 1d average volume to 4h
-    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
+    # Get weekly OHLC
+    weekly = df_1h_copy.resample('W').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).dropna()
     
-    # Calculate 4h Donchian channels (20-period high/low)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    if len(weekly) < 2:
+        return np.zeros(n)
+    
+    # Calculate pivot points for each week (using prior week's data)
+    weekly['pivot'] = (weekly['high'].shift(1) + weekly['low'].shift(1) + weekly['close'].shift(1)) / 3
+    weekly['support1'] = 2 * weekly['pivot'] - weekly['high'].shift(1)
+    weekly['resistance1'] = 2 * weekly['pivot'] - weekly['low'].shift(1)
+    weekly['support2'] = weekly['pivot'] - (weekly['high'].shift(1) - weekly['low'].shift(1))
+    weekly['resistance2'] = weekly['pivot'] + (weekly['high'].shift(1) - weekly['low'].shift(1))
+    
+    # Forward fill weekly levels to 1h
+    weekly_cols = ['pivot', 'support1', 'resistance1', 'support2', 'resistance2']
+    for col in weekly_cols:
+        df_1h_copy[col] = weekly[col].reindex(df_1h_copy.index, method='ffill')
+    
+    # Align to 1d timeframe
+    pivot_1d = align_htf_to_ltf(prices, df_1h_copy, df_1h_copy['pivot'].values)
+    support1_1d = align_htf_to_ltf(prices, df_1h_copy, df_1h_copy['support1'].values)
+    resistance1_1d = align_htf_to_ltf(prices, df_1h_copy, df_1h_copy['resistance1'].values)
+    support2_1d = align_htf_to_ltf(prices, df_1h_copy, df_1h_copy['support2'].values)
+    resistance2_1d = align_htf_to_ltf(prices, df_1h_copy, df_1h_copy['resistance2'].values)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(avg_vol_20_aligned[i]):
+        if (np.isnan(pivot_1d[i]) or np.isnan(support1_1d[i]) or 
+            np.isnan(resistance1_1d[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average volume
-        volume_spike = volume[i] > 1.5 * avg_vol_20_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low or volume dries up
-            if close[i] < donch_low[i]:
+            # Exit: price drops below pivot or volume dries up
+            if close[i] < pivot_1d[i] or vol_ratio[i] < 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or volume dries up
-            if close[i] > donch_high[i]:
+            # Exit: price rises above pivot or volume dries up
+            if close[i] > pivot_1d[i] or vol_ratio[i] < 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long breakout: price breaks above Donchian high with volume spike
-            if close[i] > donch_high[i] and volume_spike:
+            # Long: break above resistance1 with volume confirmation
+            if (close[i] > resistance1_1d[i] and 
+                vol_ratio[i] > 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Short breakout: price breaks below Donchian low with volume spike
-            elif close[i] < donch_low[i] and volume_spike:
+            # Short: break below support1 with volume confirmation
+            elif (close[i] < support1_1d[i] and 
+                  vol_ratio[i] > 1.5):
                 position = -1
                 signals[i] = -0.25
     
