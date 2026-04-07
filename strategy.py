@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_volume_accumulation_distribution_12h_trend_v1
-Hypothesis: Accumulation/Distribution (AD) line confirms institutional accumulation/distribution.
-Price breaking above/below 4h swing high/low with AD confirmation and 12h trend alignment
-captures strong moves. Works in bull markets (accumulation/distribution continues) and
-bear markets (distribution/accumulation continues) by trading with the 12h trend.
-Target: 20-50 trades/year by requiring swing break + AD divergence + trend filter.
+1h_momentum_4h1d_volume_v1
+Hypothesis: In trending markets (4h/1d aligned), 1h momentum with volume confirmation captures trend continuation. 
+Uses 4h EMA for trend direction, 1h RSI for momentum entry, and volume spike for confirmation. 
+Designed for low trade frequency (15-37/year) to minimize fee drag. Works in bull/bear by only trading with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_accumulation_distribution_12h_trend_v1"
-timeframe = "4h"
+name = "1h_momentum_4h1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -27,73 +25,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Accumulation/Distribution Line
-    clv = ((close - low) - (high - close)) / (high - low)
-    clv = np.where((high - low) == 0, 0, clv)
-    adl = np.cumsum(clv * volume)
-    
-    # 4h swing points (10-period lookback)
-    lookback = 10
-    swing_high = np.full(n, np.nan)
-    swing_low = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        window_high = high[i-lookback:i+1]
-        window_low = low[i-lookback:i+1]
-        swing_high[i] = np.max(window_high)
-        swing_low[i] = np.min(window_low)
-    
-    # 12h trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 4h EMA for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
+    ema40_4h = pd.Series(df_4h['close'].values).ewm(span=40, adjust=False).mean().values
+    ema40_4h_aligned = align_htf_to_ltf(prices, df_4h, ema40_4h)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 1d EMA for higher timeframe trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # AD trend (20-period slope)
-    ad_sma = pd.Series(adl).rolling(window=20, min_periods=20).mean().values
-    ad_slope = np.diff(ad_sma, prepend=ad_sma[0])
+    # 1h RSI for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # 1h volume spike filter
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(swing_high[i]) or 
-            np.isnan(swing_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(ad_slope[i])):
+        if (np.isnan(ema40_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_sma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        
         if position == 1:  # Long position
-            # Exit: price breaks below swing low OR AD turns down
-            if close[i] < swing_low[i] or ad_slope[i] < 0:
+            # Exit: trend turns down OR RSI overbought
+            if close[i] < ema40_4h_aligned[i] or rsi[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # Short position
-            # Exit: price breaks above swing high OR AD turns up
-            if close[i] > swing_high[i] or ad_slope[i] > 0:
+            # Exit: trend turns up OR RSI oversold
+            if close[i] > ema40_4h_aligned[i] or rsi[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long: price breaks above swing high + AD rising + uptrend
-            if (close[i] > swing_high[i] and 
-                ad_slope[i] > 0 and 
-                close[i] > ema50_12h_aligned[i]):
+            # Long: price above 4h/1d EMA + RSI momentum + volume
+            if (close[i] > ema40_4h_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                rsi[i] > 55 and rsi[i] < 70 and 
+                vol_confirm):
                 position = 1
-                signals[i] = 0.25
-            # Short: price breaks below swing low + AD falling + downtrend
-            elif (close[i] < swing_low[i] and 
-                  ad_slope[i] < 0 and 
-                  close[i] < ema50_12h_aligned[i]):
+                signals[i] = 0.20
+            # Short: price below 4h/1d EMA + RSI momentum + volume
+            elif (close[i] < ema40_4h_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  rsi[i] < 45 and rsi[i] > 30 and 
+                  vol_confirm):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
