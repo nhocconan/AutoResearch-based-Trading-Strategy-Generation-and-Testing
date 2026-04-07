@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + 1d Trend + Volume Confirmation
-Hypothesis: Donchian channel breakouts on 12h timeframe capture medium-term trends in both bull and bear markets.
-Trend filtered by 1d EMA(21) ensures directional alignment. Volume > 1.5x average confirms institutional participation.
-Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe.
+4h Donchian Breakout + 1d Trend + Volume Confirmation
+Hypothesis: Donchian channel breakouts capture momentum in both bull and bear markets.
+Trend filtered by daily EMA(21) ensures directional alignment. Volume > 1.5x average
+confirms institutional participation. Stops when price closes below/above entry bar's
+extreme. Designed for low trade frequency (<50/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
