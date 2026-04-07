@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend and Volume Confirmation.
-Long when price breaks above upper Donchian(20) with 1d uptrend and volume confirmation.
-Short when price breaks below lower Donchian(20) with 1d downtrend and volume confirmation.
-Exit when price crosses opposite Donchian band or trend reverses.
+6h Donchian Breakout with Weekly Pivot Direction and Volume Filter.
+Long when price breaks above 20-period Donchian high with weekly uptrend and volume confirmation.
+Short when price breaks below 20-period Donchian low with weekly downtrend and volume confirmation.
+Exit when price crosses back below 10-period Donchian high (long) or above 10-period Donchian low (short).
+Designed for 6h timeframe with ~50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "6h_donchian_breakout_weekly_pivot_direction_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,46 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D EMA TREND FILTER (HTF) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # === WEEKLY TREND FILTER (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
-    one_d_close = df_1d['close'].values
-    one_d_ema = pd.Series(one_d_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    one_d_ema_aligned = align_htf_to_ltf(prices, df_1d, one_d_ema)
+    one_w_close = df_1w['close'].values
+    one_w_ema = pd.Series(one_w_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)
     
-    # === DONCHIAN CHANNELS (12h) ===
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === DONCHIAN CHANNELS (6H) ===
+    # 20-period for entry
+    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 10-period for exit (faster exit)
+    donch_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donch_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
-    # === VOLUME CONFIRMATION (12h) ===
+    # === VOLUME CONFIRMATION (6H) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(one_d_ema_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(one_w_ema_aligned[i]) or np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i]) or
+            np.isnan(donch_high_10[i]) or np.isnan(donch_low_10[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1d EMA
-        uptrend = close[i] > one_d_ema_aligned[i]
-        downtrend = close[i] < one_d_ema_aligned[i]
+        # Determine trend direction from weekly EMA
+        uptrend = close[i] > one_w_ema_aligned[i]
+        downtrend = close[i] < one_w_ema_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below lower band OR trend turns down
-            if close[i] < lower[i] or downtrend:
+            # Exit: price crosses below 10-period Donchian high OR trend turns down
+            if close[i] < donch_high_10[i] or downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above upper band OR trend turns up
-            if close[i] > upper[i] or uptrend:
+            # Exit: price crosses above 10-period Donchian low OR trend turns up
+            if close[i] > donch_low_10[i] or uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -76,12 +80,12 @@ def generate_signals(prices):
                 continue
             
             # Entry: Donchian breakout with trend alignment
-            if close[i] > upper[i] and uptrend:
-                # Breakout above upper band in uptrend -> long
+            if close[i] > donch_high_20[i] and uptrend:
+                # Breakout above 20-period high in uptrend -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < lower[i] and downtrend:
-                # Breakdown below lower band in downtrend -> short
+            elif close[i] < donch_low_20[i] and downtrend:
+                # Breakdown below 20-period low in downtrend -> short
                 position = -1
                 signals[i] = -0.25
     
