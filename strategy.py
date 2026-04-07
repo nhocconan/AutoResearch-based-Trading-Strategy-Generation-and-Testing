@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day price action with weekly regime filter (ADX) and daily momentum (RSI)
-# Long when price > daily EMA(50) + weekly ADX > 25 (trending) + daily RSI > 55
-# Short when price < daily EMA(50) + weekly ADX > 25 + daily RSI < 45
-# Exit when price crosses EMA(50) in opposite direction
+# Hypothesis: 6h Camarilla pivot reversal with 12h trend filter and volume confirmation
+# Long when price breaks below S3 with 12h EMA(50) bullish and volume > 1.5x 20-period average
+# Short when price breaks above R3 with 12h EMA(50) bearish and volume > 1.5x 20-period average
+# Exit when price crosses opposite Camarilla level (S4 for long, R4 for short)
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25
-# Uses weekly ADX for trend strength and daily RSI for momentum confirmation
-# Target: 50-150 total trades over 4 years (12-38/year)
+# Uses Camarilla levels from daily data for institutional reversal points
 
-name = "1d_ema50_weekly_adx_daily_rsi_v1"
-timeframe = "1d"
+name = "6h_camarilla_reversal_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,60 +24,47 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily EMA(50) for trend
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Weekly data for ADX (trend strength filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # 1-day data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly ADX(14)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Calculate Camarilla levels from previous day
+    # Using standard Camarilla formula: 
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # S4 = C - ((H-L) * 1.1/2), S3 = C - ((H-L) * 1.1/4)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # True Range
-    tr1 = high_w - low_w
-    tr2 = np.abs(high_w - np.roll(close_w, 1))
-    tr3 = np.abs(low_w - np.roll(close_w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_w = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Avoid look-ahead: use previous day's data
+    camarilla_c = prev_close
+    camarilla_range = prev_high - prev_low
+    camarilla_r4 = camarilla_c + (camarilla_range * 1.1 / 2)
+    camarilla_r3 = camarilla_c + (camarilla_range * 1.1 / 4)
+    camarilla_s4 = camarilla_c - (camarilla_range * 1.1 / 2)
+    camarilla_s3 = camarilla_c - (camarilla_range * 1.1 / 4)
     
-    # Directional Movement
-    dm_plus = np.where((high_w - np.roll(high_w, 1)) > (np.roll(low_w, 1) - low_w), 
-                       np.maximum(high_w - np.roll(high_w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_w, 1) - low_w) > (high_w - np.roll(high_w, 1)), 
-                        np.maximum(np.roll(low_w, 1) - low_w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Smoothed values
-    tr14 = pd.Series(tr_w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus14 / (tr14 + 1e-10)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Daily RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: 20-period average
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -95,8 +81,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema50[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -109,8 +96,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below EMA50
-            elif close[i] < ema50[i]:
+            # Exit: price crosses above S4 (stop and reverse condition)
+            elif close[i] > camarilla_s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -122,28 +109,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above EMA50
-            elif close[i] > ema50[i]:
+            # Exit: price crosses below R4 (stop and reverse condition)
+            elif close[i] < camarilla_r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: EMA50 break with weekly ADX trend filter and daily RSI momentum
-            # Trend filter: weekly ADX > 25 (strong trend)
-            adx_filter = adx_aligned[i] > 25
-            # Momentum filter: daily RSI > 55 for long, < 45 for short
-            rsi_filter_long = rsi[i] > 55
-            rsi_filter_short = rsi[i] < 45
+            # Look for entries: Camarilla S3/R3 break with 12h trend filter and volume confirmation
+            # Volume filter: volume > 1.5x 20-period average
+            volume_filter = volume[i] > 1.5 * volume_ma[i]
+            # Trend filter: 12h EMA(50) - bullish if price > EMA, bearish if price < EMA
+            trend_filter_long = close[i] > ema_12h_aligned[i]
+            trend_filter_short = close[i] < ema_12h_aligned[i]
             
-            # Long: price above EMA50 + strong trend + bullish momentum
-            if close[i] > ema50[i] and adx_filter and rsi_filter_long:
+            # Long: price breaks below S3 (mean reversion) with bullish 12h trend and volume
+            if close[i] < camarilla_s3_aligned[i] and trend_filter_long and volume_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price below EMA50 + strong trend + bearish momentum
-            elif close[i] < ema50[i] and adx_filter and rsi_filter_short:
+            # Short: price breaks above R3 (mean reversion) with bearish 12h trend and volume
+            elif close[i] > camarilla_r3_aligned[i] and trend_filter_short and volume_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
