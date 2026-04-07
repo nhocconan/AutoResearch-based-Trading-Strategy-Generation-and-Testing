@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout + weekly EMA200 trend filter + volume confirmation.
-Long when price breaks above 20-day high with weekly uptrend and volume surge.
-Short when price breaks below 20-day low with weekly downtrend and volume surge.
-Uses 1d timeframe for entry/exit and 1w for trend filter.
-Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with daily trend filter and volume confirmation.
+Bull Power = Close - EMA13, Bear Power = EMA13 - Low.
+In bull market (daily close > daily EMA50): long when Bull Power > 0 and rising.
+In bear market (daily close < daily EMA50): short when Bear Power > 0 and rising.
+Volume must be above 20-period average to confirm strength.
+Elder Ray measures bull/bear power behind moves, effective in both trends.
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_elder_ray_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,60 +28,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # === DAILY TREND FILTER (HTF) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)  # already shifted
     
-    # === DAILY DONCHIAN CHANNEL (20-day) ===
-    # Use pandas rolling for efficiency
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # === ELDER RAY (LTF) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = close - ema13  # Close - EMA13
+    bear_power = ema13 - low    # EMA13 - Low
     
-    # === VOLUME CONFIRMATION ===
+    # Smooth power for rising detection (3-period EMA)
+    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    
+    # Rising detection: current > previous
+    bull_rising = bull_power_smooth > np.roll(bull_power_smooth, 1)
+    bear_rising = bear_power_smooth > np.roll(bear_power_smooth, 1)
+    bull_rising[0] = False
+    bear_rising[0] = False
+    
+    # === VOLUME CONFIRMATION (LTF) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
-        if np.isnan(weekly_ema_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(daily_ema_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
+        # Determine trend direction from daily EMA
+        bull_trend = close[i] > daily_ema_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low OR weekly trend turns bearish
-            if close[i] < donchian_low[i] or close[i] <= weekly_ema_aligned[i]:
+            # Exit: Bull Power <= 0 OR trend turns bearish
+            if bull_power[i] <= 0 or not bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high OR weekly trend turns bullish
-            if close[i] > donchian_high[i] or close[i] >= weekly_ema_aligned[i]:
+            # Exit: Bear Power <= 0 OR trend turns bullish
+            if bear_power[i] <= 0 or bull_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation (above average)
+            # Need volume confirmation
             if volume[i] <= vol_ma[i]:
                 signals[i] = 0.0
                 continue
             
-            # Entry logic based on weekly trend
-            if close[i] > weekly_ema_aligned[i]:  # Weekly uptrend
-                if close[i] > donchian_high[i]:  # Break above 20-day high
+            # Entry logic based on daily trend
+            if bull_trend:
+                # In bull market: long when Bull Power > 0 and rising
+                if bull_power[i] > 0 and bull_rising[i]:
                     position = 1
                     signals[i] = 0.25
-            else:  # Weekly downtrend
-                if close[i] < donchian_low[i]:  # Break below 20-day low
+            else:
+                # In bear market: short when Bear Power > 0 and rising
+                if bear_power[i] > 0 and bear_rising[i]:
                     position = -1
                     signals[i] = -0.25
     
