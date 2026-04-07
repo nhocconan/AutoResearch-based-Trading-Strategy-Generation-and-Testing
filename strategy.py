@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_cci_breakout_1d_trend_volume_v1
-Hypothesis: On 6h timeframe, use CCI(20) breakout with daily trend filter and volume confirmation. 
-Enter long when CCI crosses above +100 with daily EMA50 > EMA200 and volume > 1.5x average; 
-enter short when CCI crosses below -100 with daily EMA50 < EMA200 and volume > 1.5x average. 
-Exit when CCI crosses back through zero or trend reverses. 
-CCI captures momentum extremes, daily EMA filter ensures trend alignment, volume confirms institutional participation.
-Works in bull/bear via daily trend filter. Targets 15-30 trades/year to minimize fee drag.
+6h_ema_slope_volume_breakout
+Hypothesis: On 6h timeframe, use EMA slope (rate of change) to detect strong momentum trends combined with volume confirmation. Enter long when EMA20 slope turns positive with price above EMA50 and volume > 2x average; enter short when EMA20 slope turns negative with price below EMA50 and volume > 2x average. Exit when EMA slope reverses or price crosses opposite EMA. This captures institutional momentum moves while avoiding chop. Works in bull/bear via slope direction filter. Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_breakout_1d_trend_volume_v1"
+name = "6h_ema_slope_volume_breakout"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -28,17 +23,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA50 and EMA200 for trend filter
+    # Calculate EMAs
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Calculate CCI(20) on 6h data
-    typical_price = (high + low + close) / 3
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (typical_price - tp_mean) / (0.015 * tp_mad)
-    # Handle division by zero
-    cci = np.where(tp_mad == 0, 0, cci)
+    # Calculate EMA20 slope (rate of change over 3 periods)
+    ema20_slope = (ema20 - np.roll(ema20, 3)) / 3
+    ema20_slope[:3] = 0  # First 3 values invalid
     
     # Volume confirmation (24-period average on 6h = 6 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -46,24 +37,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(cci[i]) or np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
+        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
+            np.isnan(ema20_slope[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 24-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2x 24-period average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if CCI crosses below zero (momentum fade)
-            if cci[i] < 0 and cci[i-1] >= 0:
+            # Exit if EMA20 slope turns negative (momentum loss)
+            if ema20_slope[i] < 0:
                 exit_long = True
-            # Exit if daily EMA50 crosses below EMA200 (trend reversal)
-            elif ema50[i] < ema200[i] and ema50[i-1] >= ema200[i-1]:
+            # Exit if price crosses below EMA50 (trend change)
+            elif close[i] < ema50[i] and close[i-1] >= ema50[i-1]:
                 exit_long = True
             
             if exit_long:
@@ -75,11 +67,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if CCI crosses above zero (momentum fade)
-            if cci[i] > 0 and cci[i-1] <= 0:
+            # Exit if EMA20 slope turns positive (momentum loss)
+            if ema20_slope[i] > 0:
                 exit_short = True
-            # Exit if daily EMA50 crosses above EMA200 (trend reversal)
-            elif ema50[i] > ema200[i] and ema50[i-1] <= ema200[i-1]:
+            # Exit if price crosses above EMA50 (trend change)
+            elif close[i] > ema50[i] and close[i-1] <= ema50[i-1]:
                 exit_short = True
             
             if exit_short:
@@ -88,16 +80,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI crosses above +100 with daily EMA50 > EMA200 and volume confirmation
+            # Long entry: EMA20 slope turns positive, price above EMA50, volume confirmation
             long_entry = False
-            if (cci[i] > 100 and cci[i-1] <= 100 and
-                ema50[i] > ema200[i] and vol_confirm):
+            if (ema20_slope[i] > 0 and ema20_slope[i-1] <= 0 and
+                close[i] > ema50[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: CCI crosses below -100 with daily EMA50 < EMA200 and volume confirmation
+            # Short entry: EMA20 slope turns negative, price below EMA50, volume confirmation
             short_entry = False
-            if (cci[i] < -100 and cci[i-1] >= -100 and
-                ema50[i] < ema200[i] and vol_confirm):
+            if (ema20_slope[i] < 0 and ema20_slope[i-1] >= 0 and
+                close[i] < ema50[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
