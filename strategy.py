@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_ichimoku_cloud_1d_trend_v1
-Hypothesis: On 6-hour timeframe, use Ichimoku Cloud components from daily timeframe for trend direction and 6h TK Cross for entry timing.
-Enter long when 6h Tenkan-sen crosses above Kijun-sen AND price is above daily Kumo (cloud).
-Enter short when 6h Tenkan-sen crosses below Kijun-sen AND price is below daily Kumo (cloud).
-Exit when TK Cross reverses or price crosses Kumo in opposite direction.
-Ichimoku provides multi-layered trend support/resistance that works in both trending and ranging markets.
-Daily timeframe filter ensures alignment with higher timeframe trend, reducing whipsaw.
-Target: 20-40 trades/year to minimize fee drag while capturing sustained moves.
+6h_trix_1d_volume_regime_v1
+Hypothesis: On 6-hour timeframe, use TRIX momentum oscillator for entry signals filtered by daily volume spike and 6-hour chop regime (range vs trend). TRIX filters out minor cycles and is effective in both trending and ranging markets when combined with volume confirmation. Volume spikes indicate institutional interest and increase probability of sustained moves. Chop regime filter avoids whipsaw in sideways markets by switching between mean reversion (in chop) and trend following (in trend). Target: 25-35 trades/year to minimize fee drag while capturing high-probability moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_1d_trend_v1"
+name = "6h_trix_1d_volume_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,78 +19,75 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate Ichimoku on 6h timeframe for TK Cross
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate TRIX on 6h (1-period ROC of triple EMA)
+    # TRIX = 100 * (EMA3 of ROC)
+    close_s = pd.Series(close)
+    roc = close_s.pct_change(1)  # 1-period rate of change
+    ema1 = roc.ewm(span=15, min_periods=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, min_periods=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, min_periods=15, adjust=False).mean()
+    trix = 100 * ema3
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Get daily data for Kumo (Cloud)
+    # Get daily data for volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on daily
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate 20-day average volume on daily
+    d_volume = df_1d['volume'].values
+    d_vol_avg = pd.Series(d_volume).rolling(window=20, min_periods=20).mean().values
+    d_vol_avg_aligned = align_htf_to_ltf(prices, df_1d, d_vol_avg)
     
-    # Tenkan-sen and Kijun-sen for daily
-    d_tenkan = (pd.Series(d_high).rolling(window=9, min_periods=9).max() + 
-                pd.Series(d_low).rolling(window=9, min_periods=9).min()) / 2
-    d_kijun = (pd.Series(d_high).rolling(window=26, min_periods=26).max() + 
-               pd.Series(d_low).rolling(window=26, min_periods=26).min()) / 2
+    # Calculate chop regime on 6h (using ATR and price range)
+    high = prices['high'].values
+    low = prices['low'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
-    d_senkou_a = ((d_tenkan + d_kijun) / 2)
+    # Calculate 14-period high-low range
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_hl = max_high - min_low
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
-    period52_high = pd.Series(d_high).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(d_low).rolling(window=52, min_periods=52).min()
-    d_senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Align daily components to 6h timeframe (shifted by 1 day to avoid look-ahead)
-    d_senkou_a_aligned = align_htf_to_ltf(prices, df_1d, d_senkou_a.values)
-    d_senkou_b_aligned = align_htf_to_ltf(prices, df_1d, d_senkou_b.values)
+    # Chop = 100 * log10(sum(ATR14) / (maxHigh-minLow)) / log10(14)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    chop = np.where(range_hl > 0, 100 * np.log10(atr_sum / range_hl) / np.log10(14), 50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(26, n):  # Start after Kijun warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if required data not available
-        if (np.isnan(tenkan_sen.iloc[i]) or np.isnan(kijun_sen.iloc[i]) or
-            np.isnan(d_senkou_a_aligned[i]) or np.isnan(d_senkou_b_aligned[i])):
+        if (np.isnan(trix.iloc[i]) or np.isnan(d_vol_avg_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # TK Cross signals
-        tk_cross_above = (tenkan_sen.iloc[i] > kijun_sen.iloc[i]) and (tenkan_sen.iloc[i-1] <= kijun_sen.iloc[i-1])
-        tk_cross_below = (tenkan_sen.iloc[i] < kijun_sen.iloc[i]) and (tenkan_sen.iloc[i-1] >= kijun_sen.iloc[i-1])
+        # Volume spike: current volume > 1.5x daily average volume
+        vol_spike = volume[i] > 1.5 * d_vol_avg_aligned[i]
         
-        # Kumo (Cloud) boundaries
-        senkou_top = np.maximum(d_senkou_a_aligned[i], d_senkou_b_aligned[i])
-        senkou_bottom = np.minimum(d_senkou_a_aligned[i], d_senkou_b_aligned[i])
+        # Regime filters
+        in_chop = chop[i] > 61.8  # Choppy market
+        in_trend = chop[i] < 38.2  # Trending market
         
-        # Price above/below cloud
-        price_above_cloud = close[i] > senkou_top
-        price_below_cloud = close[i] < senkou_bottom
+        # TRIX signals
+        trix_cross_up = trix.iloc[i] > 0 and trix.iloc[i-1] <= 0
+        trix_cross_down = trix.iloc[i] < 0 and trix.iloc[i-1] >= 0
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when TK Cross turns bearish
-            if tk_cross_below:
+            # Exit when TRIX crosses below zero
+            if trix_cross_down:
                 exit_long = True
-            # Exit when price drops below cloud
-            elif price_below_cloud:
+            # Exit when volatility spikes against position
+            elif trix.iloc[i] < -0.5:  # Strong bearish momentum
                 exit_long = True
             
             if exit_long:
@@ -108,11 +99,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when TK Cross turns bullish
-            if tk_cross_above:
+            # Exit when TRIX crosses above zero
+            if trix_cross_up:
                 exit_short = True
-            # Exit when price rises above cloud
-            elif price_above_cloud:
+            # Exit when volatility spikes against position
+            elif trix.iloc[i] > 0.5:  # Strong bullish momentum
                 exit_short = True
             
             if exit_short:
@@ -121,11 +112,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: TK Cross bullish AND price above cloud
-            long_entry = tk_cross_above and price_above_cloud
-            
-            # Short entry: TK Cross bearish AND price below cloud
-            short_entry = tk_cross_below and price_below_cloud
+            # Entry logic adapts to regime
+            if in_trend:
+                # Trend following: enter in direction of TRIX momentum
+                long_entry = trix_cross_up and vol_spike
+                short_entry = trix_cross_down and vol_spike
+            elif in_chop:
+                # Mean reversion: fade extreme TRIX readings
+                long_entry = (trix.iloc[i] < -0.3 and trix.iloc[i] > trix.iloc[i-1]) and vol_spike
+                short_entry = (trix.iloc[i] > 0.3 and trix.iloc[i] < trix.iloc[i-1]) and vol_spike
+            else:
+                # Neutral regime: standard TRIX crossover with volume
+                long_entry = trix_cross_up and vol_spike
+                short_entry = trix_cross_down and vol_spike
             
             if long_entry:
                 position = 1
