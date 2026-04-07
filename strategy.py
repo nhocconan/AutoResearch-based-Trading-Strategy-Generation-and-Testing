@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 12h RSI trend filter
-# Long when price breaks above 4h Donchian high + 12h volume > 1.5x 20-period 12h average + 12h RSI > 50
-# Short when price breaks below 4h Donchian low + 12h volume > 1.5x 20-period 12h average + 12h RSI < 50
-# Exit when price crosses opposite Donchian level (long exits at Donchian low, short exits at Donchian high)
-# Stoploss at 2.5 * ATR(14)
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d RSI trend filter
+# Long when price breaks above 4h Donchian high + 12h volume > 1.2x 20-period 12h average + daily RSI > 55
+# Short when price breaks below 4h Donchian low + 12h volume > 1.2x 20-period 12h average + daily RSI < 45
+# Exit when price crosses opposite Donchian level
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12h volume for confirmation and 12h RSI for trend strength
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_12h_vol_rsi_v1"
+name = "4h_donchian20_12h_vol_daily_rsi_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,31 +26,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for volume and RSI confirmation
+    # 12h data for volume confirmation
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 12-hour volume average (20-period)
+    # Calculate 12h volume average (20-period)
     volume_12h = df_12h['volume'].values
     volume_12h_s = pd.Series(volume_12h)
     volume_ma = volume_12h_s.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
     
-    # 12-hour RSI (14-period) for trend filter
-    close_12h = df_12h['close'].values
-    delta_12h = np.diff(close_12h, prepend=close_12h[0])
-    gain_12h = np.where(delta_12h > 0, delta_12h, 0)
-    loss_12h = np.where(delta_12h < 0, -delta_12h, 0)
+    # Daily RSI (14-period) for trend filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain_12h = pd.Series(gain_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_12h = pd.Series(loss_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    rs_12h = avg_gain_12h / (avg_loss_12h + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs_12h))
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 4-hour Donchian channels (20-period)
+    # 20-period Donchian channels (4h)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -71,7 +68,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -80,8 +77,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -93,8 +90,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -107,11 +104,11 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout with volume confirmation and RSI trend filter
-            # Volume filter: volume > 1.5x 20-period 12h average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: 12h RSI > 50 for long, < 50 for short
-            rsi_filter_long = rsi_12h_aligned[i] > 50
-            rsi_filter_short = rsi_12h_aligned[i] < 50
+            # Volume filter: volume > 1.2x 20-period 12h average
+            volume_filter = volume[i] > 1.2 * volume_ma_aligned[i]
+            # Trend filter: daily RSI > 55 for long, < 45 for short
+            rsi_filter_long = rsi[i] > 55
+            rsi_filter_short = rsi[i] < 45
             
             # Long: price breaks above Donchian high + volume filter + RSI filter
             if close[i] > highest_high[i] and volume_filter and rsi_filter_long:
