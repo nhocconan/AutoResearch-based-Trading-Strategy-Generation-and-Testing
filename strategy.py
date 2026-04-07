@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 4h trend filter and volume confirmation
-# Long when price breaks above 12h Donchian upper channel, 4h close > 4h EMA50 (uptrend), and volume > 1.5x 12h average volume
-# Short when price breaks below 12h Donchian lower channel, 4h close < 4h EMA50 (downtrend), and volume > 1.5x 12h average volume
-# Exit when Donchian breakout reverses or trend changes
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: 6h Donchian breakout with weekly trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high, weekly close > weekly EMA50 (uptrend), and volume > 1.5x 6h average volume
+# Short when price breaks below Donchian(20) low, weekly close < weekly EMA50 (downtrend), and volume > 1.5x 6h average volume
+# Exit when price crosses back below/above Donchian midpoint or trend changes
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 4h EMA50 for trend filter and 12h volume average for confirmation
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Uses weekly EMA50 for trend filter and 6h volume average for confirmation
+# Target: 75-175 total trades over 4 years (19-44/year)
 
-name = "12h_donchian20_4h_ema50_vol_v1"
-timeframe = "4h"
+name = "6h_donchian20_1w_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +27,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Donchian(20) channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_roll + low_roll) / 2.0
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 12h volume average for confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    # 6h volume average for confirmation
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -66,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_ma_12h_aligned[i]) or 
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_ma[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -76,26 +70,26 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Donchian breakout reverses or trend changes
-            elif close[i] < donchian_lower[i] or close[i] < ema50_4h_aligned[i]:
+            # Exit: price crosses below Donchian midpoint or trend changes
+            elif close[i] < donchian_mid[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Donchian breakout reverses or trend changes
-            elif close[i] > donchian_upper[i] or close[i] > ema50_4h_aligned[i]:
+            # Exit: price crosses above Donchian midpoint or trend changes
+            elif close[i] > donchian_mid[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -103,150 +97,22 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with Donchian breakout, trend alignment, and volume confirmation
-            # Bullish breakout: price closes above 12h Donchian upper channel
-            bullish_breakout = close[i] > donchian_upper[i]
-            # Bearish breakout: price closes below 12h Donchian lower channel
-            bearish_breakout = close[i] < donchian_lower[i]
+            # Bullish breakout: price breaks above Donchian(20) high
+            bullish_break = close[i] > high_roll[i] and close[i-1] <= high_roll[i-1]
+            # Bearish breakout: price breaks below Donchian(20) low
+            bearish_break = close[i] < low_roll[i] and close[i-1] >= low_roll[i-1]
             
-            # Long: bullish breakout, 4h uptrend, volume spike
-            if (bullish_breakout and
-                close[i] > ema50_4h_aligned[i] and
-                volume[i] > 1.5 * volume_ma_12h_aligned[i]):
+            # Long: bullish breakout, weekly uptrend, volume spike
+            if (bullish_break and
+                close[i] > ema50_1w_aligned[i] and
+                volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: bearish breakout, 4h downtrend, volume spike
-            elif (bearish_breakout and
-                  close[i] < ema50_4h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_12h_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h Donchian breakout with 4h trend filter and volume confirmation
-# Long when price breaks above 12h Donchian upper channel, 4h close > 4h EMA50 (uptrend), and volume > 1.5x 12h average volume
-# Short when price breaks below 12h Donchian lower channel, 4h close < 4h EMA50 (downtrend), and volume > 1.5x 12h average volume
-# Exit when Donchian breakout reverses or trend changes
-# Stoploss at 2.0 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Uses 4h EMA50 for trend filter and 12h volume average for confirmation
-# Target: 75-200 total trades over 4 years (19-50/year)
-
-name = "12h_donchian20_4h_ema50_vol_v1"
-timeframe = "4h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # 12h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # 12h volume average for confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(100, n):
-        # Skip if required data not available
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_ma_12h_aligned[i]) or 
-            np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Donchian breakout reverses or trend changes
-            elif close[i] < donchian_lower[i] or close[i] < ema50_4h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Donchian breakout reverses or trend changes
-            elif close[i] > donchian_upper[i] or close[i] > ema50_4h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with Donchian breakout, trend alignment, and volume confirmation
-            # Bullish breakout: price closes above 12h Donchian upper channel
-            bullish_breakout = close[i] > donchian_upper[i]
-            # Bearish breakout: price closes below 12h Donchian lower channel
-            bearish_breakout = close[i] < donchian_lower[i]
-            
-            # Long: bullish breakout, 4h uptrend, volume spike
-            if (bullish_breakout and
-                close[i] > ema50_4h_aligned[i] and
-                volume[i] > 1.5 * volume_ma_12h_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            # Short: bearish breakout, 4h downtrend, volume spike
-            elif (bearish_breakout and
-                  close[i] < ema50_4h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma_12h_aligned[i]):
+            # Short: bearish breakout, weekly downtrend, volume spike
+            elif (bearish_break and
+                  close[i] < ema50_1w_aligned[i] and
+                  volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
