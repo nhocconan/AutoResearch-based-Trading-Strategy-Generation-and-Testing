@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Camarilla pivot level touch + volume confirmation + weekly trend filter.
-Uses weekly EMA200 for trend direction (bull/bear filter) and daily Camarilla levels for entry.
-In bull markets (price > weekly EMA200): long at L3, short at H3.
-In bear markets (price < weekly EMA200): short at H3, long at L3.
+Hypothesis: 12h Donchian breakout + weekly trend filter + volume confirmation.
+Uses weekly ADX for trend strength and daily Donchian channels for entry.
+Long when price breaks above upper Donchian channel in strong uptrend (ADX>25),
+short when price breaks below lower Donchian channel in strong downtrend (ADX>25).
 Volume must be above 20-period average to confirm breakout.
-Low trade frequency expected due to specific pivot level touches.
-Works in both bull/bear by adapting direction based on higher timeframe trend.
-Target: 50-150 total trades over 4 years.
+Exit when price crosses opposite Donchian band or ADX falls below 20.
+Designed for low trade frequency with strong trend filtering.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1w_trend_volume_v1"
+name = "12h_donchian_breakout_weekly_adx_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -29,36 +28,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (HTF) ===
+    # === WEEKLY ADX TREND STRENGTH (HTF) ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    if len(df_1w) < 30:
         return np.zeros(n)
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)  # already shifted
     
-    # === DAILY CAMARILLA PIVOTS (HTF) ===
+    w_high = df_1w['high'].values
+    w_low = df_1w['low'].values
+    w_close = df_1w['close'].values
+    
+    # Calculate ADX
+    # True Range
+    tr1 = w_high - w_low
+    tr2 = np.abs(w_high - np.roll(w_close, 1))
+    tr3 = np.abs(w_low - np.roll(w_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((w_high - np.roll(w_high, 1)) > (np.roll(w_low, 1) - w_low), 
+                       np.maximum(w_high - np.roll(w_high, 1), 0), 0)
+    dm_minus = np.where((np.roll(w_low, 1) - w_low) > (w_high - np.roll(w_high, 1)), 
+                        np.maximum(np.roll(w_low, 1) - w_low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] * (1 - 1/period) + arr[i] * (1/period)
+        return result
+    
+    atr_period = 14
+    tr_smooth = wilder_smooth(tr, atr_period)
+    dm_plus_smooth = wilder_smooth(dm_plus, atr_period)
+    dm_minus_smooth = wilder_smooth(dm_minus, atr_period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, dm_plus_smooth / tr_smooth * 100, 0)
+    di_minus = np.where(tr_smooth != 0, dm_minus_smooth / tr_smooth * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilder_smooth(dx, atr_period)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # === DAILY DONCHIAN CHANNELS (HTF) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
     d_high = df_1d['high'].values
     d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
     
-    pivot = (d_high + d_low + d_close * 2) / 4
-    range_ = d_high - d_low
+    # Donchian channels (20-period)
+    upper_channel = np.full_like(d_high, np.nan)
+    lower_channel = np.full_like(d_low, np.nan)
     
-    # Camarilla levels
-    H4 = d_close + range_ * 1.1 / 2
-    H3 = d_close + range_ * 1.1 / 4
-    L3 = d_close - range_ * 1.1 / 4
-    L4 = d_close - range_ * 1.1 / 2
+    for i in range(len(d_high)):
+        if i >= 19:  # 20-period lookback
+            upper_channel[i] = np.max(d_high[i-19:i+1])
+            lower_channel[i] = np.min(d_low[i-19:i+1])
     
-    # Align to 12h timeframe (use previous day's levels)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align to 12h timeframe (use previous day's channels)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
     
     # === VOLUME CONFIRMATION (LTF) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,51 +108,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after warmup
-        if np.isnan(weekly_ema_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_ma[i]):
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(adx_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from weekly EMA
-        bull_trend = close[i] > weekly_ema_aligned[i]
+        # Trend strength filter
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20
         
         if position == 1:  # Long position
-            # Exit: price crosses below L3 OR weekly trend turns bearish
-            if close[i] < L3_aligned[i] or not bull_trend:
+            # Exit: price crosses below lower channel OR trend weakens
+            if close[i] < lower_aligned[i] or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above H3 OR weekly trend turns bullish
-            if close[i] > H3_aligned[i] or bull_trend:
+            # Exit: price crosses above upper channel OR trend weakens
+            if close[i] > upper_aligned[i] or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation
-            if volume[i] <= vol_ma[i]:
+            # Need volume confirmation and strong trend
+            if volume[i] <= vol_ma[i] or not strong_trend:
                 signals[i] = 0.0
                 continue
             
-            # Entry logic based on weekly trend
-            if bull_trend:
-                # In bull market: long at L3 support, short at H3 resistance
-                if close[i] <= L3_aligned[i]:  # Touch or break below L3 -> long
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] >= H3_aligned[i]:  # Touch or break above H3 -> short
-                    position = -1
-                    signals[i] = -0.25
-            else:
-                # In bear market: short at H3 resistance, long at L3 support
-                if close[i] >= H3_aligned[i]:  # Touch or break above H3 -> short
-                    position = -1
-                    signals[i] = -0.25
-                elif close[i] <= L3_aligned[i]:  # Touch or break below L3 -> long
-                    position = 1
-                    signals[i] = 0.25
+            # Entry: breakout in direction of trend
+            if close[i] > upper_aligned[i]:  # Break above upper channel -> long
+                position = 1
+                signals[i] = 0.25
+            elif close[i] < lower_aligned[i]:  # Break below lower channel -> short
+                position = -1
+                signals[i] = -0.25
     
     return signals
