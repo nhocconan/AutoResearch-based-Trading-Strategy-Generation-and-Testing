@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Daily Supertrend with Volume Confirmation
-# Hypothesis: Supertrend (ATR-based trend filter) on daily timeframe provides
-# robust trend direction that works in both bull and bear markets. Entry on 6s
-# when price pulls back to Supertrend level with volume confirmation reduces
-# whipsaw. Target: 20-40 trades/year (80-160 over 4 years).
+# Strategy: 1h 4h/1d Trend Filter with Volume Spike Entry
+# Hypothesis: Use 4h EMA trend direction and 1d volatility regime to filter entries,
+# entering on 1h pullbacks with volume spikes. Works in bull (buy pullbacks in uptrend)
+# and bear (sell rallies in downtrend) by following higher timeframe trend.
+# Volume spike confirms institutional interest. Target: 15-35 trades/year.
 
-name = "6h_daily_supertrend_volume_v1"
-timeframe = "6h"
+name = "1h_4h1d_trend_volume_spike_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,121 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Supertrend calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 10:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Supertrend on daily timeframe
-    # Parameters: ATR period = 10, multiplier = 3.0
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate 4h EMA(20) for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Calculate True Range
-    tr1 = df_daily['high'] - df_daily['low']
-    tr2 = abs(df_daily['high'] - df_daily['close'].shift(1))
-    tr3 = abs(df_daily['low'] - df_daily['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Get 1d data for volatility regime (ATR-based)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Calculate ATR
-    atr = tr.rolling(window=atr_period, min_periods=atr_period).mean()
+    # Calculate 1d ATR(14) for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate basic upper and lower bands
-    hl_avg = (df_daily['high'] + df_daily['low']) / 2
-    upper_band = hl_avg + (multiplier * atr)
-    lower_band = hl_avg - (multiplier * atr)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Initialize Supertrend
-    supertrend = pd.Series(index=df_daily.index, dtype=float)
-    direction = pd.Series(index=df_daily.index, dtype=int)  # 1 for uptrend, -1 for downtrend
+    # 1h ATR for entry timing
+    tr1h = high - low
+    tr2h = np.abs(high - np.roll(close, 1))
+    tr3h = np.abs(low - np.roll(close, 1))
+    tr1h[0] = high[0] - low[0]
+    tr2h[0] = np.abs(high[0] - close[0])
+    tr3h[0] = np.abs(low[0] - close[0])
+    trh = np.maximum(tr1h, np.maximum(tr2h, tr3h))
+    atr_10_1h = pd.Series(trh).rolling(window=10, min_periods=10).mean().values
     
-    # First valid value
-    supertrend.iloc[atr_period-1] = upper_band.iloc[atr_period-1]
-    direction.iloc[atr_period-1] = 1
+    # Volume filter: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma_20)
     
-    # Calculate Supertrend iteratively
-    for i in range(atr_period, len(df_daily)):
-        if df_daily['close'].iloc[i] <= upper_band.iloc[i-1]:
-            upper_band.iloc[i] = upper_band.iloc[i-1]
-        else:
-            upper_band.iloc[i] = hl_avg.iloc[i] + (multiplier * atr.iloc[i])
-            
-        if df_daily['close'].iloc[i] >= lower_band.iloc[i-1]:
-            lower_band.iloc[i] = lower_band.iloc[i-1]
-        else:
-            lower_band.iloc[i] = hl_avg.iloc[i] - (multiplier * atr.iloc[i])
-            
-        if (supertrend.iloc[i-1] == upper_band.iloc[i-1] and 
-            df_daily['close'].iloc[i] <= upper_band.iloc[i]):
-            supertrend.iloc[i] = upper_band.iloc[i]
-            direction.iloc[i] = -1
-        elif (supertrend.iloc[i-1] == upper_band.iloc[i-1] and 
-              df_daily['close'].iloc[i] > upper_band.iloc[i]):
-            supertrend.iloc[i] = lower_band.iloc[i]
-            direction.iloc[i] = 1
-        elif (supertrend.iloc[i-1] == lower_band.iloc[i-1] and 
-              df_daily['close'].iloc[i] >= lower_band.iloc[i]):
-            supertrend.iloc[i] = lower_band.iloc[i]
-            direction.iloc[i] = 1
-        else:  # supertrend.iloc[i-1] == lower_band.iloc[i-1] and close < lower_band
-            supertrend.iloc[i] = upper_band.iloc[i]
-            direction.iloc[i] = -1
-    
-    # Convert to arrays
-    supertrend_vals = supertrend.values
-    direction_vals = direction.values
-    
-    # Handle NaN values at start
-    for i in range(len(supertrend_vals)):
-        if np.isnan(supertrend_vals[i]):
-            if i > 0:
-                supertrend_vals[i] = supertrend_vals[i-1]
-                direction_vals[i] = direction_vals[i-1]
-            else:
-                supertrend_vals[i] = close[i]  # fallback
-                direction_vals[i] = 1
-    
-    # Align Supertrend and direction to 6h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_daily, supertrend_vals)
-    direction_aligned = align_htf_to_ltf(prices, df_daily, direction_vals)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(atr_10_1h[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        if position == 1:  # Long position
-            # Exit conditions: trend change or volume filter fails
-            if direction_aligned[i] == -1 or not vol_filter[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25  # Maintain long
-        elif position == -1:  # Short position
-            # Exit conditions: trend change or volume filter fails
-            if direction_aligned[i] == 1 or not vol_filter[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25  # Maintain short
-        else:  # Flat, look for entry
-            # Long entry: price at or above Supertrend in uptrend with volume
-            if (direction_aligned[i] == 1 and close[i] >= supertrend_aligned[i] and vol_filter[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price at or below Supertrend in downtrend with volume
-            elif (direction_aligned[i] == -1 and close[i] <= supertrend_aligned[i] and vol_filter[i]):
-                position = -1
-                signals[i] = -0.25
+        # Apply session filter
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Determine trend direction from 4h EMA
+        trend_up = close[i] > ema_20_4h_aligned[i]
+        trend_down = close[i] < ema_20_4h_aligned[i]
+        
+        # Volatility regime: only trade when volatility is elevated (above average)
+        vol_regime = atr_10_1h[i] > 0.5 * atr_14_1d_aligned[i]
+        
+        # Long entry: uptrend + pullback to EMA + volume spike
+        if trend_up and vol_regime and vol_spike[i]:
+            if close[i] <= ema_20_4h_aligned[i] + 0.5 * atr_10_1h[i]:
+                signals[i] = 0.20
+        
+        # Short entry: downtrend + rally to EMA + volume spike
+        elif trend_down and vol_regime and vol_spike[i]:
+            if close[i] >= ema_20_4h_aligned[i] - 0.5 * atr_10_1h[i]:
+                signals[i] = -0.20
     
     return signals
