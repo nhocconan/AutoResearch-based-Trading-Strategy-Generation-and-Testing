@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
-# Uses 4h Donchian(20) channels to identify breakouts in direction of 1d trend
-# - Long when price breaks above upper band in 1d uptrend with volume confirmation
-# - Short when price breaks below lower band in 1d downtrend with volume confirmation
-# - Exit when price reverses to opposite band or trend changes
-# - Designed for low frequency (target: 20-50 trades/year) to minimize fee impact
-# - Works in both bull/bear via trend filter: only trade in direction of 1d trend
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Uses 4-hour Donchian channel breakouts for trend continuation:
+# - Long when price breaks above 20-period high with 1d uptrend and volume confirmation
+# - Short when price breaks below 20-period low with 1d downtrend and volume confirmation
+# - 1d EMA50 filter ensures trades align with higher timeframe trend
+# - Volume confirmation avoids false breakouts
+# Designed for low frequency (target: 20-50 trades/year) to minimize fee impact
+# Works in both bull/bear via trend-following logic
 
-name = "4h_donchian20_1d_trend_volume_v1"
+name = "4h_donchian20_1d_ema_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,7 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA50)
+    # 1d EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -61,32 +62,28 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
-        
         # Exit conditions
         if position == 1:  # Long position
-            # Exit on reverse breakout or trend change
-            if breakout_down or not uptrend:
+            # Exit on breakdown below Donchian low or trend reversal
+            if close[i] < donchian_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit on reverse breakout or trend change
-            if breakout_up or not downtrend:
+            # Exit on breakout above Donchian high or trend reversal
+            if close[i] > donchian_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long breakout in uptrend with volume
-            if breakout_up and uptrend and vol_confirm:
+            # Long entry: breakout above Donchian high with uptrend and volume
+            if close[i] > donchian_high[i] and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short breakout in downtrend with volume
-            elif breakout_down and downtrend and vol_confirm:
+            # Short entry: breakdown below Donchian low with downtrend and volume
+            elif close[i] < donchian_low[i] and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
