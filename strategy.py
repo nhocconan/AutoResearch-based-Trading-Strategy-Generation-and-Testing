@@ -1,109 +1,111 @@
 #!/usr/bin/env python3
 """
-1h_rsi_pullback_4h1d_trend_volume_v1
-Hypothesis: On 1h timeframe, buy pullbacks to RSI(14) < 30 in uptrends (price > EMA50 on 4h) and sell rallies to RSI > 70 in downtrends (price < EMA50 on 4h), with volume confirmation and session filter (08-20 UTC). Uses 1d trend filter to avoid counter-trend trades in strong opposing trends. Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing mean reversion in ranging markets and pullbacks in trending markets.
+6h_ichimoku_cloud_1w_trend_v1
+Hypothesis: Ichimoku Cloud system with Tenkan/Kijun cross and cloud color filter from weekly timeframe.
+In bull markets (price above cloud), take longs on TK cross up; in bear markets (price below cloud), 
+take shorts on TK cross down. Uses weekly trend filter to avoid counter-trend trades.
+Works in both bull and bear markets by adapting to trend via cloud position.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_pullback_4h1d_trend_volume_v1"
-timeframe = "1h"
+name = "6h_ichimoku_cloud_1w_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h data for trend filter and entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly data for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    # Calculate Ichimoku components on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # 1d data for higher timeframe trend filter (avoid counter-trend in strong trends)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # 1h RSI(14) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # 1h volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Chikou Span (Lagging Span): current close plotted 26 periods ago
+    # Not used for signals but needed for cloud calculation
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1w, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1w, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1w, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1w, senkou_b)
+    
+    # Determine cloud top and bottom
+    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
+    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    
+    # Determine if price is above or below cloud
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(52, n):
         # Skip if required data not available
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during active hours
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # TK cross signals
+        tk_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+        tk_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) OR trend turns down
-            if rsi_values[i] > 50 or close[i] < ema50_4h_aligned[i]:
+            # Exit: price drops below cloud or TK cross down
+            if close[i] < cloud_bottom[i] or tk_cross_down:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: RSI < 50 (mean reversion complete) OR trend turns up
-            if rsi_values[i] < 50 or close[i] > ema50_4h_aligned[i]:
+            # Exit: price rises above cloud or TK cross up
+            if close[i] > cloud_top[i] or tk_cross_up:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: RSI < 30 (oversold) + uptrend on 4h + volume confirmation
-            if (rsi_values[i] < 30 and 
-                close[i] > ema50_4h_aligned[i] and 
-                vol_confirm):
+            # Long: TK cross up AND price above cloud (bullish alignment)
+            if tk_cross_up and price_above_cloud[i]:
                 position = 1
-                signals[i] = 0.20
-            # Short: RSI > 70 (overbought) + downtrend on 4h + volume confirmation
-            elif (rsi_values[i] > 70 and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  vol_confirm):
+                signals[i] = 0.25
+            # Short: TK cross down AND price below cloud (bearish alignment)
+            elif tk_cross_down and price_below_cloud[i]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
