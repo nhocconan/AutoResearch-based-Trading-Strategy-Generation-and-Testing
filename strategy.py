@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and weekly ADX trend filter
+# Hypothesis: 1-day Donchian(20) breakout with daily volume confirmation and weekly ADX trend filter
 # Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period daily average + weekly ADX > 25
 # Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period daily average + weekly ADX > 25
 # Exit when price crosses opposite Donchian level (long exits at Donchian low, short exits at Donchian high)
 # Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses daily volume for confirmation and weekly ADX for trend strength
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "4h_donchian20_1d_vol_1w_adx_v1"
-timeframe = "4h"
+name = "1d_donchian20_vol_1w_adx_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
