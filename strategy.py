@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Breakouts with volume confirmation capture strong trends; volatility filter avoids choppy markets.
-# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
-# Target: 20-50 trades/year to minimize fee drag.
-name = "4h_donchian20_1d_volume_atr_v1"
-timeframe = "4h"
+# Strategy: 1h RSI pullback with 4h trend filter and daily volume confirmation
+# Hypothesis: In uptrends, buy pullbacks to RSI(14) < 40; in downtrends, sell rallies to RSI(14) > 60.
+# Uses 4h EMA(50) for trend direction and daily volume > 20-period MA for confirmation.
+# Works in bull via trend-following pullbacks, in bear via counter-trend fades at extremes.
+# Target: 15-37 trades/year to minimize fee drag on 1h timeframe.
+name = "1h_rsi_pullback_4h_trend_1d_volume_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,9 +23,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA(50) for trend
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
     # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate daily 20-period volume moving average
@@ -32,56 +43,60 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate ATR(14) for volatility filter and stop sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate RSI(14) on 1h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current 1h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
-        
         if position == 1:  # Long position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] <= lowest_low[i] or not vol_filter:
+            # Exit: RSI > 60 (overbought) or trend turns bearish
+            if rsi[i] > 60 or close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] >= highest_high[i] or not vol_filter:
+            # Exit: RSI < 40 (oversold) or trend turns bullish
+            if rsi[i] < 40 or close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Enter long: uptrend (price > EMA) + RSI pullback (<40) + volume confirmation
+            if close[i] > ema_4h_aligned[i] and rsi[i] < 40 and vol_confirm:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+                signals[i] = 0.20
+            # Enter short: downtrend (price < EMA) + RSI rally (>60) + volume confirmation
+            elif close[i] < ema_4h_aligned[i] and rsi[i] > 60 and vol_confirm:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
