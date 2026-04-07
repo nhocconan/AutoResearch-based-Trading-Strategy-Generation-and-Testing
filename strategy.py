@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1d Weekly ATR Breakout with Volume and Trend Filter
-# Hypothesis: Weekly ATR-based breakouts capture momentum in both bull and bear markets.
-# Uses 1d price above/below 50 EMA for trend filter to avoid counter-trend trades.
-# Volume filter ensures institutional participation. ATR stoploss manages risk.
-# Target: 15-25 trades/year (60-100 over 4 years).
+# Strategy: 6h Weekly RSI with 12h Trend Filter and Volume Confirmation
+# Hypothesis: Weekly RSI extremes (overbought/oversold) combined with 12h trend direction
+# and volume spikes provide high-probability mean-reversion entries in both bull and bear markets.
+# Uses 12h EMA50 as trend filter to align with higher timeframe momentum.
+# Volume > 2x 20-period average confirms institutional participation.
+# Target: 20-40 trades/year (80-160 over 4 years).
 
-name = "1d_weekly_atr_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_weekly_rsi_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,89 +25,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR calculation
+    # Get weekly data for RSI calculation
     df_weekly = get_htf_data(prices, '1w')
     if len(df_weekly) < 14:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Calculate weekly RSI(14)
     weekly_close = df_weekly['close'].values
+    delta = np.diff(weekly_close, prepend=weekly_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range
-    tr1 = weekly_high - weekly_low
-    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
-    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # ATR using Wilder's smoothing (equivalent to RMA)
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Shift by 1 to use previous week's ATR (avoid look-ahead)
-    atr_prev = np.roll(atr, 1)
-    atr_prev[0] = atr[0]  # First period
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    weekly_rsi = 100 - (100 / (1 + rs))
     
-    # Align to 1d timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_weekly, atr_prev)
+    # Align weekly RSI to 6h timeframe
+    weekly_rsi_aligned = align_htf_to_ltf(prices, df_weekly, weekly_rsi)
     
-    # Calculate weekly high/low for breakout levels
-    weekly_high_shift = np.roll(weekly_high, 1)
-    weekly_low_shift = np.roll(weekly_low, 1)
-    weekly_high_shift[0] = weekly_high[0]
-    weekly_low_shift[0] = weekly_low[0]
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high_shift)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low_shift)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Breakout levels: weekly high/low ± 0.5 * ATR
-    breakout_high = weekly_high_aligned + 0.5 * atr_aligned
-    breakout_low = weekly_low_aligned - 0.5 * atr_aligned
-    
-    # 1d trend filter: price above/below 50 EMA
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(breakout_high[i]) or np.isnan(breakout_low[i]) or 
-            np.isnan(ema_50[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_rsi_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below breakout_low or trend turns bearish or volume drops
-            if (close[i] < breakout_low[i] or close[i] < ema_50[i] or not vol_filter[i]):
+            # Exit: RSI returns to neutral (50) or trend turns bearish or volume drops
+            if (weekly_rsi_aligned[i] >= 50 or close[i] < ema_50_12h_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises above breakout_high or trend turns bullish or volume drops
-            if (close[i] > breakout_high[i] or close[i] > ema_50[i] or not vol_filter[i]):
+            # Exit: RSI returns to neutral (50) or trend turns bullish or volume drops
+            if (weekly_rsi_aligned[i] <= 50 or close[i] > ema_50_12h_aligned[i] or not vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price breaks above breakout_high with volume and bullish trend
-            if (high[i] > breakout_high[i] and close[i] > ema_50[i] and vol_filter[i]):
+            # Long: weekly RSI oversold (<30) with bullish 12h trend and volume spike
+            if (weekly_rsi_aligned[i] < 30 and close[i] > ema_50_12h_aligned[i] and vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below breakout_low with volume and bearish trend
-            elif (low[i] < breakout_low[i] and close[i] < ema_50[i] and vol_filter[i]):
+            # Short: weekly RSI overbought (>70) with bearish 12h trend and volume spike
+            elif (weekly_rsi_aligned[i] > 70 and close[i] < ema_50_12h_aligned[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
