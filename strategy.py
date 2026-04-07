@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v2
-Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from daily timeframe with volume confirmation and stricter entry conditions. 
-Enter long when price breaks above R4 with volume > 2.0x average and price > 200 EMA, short when price breaks below S4 with volume > 2.0x average and price < 200 EMA. 
-Exit when price touches opposite pivot level (S4 for long, R4 for short). 
-Reduced trade frequency by increasing volume threshold and adding trend filter to avoid whipsaws. Designed for low frequency (20-50 trades/year) to minimize fee drag.
+6h_supertrend_1w_trend_volume_v1
+Hypothesis: On 6-hour timeframe, use Supertrend (ATR=10, multiplier=3) from weekly timeframe for trend direction with volume confirmation on 6H. 
+Enter long when Supertrend turns bullish (green) and volume > 1.5x average, short when Supertrend turns bearish (red) and volume > 1.5x average. 
+Exit when Supertrend flips direction. Uses weekly trend to avoid 6H whipsaws and volume to confirm momentum. Designed for low frequency (12-30 trades/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v2"
-timeframe = "4h"
+name = "6h_supertrend_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -26,66 +25,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Supertrend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate Supertrend on weekly data
+    wt_high = df_1w['high'].values
+    wt_low = df_1w['low'].values
+    wt_close = df_1w['close'].values
     
-    pivot = (d_high + d_low + d_close) / 3
-    range_val = d_high - d_low
+    # ATR calculation
+    atr_period = 10
+    tr1 = wt_high[1:] - wt_low[1:]
+    tr2 = np.abs(wt_high[1:] - wt_close[:-1])
+    tr3 = np.abs(wt_low[1:] - wt_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full_like(tr, np.nan, dtype=float)
+    for i in range(atr_period, len(tr)):
+        if i == atr_period:
+            atr[i] = np.nanmean(tr[1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
     
-    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
-    r4 = d_close + range_val * 1.1 / 2
-    s4 = d_close - range_val * 1.1 / 2
+    # Supertrend calculation
+    multiplier = 3
+    hl_avg = (wt_high + wt_low) / 2
+    upper_band = hl_avg + multiplier * atr
+    lower_band = hl_avg - multiplier * atr
     
-    # Align to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    supertrend = np.full_like(wt_close, np.nan, dtype=float)
+    trend = np.full_like(wt_close, 1, dtype=int)  # 1=up, -1=down
+    
+    for i in range(1, len(wt_close)):
+        if np.isnan(atr[i]) or np.isnan(atr[i-1]):
+            supertrend[i] = np.nan
+            continue
+            
+        if wt_close[i] > upper_band[i-1]:
+            trend[i] = 1
+        elif wt_close[i] < lower_band[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+            if trend[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if trend[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if trend[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Align Supertrend and trend to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1w, supertrend)
+    trend_aligned = align_htf_to_ltf(prices, df_1w, trend)
     
     # Calculate 50-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate 200 EMA for trend filter
-    close_series = pd.Series(close)
-    ema_200 = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after EMA and volume average warmup
-        # Skip if daily data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+    for i in range(50, n):  # Start after volume average warmup
+        # Skip if weekly data not available
+        if np.isnan(supertrend_aligned[i]) or np.isnan(trend_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 50-period average
-        vol_confirm = volume[i] > 2.0 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 1.5x 50-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below S4
-            if close[i] <= s4_aligned[i]:
+            # Exit when Supertrend turns bearish
+            if trend_aligned[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above R4
-            if close[i] >= r4_aligned[i]:
+            # Exit when Supertrend turns bullish
+            if trend_aligned[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 with volume confirmation AND price > 200 EMA (uptrend)
-            long_entry = (close[i] > r4_aligned[i]) and vol_confirm and (close[i] > ema_200[i])
-            # Short entry: price breaks below S4 with volume confirmation AND price < 200 EMA (downtrend)
-            short_entry = (close[i] < s4_aligned[i]) and vol_confirm and (close[i] < ema_200[i])
+            # Long entry: Supertrend bullish AND volume confirmation
+            long_entry = (trend_aligned[i] == 1) and vol_confirm
+            # Short entry: Supertrend bearish AND volume confirmation
+            short_entry = (trend_aligned[i] == -1) and vol_confirm
             
             if long_entry:
                 position = 1
