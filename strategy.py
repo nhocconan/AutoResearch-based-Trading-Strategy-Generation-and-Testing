@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian breakout with 1d volume confirmation and ATR volatility filter
+# Strategy: 4h Donchian(20) breakout with 1d volume confirmation and ATR volatility filter
 # Works in bull markets via breakouts, in bear via volatility-filtered mean reversion at bands
 # Target: 20-40 trades/year, low frequency to minimize fee drag
 name = "4h_donchian20_1d_volume_atr_v1"
