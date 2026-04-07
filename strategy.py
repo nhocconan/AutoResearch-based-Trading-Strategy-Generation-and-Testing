@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot with 1d Volume Spike and Chop Filter
-Hypothesis: Camarilla pivot levels act as strong support/resistance. 
-Price touching S3/R3 with volume spike and low chop indicates mean reversion.
-In chop regime, we fade extreme moves; in trend, we wait for breakouts.
-Works in both bull/bear by adapting to regime.
-Target: 12-37 trades/year (50-150 total) to minimize fee drag.
+1h Momentum Reversal with 4h Trend Filter and Volume Spike
+Hypothesis: Intraday reversals against short-term momentum, filtered by 4h trend,
+             offer high-probability entries in both bull and bear markets.
+             Volume spikes confirm institutional participation at turning points.
+             Using 4h trend (not 1d) avoids whipsaws in choppy 1d trends.
+             Target: 15-35 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_chop_v1"
-timeframe = "12h"
+name = "1h_momentum_reversal_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,107 +27,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Chop filter (14-period)
-    def calculate_chop(high, low, close, window=14):
-        atr = []
-        tr = []
-        for i in range(len(close)):
-            if i == 0:
-                tr.append(high[i] - low[i])
-            else:
-                tr.append(max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1])))
-            if i < window:
-                atr.append(np.nan)
-            else:
-                atr.append(np.mean(tr[i-window+1:i+1]))
-        atr = np.array(atr)
-        
-        max_h = np.full(len(close), np.nan)
-        min_l = np.full(len(close), np.nan)
-        for i in range(len(close)):
-            if i < window:
-                continue
-            max_h[i] = np.max(high[i-window+1:i+1])
-            min_l[i] = np.min(low[i-window+1:i+1])
-        
-        chop = np.full(len(close), np.nan)
-        for i in range(window-1, len(close)):
-            if atr[i] == 0 or max_h[i] == min_l[i]:
-                chop[i] = 50
-            else:
-                chop[i] = 100 * np.log10(sum(tr[i-window+1:i+1]) / (max_h[i] - min_l[i])) / np.log10(window)
-        return chop
+    # RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    chop = calculate_chop(high, low, close, 14)
-    chop_filter = chop < 61.8  # Trending when chop < 61.8
+    # 4h EMA20 Trend Filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_20 = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)
     
     # Volume Spike Detector (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
-    # 1d Camarilla Pivot Levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    s3 = pivot - (range_1d * 1.1 / 6)
-    s4 = pivot - (range_1d * 1.1 / 2)
-    r3 = pivot + (range_1d * 1.1 / 6)
-    r4 = pivot + (range_1d * 1.1 / 2)
-    
-    # Align to 12h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    # Session filter: 08-20 UTC (already datetime64[ms] index)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(chop[i])):
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(rsi[i]) or np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches S4 or chop turns low (trending)
-            if close[i] <= s4_aligned[i] or chop_filter[i]:
+            # Exit: RSI crosses above 60 (overbought) or trend turns bearish
+            if rsi[i] > 60 or close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R4 or chop turns low (trending)
-            if close[i] >= r4_aligned[i] or chop_filter[i]:
+            # Exit: RSI crosses below 40 (oversold) or trend turns bullish
+            if rsi[i] < 40 or close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Only trade in choppy market (chop >= 61.8)
-            if chop_filter[i]:  # Trending regime, wait
-                signals[i] = 0.0
-                continue
-                
-            # Long: price touches S3 with volume spike
-            if (low[i] <= s3_aligned[i] and 
-                close[i] > s3_aligned[i] and  # Confirmed bounce
+            # Long: RSI < 30 (oversold) + price above 4h EMA20 + volume spike
+            if (rsi[i] < 30 and 
+                close[i] > ema_20_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: price touches R3 with volume spike
-            elif (high[i] >= r3_aligned[i] and 
-                  close[i] < r3_aligned[i] and  # Confirmed rejection
+                signals[i] = 0.20
+            # Short: RSI > 70 (overbought) + price below 4h EMA20 + volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_20_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
