@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour momentum with 4-hour trend filter and session filter (08-20 UTC).
-# Long when 1h price crosses above 12-period EMA + 4h EMA(21) upward + volume > 1.5x 20-period average + session active.
-# Short when 1h price crosses below 12-period EMA + 4h EMA(21) downward + volume > 1.5x 20-period average + session active.
-# Exit when price crosses 8-period EMA in opposite direction.
-# Stoploss at 2.0 * ATR(14).
-# Position size: 0.20 (20% of capital).
-# Uses 4h EMA for trend direction and 1h volume for confirmation.
-# Target: 60-150 total trades over 4 years (15-37/year).
+# Hypothesis: 6-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.8x 20-period average + weekly ADX > 22
+# Short when price breaks below 20-period Donchian low + volume > 1.8x 20-period average + weekly ADX > 22
+# Exit when price crosses 4-period EMA in opposite direction
+# Stoploss at 2.0 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses 1-day volume for confirmation and 1-week ADX for trend strength
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "1h_ema12_4h_trend_vol_session_v1"
-timeframe = "1h"
+name = "6h_donchian20_1d_vol_1w_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,27 +27,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4-hour data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # 1-day data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4-hour EMA(21) for trend
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # 1-week data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate 1-hour EMA(12) for entry
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Calculate 1-day volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_1d_s = pd.Series(volume_1d)
+    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Calculate 1-hour EMA(8) for exit
-    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # Calculate 1-week ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1-hour volume average (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate ATR(14) for stoploss
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # 20-period Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4-period EMA for exit
+    ema_4 = pd.Series(close).ewm(span=4, adjust=False, min_periods=4).mean().values
+    
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -56,21 +93,17 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(21, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_12[i]) or np.isnan(ema_8[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_4[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -81,48 +114,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 8-period EMA
-            elif close[i] < ema_8[i]:
+            # Exit: price crosses below 4-period EMA
+            elif close[i] < ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2.0 * ATR
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 8-period EMA
-            elif close[i] > ema_8[i]:
+            # Exit: price crosses above 4-period EMA
+            elif close[i] > ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: EMA crossover with 4h trend filter, volume confirmation, and session
-            # EMA crossover: price crosses 12-period EMA
-            ema_cross_up = close[i] > ema_12[i] and close[i-1] <= ema_12[i-1]
-            ema_cross_down = close[i] < ema_12[i] and close[i-1] >= ema_12[i-1]
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma[i]
-            # Trend filter: 4h EMA(21) slope (using 3-bar change for direction)
-            ema_4h_slope = ema_4h_aligned[i] - ema_4h_aligned[i-3]
-            trend_up = ema_4h_slope > 0
-            trend_down = ema_4h_slope < 0
-            # Session filter
-            session_filter = in_session[i]
+            # Look for entries: Donchian breakout with volume confirmation and ADX filter
+            # Volume filter: volume > 1.8x 20-period average
+            volume_filter = volume[i] > 1.8 * volume_ma_aligned[i]
+            # Trend filter: weekly ADX > 22
+            trend_filter = adx_aligned[i] > 22
             
-            # Long: price crosses above EMA12 + 4h trend up + volume filter + session
-            if ema_cross_up and trend_up and volume_filter and session_filter:
-                signals[i] = 0.20
+            # Long: price breaks above Donchian high + volume filter + trend filter
+            if close[i] > highest_high[i] and volume_filter and trend_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price crosses below EMA12 + 4h trend down + volume filter + session
-            elif ema_cross_down and trend_down and volume_filter and session_filter:
-                signals[i] = -0.20
+            # Short: price breaks below Donchian low + volume filter + trend filter
+            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
