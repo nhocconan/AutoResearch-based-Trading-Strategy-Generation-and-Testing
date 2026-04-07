@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_volatility_breakout_12h_ema_v1
-Hypothesis: Price breaks above/below 12h EMA during low volatility periods (Bollinger Band squeeze) with volume confirmation capture institutional breakouts.
-Works in both bull/bear markets by using volatility regime filter - only trade when volatility is low (squeeze) and breaks with volume.
-Targets 20-40 trades/year to minimize fee drag while capturing strong moves.
+1d_adx_rsi_momentum_v1
+Hypothesis: Combine ADX trend strength with RSI momentum to capture strong moves in both bull and bear markets.
+Long when ADX > 25 (strong trend) and RSI > 50 (bullish momentum).
+Short when ADX > 25 (strong trend) and RSI < 50 (bearish momentum).
+Use weekly timeframe for trend filter to avoid whipsaws.
+Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag on daily timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_12h_ema_v1"
-timeframe = "4h"
+name = "1d_adx_rsi_momentum_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,73 +25,109 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 12h EMA for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate ADX (14-period)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/14)
+    atr = np.zeros(n)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    # Initial values
+    atr[13] = np.mean(tr[1:14])
+    plus_dm_sum = np.sum(plus_dm[1:14])
+    minus_dm_sum = np.sum(minus_dm[1:14])
+    
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        plus_dm_sum = plus_dm_sum - (plus_dm_sum / 14) + plus_dm[i]
+        minus_dm_sum = minus_dm_sum - (minus_dm_sum / 14) + minus_dm[i]
+        
+        plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+        minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    for i in range(14, n):
+        di_sum = plus_di[i] + minus_di[i]
+        dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum if di_sum != 0 else 0
+    
+    # Smooth DX to get ADX
+    adx[27] = np.mean(dx[14:28])  # First ADX value after 2*14 periods
+    for i in range(28, n):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Calculate RSI (14-period)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.zeros(n)
+    rsi = np.zeros(n)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    # Weekly trend filter: EMA(50) on weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    close_1w = df_1w['close'].values
+    ema_50 = np.zeros(len(close_1w))
+    ema_50[49] = np.mean(close_1w[:50])
+    for i in range(50, len(close_1w)):
+        ema_50[i] = (close_1w[i] * 2 + ema_50[i-1] * 49) / 50
     
-    # Bollinger Bands for volatility regime (20-period, 2 std)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Bollinger Band width percentile for squeeze detection (low volatility)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=30).apply(
-        lambda x: np.percentile(x, 25) if len(x) > 0 else 0, raw=True
-    ).values
-    volatility_squeeze = bb_width < bb_width_percentile
-    
-    # Volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
+    # Generate signals
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if data not available
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(bb_width[i]) or np.isnan(volatility_squeeze[i]) or
-            vol_ma[i] == 0):
+        # Skip if data not ready
+        if (np.isnan(adx[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirmed = volume[i] > vol_ma[i] * 1.5  # Require 1.5x average volume
-        
-        if position == 1:  # Long position
-            # Exit: price closes below 12h EMA or volatility expands significantly
-            if close[i] < ema_12h_aligned[i] or bb_width[i] > bb_width_percentile[i] * 2:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Exit: price closes above 12h EMA or volatility expands significantly
-            if close[i] > ema_12h_aligned[i] or bb_width[i] > bb_width_percentile[i] * 2:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat, look for entry
-            # Volatility breakout long: price breaks above EMA during low volatility with volume
-            if (close[i] > ema_12h_aligned[i] and 
-                volatility_squeeze[i] and 
-                vol_confirmed):
-                position = 1
-                signals[i] = 0.25
-            # Volatility breakout short: price breaks below EMA during low volatility with volume
-            elif (close[i] < ema_12h_aligned[i] and 
-                  volatility_squeeze[i] and 
-                  vol_confirmed):
-                position = -1
-                signals[i] = -0.25
+        # Long: strong uptrend (ADX > 25) + bullish momentum (RSI > 50) + price above weekly EMA
+        if adx[i] > 25 and rsi[i] > 50 and close[i] > ema_50_aligned[i]:
+            signals[i] = 0.25
+        # Short: strong downtrend (ADX > 25) + bearish momentum (RSI < 50) + price below weekly EMA
+        elif adx[i] > 25 and rsi[i] < 50 and close[i] < ema_50_aligned[i]:
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
