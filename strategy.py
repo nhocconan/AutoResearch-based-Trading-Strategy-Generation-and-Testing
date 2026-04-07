@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams %R with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Williams %R crosses above -20 (oversold reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when Williams %R crosses below -80 (overbought reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when Williams %R crosses back below -50 for longs or above -50 for shorts
-# Stoploss at 2.5 * ATR(14)
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.8x 20-period average + weekly ADX > 22
+# Short when price breaks below 20-period Donchian low + volume > 1.8x 20-period average + weekly ADX > 22
+# Exit when price crosses 4-period EMA in opposite direction
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Williams %R identifies reversals in ranging markets, effective in both bull and bear cycles
-# Target: 80-150 total trades over 4 years (20-38/year)
+# Uses 1-day volume for confirmation and 1-week ADX for trend strength
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "12h_williamsr_1d_vol_1w_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_vol_1w_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -53,7 +53,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1w - np.roll(close_1w, 1))
     tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = tr1[0]
-    tr3[0] = t1[0]
+    tr3[0] = tr1[0]
     tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
@@ -77,10 +77,12 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # 20-period Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4-period EMA for exit
+    ema_4 = pd.Series(close).ewm(span=4, adjust=False, min_periods=4).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -95,11 +97,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(atr[i])):
+            np.isnan(ema_4[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -107,513 +109,47 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R crosses back below -50
-            elif williams_r[i] < -50:
+            # Exit: price crosses below 4-period EMA
+            elif close[i] < ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Williams %R crosses back above -50
-            elif williams_r[i] > -50:
+            # Exit: price crosses above 4-period EMA
+            elif close[i] > ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Williams %R reversal with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 25
-            trend_filter = adx_aligned[i] > 25
+            # Look for entries: Donchian breakout with volume confirmation and ADX filter
+            # Volume filter: volume > 1.8x 20-period average
+            volume_filter = volume[i] > 1.8 * volume_ma_aligned[i]
+            # Trend filter: weekly ADX > 22
+            trend_filter = adx_aligned[i] > 22
             
-            # Williams %R conditions
-            wr_prev = williams_r[i-1] if i > 0 else -100
-            wr_cross_up = williams_r[i] > -20 and wr_prev <= -20  # crosses above -20 (oversold)
-            wr_cross_down = williams_r[i] < -80 and wr_prev >= -80  # crosses below -80 (overbought)
-            
-            # Long: Williams %R crosses above -20 + volume filter + trend filter
-            if wr_cross_up and volume_filter and trend_filter:
+            # Long: price breaks above Donchian high + volume filter + trend filter
+            if close[i] > highest_high[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Williams %R crosses below -80 + volume filter + trend filter
-            elif wr_cross_down and volume_filter and trend_filter:
+            # Short: price breaks below Donchian low + volume filter + trend filter
+            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12-hour Williams %R with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Williams %R crosses above -20 (oversold reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when Williams %R crosses below -80 (overbought reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when Williams %R crosses back below -50 for longs or above -50 for shorts
-# Stoploss at 2.5 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Williams %R identifies reversals in ranging markets, effective in both bull and bear cycles
-# Target: 80-150 total trades over 4 years (20-38/year)
-
-name = "12h_williamsr_1d_vol_1w_adx_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # 1-day data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1-week data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
-    
-    # Calculate 1-week ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Williams %R crosses back below -50
-            elif williams_r[i] < -50:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Williams %R crosses back above -50
-            elif williams_r[i] > -50:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries: Williams %R reversal with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 25
-            trend_filter = adx_aligned[i] > 25
-            
-            # Williams %R conditions
-            wr_prev = williams_r[i-1] if i > 0 else -100
-            wr_cross_up = williams_r[i] > -20 and wr_prev <= -20  # crosses above -20 (oversold)
-            wr_cross_down = williams_r[i] < -80 and wr_prev >= -80  # crosses below -80 (overbought)
-            
-            # Long: Williams %R crosses above -20 + volume filter + trend filter
-            if wr_cross_up and volume_filter and trend_filter:
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            # Short: Williams %R crosses below -80 + volume filter + trend filter
-            elif wr_cross_down and volume_filter and trend_filter:
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12-hour Williams %R with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Williams %R crosses above -20 (oversold reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when Williams %R crosses below -80 (overbought reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when Williams %R crosses back below -50 for longs or above -50 for shorts
-# Stoploss at 2.5 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Williams %R identifies reversals in ranging markets, effective in both bull and bear cycles
-# Target: 80-150 total trades over 4 years (20-38/year)
-
-name = "12h_williamsr_1d_vol_1w_adx_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # 1-day data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1-week data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
-    
-    # Calculate 1-week ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Williams %R crosses back below -50
-            elif williams_r[i] < -50:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Williams %R crosses back above -50
-            elif williams_r[i] > -50:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries: Williams %R reversal with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 25
-            trend_filter = adx_aligned[i] > 25
-            
-            # Williams %R conditions
-            wr_prev = williams_r[i-1] if i > 0 else -100
-            wr_cross_up = williams_r[i] > -20 and wr_prev <= -20  # crosses above -20 (oversold)
-            wr_cross_down = williams_r[i] < -80 and wr_prev >= -80  # crosses below -80 (overbought)
-            
-            # Long: Williams %R crosses above -20 + volume filter + trend filter
-            if wr_cross_up and volume_filter and trend_filter:
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            # Short: Williams %R crosses below -80 + volume filter + trend filter
-            elif wr_cross_down and volume_filter and trend_filter:
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12-hour Williams %R with 1-day volume confirmation and 1-week ADX trend filter
-# Long when Williams %R crosses above -20 (oversold reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when Williams %R crosses below -80 (overbought reversal) + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when Williams %R crosses back below -50 for longs or above -50 for shorts
-# Stoploss at 2.5 * ATR(14)
-# Position size: 0.25 (25% of capital)
-# Williams %R identifies reversals in ranging markets, effective in both bull and bear cycles
-# Target: 80-150 total trades over 4 years (20-38/year)
-
-name = "12h_williamsr_1d_vol_1w_adx_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # 1-day data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1-week data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1-day volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_1d_s = pd.Series(volume_1d)
-    volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
-    
-    # Calculate 1-week ADX (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1  # invert to positive
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(14, n):
-        # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Williams %R crosses back below -50
-            elif williams_r[i] < -50:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            # Exit: Williams %R crosses back above -50
-            elif williams_r[i] > -50:
-                signals[i] = 0.0
-                position = 0
-                entry_price = 0.0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries: Williams %R reversal with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend
