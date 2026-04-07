@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation.
-Long when price breaks above Donchian upper band with weekly bullish bias and volume confirmation.
-Short when price breaks below Donchian lower band with weekly bearish bias and volume confirmation.
-Exit when price crosses back to middle band or weekly bias flips.
+12h Donchian Channel Breakout with 1d EMA Trend and Volume Confirmation.
+Long when price breaks above 12h Donchian upper band (20-period) with 1d uptrend and volume > 20-period average.
+Short when price breaks below 12h Donchian lower band with 1d downtrend and volume > 20-period average.
+Exit when price crosses back below Donchian middle (for long) or above middle (for short).
+Target: 50-150 trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_breakout_weekly_pivot_direction_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,51 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY PIVOT DIRECTION (HTF) ===
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) == 0:
+    # === 1D EMA TREND FILTER (HTF) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
-    weekly_close = df_w['close'].values
-    weekly_high = df_w['high'].values
-    weekly_low = df_w['low'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_pivot_prev = np.roll(weekly_pivot, 1)
-    weekly_pivot_prev[0] = np.nan
-    weekly_bullish = weekly_pivot > weekly_pivot_prev
-    weekly_bearish = weekly_pivot < weekly_pivot_prev
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_w, weekly_bearish)
+    one_d_close = df_1d['close'].values
+    one_d_ema = pd.Series(one_d_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    one_d_ema_aligned = align_htf_to_ltf(prices, df_1d, one_d_ema)
     
-    # === DONCHIAN CHANNEL (6H) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    middle_band = (highest_high + lowest_low) / 2
+    # === 12H DONCHIAN CHANNEL (20-period) ===
+    # Calculate rolling max/min on high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=20, min_periods=20).max().values
+    donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # === VOLUME CONFIRMATION (6H) ===
+    # === VOLUME CONFIRMATION (12h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
-            np.isnan(vol_ma[i])):
+    for i in range(20, n):
+        if (np.isnan(one_d_ema_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(donch_mid[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend direction from 1d EMA
+        uptrend = close[i] > one_d_ema_aligned[i]
+        downtrend = close[i] < one_d_ema_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price crosses below middle OR weekly bias turns bearish
-            if close[i] < middle_band[i] or weekly_bearish_aligned[i]:
+            # Exit: price crosses below Donchian middle OR trend turns down
+            if close[i] < donch_mid[i] or downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above middle OR weekly bias turns bullish
-            if close[i] > middle_band[i] or weekly_bullish_aligned[i]:
+            # Exit: price crosses above Donchian middle OR trend turns up
+            if close[i] > donch_mid[i] or uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,13 +79,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with weekly bias alignment
-            if close[i] > highest_high[i] and weekly_bullish_aligned[i]:
-                # Breakout above upper band in weekly bullish bias -> long
+            # Entry: Donchian breakout with trend alignment
+            if close[i] > donch_high[i] and uptrend:
+                # Breakout above upper band in uptrend -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < lowest_low[i] and weekly_bearish_aligned[i]:
-                # Breakdown below lower band in weekly bearish bias -> short
+            elif close[i] < donch_low[i] and downtrend:
+                # Breakdown below lower band in downtrend -> short
                 position = -1
                 signals[i] = -0.25
     
