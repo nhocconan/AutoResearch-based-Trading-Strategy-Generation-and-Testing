@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_atr_breakout_1d_trend_volume_v1
-Hypothesis: ATR-based breakout with daily EMA trend filter and volume confirmation.
-Buy when price breaks above ATR-based upper band in uptrend (price > EMA200),
-sell when price breaks below ATR-based lower band in downtrend (price < EMA200).
-Volume confirmation reduces false breakouts. Works in both bull and bear markets
-by adapting to daily trend via EMA200 filter.
+1d_breakout_1w_trend_volume_v1
+Hypothesis: Daily Donchian breakout with weekly trend filter and volume confirmation.
+In trending markets (price above/below weekly EMA), buy/sell breakouts of 20-day high/low.
+Volume confirmation reduces false breakouts. Works in both bull and bear markets by
+only trading in direction of weekly trend, avoiding counter-trend whipsaws.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_atr_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,69 +26,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily EMA200 for trend filter
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
-    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
     
-    # ATR calculation (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly EMA to daily timeframe
+    ema20_1d = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # ATR-based bands (2.5 * ATR)
-    atr_mult = 2.5
-    upper_band = close + atr_mult * atr
-    lower_band = close - atr_mult * atr
+    # Daily Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # 20-period volume average
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema200_4h[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_sma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema20_1d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x average volume
-        vol_confirm = volume[i] > 1.8 * vol_sma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below lower band OR EMA trend turns down
-            if close[i] < lower_band[i] or close[i] < ema200_4h[i]:
+            # Exit: price breaks below 20-day low OR weekly trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema20_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above upper band OR EMA trend turns up
-            if close[i] > upper_band[i] or close[i] > ema200_4h[i]:
+            # Exit: price breaks above 20-day high OR weekly trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema20_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long breakout in uptrend (price > EMA200)
-            if (close[i] > upper_band[i] and 
+            # Long breakout: price breaks above 20-day high in uptrend
+            if (close[i] > donchian_high[i] and 
                 vol_confirm and 
-                close[i] > ema200_4h[i]):
+                close[i] > ema20_1d[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown in downtrend (price < EMA200)
-            elif (close[i] < lower_band[i] and 
+            # Short breakout: price breaks below 20-day low in downtrend
+            elif (close[i] < donchian_low[i] and 
                   vol_confirm and 
-                  close[i] < ema200_4h[i]):
+                  close[i] < ema20_1d[i]):
                 position = -1
                 signals[i] = -0.25
     
