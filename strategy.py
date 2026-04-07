@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6H Daily ADX + Volume Breakout with Trend Filter
-# Hypothesis: ADX > 25 indicates strong trend on daily timeframe, breakouts in direction
-# of trend with volume confirmation capture momentum moves. Works in both bull and bear
-# markets by following the dominant daily trend. Uses discrete position sizing to minimize
-# fee churn and avoid overtrading. Target: 12-37 trades/year.
+# Strategy: 4h Daily Donchian Breakout with Volume and ADX Filter
+# Hypothesis: Donchian(20) breakouts in direction of daily ADX > 25 trend with volume
+# confirmation capture momentum moves. Works in both bull and bear markets by following
+# the daily trend. Uses discrete position sizing to minimize churn. Target: 20-50 trades/year.
 
-name = "6h_daily_adx_volume_breakout_v1"
-timeframe = "6h"
+name = "4h_daily_donchian_breakout_volume_adx_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -79,12 +78,12 @@ def generate_signals(prices):
     daily_high_20 = high_series.rolling(window=20, min_periods=20).max().values
     daily_low_20 = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align daily indicators to 6h timeframe
+    # Align daily indicators to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
     high_20_aligned = align_htf_to_ltf(prices, df_daily, daily_high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_daily, daily_low_20)
     
-    # Volume filter on 6h: volume > 2.0x 30-period average
+    # Volume filter on 4h: volume > 2.0x 30-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
     vol_filter = volume > (2.0 * vol_ma)
