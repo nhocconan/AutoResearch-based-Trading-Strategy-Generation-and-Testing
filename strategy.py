@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high, 12h EMA50 is rising (uptrend), and volume > 1.8x 4h average volume
-# Short when price breaks below Donchian(20) low, 12h EMA50 is falling (downtrend), and volume > 1.8x 4h average volume
-# Exit when price breaks opposite Donchian level or trend changes
+# Long when price breaks above Donchian(20) high, 12h close > 12h EMA50 (uptrend), and volume > 1.8x 4h average volume
+# Short when price breaks below Donchian(20) low, 12h close < 12h EMA50 (downtrend), and volume > 1.8x 4h average volume
+# Exit when price crosses back through Donchian(20) midline or trend changes
 # Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12h EMA50 for trend filter and 4h volume average for confirmation
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Uses Donchian channels for breakout structure, 12h EMA50 for trend filter, volume spike for confirmation
+# Target: 100-180 total trades over 4 years (25-45/year)
 
 name = "4h_donchian20_12h_ema50_vol_v1"
 timeframe = "4h"
@@ -18,7 +18,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,11 +27,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
+    # 4h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
@@ -40,9 +41,6 @@ def generate_signals(prices):
     
     close_12h = df_12h['close'].values
     ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_prev = np.roll(ema50_12h, 1)
-    ema50_12h_prev[0] = ema50_12h[0]
-    ema50_12h_slope = ema50_12h - ema50_12h_prev  # Rising if > 0
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # 4h volume average for confirmation
@@ -62,11 +60,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(atr[i])):
+            np.isnan(donchian_mid[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -79,8 +77,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Donchian low or trend turns down
-            elif close[i] < donchian_low[i] or ema50_12h_slope[i] <= 0:
+            # Exit: price crosses below Donchian midline or trend changes
+            elif close[i] < donchian_mid[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -92,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Donchian high or trend turns up
-            elif close[i] > donchian_high[i] or ema50_12h_slope[i] >= 0:
+            # Exit: price crosses above Donchian midline or trend changes
+            elif close[i] > donchian_mid[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -108,14 +106,14 @@ def generate_signals(prices):
             
             # Long: bullish breakout, 12h uptrend, volume spike
             if (bullish_break and
-                ema50_12h_slope[i] > 0 and
+                close[i] > ema50_12h_aligned[i] and
                 volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: bearish breakout, 12h downtrend, volume spike
             elif (bearish_break and
-                  ema50_12h_slope[i] < 0 and
+                  close[i] < ema50_12h_aligned[i] and
                   volume[i] > 1.8 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
