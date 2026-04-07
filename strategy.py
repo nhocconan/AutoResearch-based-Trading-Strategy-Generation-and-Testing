@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 4h timeframe, use Camarilla pivot levels from 1d timeframe to identify key support/resistance zones. Enter long when price bounces above S3 with volume confirmation, and enter short when price rejects from R3 with volume confirmation. Filter trades using 1w ADX to avoid low-momentum environments. This strategy aims to capture mean-reversion bounces at strong institutional levels while avoiding choppy markets. Target: 20-50 trades per year to minimize fee drag and work in both bull and bear markets by fading extremes at proven pivot levels.
+1d_supertrend_1w_trend_filter_v2
+Hypothesis: On daily timeframe, use Supertrend indicator with ATR multiplier 3 to capture strong trends, filtered by weekly Supertrend for higher timeframe alignment. Daily Supertrend provides entry/exit signals, while weekly Supertrend acts as a regime filter to avoid counter-trend trades. This approach reduces whipsaws and works in both bull and bear markets by following the dominant trend. Added volume confirmation to reduce false signals and lower trade frequency. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "1d_supertrend_1w_trend_filter_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,141 +23,157 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Supertrend parameters
+    atr_period = 10
+    atr_multiplier = 3.0
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_S3 = np.zeros(len(df_1d))
-    camarilla_S4 = np.zeros(len(df_1d))
-    camarilla_R3 = np.zeros(len(df_1d))
-    camarilla_R4 = np.zeros(len(df_1d))
+    # Calculate basic upper and lower bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (atr_multiplier * atr)
+    lower_band = hl2 - (atr_multiplier * atr)
     
-    for i in range(len(df_1d)):
-        if i == 0:
-            camarilla_S3[i] = camarilla_S4[i] = camarilla_R3[i] = camarilla_R4[i] = np.nan
-        else:
-            # Use previous day's OHLC
-            high_prev = high_1d[i-1]
-            low_prev = low_1d[i-1]
-            close_prev = close_1d[i-1]
+    # Initialize Supertrend arrays
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
+    
+    # Calculate Supertrend
+    for i in range(atr_period, n):
+        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+            continue
             
-            range_prev = high_prev - low_prev
-            camarilla_S3[i] = close_prev - 1.1 * range_prev / 6
-            camarilla_S4[i] = close_prev - 1.1 * range_prev / 2
-            camarilla_R3[i] = close_prev + 1.1 * range_prev / 6
-            camarilla_R4[i] = close_prev + 1.1 * range_prev / 2
+        if i == atr_period:
+            supertrend[i] = upper_band[i]
+            direction[i] = -1  # start in downtrend
+        else:
+            if close[i] <= supertrend[i-1]:
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+            
+            # Adjust bands
+            if direction[i] == 1:  # uptrend
+                if lower_band[i] < lower_band[i-1]:
+                    lower_band[i] = lower_band[i-1]
+            else:  # downtrend
+                if upper_band[i] > upper_band[i-1]:
+                    upper_band[i] = upper_band[i-1]
+            
+            # Recalculate supertrend with adjusted bands
+            if direction[i] == 1:
+                supertrend[i] = lower_band[i]
+            else:
+                supertrend[i] = upper_band[i]
     
-    # Align Camarilla levels to 4h
-    S3_4h = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    S4_4h = align_htf_to_ltf(prices, df_1d, camarilla_S4)
-    R3_4h = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    R4_4h = align_htf_to_ltf(prices, df_1d, camarilla_R4)
+    # Calculate average volume for confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w ADX for trend filter
+    # Load weekly Supertrend for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < atr_period:
         return np.zeros(n)
     
+    # Calculate weekly Supertrend
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])],
-                            np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate ATR for weekly
+    tr1_1w = high_1w[1:] - low_1w[1:]
+    tr2_1w = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3_1w = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
+                            np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))])
+    atr_1w = pd.Series(tr_1w).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]),
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]),
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    hl2_1w = (high_1w + low_1w) / 2
+    upper_band_1w = hl2_1w + (atr_multiplier * atr_1w)
+    lower_band_1w = hl2_1w - (atr_multiplier * atr_1w)
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-    def wilder_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        for i in range(period, len(data)):
-            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-        return result
+    supertrend_1w = np.full(len(df_1w), np.nan)
+    direction_1w = np.full(len(df_1w), 1)
     
-    atr_1w = wilder_smoothing(tr_1w, 14)
-    dm_plus_smooth = wilder_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilder_smoothing(dm_minus, 14)
+    for i in range(atr_period, len(df_1w)):
+        if np.isnan(atr_1w[i]) or np.isnan(upper_band_1w[i]) or np.isnan(lower_band_1w[i]):
+            continue
+            
+        if i == atr_period:
+            supertrend_1w[i] = upper_band_1w[i]
+            direction_1w[i] = -1
+        else:
+            if close_1w[i] <= supertrend_1w[i-1]:
+                supertrend_1w[i] = upper_band_1w[i]
+                direction_1w[i] = -1
+            else:
+                supertrend_1w[i] = lower_band_1w[i]
+                direction_1w[i] = 1
+            
+            # Adjust bands
+            if direction_1w[i] == 1:  # uptrend
+                if lower_band_1w[i] < lower_band_1w[i-1]:
+                    lower_band_1w[i] = lower_band_1w[i-1]
+            else:  # downtrend
+                if upper_band_1w[i] > upper_band_1w[i-1]:
+                    upper_band_1w[i] = upper_band_1w[i-1]
+            
+            # Recalculate supertrend with adjusted bands
+            if direction_1w[i] == 1:
+                supertrend_1w[i] = lower_band_1w[i]
+            else:
+                supertrend_1w[i] = upper_band_1w[i]
     
-    # Calculate DI+ and DI-
-    di_plus = np.where(atr_1w > 0, dm_plus_smooth / atr_1w * 100, 0)
-    di_minus = np.where(atr_1w > 0, dm_minus_smooth / atr_1w * 100, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1w = wilder_smoothing(dx, 14)
-    
-    # Align ADX to 4h
-    adx_1w_4h = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Calculate volume moving average (20-period)
-    def sma_with_min_period(data, period):
-        result = np.full(len(data), np.nan)
-        for i in range(len(data)):
-            if i >= period - 1:
-                result[i] = np.mean(data[i-period+1:i+1])
-        return result
-    
-    vol_ma = sma_with_min_period(volume, 20)
+    # Align weekly Supertrend to daily
+    supertrend_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w)
+    direction_1w_aligned = align_htf_to_ltf(prices, df_1w, direction_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
-        # Skip if any data is not available
-        if (np.isnan(S3_4h[i]) or np.isnan(R3_4h[i]) or np.isnan(adx_1w_4h[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+    for i in range(atr_period, n):
+        # Skip if data not available
+        if (np.isnan(supertrend[i]) or np.isnan(close[i]) or 
+            np.isnan(supertrend_1w_aligned[i]) or np.isnan(direction_1w_aligned[i]) or
+            np.isnan(avg_volume[i]) or volume[i] < avg_volume[i] * 0.5):  # Volume filter: require at least 50% of average volume
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_ok = volume[i] > 1.5 * vol_ma[i]
-        
-        # ADX filter: only trade when ADX > 25 (trending market)
-        adx_ok = adx_1w_4h[i] > 25
+        # Weekly trend filter: only trade in direction of weekly trend
+        weekly_uptrend = direction_1w_aligned[i] == 1
         
         if position == 1:  # Long position
-            # Exit: price closes below S4 (strong breakdown)
-            if close[i] < S4_4h[i]:
+            # Exit: price closes below Supertrend (trend reversal)
+            if close[i] <= supertrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R4 (strong breakout)
-            if close[i] > R4_4h[i]:
+            # Exit: price closes above Supertrend (trend reversal)
+            if close[i] >= supertrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation and ADX filter
-            if volume_ok and adx_ok:
-                # Long entry: price crosses above S3 with volume
-                if close[i] > S3_4h[i] and close[i-1] <= S3_4h[i-1]:
+            # Only enter if weekly trend aligns AND volume confirmation
+            if weekly_uptrend and volume[i] > avg_volume[i]:
+                # Long entry: price closes above Supertrend (uptrend start)
+                if close[i] > supertrend[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price crosses below R3 with volume
-                elif close[i] < R3_4h[i] and close[i-1] >= R3_4h[i-1]:
+            elif not weekly_uptrend and volume[i] > avg_volume[i]:
+                # Short entry: price closes below Supertrend (downtrend start)
+                if close[i] < supertrend[i]:
                     position = -1
                     signals[i] = -0.25
     
