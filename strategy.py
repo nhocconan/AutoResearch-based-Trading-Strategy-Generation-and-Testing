@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Donchian Breakout with Volume and ADX Filter
-# Hypothesis: Donchian(10) breakouts in direction of daily ADX > 20 trend with volume
-# confirmation capture momentum moves while avoiding whipsaws. Uses daily trend for
-# robustness across bull/bear markets, volume filter to reduce false breakouts.
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
+# Strategy: 1d KAMA + RSI + Chop Filter
+# Hypothesis: KAMA adapts to market regime, capturing trends in both bull and bear markets.
+# RSI filters for momentum strength, and Choppiness Index avoids whipsaws in ranging markets.
+# Uses weekly trend filter for alignment with higher timeframe momentum.
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
 
-name = "4h_daily_donchian_breakout_volume_adx_v4"
-timeframe = "4h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,107 +24,123 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX and breakout levels
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
     
-    # Calculate ADX on daily data
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate KAMA on daily close
+    def kama(close, er_period=10, fast_sc=2, slow_sc=30):
+        change = np.abs(np.diff(close, n=10))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.zeros_like(close)
+        er[10:] = change[10:] / volatility[10:]
+        er[np.isnan(er)] = 0
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            if not np.isnan(kama[i-1]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # True Range
-    tr1 = daily_high[1:] - daily_low[1:]
-    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
-    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    kama_val = kama(close)
+    kama_dir = np.where(kama_val > np.roll(kama_val, 1), 1, -1)
+    kama_dir[0] = 1  # Initialize
     
-    # Directional Movement
-    dm_plus = np.where((daily_high[1:] - daily_high[:-1]) > (daily_low[:-1] - daily_low[1:]),
-                       np.maximum(daily_high[1:] - daily_high[:-1], 0), 0)
-    dm_minus = np.where((daily_low[:-1] - daily_low[1:]) > (daily_high[1:] - daily_high[:-1]),
-                        np.maximum(daily_low[:-1] - daily_low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate RSI(14)
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period]) / period
-        # Subsequent values
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    rsi_val = rsi(close)
     
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    # Calculate Choppiness Index (14)
+    def chop(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        max_high = np.zeros_like(high)
+        min_low = np.zeros_like(low)
+        max_high[0] = high[0]
+        min_low[0] = low[0]
+        for i in range(1, len(close)):
+            max_high[i] = max(max_high[i-1], high[i])
+            min_low[i] = min(min_low[i-1], low[i])
+        chop = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            if atr[i] > 0:
+                chop[i] = 100 * np.log10((atr[i] * period) / (max_high[i] - min_low[i])) / np.log10(period)
+        return chop
     
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    chop_val = chop(high, low, close)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Daily breakout levels (10-period high/low)
-    high_series = pd.Series(daily_high)
-    low_series = pd.Series(daily_low)
-    daily_high_10 = high_series.rolling(window=10, min_periods=10).max().values
-    daily_low_10 = low_series.rolling(window=10, min_periods=10).min().values
-    
-    # Align daily indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
-    high_10_aligned = align_htf_to_ltf(prices, df_daily, daily_high_10)
-    low_10_aligned = align_htf_to_ltf(prices, df_daily, daily_low_10)
-    
-    # Volume filter on 4h: volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    # Weekly EMA(20) for trend filter
+    weekly_close = df_weekly['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(high_10_aligned[i]) or
-            np.isnan(low_10_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or 
+            np.isnan(chop_val[i]) or np.isnan(weekly_ema_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls back below 10-day low or ADX weakens
-            if close[i] < low_10_aligned[i] or adx_aligned[i] < 15:
+            # Exit: KAMA turns down OR RSI overbought OR chop becomes too high (trending)
+            if (kama_dir[i] == -1 or rsi_val[i] > 70 or chop_val[i] < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises back above 10-day high or ADX weakens
-            if close[i] > high_10_aligned[i] or adx_aligned[i] < 15:
+            # Exit: KAMA turns up OR RSI oversold OR chop becomes too high (trending)
+            if (kama_dir[i] == 1 or rsi_val[i] < 30 or chop_val[i] < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Moderate trend required
-            if adx_aligned[i] >= 20:
-                # Long entry: breakout above 10-day high with volume
-                if (high[i] > high_10_aligned[i] and close[i] > high_10_aligned[i] and
-                    vol_filter[i]):
+            # Choppy market (chop > 61.8) for mean reversion
+            if chop_val[i] > 61.8:
+                # Long: price below KAMA AND RSI oversold
+                if close[i] < kama_val[i] and rsi_val[i] < 30:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: breakdown below 10-day low with volume
-                elif (low[i] < low_10_aligned[i] and close[i] < low_10_aligned[i] and
-                      vol_filter[i]):
+                # Short: price above KAMA AND RSI overbought
+                elif close[i] > kama_val[i] and rsi_val[i] > 70:
                     position = -1
                     signals[i] = -0.25
+            # Trending market (chop < 38.2) - follow weekly trend
+            elif chop_val[i] < 38.2:
+                # Only take longs in uptrend, shorts in downtrend
+                if close[i] > weekly_ema_aligned[i]:  # Uptrend
+                    if close[i] > kama_val[i] and rsi_val[i] > 50:
+                        position = 1
+                        signals[i] = 0.25
+                else:  # Downtrend
+                    if close[i] < kama_val[i] and rsi_val[i] < 50:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
