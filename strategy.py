@@ -1,18 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Strategy: 1h EMA Pullback with 4h Trend and 1d Volume Confirmation
-Hypothesis: In trending markets (identified by 4h EMA alignment), pullbacks to the 1h EMA offer high-probability entries. 
-Volume confirmation from 1d average volume filters low-conviction moves. Works in bull via trend continuation, 
-in bear via short entries on rallies to resistance. Target: 15-35 trades/year.
-"""
-name = "1h_ema_pullback_4h1d_volume_v2"
-timeframe = "1h"
-leverage = 1.0
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Strategy: 6h Elder Ray with 1d regime filter and volume confirmation
+# Hypothesis: Elder Ray power (bull/bear) captures institutional pressure; 1d trend filter avoids counter-trend trades; volume confirms conviction.
+# Works in bull via bull power > 0 + uptrend, in bear via bear power < 0 + downtrend. Volume filter avoids low-conviction whipsaws.
+# Target: 50-150 total trades over 4 years (~12-37/year) to minimize fee drag.
+name = "6h_elder_ray_1d_regime_volume_v1"
+timeframe = "6h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,70 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for regime and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(20) for trend
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 13-period EMA for Elder Ray (using close)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False).mean().values
     
-    # Calculate 1d average volume (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20, center=False).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = df_1d['high'].values - ema13_1d
+    bear_power_1d = df_1d['low'].values - ema13_1d
     
-    # Calculate 1h EMA(20) for pullback entries
-    ema_1h = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Align to 6h timeframe
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Calculate 1d trend (50-period EMA slope) for regime filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Trend: 1 if rising (current > previous), -1 if falling, 0 if flat
+    trend_1d = np.zeros_like(ema50_1d_aligned)
+    trend_1d[1:] = np.where(ema50_1d_aligned[1:] > ema50_1d_aligned[:-1], 1,
+                            np.where(ema50_1d_aligned[1:] < ema50_1d_aligned[:-1], -1, 0))
+    
+    # Calculate 6h volume confirmation (volume > 20-period average)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
+    position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after warmup period
         # Skip if required data not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(ema_1h[i])):
+        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1d average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        # Volume confirmation: current 6h volume > 20-period average
+        vol_confirm = volume[i] > vol_ma_6h[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA(20) OR trend changes
-            if close[i] < ema_1h[i] or close[i] < ema_4h_aligned[i]:
+            # Exit: bear power becomes positive (selling pressure) OR trend turns down OR volume fails
+            if bear_power_1d_aligned[i] > 0 or trend_1d[i] == -1 or not vol_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA(20) OR trend changes
-            if close[i] > ema_1h[i] or close[i] > ema_4h_aligned[i]:
+            # Exit: bull power becomes negative (buying pressure) OR trend turns up OR volume fails
+            if bull_power_1d_aligned[i] < 0 or trend_1d[i] == 1 or not vol_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price pulls back to EMA(20) from above in uptrend + volume confirmation
-            if (close[i] >= ema_1h[i] and  # Price at or above EMA
-                close[i-1] < ema_1h[i-1] and  # Was below EMA (pullback completion)
-                close[i] > ema_4h_aligned[i] and  # Uptrend: price above 4h EMA
-                vol_confirm):
+            # Enter long: bull power positive (buying pressure) + uptrend + volume confirmation
+            if bull_power_1d_aligned[i] > 0 and trend_1d[i] == 1 and vol_confirm:
                 position = 1
-                signals[i] = 0.20
-            # Enter short: price pulls back to EMA(20) from below in downtrend + volume confirmation
-            elif (close[i] <= ema_1h[i] and  # Price at or below EMA
-                  close[i-1] > ema_1h[i-1] and  # Was above EMA (pullback completion)
-                  close[i] < ema_4h_aligned[i] and  # Downtrend: price below 4h EMA
-                  vol_confirm):
+                signals[i] = 0.25
+            # Enter short: bear power negative (selling pressure) + downtrend + volume confirmation
+            elif bear_power_1d_aligned[i] < 0 and trend_1d[i] == -1 and vol_confirm:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
