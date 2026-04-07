@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: Camarilla pivot levels from 1-day timeframe provide strong support/resistance levels.
-Price tends to reverse at these levels during ranging markets and break out during trending markets.
-Volume surge confirms the breakout/reversal. Works in both bull/bear by taking reversals at S3/R3
-in ranging markets and breakouts at S4/R4 in trending markets. Target: 20-40 trades/year on 4h.
+12h_camarilla_pivot_1w_ema_volume_v2
+Hypothesis: Use weekly EMA50 trend filter with Camarilla pivot levels from daily timeframe.
+Enter long at S3 level or short at R3 level with volume confirmation.
+Only trade in direction of weekly trend to avoid counter-trend whipsaw.
+Targets 15-30 trades per year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1w_ema_volume_v2"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    s3 = close - range_val * 1.1 / 4
+    s2 = close - range_val * 1.1 / 6
+    s1 = close - range_val * 1.1 / 12
+    r1 = close + range_val * 1.1 / 12
+    r2 = close + range_val * 1.1 / 6
+    r3 = close + range_val * 1.1 / 4
+    return s1, s2, s3, r1, r2, r3
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,83 +38,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
     # Daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each day
-    # Using previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3
-    # Camarilla levels
-    range_ = prev_high - prev_low
-    s1 = close - (range_ * 1.1 / 12)
-    s2 = close - (range_ * 1.1 / 6)
-    s3 = close - (range_ * 1.1 / 4)
-    s4 = close - (range_ * 1.1 / 2)
-    r1 = close + (range_ * 1.1 / 12)
-    r2 = close + (range_ * 1.1 / 6)
-    r3 = close + (range_ * 1.1 / 4)
-    r4 = close + (range_ * 1.1 / 2)
+    s1, s2, s3, r1, r2, r3 = calculate_camarilla(prev_high, prev_low, prev_close)
     
-    # Align to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     
-    # Volume average (20-period)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if pivot levels not ready
-        if np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or \
-           np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(vol_ma[i]):
+    for i in range(30, n):
+        # Skip if trend filter not ready
+        if np.isnan(ema50_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume surge condition
-        vol_surge = volume[i] > vol_ma[i] * 1.5
+        # Trend filter: price vs weekly EMA50
+        above_ema50 = close[i] > ema50_1w_aligned[i]
+        below_ema50 = close[i] < ema50_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches R3 or R4
-            if close[i] >= r3_aligned[i]:
+            # Exit: price crosses below S2 or trend turns bearish
+            if close[i] < s2_aligned[i] or below_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches S3 or S4
-            if close[i] <= s3_aligned[i]:
+            # Exit: price crosses above R2 or trend turns bullish
+            if close[i] > r2_aligned[i] or above_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Enter long at S3/S4 with volume surge (bounce)
-            if vol_surge and close[i] <= s3_aligned[i] and close[i] > s4_aligned[i]:
+            # Enter long: price at S3 level with volume confirmation and bullish trend
+            if (close[i] <= s3_aligned[i] * 1.002 and  # Allow small buffer
+                volume_filter[i] and 
+                above_ema50):
                 position = 1
                 signals[i] = 0.25
-            # Enter short at R3/R4 with volume surge (rejection)
-            elif vol_surge and close[i] >= r3_aligned[i] and close[i] < r4_aligned[i]:
+            # Enter short: price at R3 level with volume confirmation and bearish trend
+            elif (close[i] >= r3_aligned[i] * 0.998 and   # Allow small buffer
+                  volume_filter[i] and 
+                  below_ema50):
                 position = -1
                 signals[i] = -0.25
-            # Breakout entries: price breaks S4/R4 with volume surge
-            elif vol_surge and close[i] < s4_aligned[i]:
-                position = -1
-                signals[i] = -0.25
-            elif vol_surge and close[i] > r4_aligned[i]:
-                position = 1
-                signals[i] = 0.25
     
     return signals
