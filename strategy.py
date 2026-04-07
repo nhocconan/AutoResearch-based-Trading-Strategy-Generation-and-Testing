@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, use 1-day Donchian breakouts for entry with 1-day trend filter (EMA50) and volume confirmation to capture strong trending moves. Exit when price returns to the midpoint of the Donchian channel. This strategy targets sustained trends while avoiding false breakouts, working in both bull and bear markets via trend filter.
+4h_cci_breakout_12h_trend_volume_v4
+Hypothesis: On 4h timeframe, use 12h CCI for trend strength and direction, with 12h EMA for trend filter, and volume confirmation for institutional participation. Enter long when CCI crosses above +100 with price above EMA and volume confirmation; enter short when CCI crosses below -100 with price below EMA and volume confirmation. Exit when CCI returns to zero or opposite extreme. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_cci_breakout_12h_trend_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,31 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h data for CCI and EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian Channel on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate CCI on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Donchian Channel (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Typical price
+    tp_12h = (high_12h + low_12h + close_12h) / 3
+    # SMA of typical price
+    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
+    # Mean deviation
+    md = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # CCI calculation
+    cci_12h = (tp_12h - sma_tp) / (0.015 * md)
     
-    # 1d EMA for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # 12h EMA for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
     
-    # Align indicators to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_12h = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align indicators to 4h timeframe
+    cci_12h_4h = align_htf_to_ltf(prices, df_12h, cci_12h)
+    ema_12h_4h = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Volume confirmation (20-period average on 12h)
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,8 +57,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or
-            np.isnan(donchian_mid_12h[i]) or np.isnan(ema_1d_12h[i]) or
+        if (np.isnan(cci_12h_4h[i]) or np.isnan(ema_12h_4h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
@@ -65,34 +66,58 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Trend direction from EMA
-        uptrend = close[i] > ema_1d_12h[i]
-        downtrend = close[i] < ema_1d_12h[i]
+        uptrend = close[i] > ema_12h_4h[i]
+        downtrend = close[i] < ema_12h_4h[i]
         
         if position == 1:  # Long position
-            # Exit if price returns to Donchian midpoint
-            if close[i] <= donchian_mid_12h[i]:
+            # Exit conditions
+            exit_long = False
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_12h_4h[i]) < 10:
+                exit_long = True
+            # Exit if CCI goes below -100 (strong reversal)
+            elif cci_12h_4h[i] < -100:
+                exit_long = True
+            # Exit if trend turns down
+            elif downtrend and cci_12h_4h[i] < 0:
+                exit_long = True
+            
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price returns to Donchian midpoint
-            if close[i] >= donchian_mid_12h[i]:
+            # Exit conditions
+            exit_short = False
+            # Exit if CCI returns to zero (trend weakening)
+            if abs(cci_12h_4h[i]) < 10:
+                exit_short = True
+            # Exit if CCI goes above +100 (strong reversal)
+            elif cci_12h_4h[i] > 100:
+                exit_short = True
+            # Exit if trend turns up
+            elif uptrend and cci_12h_4h[i] > 0:
+                exit_short = True
+            
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high with uptrend and volume
+            # Long entry conditions
             long_entry = False
-            if close[i] > donchian_high_12h[i] and close[i-1] <= donchian_high_12h[i-1]:
+            # CCI breaks above +100 with uptrend and volume confirmation
+            if cci_12h_4h[i] > 100 and cci_12h_4h[i-1] <= 100:
                 if uptrend and vol_confirm:
                     long_entry = True
             
-            # Short entry: price breaks below Donchian low with downtrend and volume
+            # Short entry conditions
             short_entry = False
-            if close[i] < donchian_low_12h[i] and close[i-1] >= donchian_low_12h[i-1]:
+            # CCI breaks below -100 with downtrend and volume confirmation
+            if cci_12h_4h[i] < -100 and cci_12h_4h[i-1] >= -100:
                 if downtrend and vol_confirm:
                     short_entry = True
             
