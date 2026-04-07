@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-1h VWAP Reversion + Volume Spike + 4h Trend Filter
-- Trend: 4h EMA200 (bull/bear filter)
-- Entry: Price deviates >1.5% from 20-period VWAP with volume >1.5x average
-- Exit: Price returns to VWAP or trend reversal
-- Session filter: 08-20 UTC only
-- Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
+Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d regime filter and volume confirmation.
+Uses daily EMA13 for trend regime (bull/bear filter) and 6h Elder Ray for entry.
+In bull regime (close > daily EMA13): long when Bull Power > 0 and rising.
+In bear regime (close < daily EMA13): short when Bear Power < 0 and falling.
+Volume must be above 20-period average to confirm.
+Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_vwap_reversion_volume_spike_4h_trend_v1"
-timeframe = "1h"
+name = "6h_elder_ray_1d_regime_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,75 +28,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC only
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # === 4H TREND FILTER (HTF) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
+    # === DAILY REGIME FILTER (HTF) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)  # already shifted
     
-    # === 1H VWAP (20-period) ===
-    typical_price = (high + low + close) / 3
-    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # === 6h ELDER RAY (LTF) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
     
-    # Volume average
+    # === VOLUME CONFIRMATION (LTF) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
-        # Skip if not in session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Skip if any data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
+    for i in range(20, n):  # Start after warmup
+        if np.isnan(daily_ema_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Determine 4h trend
-        bull_trend = close[i] > ema_4h_aligned[i]
-        
-        # Calculate VWAP deviation
-        vwap_dev = (close[i] - vwap[i]) / vwap[i] * 100
+        # Determine regime from daily EMA
+        bull_regime = close[i] > daily_ema_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to VWAP OR trend turns bearish
-            if vwap_dev >= -0.5 or not bull_trend:
+            # Exit: Bull Power turns negative OR regime turns bearish
+            if bull_power[i] <= 0 or not bull_regime:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to VWAP OR trend turns bullish
-            if vwap_dev <= 0.5 or bull_trend:
+            # Exit: Bear Power turns positive OR regime turns bullish
+            if bear_power[i] >= 0 or bull_regime:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume spike (>1.5x average)
-            if volume[i] <= vol_ma[i] * 1.5:
+            # Need volume confirmation
+            if volume[i] <= vol_ma[i]:
                 signals[i] = 0.0
                 continue
             
-            # Entry: price deviates significantly from VWAP
-            if vwap_dev <= -1.5:  # Price below VWAP -> long
-                position = 1
-                signals[i] = 0.20
-            elif vwap_dev >= 1.5:  # Price above VWAP -> short
-                position = -1
-                signals[i] = -0.20
+            # Entry logic based on regime
+            if bull_regime:
+                # In bull regime: long when Bull Power > 0 and rising
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
+                    position = 1
+                    signals[i] = 0.25
+            else:
+                # In bear regime: short when Bear Power < 0 and falling
+                if bear_power[i] < 0 and bear_power[i] < bear_power[i-1]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
