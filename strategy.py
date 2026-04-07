@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour volume confirmation and 12-hour ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + 12h ADX > 25
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + 12h ADX > 25
-# Exit when price crosses 8-period EMA in opposite direction
-# Stoploss at 2.5 * ATR(14)
+# Hypothesis: 4-hour Donchian(20) breakout with 4-hour volume confirmation and 12-hour ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.8x 4-hour average + 12h ADX > 22
+# Short when price breaks below 20-period Donchian low + volume > 1.8x 4-hour average + 12h ADX > 22
+# Exit when price crosses 4-period EMA in opposite direction
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12-hour volume for confirmation and 12-hour ADX for trend strength
+# Uses 4h volume for confirmation and 12h ADX for trend strength
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_12h_vol_adx_v1"
+name = "4h_donchian20_4h_vol_12h_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,16 +27,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for volume and ADX confirmation
+    # 4-hour data for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # 12-hour data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 12-hour volume average (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_12h_s = pd.Series(volume_12h)
-    volume_ma = volume_12h_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
+    # Calculate 4-hour volume average (20-period)
+    volume_4h = df_4h['volume'].values
+    volume_4h_s = pd.Series(volume_4h)
+    volume_ma = volume_4h_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
     
     # Calculate 12-hour ADX (14-period)
     high_12h = df_12h['high'].values
@@ -76,8 +81,8 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 8-period EMA for exit
-    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # 4-period EMA for exit
+    ema_4 = pd.Series(close).ewm(span=4, adjust=False, min_periods=4).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -96,7 +101,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_8[i]) or np.isnan(atr[i])):
+            np.isnan(ema_4[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -104,26 +109,26 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 8-period EMA
-            elif close[i] < ema_8[i]:
+            # Exit: price crosses below 4-period EMA
+            elif close[i] < ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 8-period EMA
-            elif close[i] > ema_8[i]:
+            # Exit: price crosses above 4-period EMA
+            elif close[i] > ema_4[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -131,10 +136,10 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: 12h ADX > 25
-            trend_filter = adx_aligned[i] > 25
+            # Volume filter: volume > 1.8x 20-period average
+            volume_filter = volume[i] > 1.8 * volume_ma_aligned[i]
+            # Trend filter: 12-hour ADX > 22
+            trend_filter = adx_aligned[i] > 22
             
             # Long: price breaks above Donchian high + volume filter + trend filter
             if close[i] > highest_high[i] and volume_filter and trend_filter:
