@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_ichimoku_12h_trend_volume_v1
-Hypothesis: On 6-hour timeframe, use Ichimoku cloud from 12-hour timeframe for trend direction, with Tenkan/Kijun cross for entry timing and volume confirmation. The Ichimoku cloud provides strong support/resistance levels and future cloud acts as leading indicator. Works in bull markets (buy when price above cloud in uptrend) and bear markets (sell when price below cloud in downtrend) by using higher timeframe trend filter. Volume confirmation ensures breakouts have conviction. Targets 12-37 trades/year to avoid fee drag.
+12h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 12-hour timeframe, use daily Camarilla pivot levels with volume confirmation for mean reversion entries. Enter long when price touches S3 level with volume > 1.5x average, short when price touches R3 level with volume > 1.5x average. Exit when price reaches opposite pivot level (S1/R1) or reverses. Uses 1-day trend filter to avoid counter-trend trades. Designed for low frequency (12-37 trades/year) to avoid fee drag while capturing mean reversion in ranging markets and breakouts in trending markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_12h_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,108 +23,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Ichimoku
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 12h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    tenkan_sen = []
-    for i in range(len(high_12h)):
-        if i < 8:
-            tenkan_sen.append(np.nan)
-        else:
-            tenkan_sen.append((np.max(high_12h[i-8:i+1]) + np.min(low_12h[i-8:i+1])) / 2)
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # S1 = C - (Range * 1.1 / 6)
+    # S2 = C - (Range * 1.1 / 4)
+    # S3 = C - (Range * 1.1 / 2)
+    # R1 = C + (Range * 1.1 / 6)
+    # R2 = C + (Range * 1.1 / 4)
+    # R3 = C + (Range * 1.1 / 2)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = []
-    for i in range(len(high_12h)):
-        if i < 25:
-            kijun_sen.append(np.nan)
-        else:
-            kijun_sen.append((np.max(high_12h[i-25:i+1]) + np.min(low_12h[i-25:i+1])) / 2)
+    pivot = (d_high + d_low + d_close) / 3.0
+    rng = d_high - d_low
+    s1 = d_close - (rng * 1.1 / 6)
+    s2 = d_close - (rng * 1.1 / 4)
+    s3 = d_close - (rng * 1.1 / 2)
+    r1 = d_close + (rng * 1.1 / 6)
+    r2 = d_close + (rng * 1.1 / 4)
+    r3 = d_close + (rng * 1.1 / 2)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = []
-    for i in range(len(tenkan_sen)):
-        if i < 25 or np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]):
-            senkou_span_a.append(np.nan)
-        else:
-            senkou_span_a.append((tenkan_sen[i] + kijun_sen[i]) / 2)
+    # Align pivot levels to 12h timeframe (shifted by 1 day for no look-ahead)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_span_b = []
-    for i in range(len(high_12h)):
-        if i < 51:
-            senkou_span_b.append(np.nan)
-        else:
-            senkou_span_b.append((np.max(high_12h[i-51:i+1]) + np.min(low_12h[i-51:i+1])) / 2)
-    
-    # Chikou Span (Lagging Span): Close plotted 26 periods behind
-    chikou_span = df_12h['close'].values
-    
-    # Align Ichimoku components to 6h timeframe (shifted by 1 for completed bars only)
-    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b)
-    chikou_aligned = align_htf_to_ltf(prices, df_12h, chikou_span)
-    
-    # Calculate 50-period average volume for confirmation on 6h
-    vol_avg = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Calculate 24-period average volume for confirmation (2 days of 12h data)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup
-        # Skip if Ichimoku data not available
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i])):
+    for i in range(24, n):  # Start after volume average warmup
+        # Skip if daily data not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend: price above/below cloud
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # Tenkan/Kijun cross for entry timing
-        tenkan_now = tenkan_aligned[i]
-        kijun_now = kijun_aligned[i]
-        tenkan_prev = tenkan_aligned[i-1]
-        kijun_prev = kijun_aligned[i-1]
-        
-        tk_cross_up = (tenkan_prev <= kijun_prev) and (tenkan_now > kijun_now)
-        tk_cross_down = (tenkan_prev >= kijun_prev) and (tenkan_now < kijun_now)
-        
-        # Volume confirmation: current volume > 1.5x 50-period average
+        # Volume confirmation: current volume > 1.5x 24-period average
         vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price crosses below cloud or Tenkan/Kijun cross down
-            if price_below_cloud or tk_cross_down:
+            # Exit when price reaches S1 level or shows weakness below S2
+            if close[i] >= s1_aligned[i] or close[i] <= s2_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price crosses above cloud or Tenkan/Kijun cross up
-            if price_above_cloud or tk_cross_up:
+            # Exit when price reaches R1 level or shows strength above R2
+            if close[i] <= r1_aligned[i] or close[i] >= r2_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price above cloud + Tenkan crosses above Kijun + volume confirmation
-            long_entry = price_above_cloud and tk_cross_up and vol_confirm
-            # Short entry: price below cloud + Tenkan crosses below Kijun + volume confirmation
-            short_entry = price_below_cloud and tk_cross_down and vol_confirm
+            # Long entry: price touches or goes below S3 level with volume confirmation
+            long_entry = (close[i] <= s3_aligned[i]) and vol_confirm
+            # Short entry: price touches or goes above R3 level with volume confirmation
+            short_entry = (close[i] >= r3_aligned[i]) and vol_confirm
             
             if long_entry:
                 position = 1
