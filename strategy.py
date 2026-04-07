@@ -1,21 +1,20 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1w_trend_volume_v1
-Hypothesis: Breakouts of 20-period Donchian channels on 4h, filtered by 1-week EMA200 trend and volume confirmation, capture trending moves in both bull and bear markets. Volatility filter avoids choppy periods. Target: 20-40 trades/year.
+12h_kama_trend_1d_volume_v1
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a reliable trend signal. On 12h timeframe, we use KAMA(10) for trend direction, confirmed by 1d EMA200 for higher timeframe alignment. Volume confirmation filters weak signals. This adapts to both trending and ranging markets, reducing false signals. Target: 12-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1w_trend_volume_v1"
-timeframe = "4h"
+name = "12h_kama_trend_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,78 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA200 for trend filter
-    ema_200 = df_1w['close'].ewm(span=200, adjust=False).mean()
+    # 1d EMA200 for trend filter
+    ema_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200.values)
     
-    # Align 1w EMA200 to 4h timeframe
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200.values)
+    # KAMA(10) on 12h: Kaufman Adaptive Moving Average
+    # Efficiency Ratio (ER) = |change| / volatility
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
+    # Handle first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start with close at index 9
+    for i in range(10, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Donchian Channel (20-period) on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max()
-    lower = low_series.rolling(window=20, min_periods=20).min()
-    
-    # Donchian breakout signals
-    breakout_up = (close > upper.shift(1)).astype(float)  # Break above prior upper band
-    breakout_dn = (close < lower.shift(1)).astype(float)  # Break below prior lower band
-    
-    # Volatility filter: ATR(14) < 50th percentile of ATR(50) to avoid chop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    atr_median = pd.Series(atr).rolling(window=50, min_periods=50).median()
-    vol_filter = (atr < atr_median).astype(float)  # Low volatility regime
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = (volume > 1.5 * vol_ma).astype(float)
+    # Volume confirmation (20-period average on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma[i]) or 
-            vol_ma[i] <= 0 or np.isnan(atr[i]) or np.isnan(atr_median[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_200_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian band or trend fails
-            if close[i] < lower.iloc[i] or close[i] < ema_200_aligned[i]:
+            # Exit: price crosses below KAMA or below 1d EMA200
+            if close[i] < kama[i] or close[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian band or trend fails
-            if close[i] > upper.iloc[i] or close[i] > ema_200_aligned[i]:
+            # Exit: price crosses above KAMA or above 1d EMA200
+            if close[i] > kama[i] or close[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Donchian breakout up, with trend, volume, and low volatility
-            if (breakout_up.iloc[i] and 
-                close[i] > ema_200_aligned[i] and 
-                vol_confirm.iloc[i] and 
-                vol_filter.iloc[i]):
+            # Long entry: price above KAMA and above 1d EMA200, with volume
+            if (close[i] > kama[i] and close[i] > ema_200_aligned[i] and vol_confirm):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Donchian breakout down, with trend, volume, and low volatility
-            elif (breakout_dn.iloc[i] and 
-                  close[i] < ema_200_aligned[i] and 
-                  vol_confirm.iloc[i] and 
-                  vol_filter.iloc[i]):
+            # Short entry: price below KAMA and below 1d EMA200, with volume
+            elif (close[i] < kama[i] and close[i] < ema_200_aligned[i] and vol_confirm):
                 position = -1
                 signals[i] = -0.25
     
