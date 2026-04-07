@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Camarilla Pivot + Volume + Weekly Trend
-# Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
-# combined with volume confirmation and weekly trend filter provides high-probability
-# entries in both trending and ranging markets. The weekly trend ensures we trade
-# with the dominant market direction, while Camarilla levels provide precise
-# entry/exit points. Volume filters out false breakouts.
-# Target: 15-25 trades/year to minimize fee drag on 6h timeframe.
-name = "6h_camarilla_pivot_volume_weekly_trend_v1"
-timeframe = "6h"
+# Strategy: 12h Donchian(20) Breakout + Volume Confirmation + ADX Trend Filter
+# Hypothesis: Donchian breakouts capture strong momentum moves. Volume confirms
+# institutional participation. ADX ensures we only trade in trending markets,
+# avoiding whipsaws in ranges. Works in bull/bear by following breakout direction.
+# Target: 12-37 trades/year on 12h timeframe to minimize fee drag.
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily OHLC for Camarilla calculation (using 1d timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla formula
-    range_ = prev_high - prev_low
-    camarilla_r3 = prev_close + range_ * 1.1 / 4
-    camarilla_s3 = prev_close - range_ * 1.1 / 4
-    camarilla_r4 = prev_close + range_ * 1.1 / 2
-    camarilla_s4 = prev_close - range_ * 1.1 / 2
-    
-    # Align to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.5)
     
-    # Weekly trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # ADX (14-period) for trend strength
+    # TR = max(high-low, |high-close_prev|, |low-close_prev|)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # +DM and -DM
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    
+    # DX and ADX
+    dx = np.zeros(n)
+    dx_sum = pd.Series(np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100).rolling(window=14, min_periods=14).mean().values
+    adx = dx_sum  # ADX is smoothed DX
+    
+    # Get daily trend filter (1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=21, adjust=False).mean().values
-    weekly_ema_6h = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # Daily EMA(50) for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
+    daily_ema_12h = align_htf_to_ltf(prices, df_1d, daily_ema)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(weekly_ema_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(adx[i]) or 
+            np.isnan(daily_ema_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below S3 or weekly trend turns bearish
-            if close[i] < s3_6h[i] or close[i] < weekly_ema_6h[i]:
+            # Exit: price closes below Donchian lower band or trend turns bearish
+            if close[i] < lowest_low[i] or close[i] < daily_ema_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price crosses above R3 or weekly trend turns bullish
-            if close[i] > r3_6h[i] or close[i] > weekly_ema_6h[i]:
+            # Exit: price closes above Donchian upper band or trend turns bullish
+            if close[i] > highest_high[i] or close[i] > daily_ema_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume confirmation
-            if vol_filter[i]:
-                # Mean reversion at S3/R3 in ranging markets
-                if close[i] <= s3_6h[i] and close[i] > weekly_ema_6h[i]:
-                    # Buy at S3 when above weekly EMA (bullish bias)
+            # Only trade in strong trending markets (ADX > 25)
+            if adx[i] > 25:
+                # Enter long: price breaks above Donchian upper band + volume spike + bullish daily trend
+                if close[i] > highest_high[i] and volume_spike[i] and close[i] > daily_ema_12h[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] >= r3_6h[i] and close[i] < weekly_ema_6h[i]:
-                    # Sell at R3 when below weekly EMA (bearish bias)
-                    position = -1
-                    signals[i] = -0.25
-                # Breakout continuation at R4/S4
-                elif close[i] > r4_6h[i] and close[i] > weekly_ema_6h[i]:
-                    # Buy breakout above R4 in bullish trend
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < s4_6h[i] and close[i] < weekly_ema_6h[i]:
-                    # Sell breakdown below S4 in bearish trend
+                # Enter short: price breaks below Donchian lower band + volume spike + bearish daily trend
+                elif close[i] < lowest_low[i] and volume_spike[i] and close[i] < daily_ema_12h[i]:
                     position = -1
                     signals[i] = -0.25
     
