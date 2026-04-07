@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_volatility_filter_v1
-Hypothesis: Camarilla pivot levels on daily timeframe provide strong support/resistance levels.
-We trade reversals at S3/R3 (80% probability) and breakouts at S4/R4 (continuation).
-Volatility filter (ATR ratio) ensures we only trade when volatility is expanding (>1.2x average).
-Works in both bull and bear markets by adapting to volatility regime.
-Target: 15-30 trades/year.
+4h_camarilla_pivot_1d_trend_volume_v2
+Hypothesis: Camarilla pivot levels on 1d timeframe identify key support/resistance levels, 
+combined with 1d EMA trend filter and volume confirmation. Works in both bull and bear markets 
+by buying near support in uptrends and selling near resistance in downtrends. Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_volatility_filter_v1"
-timeframe = "6h"
+name = "4h_camarilla_pivot_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,90 +25,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and ATR
+    # Daily data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean()
+    # Calculate Camarilla pivot levels (based on previous day's range)
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Range = High - Low
+    daily_range = df_1d['high'] - df_1d['low']
     
-    # Calculate daily Camarilla pivot levels
-    # Based on previous day's OHLC
-    high_prev = df_1d['high'].shift(1)
-    low_prev = df_1d['low'].shift(1)
-    close_prev = df_1d['close'].shift(1)
+    # Camarilla levels (using previous day's data)
+    # S1 = Close - (Range * 1.1/12)
+    # S2 = Close - (Range * 1.1/6)
+    # S3 = Close - (Range * 1.1/4)
+    # S4 = Close - (Range * 1.1/2)
+    # R1 = Close + (Range * 1.1/12)
+    # R2 = Close + (Range * 1.1/6)
+    # R3 = Close + (Range * 1.1/4)
+    # R4 = Close + (Range * 1.1/2)
     
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_prev = high_prev - low_prev
+    prev_close = df_1d['close'].shift(1)
+    prev_range = df_1d['high'].shift(1) - df_1d['low'].shift(1)
     
-    # Camarilla levels
-    s1 = close_prev - (range_prev * 1.1 / 12)
-    s2 = close_prev - (range_prev * 1.1 / 6)
-    s3 = close_prev - (range_prev * 1.1 / 4)
-    s4 = close_prev - (range_prev * 1.1 / 2)
-    r1 = close_prev + (range_prev * 1.1 / 12)
-    r2 = close_prev + (range_prev * 1.1 / 6)
-    r3 = close_prev + (range_prev * 1.1 / 4)
-    r4 = close_prev + (range_prev * 1.1 / 2)
+    # Calculate levels
+    s1 = prev_close - (prev_range * 1.1 / 12)
+    s2 = prev_close - (prev_range * 1.1 / 6)
+    s3 = prev_close - (prev_range * 1.1 / 4)
+    s4 = prev_close - (prev_range * 1.1 / 2)
+    r1 = prev_close + (prev_range * 1.1 / 12)
+    r2 = prev_close + (prev_range * 1.1 / 6)
+    r3 = prev_close + (prev_range * 1.1 / 4)
+    r4 = prev_close + (prev_range * 1.1 / 2)
     
-    # Align all daily data to 6h timeframe
+    # Daily EMA for trend filter (20-period)
+    ema_20 = df_1d['close'].ewm(span=20, adjust=False).mean()
+    
+    # Align all daily data to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14.values)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20.values)
     
-    # Volatility filter: current ATR > 1.2 * average ATR (30-day)
-    atr_ma = pd.Series(atr_aligned).rolling(window=30, min_periods=30).mean().values
-    vol_expanding = atr_aligned > 1.2 * atr_ma
+    # Volume confirmation (20-period average = ~3.3 days on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(atr_ma[i]) or atr_ma[i] <= 0):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: price reaches R4 (take profit) or reverses below R3
-            if close[i] >= r4_aligned[i] or close[i] < r3_aligned[i]:
+            # Exit: price reaches R3 or trend turns bearish
+            if close[i] >= r3_aligned[i] or close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price reaches S4 (take profit) or reverses above S3
-            if close[i] <= s4_aligned[i] or close[i] > s3_aligned[i]:
+            # Exit: price reaches S3 or trend turns bullish
+            if close[i] <= s3_aligned[i] or close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: reversal at S3 with expanding volatility
-            if (close[i] <= s3_aligned[i] and close[i] > s4_aligned[i] and 
-                vol_expanding[i]):
+            # Long entry: price touches S1 with volume and bullish trend
+            if (close[i] <= s1_aligned[i] and vol_confirm and 
+                close[i] > ema_20_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: reversal at R3 with expanding volatility
-            elif (close[i] >= r3_aligned[i] and close[i] < r4_aligned[i] and 
-                  vol_expanding[i]):
-                position = -1
-                signals[i] = -0.25
-            # Long breakout: price breaks above R4 with expanding volatility
-            elif (close[i] > r4_aligned[i] and vol_expanding[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short breakout: price breaks below S4 with expanding volatility
-            elif (close[i] < s4_aligned[i] and vol_expanding[i]):
+            # Short entry: price touches R1 with volume and bearish trend
+            elif (close[i] >= r1_aligned[i] and vol_confirm and 
+                  close[i] < ema_20_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
