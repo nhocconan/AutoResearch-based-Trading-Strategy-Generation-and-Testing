@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
+# Strategy: 4h Donchian breakout with 1d volume confirmation and ATR volatility filter
 # Hypothesis: Breakouts with volume confirmation capture strong trends; volatility filter avoids choppy markets.
 # Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
 # Target: 20-50 trades/year to minimize fee drag.
