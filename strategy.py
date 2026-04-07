@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, use 1-day Donchian breakout for entry with volume confirmation and 1-day EMA trend filter. Enter long when price breaks above 1-day Donchian high with volume > 2x average and price above EMA; enter short when price breaks below 1-day Donchian low with volume > 2x average and price below EMA. Exit when price returns to the Donchian midpoint. Uses 1-day trend filter to work in both bull and bear markets, with volume confirmation to reduce false signals. Targets 15-30 trades per year.
+4h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 4h timeframe, use Donchian(20) breakout for entry, with 1d EMA for trend filter and volume confirmation for institutional participation. Exit on opposite Donchian breakout or trend reversal. This strategy targets strong trending moves with volume confirmation, reducing false signals and trade frequency. Works in bull/bear via trend filter and breakout logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +23,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for Donchian channels, EMA trend filter, and volume average
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate EMA on 1d data
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
     
-    # Donchian high and low (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Align EMA to 4h timeframe
+    ema_1d_4h = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1-day EMA for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # Donchian channels on 4h (20-period high/low)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1-day volume average (20-period)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 12h timeframe
-    donch_high_12h = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_12h = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_12h = align_htf_to_ltf(prices, df_1d, donch_mid)
-    ema_1d_12h = align_htf_to_ltf(prices, df_1d, ema_1d)
-    vol_ma_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Volume confirmation (20-period average on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or
-            np.isnan(donch_mid_12h[i]) or np.isnan(ema_1d_12h[i]) or
-            np.isnan(vol_ma_1d_12h[i]) or vol_ma_1d_12h[i] <= 0):
+        if (np.isnan(ema_1d_4h[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2x 1-day average volume
-        vol_confirm = volume[i] > 2.0 * vol_ma_1d_12h[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume[i] > 2.0 * vol_ma[i]
         
-        # Trend direction from 1-day EMA
-        uptrend = close[i] > ema_1d_12h[i]
-        downtrend = close[i] < ema_1d_12h[i]
+        # Trend direction from EMA
+        uptrend = close[i] > ema_1d_4h[i]
+        downtrend = close[i] < ema_1d_4h[i]
         
         if position == 1:  # Long position
-            # Exit when price returns to Donchian midpoint
-            if close[i] <= donch_mid_12h[i]:
+            # Exit conditions
+            exit_long = False
+            # Exit if price breaks below lower Donchian channel
+            if close[i] < low_min[i]:
+                exit_long = True
+            # Exit if trend turns down
+            elif downtrend:
+                exit_long = True
+            
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price returns to Donchian midpoint
-            if close[i] >= donch_mid_12h[i]:
+            # Exit conditions
+            exit_short = False
+            # Exit if price breaks above upper Donchian channel
+            if close[i] > high_max[i]:
+                exit_short = True
+            # Exit if trend turns up
+            elif uptrend:
+                exit_short = True
+            
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high with volume confirmation and uptrend
+            # Long entry conditions
             long_entry = False
-            if high[i] > donch_high_12h[i] and vol_confirm and uptrend:
-                long_entry = True
+            # Price breaks above upper Donchian channel with uptrend and volume confirmation
+            if close[i] > high_max[i] and close[i-1] <= high_max[i-1]:
+                if uptrend and vol_confirm:
+                    long_entry = True
             
-            # Short entry: price breaks below Donchian low with volume confirmation and downtrend
+            # Short entry conditions
             short_entry = False
-            if low[i] < donch_low_12h[i] and vol_confirm and downtrend:
-                short_entry = True
+            # Price breaks below lower Donchian channel with downtrend and volume confirmation
+            if close[i] < low_min[i] and close[i-1] >= low_min[i-1]:
+                if downtrend and vol_confirm:
+                    short_entry = True
             
             if long_entry:
                 position = 1
