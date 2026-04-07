@@ -3,81 +3,85 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1D Donchian Breakout + Weekly EMA Trend + Volume Confirmation
-# Hypothesis: Buy breakouts above 20-day high in weekly uptrend, sell breakdowns below 20-day low in weekly downtrend.
-# Uses weekly EMA(20) as trend filter to align with higher timeframe direction, reducing whipsaws in sideways markets.
-# Volume confirmation ensures breakouts have conviction. Works in bull/bear by trading with weekly trend.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# Strategy: 6h Bollinger Band Squeeze + 12h Trend Filter
+# Hypothesis: During low volatility (BB width < 20th percentile), price breaks out in direction of 12h EMA(50) trend.
+# Works in bull/bear by trading breakouts with trend filter. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_donchian_breakout_weekly_ema_volume_v2"
-timeframe = "1d"
+name = "6h_bb_squeeze_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    close_12h = df_12h['close'].values
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma_20 + bb_std * std_20
+    lower = sma_20 - bb_std * std_20
+    bb_width = upper - lower
     
-    # Volume filter: daily volume > 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Band width percentile (20-period lookback)
+    bb_width_pct = pd.Series(bb_width).rolling(window=100, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    
+    # 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(bb_width_pct[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma_20[i]
+        # Squeeze condition: BB width in lowest 20% of recent range
+        squeeze = bb_width_pct[i] <= 0.20
         
         if position == 1:  # Long position
-            # Exit: price breaks below 20-day low or trend changes
-            if low[i] < low_20[i] or close[i] < ema_20_aligned[i]:
+            # Exit: price closes below SMA(20) or trend changes
+            if close[i] < sma_20[i] or close[i] < ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above 20-day high or trend changes
-            if high[i] > high_20[i] or close[i] > ema_20_aligned[i]:
+            # Exit: price closes above SMA(20) or trend changes
+            if close[i] > sma_20[i] or close[i] > ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout in direction of weekly EMA trend with volume
-            if vol_ok:
-                if close[i] > ema_20_aligned[i]:  # Weekly uptrend
-                    if high[i] > high_20[i]:  # Breakout above 20-day high
-                        position = 1
-                        signals[i] = 0.25
-                else:  # Weekly downtrend
-                    if low[i] < low_20[i]:  # Breakdown below 20-day low
-                        position = -1
-                        signals[i] = -0.25
+            if squeeze:
+                # Breakout above upper band with uptrend
+                if close[i] > upper[i] and close[i] > ema_50_12h_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Breakdown below lower band with downtrend
+                elif close[i] < lower[i] and close[i] < ema_50_12h_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
