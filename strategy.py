@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily trend filter and volume confirmation
-# Uses daily timeframe for trend direction to avoid whipsaws in choppy markets.
-# Entry only when price breaks Donchian channel with volume above average.
-# Stop loss via ATR-based trailing stop (implemented as signal=0 when price < highest - 2*ATR).
-# Designed for low frequency (target: 15-35 trades/year) to minimize fee drag.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+# Hypothesis: 4-hour Williams Alligator with daily trend filter and volume confirmation
+# Alligator uses smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
+# Daily trend filter ensures trades align with higher timeframe direction.
+# Volume confirmation filters low-participation moves. Designed for low frequency in 4h timeframe.
+# Works in bull markets (buy when Lips cross above Teeth/Jaw in uptrend) and bear markets (sell when Lips cross below in downtrend).
 
-name = "12h_donchian20_volume_atr_v1"
-timeframe = "12h"
+name = "4h_alligator_daily_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,81 +26,72 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA13 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema13_1d = close_1d.ewm(span=13, min_periods=13, adjust=False).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Calculate ATR(14) for stop loss
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Alligator components (SMMA = smoothed moving average)
+    close_s = pd.Series(close)
+    # Jaw: 13-period SMMA, 8 bars ahead
+    jaw = close_s.rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMMA, 5 bars ahead
+    teeth = close_s.rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMMA, 3 bars ahead
+    lips = close_s.rolling(window=5, min_periods=5).mean().shift(3).values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
-    highest_since_long = 0  # Track highest high since entering long
-    lowest_since_short = 0  # Track lowest low since entering short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(13, n):  # Start after Alligator warmup
         # Skip if required data not available
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Daily trend filter
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        # Daily trend: close above/below daily EMA13
+        daily_uptrend = close[i] > ema13_1d_aligned[i]
+        daily_downtrend = close[i] < ema13_1d_aligned[i]
         
-        # Volume confirmation
+        # Volume confirmation: current volume above average
         vol_confirm = volume[i] > vol_ma[i]
         
-        # Update trailing stop levels
-        if position == 1:
-            highest_since_long = max(highest_since_long, high[i])
-        elif position == -1:
-            lowest_since_short = min(lowest_since_short, low[i])
+        # Alligator signals
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit if trend turns down OR price drops 2*ATR from peak
-            if not daily_uptrend or close[i] < highest_since_long - 2.0 * atr[i]:
+            # Exit if daily trend turns down or Alligator turns bearish
+            if not daily_uptrend or not (lips_above_teeth and teeth_above_jaw):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit if trend turns up OR price rises 2*ATR from trough
-            if not daily_downtrend or close[i] > lowest_since_short + 2.0 * atr[i]:
+            # Exit if daily trend turns up or Alligator turns bullish
+            if not daily_downtrend or not (lips_below_teeth and teeth_below_jaw):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: daily uptrend + price breaks above Donchian high + volume confirmation
-            if daily_uptrend and close[i] > highest_high[i] and vol_confirm:
+            # Enter long: daily uptrend + Alligator bullish (Lips > Teeth > Jaw) + volume confirmation
+            if daily_uptrend and lips_above_teeth and teeth_above_jaw and vol_confirm:
                 position = 1
-                highest_since_long = high[i]
                 signals[i] = 0.25
-            # Enter short: daily downtrend + price breaks below Donchian low + volume confirmation
-            elif daily_downtrend and close[i] < lowest_low[i] and vol_confirm:
+            # Enter short: daily downtrend + Alligator bearish (Lips < Teeth < Jaw) + volume confirmation
+            elif daily_downtrend and lips_below_teeth and teeth_below_jaw and vol_confirm:
                 position = -1
-                lowest_since_short = low[i]
                 signals[i] = -0.25
     
     return signals
