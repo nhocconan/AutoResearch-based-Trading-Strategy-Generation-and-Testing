@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-day trend filter (EMA50)
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 1-day average + price above 1-day EMA50
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 1-day average + price below 1-day EMA50
-# Exit when price crosses Donchian midline or volume drops below average
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-week trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-day average + 1-week EMA50 uptrend
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-day average + 1-week EMA50 downtrend
+# Exit when price crosses the Donchian midline (average of high/low) or volume drops below 1.0x 20-day average
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
+# Uses 1-day volume for confirmation and 1-week EMA50 for trend direction
 # Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_vol_ema_trend_v1"
+name = "4h_donchian20_1d_vol_1w_ema_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,22 +27,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume confirmation and trend filter
+    # 1-day data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1-day average volume (20-period)
+    # 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1-day average volume (20-period)
     volume_1d = df_1d['volume'].values
     volume_1d_s = pd.Series(volume_1d)
     volume_1d_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
     volume_1d_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_ma)
     
-    # 1-day EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    ema50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1-week EMA50 for trend
+    close_1w = df_1w['close'].values
+    close_1w_s = pd.Series(close_1w)
+    ema50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -66,7 +72,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_1d_ma_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_1d_ma_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -75,8 +81,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -88,8 +94,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -104,9 +110,9 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout with volume confirmation and trend filter
             # Volume spike: > 1.5x average volume
             volume_confirmed = volume[i] > 1.5 * volume_1d_ma_aligned[i]
-            # Trend filter: price above/below 1-day EMA50
-            uptrend = close[i] > ema50_1d_aligned[i]
-            downtrend = close[i] < ema50_1d_aligned[i]
+            # Trend filter: price above/below 1-week EMA50
+            uptrend = close[i] > ema50_1w_aligned[i]
+            downtrend = close[i] < ema50_1w_aligned[i]
             
             # Long: break above Donchian high, volume confirmed, uptrend
             if close[i] > donchian_high[i] and volume_confirmed and uptrend:
