@@ -1,118 +1,85 @@
 #!/usr/bin/env python3
 """
-6h_adx_di_crossover_1w_trend_v1
-Hypothesis: On 6-hour timeframe, use weekly ADX and DI crossover to identify strong trends, 
-entering long when +DI crosses above -DI with ADX > 25, short when -DI crosses above +DI with ADX > 25.
-Exit when ADX falls below 20 (trend weakening) or opposite DI crossover occurs.
-Weekly trend filter ensures alignment with major trend, reducing whipsaw in ranging markets.
-ADX > 25 ensures we only trade strong trends, avoiding chop.
-Target: 20-30 trades/year to minimize fee decay while capturing sustained trends.
+12h_donchian_20_1d_volume_v2
+Hypothesis: On 12-hour timeframe, use Donchian channel (20-period) breakout for entry, confirmed by daily trend direction and volume spike.
+Enter long when price breaks above 20-period Donchian high AND daily trend is up (price > SMA50) AND volume > 2x average.
+Enter short when price breaks below 20-period Donchian low AND daily trend is down (price < SMA50) AND volume > 2x average.
+Exit when price crosses the midline (average of Donchian bands) or volume drops below average.
+Donchian channels capture breakouts with clear levels; daily trend filter ensures alignment with higher timeframe; volume confirms institutional participation.
+Target: 20-30 trades/year to minimize fee dust while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adx_di_crossover_1w_trend_v1"
-timeframe = "6h"
+name = "12h_donchian_20_1d_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for ADX calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc = df_1w['close'].values
+    d_close = df_1d['close'].values
     
-    # Calculate ADX and DI on weekly
-    period = 14
+    # Calculate Donchian channels (20-period) on 12h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max()
+    donchian_low = low_series.rolling(window=20, min_periods=20).min()
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # True Range
-    tr1 = wh[1:] - wl[1:]
-    tr2 = np.abs(wh[1:] - wc[:-1])
-    tr3 = np.abs(wl[1:] - wc[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    # Calculate daily SMA50 for trend filter
+    sma50 = pd.Series(d_close).rolling(window=50, min_periods=50).mean().values
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50)
     
-    # Directional Movement
-    dm_plus = np.where((wh[1:] - wh[:-1]) > (wl[:-1] - wl[1:]), np.maximum(wh[1:] - wh[:-1], 0), 0)
-    dm_minus = np.where((wl[:-1] - wl[1:]) > (wh[1:] - wh[:-1]), np.maximum(wl[:-1] - wl[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        """Wilder smoothing (same as RSI)"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # skip first NaN
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr_smooth = smooth_wilder(tr, period)
-    dm_plus_smooth = smooth_wilder(dm_plus, period)
-    dm_minus_smooth = smooth_wilder(dm_minus, period)
-    
-    # DI+
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    # DI-
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    
-    # DX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    
-    # ADX (smoothed DX)
-    adx = smooth_wilder(dx, period)
-    
-    # Align to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    di_plus_aligned = align_htf_to_ltf(prices, df_1w, di_plus)
-    di_minus_aligned = align_htf_to_ltf(prices, df_1w, di_minus)
+    # Volume filter: 12h volume > 2x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = vol_series / vol_ma
+    vol_ratio = vol_ratio.fillna(0).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):  # Start from 1 to avoid NaN issues
-        # Skip if ADX not available
-        if np.isnan(adx_aligned[i]) or np.isnan(di_plus_aligned[i]) or np.isnan(di_minus_aligned[i]):
+    for i in range(20, n):  # Start after Donchian warmup
+        # Skip if Donchian or SMA not available
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(sma50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        adx_val = adx_aligned[i]
-        di_plus_val = di_plus_aligned[i]
-        di_minus_val = di_minus_aligned[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous low
         
-        # Previous values for crossover detection
-        if i > 1:
-            di_plus_prev = di_plus_aligned[i-1]
-            di_minus_prev = di_minus_aligned[i-1]
-        else:
-            di_plus_prev = di_plus_val
-            di_minus_prev = di_minus_val
+        # Daily trend filter
+        trend_up = close[i] > sma50_aligned[i]  # Price above daily SMA50
+        trend_down = close[i] < sma50_aligned[i]  # Price below daily SMA50
+        
+        # Volume confirmation
+        vol_confirmed = vol_ratio[i] > 2.0
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when ADX falls below 20 (trend weakening)
-            if adx_val < 20:
+            # Exit when price crosses below Donchian midline
+            if close[i] < donchian_mid[i]:
                 exit_long = True
-            # Exit when -DI crosses above +DI
-            elif di_minus_prev <= di_plus_prev and di_minus_val > di_plus_val:
+            # Exit when volume drops below average
+            elif vol_ratio[i] < 1.0:
                 exit_long = True
             
             if exit_long:
@@ -124,11 +91,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when ADX falls below 20 (trend weakening)
-            if adx_val < 20:
+            # Exit when price crosses above Donchian midline
+            if close[i] > donchian_mid[i]:
                 exit_short = True
-            # Exit when +DI crosses above -DI
-            elif di_plus_prev <= di_minus_prev and di_plus_val > di_minus_val:
+            # Exit when volume drops below average
+            elif vol_ratio[i] < 1.0:
                 exit_short = True
             
             if exit_short:
@@ -137,11 +104,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: ADX > 25 AND +DI crosses above -DI
-            long_entry = (adx_val > 25) and (di_plus_prev <= di_minus_prev) and (di_plus_val > di_minus_val)
+            # Long entry: Donchian breakout up AND daily trend up AND volume confirmed
+            long_entry = breakout_up and trend_up and vol_confirmed
             
-            # Short entry: ADX > 25 AND -DI crosses above +DI
-            short_entry = (adx_val > 25) and (di_minus_prev <= di_plus_prev) and (di_minus_val > di_plus_val)
+            # Short entry: Donchian breakout down AND daily trend down AND volume confirmed
+            short_entry = breakout_down and trend_down and vol_confirmed
             
             if long_entry:
                 position = 1
