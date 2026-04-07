@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_weekly_keltner_breakout_volume_v1
-Hypothesis: On 1d timeframe, enter long when price breaks above upper Keltner Channel (EMA20 + 2*ATR) with above-average volume and weekly trend bullish (price above weekly EMA20), enter short when price breaks below lower Keltner Channel (EMA20 - 2*ATR) with above-average volume and weekly trend bearish (price below weekly EMA20). Exit when price crosses back inside the Keltner Channel (middle line). Designed for 7-25 trades/year to minimize fee decay while capturing breakouts in both bull and bear markets via volatility expansion.
+6h_1d_volatility_breakout_v1
+Hypothesis: On 6h timeframe, breakouts from volatility contractions (Bollinger Bands width < 20th percentile) are more likely to succeed when aligned with 1d trend (price > EMA50). Enter long on breakout above upper BB with volume confirmation, short on breakdown below lower BB. Exit on opposite band touch. Designed for 15-30 trades/year to minimize fee drag while capturing explosive moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_keltner_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_volatility_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,41 +23,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA20 for Keltner Channel middle
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate Bollinger Bands (20, 2.0)
+    if len(close) < 20:
+        return np.zeros(n)
     
-    # Calculate ATR(14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Basis (SMA)
+    basis = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Keltner Channels
-    upper_keltner = ema_20 + 2 * atr
-    lower_keltner = ema_20 - 2 * atr
+    # Deviation
+    dev = pd.Series(close).rolling(window=20, min_periods=20).std(ddof=0).values
+    
+    # Upper and Lower Bands
+    upper = basis + 2.0 * dev
+    lower = basis - 2.0 * dev
+    
+    # Bollinger Band Width
+    bb_width = (upper - lower) / basis
+    
+    # Calculate 20-period percentile rank of BB width (volatility regime)
+    # Using rolling percentile approximation: rank of current value in window
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(
+        window=50, min_periods=50
+    ).apply(
+        lambda x: (pd.Series(x).rank(method='average').iloc[-1] - 1) / (len(x) - 1) * 100,
+        raw=False
+    ).values
+    
+    # Volatility contraction: BB width below 20th percentile
+    vol_contract = bb_width_percentile < 20.0
+    
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Load weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA20 for trend filter
-    weekly_close = df_weekly['close'].values
-    weekly_ema_20 = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    weekly_ema_20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema_20)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(close[i]) or np.isnan(weekly_ema_20_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
@@ -65,28 +79,28 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below middle line (EMA20)
-            if close[i] < ema_20[i]:
+            # Exit: price touches lower band (mean reversion)
+            if close[i] <= lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above middle line (EMA20)
-            if close[i] > ema_20[i]:
+            # Exit: price touches upper band (mean reversion)
+            if close[i] >= upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Long: price breaks above upper Keltner with weekly bullish trend
-                if close[i] > upper_keltner[i] and close[i-1] <= upper_keltner[i-1] and close[i] > weekly_ema_20_aligned[i]:
+            if vol_contract[i] and vol_ok:
+                # Long: breakout above upper band with 1d uptrend
+                if close[i] > upper[i] and close[i-1] <= upper[i-1] and close[i] > ema_50_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below lower Keltner with weekly bearish trend
-                elif close[i] < lower_keltner[i] and close[i-1] >= lower_keltner[i-1] and close[i] < weekly_ema_20_aligned[i]:
+                # Short: breakdown below lower band with 1d downtrend
+                elif close[i] < lower[i] and close[i-1] >= lower[i-1] and close[i] < ema_50_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
