@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1w_trend_volume_v1
-Hypothesis: On 12h timeframe, use weekly Donchian channels (20-period) for breakout signals with 1w EMA trend filter and volume confirmation. Enter long when price breaks above upper band with weekly EMA20 > EMA50 and volume > 1.5x average; enter short when price breaks below lower band with weekly EMA20 < EMA50 and volume > 1.5x average. Exit when price reaches opposite Donchian band or EMA crossover reverses. This strategy captures momentum from institutional breakouts while using weekly trend filter to avoid counter-trend trades. Volume confirmation ensures breakouts have participation. Designed for 12-37 trades/year to minimize fee drag.
+4h_cci_breakout_12h_volatility_v1
+Hypothesis: On 4h timeframe, use 12h CCI (Commodity Channel Index) to detect extreme market conditions (CCI > 100 or < -100) combined with 12h volatility regime (ATR-based) to filter entries. Enter long when CCI crosses above 100 with volatility > 20-period average; enter short when CCI crosses below -100 with volatility > 20-period average. Exit when CCI crosses back through zero. This strategy captures momentum bursts during high volatility periods, which often precede sustained moves in both bull and bear markets. The 12h CCI filters out noise, and volatility regime ensures we only trade when there's sufficient market participation. Targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1w_trend_volume_v1"
-timeframe = "12h"
+name = "4h_cci_breakout_12h_volatility_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,93 +23,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly EMA20 and EMA50 for trend filter
-    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Calculate weekly Donchian channels (20-period) from 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 12h CCI
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels: highest high and lowest low of past 20 weekly bars
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Typical price for CCI
+    tp_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
+    tp_12h_values = tp_12h.values
     
-    # Calculate rolling max/min for Donchian channels
-    upper_band = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_band = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # CCI calculation: (TP - SMA(TP,20)) / (0.015 * MeanDeviation(TP,20))
+    sma_tp = pd.Series(tp_12h_values).rolling(window=20, min_periods=20).mean().values
+    mad_tp = pd.Series(tp_12h_values).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # Avoid division by zero
+    mad_tp = np.where(mad_tp == 0, 0.001, mad_tp)
+    cci_12h = (tp_12h_values - sma_tp) / (0.015 * mad_tp)
     
-    # Align to 12h timeframe (shifted by 1 week for look-ahead prevention)
-    upper_band_12h = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_12h = align_htf_to_ltf(prices, df_1w, lower_band)
+    # Align CCI to 4h timeframe
+    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
     
-    # Volume confirmation (24-period average on 12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 12h ATR for volatility regime
+    tr1_12h = df_12h['high'] - df_12h['low']
+    tr2_12h = np.abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3_12h = np.abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    
+    # Volatility filter: ATR > 20-period average
+    atr_ma = pd.Series(atr_12h_aligned).rolling(window=20, min_periods=20).mean().values
+    vol_regime = atr_12h_aligned > atr_ma
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
-            np.isnan(upper_band_12h[i]) or np.isnan(lower_band_12h[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(cci_12h_aligned[i]) or np.isnan(vol_regime[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 24-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # CCI crossing above 100 (long entry)
+        long_entry = (cci_12h_aligned[i] > 100 and cci_12h_aligned[i-1] <= 100 and vol_regime[i])
+        # CCI crossing below -100 (short entry)
+        short_entry = (cci_12h_aligned[i] < -100 and cci_12h_aligned[i-1] >= -100 and vol_regime[i])
+        # CCI crossing zero (exit)
+        exit_long = (cci_12h_aligned[i] < 0 and cci_12h_aligned[i-1] >= 0)
+        exit_short = (cci_12h_aligned[i] > 0 and cci_12h_aligned[i-1] <= 0)
+        
+        # Track position state
+        if i == 50:
+            position = 0
+        else:
+            position = 1 if signals[i-1] > 0 else (-1 if signals[i-1] < 0 else 0)
         
         if position == 1:  # Long position
-            # Exit conditions
-            exit_long = False
-            # Exit if price reaches lower band (opposite side)
-            if close[i] <= lower_band_12h[i]:
-                exit_long = True
-            # Exit if EMA20 crosses below EMA50 (trend reversal)
-            elif ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1]:
-                exit_long = True
-            
             if exit_long:
-                position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
-                
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_short = False
-            # Exit if price reaches upper band (opposite side)
-            if close[i] >= upper_band_12h[i]:
-                exit_short = True
-            # Exit if EMA20 crosses above EMA50 (trend reversal)
-            elif ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1]:
-                exit_short = True
-            
             if exit_short:
-                position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band with EMA20 > EMA50 and volume confirmation
-            long_entry = False
-            if (close[i] > upper_band_12h[i] and close[i-1] <= upper_band_12h[i-1] and
-                ema20[i] > ema50[i] and vol_confirm):
-                long_entry = True
-            
-            # Short entry: price breaks below lower band with EMA20 < EMA50 and volume confirmation
-            short_entry = False
-            if (close[i] < lower_band_12h[i] and close[i-1] >= lower_band_12h[i-1] and
-                ema20[i] < ema50[i] and vol_confirm):
-                short_entry = True
-            
             if long_entry:
-                position = 1
                 signals[i] = 0.25
             elif short_entry:
-                position = -1
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
