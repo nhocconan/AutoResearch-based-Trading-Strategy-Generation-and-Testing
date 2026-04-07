@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Williams %R Reversal with 12h ADX Trend Filter
-# Hypothesis: Williams %R identifies overbought/oversold conditions within 12h trends.
-# In bull markets, buy pullbacks in uptrends; in bear markets, sell rallies in downtrends.
-# ADX filter ensures we only trade when trend is strong enough (ADX > 25).
-# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
+# Strategy: 1h EMA Pullback with 4h Trend and 1d Filter
+# Hypothesis: In strong 4h/1d trends, 1h EMA(21) pullbacks offer high-probability entries.
+# Uses 4h EMA(50) for trend direction and 1d close > open as market regime filter.
+# Target: 15-30 trades/year (60-120 total) to minimize fee drag.
+# Works in bull/bear: trend filter prevents counter-trend trades.
 
-name = "4h_williamsr_reversal_12h_adx_filter_v1"
-timeframe = "4h"
+name = "1h_ema_pullback_4h1d_trend_filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +23,74 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate ADX(14) on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate EMA(50) on 4h close
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align 4h EMA to 1h
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        result[period-1] = np.mean(data[1:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # 1d bull regime: close > open
+    bull_regime_1d = (df_1d['close'].values > df_1d['open'].values).astype(float)
+    bull_regime_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_regime_1d)
     
-    atr = wilders_smoothing(tr, 14)
-    dpi = wilders_smoothing(dm_plus, 14)
-    dmi = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dpi / atr
-    di_minus = 100 * dmi / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align 12h ADX to 4h
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Williams %R(14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # EMA(21) on 1h close
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(adx_12h_aligned[i]) or np.isnan(williams_r[i]):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(bull_regime_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        if hour < 8 or hour > 20:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: Williams %R reaches overbought or trend weakens
-            if williams_r[i] >= -20 or adx_12h_aligned[i] < 25:
+            # Exit: price below EMA(21) or trend change
+            if close[i] < ema_21[i] or close[i] < ema_50_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.20  # Maintain long
         elif position == -1:  # Short position
-            # Exit: Williams %R reaches oversold or trend weakens
-            if williams_r[i] <= -80 or adx_12h_aligned[i] < 25:
+            # Exit: price above EMA(21) or trend change
+            if close[i] > ema_21[i] or close[i] > ema_50_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
+                signals[i] = -0.20  # Maintain short
         else:  # Flat, look for entry
-            # Williams %R reversal in direction of 12h trend (ADX > 25)
-            if adx_12h_aligned[i] > 25:  # Strong trend
-                if williams_r[i] <= -80:  # Oversold - potential long
-                    position = 1
-                    signals[i] = 0.25
-                elif williams_r[i] >= -20:  # Overbought - potential short
-                    position = -1
-                    signals[i] = -0.25
+            # Only trade in direction of 4h trend and 1d bull regime
+            if bull_regime_1d_aligned[i] > 0.5:  # 1d bull regime
+                if close[i] > ema_50_4h_aligned[i]:  # Uptrend
+                    if close[i] <= ema_21[i]:  # Pullback to EMA
+                        position = 1
+                        signals[i] = 0.20
+            else:  # 1d bear regime
+                if close[i] < ema_50_4h_aligned[i]:  # Downtrend
+                    if close[i] >= ema_21[i]:  # Pullback to EMA
+                        position = -1
+                        signals[i] = -0.20
     
     return signals
