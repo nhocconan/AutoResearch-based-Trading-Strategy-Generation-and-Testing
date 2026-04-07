@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian Breakout + Volume + ADX Trend Filter
-# Hypothesis: Donchian channel breakouts capture momentum. Volume confirms institutional participation.
-# ADX filter ensures trades only in trending regimes (ADX > 25) to avoid whipsaws in ranging markets.
-# Works in both bull and bear markets by taking breakouts in direction of trend.
-# 12h timeframe targets 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
-name = "12h_donchian20_volume_adx_v2"
-timeframe = "12h"
+# Strategy: Daily Close vs Weekly VWAP with Volume Confirmation
+# Hypothesis: Price relative to weekly VWAP indicates institutional bias.
+# In weekly uptrend (weekly VWAP rising), go long when daily close > weekly VWAP and volume > average.
+# In weekly downtrend (weekly VWAP falling), go short when daily close < weekly VWAP and volume > average.
+# Uses weekly timeframe for trend bias and daily for entry/exit.
+# Target: 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
+name = "1d_close_vs_weekly_vwap_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,109 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (ADX calculation)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get weekly data for VWAP calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on weekly data
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate weekly VWAP: cumulative (price * volume) / cumulative volume
+    typical_price_weekly = (df_weekly['high'].values + df_weekly['low'].values + df_weekly['close'].values) / 3.0
+    pv_weekly = typical_price_weekly * df_weekly['volume'].values
+    cum_pv = np.cumsum(pv_weekly)
+    cum_vol = np.cumsum(df_weekly['volume'].values)
+    vwap_weekly = cum_pv / cum_vol
+    vwap_weekly_aligned = align_htf_to_ltf(prices, df_weekly, vwap_weekly)
     
-    # True Range
-    tr1 = np.abs(weekly_high[1:] - weekly_low[1:])
-    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
-    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    # Weekly VWAP slope for trend detection (3-period change)
+    vwap_slope = np.diff(vwap_weekly_aligned, prepend=vwap_weekly_aligned[0])
+    vwap_rising = vwap_slope > 0
+    vwap_falling = vwap_slope < 0
     
-    # Directional Movement
-    dm_plus = np.where((weekly_high[1:] - weekly_high[:-1]) > (weekly_low[:-1] - weekly_low[1:]), 
-                       np.maximum(weekly_high[1:] - weekly_high[:-1], 0), 0)
-    dm_minus = np.where((weekly_low[:-1] - weekly_low[1:]) > (weekly_high[1:] - weekly_high[:-1]), 
-                        np.maximum(weekly_low[:-1] - weekly_low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/14)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period]) / period
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        alpha = 1.0 / period
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]):
-                result[i] = result[i-1] * (1 - alpha) + data[i] * alpha
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align weekly ADX to 12h
-    adx_12h = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Donchian Channel (20-period) on 12h data
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
-    
-    for i in range(lookback-1, len(high)):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.3x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vwap_weekly_aligned[i]) or np.isnan(vwap_rising[i]) or 
+            np.isnan(vwap_falling[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_12h[i] > 25
-        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower OR trend ends
-            if close[i] < lowest_low[i] or not trending:
+            # Exit: price crosses below VWAP or volume dries up
+            if close[i] < vwap_weekly_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper OR trend ends
-            if close[i] > highest_high[i] or not trending:
+            # Exit: price crosses above VWAP or volume dries up
+            if close[i] > vwap_weekly_aligned[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume confirmation and trending market
-            if vol_filter[i] and trending:
-                # Long: price breaks above Donchian upper
-                if close[i] > highest_high[i]:
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Long when: weekly VWAP rising AND price above VWAP
+                if vwap_rising[i] and close[i] > vwap_weekly_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below Donchian lower
-                elif close[i] < lowest_low[i]:
+                # Short when: weekly VWAP falling AND price below VWAP
+                elif vwap_falling[i] and close[i] < vwap_weekly_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
