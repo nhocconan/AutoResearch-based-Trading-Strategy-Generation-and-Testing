@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v5
-Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
-Long when price breaks above R4 with volume confirmation and price above daily EMA (bullish continuation).
-Short when price breaks below S4 with volume confirmation and price below daily EMA (bearish continuation).
-Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
-Reduced trade frequency by increasing cooldown and requiring stronger volume confirmation.
-Works in both bull/bear markets by adapting to volatility and volume.
+12h_camarilla_pivot_1d_trend_v1
+Hypothesis: 12h timeframe captures medium-term trends with fewer trades. Uses daily Camarilla pivot levels as support/resistance.
+Long when price crosses above R4 with volume confirmation and price above daily EMA20 (bullish continuation).
+Short when price crosses below S4 with volume confirmation and price below daily EMA20 (bearish continuation).
+Otherwise, fade at R3/S3 with volume divergence (mean reversion in ranging markets).
+Uses 12h bars to reduce trade frequency and capture institutional levels that work in both bull/bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v5"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,6 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Daily data for Camarilla pivots and EMA
     df_1d = get_htf_data(prices, '1d')
@@ -61,24 +61,24 @@ def generate_signals(prices):
     close_series = pd.Series(close_1d)
     ema_1d = close_series.ewm(span=20, min_periods=20).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: volume > 60-period average (stricter)
-    vol_ma = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
+    # Volume confirmation: volume > 20-period average (balanced for 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Cooldown counter to prevent overtrading
+    # Cooldown to prevent overtrading: 2 bars = 24 hours minimum between trades
     cooldown = 0
-    cooldown_period = 16  # 16 bars = 64 hours minimum between trades
+    cooldown_period = 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not available
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
@@ -91,7 +91,7 @@ def generate_signals(prices):
         if cooldown > 0:
             cooldown -= 1
         
-        vol_confirmed = volume[i] > vol_ma[i] * 1.2  # Require 20% above average
+        vol_confirmed = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
             # Exit: price crosses below R3 (mean reversion) or stop at S4 break
@@ -126,16 +126,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 cooldown = cooldown_period
             # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
-            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.6:
+            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
                 # Look for bullish rejection (close > open)
-                if close[i] > prices['open'].iloc[i]:
+                if close[i] > open_price[i]:
                     position = 1
                     signals[i] = 0.25
                     cooldown = cooldown_period
             # Mean reversion short: price rejects R3 with volume divergence
-            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.6:
+            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
                 # Look for bearish rejection (close < open)
-                if close[i] < prices['open'].iloc[i]:
+                if close[i] < open_price[i]:
                     position = -1
                     signals[i] = -0.25
                     cooldown = cooldown_period
