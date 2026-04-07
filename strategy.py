@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Supertrend with 12h EMA filter and volume confirmation
-# Uses Supertrend(ATR=10, mult=3) for trend direction on 6m timeframe.
-# Filters trades with 12h EMA(20) to avoid counter-trend entries.
-# Requires volume > 1.5x 20-period average for confirmation.
-# Designed for moderate trade frequency (target: 15-35 trades/year) with strong trend filtering.
-# Works in bull markets via trend following and in bear markets via short signals.
-# Supertrend adapts to volatility, reducing whipsaw in ranging markets.
+# Hypothesis: 4h Donchian breakout with daily ADX trend filter and volume confirmation
+# Uses Donchian(20) breakouts for entry, daily ADX(14) > 25 to filter trending markets,
+# and volume > 1.5x 20-period average for confirmation. Exits on opposite Donchian(10) break.
+# Designed for moderate trade frequency (target: 20-50 trades/year) with strong trend capture.
+# Works in bull markets via long breakouts and bear markets via short breakdowns.
 
-name = "6h_supertrend_12h_ema_volume_v1"
-timeframe = "6h"
+name = "4h_donchian20_daily_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,94 +24,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Daily data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate ATR(10) for Supertrend
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate Donchian channels (20-period for entry, 10-period for exit)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    highest_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    
+    # Calculate ADX(14) on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    upper_band_final = np.zeros(n)
-    lower_band_final = np.zeros(n)
-    upper_band_final[0] = upper_band[0]
-    lower_band_final[0] = lower_band[0]
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    for i in range(1, n):
-        if close[i-1] <= upper_band_final[i-1]:
-            upper_band_final[i] = min(upper_band[i], upper_band_final[i-1])
-        else:
-            upper_band_final[i] = upper_band[i]
-            
-        if close[i-1] >= lower_band_final[i-1]:
-            lower_band_final[i] = max(lower_band[i], lower_band_final[i-1])
-        else:
-            lower_band_final[i] = lower_band[i]
+    # Directional Indicators
+    plus_di = 100 * plus_dm14 / tr14
+    minus_di = 100 * minus_dm14 / tr14
     
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    supertrend[0] = lower_band_final[0]
-    trend[0] = 1
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_14 = adx  # ADX(14)
     
-    for i in range(1, n):
-        if close[i] > upper_band_final[i-1]:
-            trend[i] = 1
-        elif close[i] < lower_band_final[i-1]:
-            trend[i] = -1
-        else:
-            trend[i] = trend[i-1]
-            
-        if trend[i] == 1:
-            supertrend[i] = lower_band_final[i]
-        else:
-            supertrend[i] = upper_band_final[i]
-    
-    # 12h EMA(20) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align daily ADX to 4h
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
     # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(supertrend[i]) or np.isnan(trend[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(highest_10[i]) or np.isnan(lowest_10[i]) or
+            np.isnan(adx_14_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Supertrend signal
-        bullish = trend[i] == 1
-        bearish = trend[i] == -1
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_14_aligned[i] > 25
         
-        # 12h EMA filter: only trade in direction of higher timeframe trend
-        ema_filter_long = close[i] > ema_12h_aligned[i]
-        ema_filter_short = close[i] < ema_12h_aligned[i]
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Long entry: price breaks above Donchian(20) high
+        long_entry = close[i] > highest_20[i]
         
-        # Long: Supertrend uptrend + price above 12h EMA + volume confirmation
-        if bullish and ema_filter_long and vol_confirm:
-            signals[i] = 0.25
-        # Short: Supertrend downtrend + price below 12h EMA + volume confirmation
-        elif bearish and ema_filter_short and vol_confirm:
-            signals[i] = -0.25
+        # Short entry: price breaks below Donchian(20) low
+        short_entry = close[i] < lowest_20[i]
+        
+        # Long exit: price breaks below Donchian(10) low
+        long_exit = close[i] < lowest_10[i]
+        
+        # Short exit: price breaks above Donchian(10) high
+        short_exit = close[i] > highest_10[i]
+        
+        # Generate signals with trend and volume filters
+        if trending and vol_confirmed:
+            if long_entry:
+                signals[i] = 0.30  # Long 30%
+            elif short_entry:
+                signals[i] = -0.30  # Short 30%
+            elif long_exit and signals[i-1] > 0:
+                signals[i] = 0.0  # Exit long
+            elif short_exit and signals[i-1] < 0:
+                signals[i] = 0.0  # Exit short
+            else:
+                signals[i] = signals[i-1]  # Hold position
         else:
+            # No trend or no volume confirmation: flatten
             signals[i] = 0.0
     
     return signals
