@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_chaikin_money_flow_1d_trend_volume_v1
-Hypothesis: Chaikin Money Flow (CMF) detects institutional buying/selling pressure. 
-Long when CMF > 0.15 and price above 1d EMA50 (accumulation + uptrend).
-Short when CMF < -0.15 and price below 1d EMA50 (distribution + downtrend).
-Uses 6h for timing, 1d for trend and CMF filter. Works in bull/bear by following institutional flow.
-Target: 15-30 trades/year.
+4h_cci_mean_reversion_1d_trend_volume_v1
+Hypothesis: CCI(20) identifies overbought/oversold conditions on 4h. 
+Long when CCI < -100 and price above 1d EMA50 (oversold + uptrend).
+Short when CCI > 100 and price below 1d EMA50 (overbought + downtrend).
+Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend.
+Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_chaikin_money_flow_1d_trend_volume_v1"
-timeframe = "6h"
+name = "4h_cci_mean_reversion_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,73 +27,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for CMF and trend
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate CMF(20) on 1d
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = df_1d['high'] - df_1d['low']
-    hl_range = hl_range.replace(0, np.nan)
-    mfm = ((df_1d['close'] - df_1d['low']) - (df_1d['high'] - df_1d['close'])) / hl_range
-    mfm = mfm.fillna(0)  # when hl_range=0, set mfm=0
-    
-    # Money Flow Volume = MFM * Volume
-    mfv = mfm * df_1d['volume']
-    
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    mfv_sum = mfv.rolling(window=20, min_periods=20).sum()
-    vol_sum = df_1d['volume'].rolling(window=20, min_periods=20).sum()
-    cmf = mfv_sum / vol_sum
-    cmf = cmf.replace([np.inf, -np.inf], 0).fillna(0)
-    
     # 1d EMA50 for trend filter
     ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
     
-    # Align all 1d data to 6h timeframe
-    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf.values)
+    # Align 1d EMA50 to 4h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
-    # Volume confirmation (20-period average on 6h)
+    # CCI(20) on 4h
+    typical_price = (high + low + close) / 3.0
+    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    # Avoid division by zero
+    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
+    cci = (typical_price - tp_mean) / (0.015 * tp_std)
+    
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(cmf_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(cci[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: CMF turns negative or price breaks below EMA50
-            if cmf_aligned[i] < 0 or close[i] < ema_50_aligned[i]:
+            # Exit: CCI crosses above -50 or price breaks below EMA50
+            if cci[i] > -50 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: CMF turns positive or price breaks above EMA50
-            if cmf_aligned[i] > 0 or close[i] > ema_50_aligned[i]:
+            # Exit: CCI crosses below 50 or price breaks above EMA50
+            if cci[i] < 50 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CMF > 0.15 with volume and price above EMA50
-            if (cmf_aligned[i] > 0.15 and vol_confirm and 
+            # Long entry: CCI < -100 with volume and price above EMA50
+            if (cci[i] < -100 and vol_confirm and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CMF < -0.15 with volume and price below EMA50
-            elif (cmf_aligned[i] < -0.15 and vol_confirm and 
+            # Short entry: CCI > 100 with volume and price below EMA50
+            elif (cci[i] > 100 and vol_confirm and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
