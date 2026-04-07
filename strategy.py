@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_trend_volume_v2
-Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
-combined with EMA trend filter and volume confirmation on 4h timeframe. 
-In ranging markets, fade at R3/S3 with EMA filter; in trending markets, 
-breakout at R4/S4. Volume confirmation reduces false signals. 
-Works in both bull and bear markets by adapting to regime via EMA filter.
+12h_1wk_momentum_reversion_v1
+Hypothesis: Use 1-week momentum (RSI) to identify overbought/oversold conditions,
+combined with 12h price action near weekly support/resistance levels.
+In ranging markets (weekly RSI between 30-70), fade extreme 12h moves.
+In trending markets (weekly RSI >70 or <30), trade pullbacks to weekly VWAP.
+Volume confirmation filters weak signals. Works in both bull/bear via regime adaptation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_trend_volume_v2"
-timeframe = "4h"
+name = "12h_1wk_momentum_reversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,93 +27,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for momentum and context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate daily OHLC for pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly RSI(14) for momentum regime
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla pivot levels for each day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Weekly VWAP for dynamic support/resistance
+    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3
+    vwap_num = (typical_price_1w * df_1w['volume'].values).cumsum()
+    vwap_den = df_1w['volume'].values.cumsum()
+    vwap_1w = vwap_num / (vwap_den + 1e-10)
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    # Weekly ATR for volatility normalization
+    high_low_1w = df_1w['high'].values - df_1w['low'].values
+    high_close_1w = np.abs(df_1w['high'].values - np.roll(close_1w, 1))
+    low_close_1w = np.abs(df_1w['low'].values - np.roll(close_1w, 1))
+    high_close_1w[0] = 0
+    low_close_1w[0] = 0
+    tr_1w = np.maximum(high_low_1w, np.maximum(high_close_1w, low_close_1w))
+    atr_1w = pd.Series(tr_1w).ewm(span=14, adjust=False).mean().values
     
-    # Align daily levels to 4h timeframe
-    r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align weekly indicators to 12h timeframe
+    rsi_1w_12h = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    vwap_1w_12h = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    atr_1w_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # 20-period volume average on 4h
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 12h RSI for entry timing
+    delta_12h = np.diff(close, prepend=close[0])
+    gain_12h = np.where(delta_12h > 0, delta_12h, 0)
+    loss_12h = np.where(delta_12h < 0, -delta_12h, 0)
+    avg_gain_12h = pd.Series(gain_12h).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss_12h = pd.Series(loss_12h).ewm(alpha=1/14, adjust=False).mean().values
+    rs_12h = avg_gain_12h / (avg_loss_12h + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs_12h))
+    
+    # 12h volume filter
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or 
-            np.isnan(ema50_4h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(rsi_1w_12h[i]) or np.isnan(vwap_1w_12h[i]) or 
+            np.isnan(atr_1w_12h[i]) or np.isnan(rsi_12h[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 1.3x average
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Distance from weekly VWAP in ATR units
+        if atr_1w_12h[i] > 0:
+            vwap_dist = (close[i] - vwap_1w_12h[i]) / atr_1w_12h[i]
+        else:
+            vwap_dist = 0
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 (mean reversion fail) OR 
-            # price breaks above R4 and EMA turns down (breakout fail)
-            if close[i] < s3_4h[i] or (close[i] > r4_4h[i] and close[i] < ema50_4h[i]):
+            # Exit: RSI overextended or price too far above VWAP
+            if (rsi_12h[i] > 75 or vwap_dist > 2.0):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (mean reversion fail) OR
-            # price breaks below S4 and EMA turns up (breakout fail)
-            if close[i] > r3_4h[i] or (close[i] < s4_4h[i] and close[i] > ema50_4h[i]):
+            # Exit: RSI oversold or price too far below VWAP
+            if (rsi_12h[i] < 25 or vwap_dist < -2.0):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion longs at S3 in uptrend (price > EMA)
-            if (close[i] <= s3_4h[i] and 
-                vol_confirm and 
-                close[i] > ema50_4h[i]):
-                position = 1
-                signals[i] = 0.25
-            # Mean reversion shorts at R3 in downtrend (price < EMA)
-            elif (close[i] >= r3_4h[i] and 
-                  vol_confirm and 
-                  close[i] < ema50_4h[i]):
-                position = -1
-                signals[i] = -0.25
-            # Breakout longs at R4 in uptrend
-            elif (close[i] >= r4_4h[i] and 
-                  vol_confirm and 
-                  close[i] > ema50_4h[i]):
-                position = 1
-                signals[i] = 0.25
-            # Breakout shorts at S4 in downtrend
-            elif (close[i] <= s4_4h[i] and 
-                  vol_confirm and 
-                  close[i] < ema50_4h[i]):
-                position = -1
-                signals[i] = -0.25
+            # Regime: weekly RSI > 60 = bullish bias, < 40 = bearish bias
+            if rsi_1w_12h[i] > 60:  # Bullish regime
+                # Look for pullbacks to VWAP with momentum divergence
+                if (vwap_dist < -0.5 and  # Below VWAP
+                    rsi_12h[i] < 40 and   # Oversold on 12h
+                    vol_confirm):
+                    position = 1
+                    signals[i] = 0.25
+            elif rsi_1w_12h[i] < 40:  # Bearish regime
+                # Look for bounces off VWAP with momentum divergence
+                if (vwap_dist > 0.5 and   # Above VWAP
+                    rsi_12h[i] > 60 and   # Overbought on 12h
+                    vol_confirm):
+                    position = -1
+                    signals[i] = -0.25
+            else:  # Neutral regime (30-70) - mean reversion
+                # Fade extreme deviations from VWAP
+                if (vwap_dist < -1.5 and  # Far below VWAP
+                    vol_confirm):
+                    position = 1
+                    signals[i] = 0.25
+                elif (vwap_dist > 1.5 and  # Far above VWAP
+                      vol_confirm):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
