@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1h Momentum Reversal with 4h/1d Trend Filter
-Hypothesis: In strong trends (4h/1d aligned), 1h pullbacks offer high-probability entries.
-In bull markets: buy pullbacks in uptrends. In bear markets: sell rallies in downtrends.
-Uses RSI(2) for extreme pullbacks, volume surge for confirmation, and 4h/1d EMA alignment for trend.
-Target: 15-30 trades/year by requiring multiple confluence factors.
+12h Camarilla Pivot + Volume Spike + Choppiness Regime Filter
+Long when price touches Camarilla S3 support with volume spike in choppy market
+Short when price touches Camarilla R3 resistance with volume spike in choppy market
+Exit when price crosses midline (Pivot) or opposite touch
+Designed for range-bound markets with mean reversion at extreme levels
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_momentum_reversal_4h1d_trend_v1"
-timeframe = "1h"
+name = "12h_camarilla_pivot_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,67 +26,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === RSI(2) for extreme pullbacks ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # === 1d data for Camarilla pivot calculation ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Volume surge confirmation ===
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels for previous day
+    # R4 = C + ((H-L)*1.1/2)
+    # R3 = C + ((H-L)*1.1/4)
+    # R2 = C + ((H-L)*1.1/6)
+    # R1 = C + ((H-L)*1.1/12)
+    # PP = (H+L+C)/3
+    # S1 = C - ((H-L)*1.1/12)
+    # S2 = C - ((H-L)*1.1/6)
+    # S3 = C - ((H-L)*1.1/4)
+    # S4 = C - ((H-L)*1.1/2)
+    
+    hl_range = high_1d - low_1d
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3
+    camarilla_r3 = close_1d + (hl_range * 1.1 / 4)
+    camarilla_s3 = close_1d - (hl_range * 1.1 / 4)
+    
+    # Align to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # === Volume confirmation (20-period volume average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === 4h trend filter (EMA 50) ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === Choppiness Index regime filter (14-period) ===
+    # CHOP = 100 * log10(sum(TR)/ (HHV(high) - LLV(low))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # === 1d trend filter (EMA 50) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (hh - ll + 1e-10)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        if (np.isnan(rsi[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+    for i in range(20, n):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 70 (overbought) or trend weakens
-            if rsi[i] > 70 or ema_4h_aligned[i] < ema_4h_aligned[i-1] or ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+            # Exit: price crosses above pivot (mean reversion complete) or touches R3
+            if close[i] > camarilla_pp_aligned[i] or close[i] >= camarilla_r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 30 (oversold) or trend weakens
-            if rsi[i] < 30 or ema_4h_aligned[i] > ema_4h_aligned[i-1] or ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+            # Exit: price crosses below pivot or touches S3
+            if close[i] < camarilla_pp_aligned[i] or close[i] <= camarilla_s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume surge (above 1.5x average)
+            # Need volume spike (above average)
             if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: RSI extreme pullback with volume surge AND 4h/1d trend alignment
-            if rsi[i] < 15 and ema_4h_aligned[i] > ema_4h_aligned[i-1] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
-                # Extreme oversold in uptrend -> long
+            # Only trade in choppy/range-bound markets (Choppiness > 50)
+            if chop[i] < 50:
+                signals[i] = 0.0
+                continue
+            
+            # Entry: Price touches Camarilla extreme levels with volume spike
+            if close[i] <= camarilla_s3_aligned[i]:
+                # Touch S3 support -> long (mean reversion long)
                 position = 1
-                signals[i] = 0.20
-            elif rsi[i] > 85 and ema_4h_aligned[i] < ema_4h_aligned[i-1] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
-                # Extreme overbought in downtrend -> short
+                signals[i] = 0.25
+            elif close[i] >= camarilla_r3_aligned[i]:
+                # Touch R3 resistance -> short (mean reversion short)
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
