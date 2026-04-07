@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_atr_breakout_12h_trend_volume_v3
-Hypothesis: ATR-based breakout from Donchian channels with 12h EMA trend filter and volume confirmation.
-Goes long when price breaks above Donchian(20) high with volume confirmation and 12h EMA50 uptrend.
-Goes short when price breaks below Donchian(20) low with volume confirmation and 12h EMA50 downtrend.
-Uses ATR for volatility-based position sizing and stop loss. Designed for 20-30 trades/year on 4h timeframe.
-Works in bull markets via breakouts and bear markets via breakdowns with trend alignment.
+12h_camarilla_pivot_1d_volume_v2
+Hypothesis: Daily Camarilla pivot reversal with volume confirmation on 12h chart.
+Long when price rejects S3/S4 with volume spike; short when rejected at R3/R4.
+Uses only daily pivots + volume to minimize trades (<20/year) and avoid overtrading.
+Works in bull/bear via mean-reversion at institutional levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_atr_breakout_12h_trend_volume_v3"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price and volume data
@@ -27,74 +26,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # ATR for volatility and stop (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume confirmation: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Previous day's OHLC
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
+    
+    # Camarilla levels
+    range_1d = prev_high - prev_low
+    camarilla_S3 = prev_close - (range_1d * 1.1 / 6)
+    camarilla_S4 = prev_close - (range_1d * 1.1 / 4)
+    camarilla_R3 = prev_close + (range_1d * 1.1 / 6)
+    camarilla_R4 = prev_close + (range_1d * 1.1 / 4)
+    
+    # Align to 12h
+    S3 = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    S4 = align_htf_to_ltf(prices, df_1d, camarilla_S4)
+    R3 = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    R4 = align_htf_to_ltf(prices, df_1d, camarilla_R4)
+    
+    # Volume spike: 2x 24-period average (2 days worth)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
+    position = 0
     
-    for i in range(lookback, n):
-        # Skip if data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(atr[i]) or atr[i] == 0 or
-            np.isnan(ema50_12h_aligned[i]) or
+    for i in range(24, n):
+        if (np.isnan(S3[i]) or np.isnan(S4[i]) or np.isnan(R3[i]) or np.isnan(R4[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] == 0):
-            signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        vol_confirmed = volume[i] > vol_ma[i]
-        
-        # Breakout conditions
-        breakout_high = close[i] > highest_high[i]
-        breakout_low = close[i] < lowest_low[i]
-        
-        # 12h trend filter
-        above_12h_ema50 = close[i] > ema50_12h_aligned[i]
-        below_12h_ema50 = close[i] < ema50_12h_aligned[i]
-        
-        if position == 1:  # Long position
-            # Exit: price breaks below Donchian low or trend turns bearish
-            if close[i] < lowest_low[i] or below_12h_ema50:
+        if position == 1:
+            # Exit long: price crosses S4 or loses volume momentum
+            if close[i] < S4[i] or not vol_spike[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or trend turns bullish
-            if close[i] > highest_high[i] or above_12h_ema50:
+        elif position == -1:
+            # Exit short: price crosses R4 or loses volume momentum
+            if close[i] > R3[i] or not vol_spike[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat, look for entry
-            # Long: breakout above Donchian high with volume confirmation and bullish trend
-            if breakout_high and vol_confirmed and above_12h_ema50:
+        else:
+            # Enter long: rejection of S3/S4 with volume spike
+            if ((close[i] <= S3[i] * 1.005) or (close[i] <= S4[i] * 1.005)) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short: breakout below Donchian low with volume confirmation and bearish trend
-            elif breakout_low and vol_confirmed and below_12h_ema50:
+            # Enter short: rejection of R3/R4 with volume spike
+            elif ((close[i] >= R3[i] * 0.995) or (close[i] >= R4[i] * 0.995)) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
