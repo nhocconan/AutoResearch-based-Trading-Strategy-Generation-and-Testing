@@ -3,98 +3,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA trend with weekly RSI filter and volatility-adjusted position sizing
-# Uses KAMA(14) for trend direction, weekly RSI(14) for overbought/oversold extremes,
-# and ATR-based volatility scaling to reduce position size in high volatility regimes.
-# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag.
-# Works in bull markets via trend following and in bear markets via mean reversion at extremes.
+# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation
+# Uses 6h Donchian breakouts for entry, 12h EMA(50) for trend direction, and 6h volume spike (>1.5x 20-period average) for confirmation
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drift
+# Works in bull markets via trend-following breakouts and in bear markets via mean-reversion fades at extreme levels
 
-name = "daily_kama_weekly_rsi_vol_scaled_v1"
-timeframe = "1d"
+name = "6h_donchian20_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 12h trend data (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate KAMA(14) for trend
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly
-    # Proper ER calculation
-    price_change = np.abs(close - np.roll(close, 1))
-    price_change[0] = 0
-    direction = np.abs(np.subtract(close, np.roll(close, 14)))
-    direction[0:14] = 0
-    volatility = np.zeros(n)
-    for i in range(1, n):
-        volatility[i] = volatility[i-1] + price_change[i] - (price_change[i-14] if i >= 14 else 0)
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)  # kama with fast=2, slow=30
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 6h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # ATR(14) for volatility scaling
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 6h volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: scale position size inversely with volatility
-        vol_ratio = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
-        vol_scale = np.clip(1.0 / vol_ratio, 0.5, 1.5)  # scale between 0.5 and 1.5
-        base_size = 0.25
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend direction from KAMA
-        bullish = close[i] > kama[i]
-        bearish = close[i] < kama[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Extreme RSI conditions for mean reversion
-        oversold = rsi_1w_aligned[i] < 30
-        overbought = rsi_1w_aligned[i] > 70
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above previous high
+        breakdown_down = close[i] < lowest_low[i-1]  # break below previous low
         
-        # Long conditions: bullish trend OR oversold mean reversion
-        if bullish or oversold:
-            signals[i] = base_size * vol_scale
-        # Short conditions: bearish trend OR overbought mean reversion
-        elif bearish or overbought:
-            signals[i] = -base_size * vol_scale
+        # Entry logic: breakout with volume confirmation and trend alignment
+        if breakout_up and uptrend and vol_confirm:
+            signals[i] = 0.25  # long
+        elif breakdown_down and downtrend and vol_confirm:
+            signals[i] = -0.25  # short
         else:
             signals[i] = 0.0
     
