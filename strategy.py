@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Daily Pivot Reversal with Volume Filter
-# Hypothesis: Daily pivot points act as significant support/resistance levels where price often reverses.
-# Price rejection at daily pivot with volume confirmation indicates institutional interest in these levels.
-# Works in both bull and bear markets: in bull, price rejects above pivot and pulls back; in bear, price rejects below pivot and bounces.
-# Target: 20-50 trades/year (80-200 over 4 years) by requiring clear rejection and volume confirmation.
+# Strategy: 1D Weekly Pivot Breakout with Volume Confirmation
+# Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance in the 1D timeframe.
+# Price breaking through these levels with volume confirmation indicates institutional breakout.
+# Works in both bull and bear markets:
+# - In bull: price breaks above R1 and continues up (momentum)
+# - In bear: price breaks below S1 and continues down (momentum)
+# Target: 20-50 trades/year (80-200 over 4 years).
 
-name = "4h_daily_pivot_reversal_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_pivot_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +26,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot: based on previous day's OHLC
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate weekly pivot levels: based on previous week's range
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Use previous day's data to avoid look-ahead
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
-    # Handle first value
-    if len(prev_high) > 1:
-        prev_high[0] = prev_high[1]
-        prev_low[0] = prev_low[1]
-        prev_close[0] = prev_close[1]
-    else:
-        prev_high[0] = 0
-        prev_low[0] = 0
-        prev_close[0] = 0
+    # Weekly pivot formulas (based on previous week)
+    # R2 = Pivot + (High - Low)
+    # R1 = (2 * Pivot) - Low
+    # Pivot = (High + Low + Close) / 3
+    # S1 = (2 * Pivot) - High
+    # S2 = Pivot - (High - Low)
     
-    # Daily pivot point: (High + Low + Close) / 3
-    daily_pivot = (prev_high + prev_low + prev_close) / 3.0
+    # Calculate for previous week (shift by 1 to avoid look-ahead)
+    prev_weekly_high = np.roll(weekly_high, 1)
+    prev_weekly_low = np.roll(weekly_low, 1)
+    prev_weekly_close = np.roll(weekly_close, 1)
+    prev_weekly_high[0] = prev_weekly_high[1] if len(prev_weekly_high) > 1 else 0
+    prev_weekly_low[0] = prev_weekly_low[1] if len(prev_weekly_low) > 1 else 0
+    prev_weekly_close[0] = prev_weekly_close[1] if len(prev_weekly_close) > 1 else 0
     
-    # Align pivot to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_daily, daily_pivot)
+    # Calculate weekly pivot levels for previous week
+    pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
+    r1 = (2 * pivot) - prev_weekly_low
+    s1 = (2 * pivot) - prev_weekly_high
+    
+    # Align to 1d timeframe (use previous week's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -64,31 +70,32 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price rises to pivot or volume drops
-            if close[i] >= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price falls below pivot or volume drops
+            if close[i] < pivot[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price falls to pivot or volume drops
-            if close[i] <= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: price rises above pivot or volume drops
+            if close[i] > pivot[i] or not vol_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long: price rejects below pivot (low < pivot and close > pivot) with volume
-            if low[i] < pivot_aligned[i] and close[i] > pivot_aligned[i] and vol_filter[i]:
+            # Long: price breaks above R1 with volume
+            if close[i] > r1_aligned[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short: price rejects above pivot (high > pivot and close < pivot) with volume
-            elif high[i] > pivot_aligned[i] and close[i] < pivot_aligned[i] and vol_filter[i]:
+            # Short: price breaks below S1 with volume
+            elif close[i] < s1_aligned[i] and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
