@@ -3,14 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Camarilla pivot reversals with 1d EMA200 trend filter and volume confirmation
-# Camarilla levels calculated from previous day's OHLC. Fade at R3/S3 (mean reversion),
-# breakout continuation at R4/S4 (trend following). Use 1d EMA200 to determine trend direction
-# for breakout filtering. Volume > 1.5x 6h average confirms breakout strength.
-# Target: 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper band, weekly close > weekly EMA50 (uptrend), and volume > 1.5x 12h average volume
+# Short when price breaks below 12h Donchian lower band, weekly close < weekly EMA50 (downtrend), and volume > 1.5x 12h average volume
+# Exit when trend reverses (12h close crosses EMA50) or opposite breakout occurs
+# Stoploss at 2.5 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses 1-week EMA50 for trend filter and 12h volume average for confirmation
+# Target: 75-150 total trades over 4 years (19-38/year)
 
-name = "6h_camarilla_1d_ema200_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,46 +27,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots and EMA200
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    camarilla_h5 = prev_close + 1.1 * range_ * 1.1 / 2  # R4 equivalent
-    camarilla_h4 = prev_close + 1.1 * range_ * 1.1 / 4  # R3
-    camarilla_h3 = prev_close + 1.1 * range_ * 1.1 / 6  # R2
-    camarilla_l3 = prev_close - 1.1 * range_ * 1.1 / 6  # S2
-    camarilla_l4 = prev_close - 1.1 * range_ * 1.1 / 4  # S3
-    camarilla_l5 = prev_close - 1.1 * range_ * 1.1 / 2  # S4
+    # 12h Donchian(20) channels
+    high_series = pd.Series(high_12h)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    low_series = pd.Series(low_12h)
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    # Align Donchian bands to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
-    # 1d EMA200 trend filter
-    close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
-    
-    # 6h volume average for confirmation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    volume_6h = df_6h['volume'].values
-    volume_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_ma_6h)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # 12h volume average for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -78,11 +72,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(h5_aligned[i]) or
-            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(l5_aligned[i]) or
-            np.isnan(ema_200_aligned[i]) or np.isnan(volume_ma_6h_aligned[i]) or
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_12h_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -91,56 +84,44 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: mean reversion at H3 or breakout failure below H4
-            elif close[i] < h3_aligned[i] or (close[i] > h4_aligned[i] and close[i] < h3_aligned[i]):
+            # Exit: trend reverses (price below EMA50) or breaks below lower band
+            elif close[i] < ema_1w_aligned[i] or close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: mean reversion at L3 or breakout failure above L4
-            elif close[i] > l3_aligned[i] or (close[i] < l4_aligned[i] and close[i] > l3_aligned[i]):
+            # Exit: trend reverses (price above EMA50) or breaks above upper band
+            elif close[i] > ema_1w_aligned[i] or close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries
-            # Mean reversion fade at extreme levels (R4/S4) when counter-trend
-            # Long fade at S4 in uptrend, short fade at R4 in downtrend
-            # Breakout continuation at R3/S3 when with trend
-            
-            # Long entry conditions:
-            # 1. Fade: price < S4 and above EMA200 (fade in uptrend)
-            # 2. Breakout: price > R3 and above EMA200 with volume (breakout in uptrend)
-            long_fade = (close[i] < l4_aligned[i] and close[i] > ema_200_aligned[i])
-            long_breakout = (close[i] > h3_aligned[i] and close[i] > ema_200_aligned[i] and 
-                           volume[i] > 1.5 * volume_ma_6h_aligned[i])
-            
-            # Short entry conditions:
-            # 1. Fade: price > R4 and below EMA200 (fade in downtrend)
-            # 2. Breakout: price < L3 and below EMA200 with volume (breakout in downtrend)
-            short_fade = (close[i] > h4_aligned[i] and close[i] < ema_200_aligned[i])
-            short_breakout = (close[i] < l3_aligned[i] and close[i] < ema_200_aligned[i] and 
-                            volume[i] > 1.5 * volume_ma_6h_aligned[i])
-            
-            if long_fade or long_breakout:
+            # Look for entries with volume confirmation and trend alignment
+            # Long: price breaks above upper band, price above EMA50 (uptrend), volume spike
+            if (close[i] > upper_aligned[i] and
+                close[i] > ema_1w_aligned[i] and
+                volume[i] > 1.5 * volume_ma_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_fade or short_breakout:
+            # Short: price breaks below lower band, price below EMA50 (downtrend), volume spike
+            elif (close[i] < lower_aligned[i] and
+                  close[i] < ema_1w_aligned[i] and
+                  volume[i] > 1.5 * volume_ma_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
