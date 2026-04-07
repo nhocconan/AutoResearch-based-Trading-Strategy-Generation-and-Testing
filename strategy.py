@@ -1,100 +1,85 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12-hour timeframe, use Camarilla pivot levels from 1-day timeframe with volume confirmation. 
-Enter long at L4 level (bullish bias) with volume > 1.3x average, short at H4 level (bearish bias) with volume > 1.3x average.
-Exit when price reaches opposite H6/L6 levels or reverses at H3/L3. Designed for low frequency (12-37 trades/year) 
-to avoid fee drag while capturing mean reversion in ranging markets and breakouts in trending markets.
-Works in bull (buy L4 bounces) and bear (sell H4 rejections) by using volume confirmation and pivot levels as dynamic support/resistance.
+4h_rsi_pullback_1d_trend_volume_v1
+Hypothesis: On 4-hour timeframe, use RSI pullbacks during higher timeframe trends. Enter long when RSI < 30 in uptrend (1d EMA50) with volume > 1.5x average, short when RSI > 70 in downtrend. Exit when RSI crosses 50 in opposite direction. Designed for low frequency (20-50 trades/year) by requiring strong trend alignment and volume confirmation. Works in bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend) by using 1-day trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timezone = "12h"
+name = "4h_rsi_pullback_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
     d_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    # Camarilla formulas:
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # H3 = close + 1.125 * (high - low)
-    # L3 = close - 1.125 * (high - low)
-    # H6 = close + 2.0 * (high - low)
-    # L6 = close - 2.0 * (high - low)
-    range_hl = d_high - d_low
-    camarilla_h4 = d_close + 1.5 * range_hl
-    camarilla_l4 = d_close - 1.5 * range_hl
-    camarilla_h3 = d_close + 1.125 * range_hl
-    camarilla_l3 = d_close - 1.125 * range_hl
-    camarilla_h6 = d_close + 2.0 * range_hl
-    camarilla_l6 = d_close - 2.0 * range_hl
-    
-    # Align all levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h6_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h6)
-    l6_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l6)
+    d_ema50 = pd.Series(d_close).ewm(span=50, adjust=False).mean().values
+    d_ema50_aligned = align_htf_to_ltf(prices, df_1d, d_ema50)
     
     # Calculate 20-period average volume for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):  # Start from 1 to have previous day's data
-        # Skip if daily data not available (first bar)
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]):
+    for i in range(50, n):
+        # Skip if daily EMA50 not available
+        if np.isnan(d_ema50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Determine trend based on price vs daily EMA50
+        uptrend = close[i] > d_ema50_aligned[i]
+        downtrend = close[i] < d_ema50_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price reaches H6 (strong resistance) or reverses below L3
-            if close[i] >= h6_aligned[i] or close[i] <= l3_aligned[i]:
+            # Exit when RSI crosses above 50
+            if rsi[i] >= 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price reaches L6 (strong support) or reverses above H3
-            if close[i] <= l6_aligned[i] or close[i] >= h3_aligned[i]:
+            # Exit when RSI crosses below 50
+            if rsi[i] <= 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price at L4 level with volume confirmation
-            long_entry = (abs(close[i] - l4_aligned[i]) < 0.001 * close[i]) and vol_confirm
-            # Short entry: price at H4 level with volume confirmation
-            short_entry = (abs(close[i] - h4_aligned[i]) < 0.001 * close[i]) and vol_confirm
+            # Long entry: RSI < 30 in uptrend with volume confirmation
+            long_entry = (rsi[i] < 30) and uptrend and vol_confirm
+            # Short entry: RSI > 70 in downtrend with volume confirmation
+            short_entry = (rsi[i] > 70) and downtrend and vol_confirm
             
             if long_entry:
                 position = 1
