@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, enter long when price breaks above 20-period Donchian upper band with above-average volume and 1d EMA50 uptrend, enter short when price breaks below 20-period Donchian lower band with above-average volume and 1d EMA50 downtrend. Exit when price crosses the 20-period EMA on 12h. Designed for 15-30 trades/year to minimize fee decay while capturing trend continuation in both bull and bear markets using Donchian breakouts as momentum signals.
+6h_wick_reversal_volume_v1
+Hypothesis: On 6h timeframe, enter long when price closes above prior bar's high with strong bullish rejection (lower wick > 2x upper wick) and volume > 1.5x average, enter short when price closes below prior bar's low with strong bearish rejection (upper wick > 2x lower wick) and volume > 1.5x average. Uses 1d trend filter (price above/below 50-period EMA) to avoid counter-trend trades. Designed for 15-25 trades/year to minimize fee drag while capturing exhaustion moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timezone = "12h"
+name = "6h_wick_reversal_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,20 +23,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels
-    if len(high) < 20:
-        return np.zeros(n)
-    
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 20-period EMA for exit
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate 50-period EMA for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -48,39 +41,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_50[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]) or
+            np.isnan(high[i-1]) or np.isnan(low[i-1])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: above average volume
-        vol_ok = volume[i] > vol_ma[i]
+        # Volume confirmation: > 1.5x average volume
+        vol_ok = volume[i] > (vol_ma[i] * 1.5)
         
+        # Wick analysis: lower wick = close - low, upper wick = high - close
+        lower_wick = close[i] - low[i]
+        upper_wick = high[i] - close[i]
+        
+        # Avoid division by zero
+        if upper_wick == 0:
+            upper_wick = 0.001
+        if lower_wick == 0:
+            lower_wick = 0.001
+            
         if position == 1:  # Long position
-            # Exit: price crosses below EMA20
-            if close[i] < ema_20[i]:
+            # Exit: price closes below prior bar's low (break of structure)
+            if close[i] < low[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA20
-            if close[i] > ema_20[i]:
+            # Exit: price closes above prior bar's high (break of structure)
+            if close[i] > high[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: price breaks above Donchian upper band with 1d EMA50 uptrend
-                if high[i] > donch_high[i] and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]:
+                # Long: bullish rejection (lower wick > 2x upper wick) + close > prior high + price > 1d EMA50
+                if (lower_wick > (2 * upper_wick) and 
+                    close[i] > high[i-1] and 
+                    close[i] > ema_50_1d_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below Donchian lower band with 1d EMA50 downtrend
-                elif low[i] < donch_low[i] and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]:
+                # Short: bearish rejection (upper wick > 2x lower wick) + close < prior low + price < 1d EMA50
+                elif (upper_wick > (2 * lower_wick) and 
+                      close[i] < low[i-1] and 
+                      close[i] < ema_50_1d_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
