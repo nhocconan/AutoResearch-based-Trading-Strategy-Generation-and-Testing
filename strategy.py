@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from daily timeframe with volume confirmation. 
-Enter long when price breaks above R4 with volume > 1.5x average, short when price breaks below S4 with volume > 1.5x average. 
-Exit when price touches opposite pivot level (S4 for long, R4 for short). Camarilla levels provide institutional support/resistance 
-that work in both bull/bear markets. Designed for low frequency (20-50 trades/year) to minimize fee drag.
+4h_adaptive_trend_breakout_v1
+Hypothesis: On 4-hour timeframe, use adaptive trend detection (EMA20 vs EMA50) combined with Donchian breakout and volume confirmation. 
+Trend-following in strong trends (ADX>25) and mean-reversion in choppy markets (ADX<20) with breakout entries. 
+Designed for low frequency (20-50 trades/year) to minimize fee flood.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
+name = "4h_adaptive_trend_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,68 +25,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # ADX calculation for regime filter
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate daily Camarilla pivot levels
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     
-    pivot = (d_high + d_low + d_close) / 3
-    range_val = d_high - d_low
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    dm_plus_ma = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
+    dm_minus_ma = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
     
-    # Camarilla levels: R4 = close + range * 1.1/2, S4 = close - range * 1.1/2
-    r4 = d_close + range_val * 1.1 / 2
-    s4 = d_close - range_val * 1.1 / 2
+    # DI and ADX
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
     
-    # Align to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # EMAs for trend
+    ema20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
+    ema50 = pd.Series(close).ewm(span=50, adjust=False).mean().values
     
-    # Calculate 20-period average volume for confirmation
+    # Donchian channels
+    def rolling_max(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    def rolling_min(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    
+    donch_high = rolling_max(high, 20)
+    donch_low = rolling_min(low, 20)
+    
+    # Volume average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume average warmup
-        # Skip if daily data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
-            signals[i] = 0.0
+    for i in range(50, n):
+        # Skip if data not ready
+        if np.isnan(adx[i]) or np.isnan(ema20[i]) or np.isnan(ema50[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_avg[i]):
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        
+        # Regime: ADX > 25 = trending, ADX < 20 = choppy
+        is_trending = adx[i] > 25
+        is_choppy = adx[i] < 20
         
         if position == 1:  # Long position
-            # Exit when price touches or goes below S4
-            if close[i] <= s4_aligned[i]:
+            # Exit: trend reversal or opposite touch
+            if is_trending and ema20[i] < ema50[i]:  # trend reversal
+                position = 0
+                signals[i] = 0.0
+            elif not is_trending and close[i] <= donch_low[i]:  # mean reversion exit
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches or goes above R4
-            if close[i] >= r4_aligned[i]:
+            # Exit: trend reversal or opposite touch
+            if is_trending and ema20[i] > ema50[i]:  # trend reversal
+                position = 0
+                signals[i] = 0.0
+            elif not is_trending and close[i] >= donch_high[i]:  # mean reversion exit
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 with volume confirmation
-            long_entry = (close[i] > r4_aligned[i]) and vol_confirm
-            # Short entry: price breaks below S4 with volume confirmation
-            short_entry = (close[i] < s4_aligned[i]) and vol_confirm
-            
-            if long_entry:
-                position = 1
-                signals[i] = 0.25
-            elif short_entry:
-                position = -1
-                signals[i] = -0.25
+            if is_trending:
+                # Trend following: breakout in trend direction
+                if ema20[i] > ema50[i] and close[i] > donch_high[i] and vol_confirm:  # uptrend breakout
+                    position = 1
+                    signals[i] = 0.25
+                elif ema20[i] < ema50[i] and close[i] < donch_low[i] and vol_confirm:  # downtrend breakout
+                    position = -1
+                    signals[i] = -0.25
+            else:
+                # Choppy market: mean reversion at extremes
+                if close[i] < donch_low[i] and vol_confirm:  # oversold bounce
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] > donch_high[i] and vol_confirm:  # overbought pullback
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
