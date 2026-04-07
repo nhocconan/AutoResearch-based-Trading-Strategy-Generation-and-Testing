@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-1d_donchian_20_1w_trend_volume_v1
-Hypothesis: Donchian(20) breakouts on 1d with 1w EMA50 trend filter and volume confirmation.
-Long when price breaks above 20-day high and above 1w EMA50.
-Short when price breaks below 20-day low and below 1w EMA50.
-Volume > 1.5x average confirms breakout strength.
-Works in bull/bear by following higher timeframe trend.
-Target: 15-25 trades/year.
+6h_cci_mean_reversion_1w_trend_volume_v1
+Hypothesis: CCI(20) identifies overbought/oversold conditions on 6h. 
+Long when CCI < -100 and price above 1w EMA50 (oversold + uptrend).
+Short when CCI > 100 and price below 1w EMA50 (overbought + downtrend).
+Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend.
+Target: 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_20_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_cci_mean_reversion_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -36,14 +35,18 @@ def generate_signals(prices):
     # 1w EMA50 for trend filter
     ema_50 = df_1w['close'].ewm(span=50, adjust=False).mean()
     
-    # Align 1w EMA50 to 1d timeframe
+    # Align 1w EMA50 to 6h timeframe
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50.values)
     
-    # Donchian(20) on 1d
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # CCI(20) on 6h
+    typical_price = (high + low + close) / 3.0
+    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    # Avoid division by zero
+    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
+    cci = (typical_price - tp_mean) / (0.015 * tp_std)
     
-    # Volume confirmation (20-period average on 1d)
+    # Volume confirmation (20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -51,36 +54,36 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(cci[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below 20-day low or below 1w EMA50
-            if close[i] < donch_low[i] or close[i] < ema_50_aligned[i]:
+            # Exit: CCI crosses above -50 or price breaks below EMA50
+            if cci[i] > -50 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above 20-day high or above 1w EMA50
-            if close[i] > donch_high[i] or close[i] > ema_50_aligned[i]:
+            # Exit: CCI crosses below 50 or price breaks above EMA50
+            if cci[i] < 50 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above 20-day high with volume and above 1w EMA50
-            if (close[i] > donch_high[i] and vol_confirm and 
+            # Long entry: CCI < -100 with volume and price above EMA50
+            if (cci[i] < -100 and vol_confirm and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 20-day low with volume and below 1w EMA50
-            elif (close[i] < donch_low[i] and vol_confirm and 
+            # Short entry: CCI > 100 with volume and price below EMA50
+            elif (cci[i] > 100 and vol_confirm and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
