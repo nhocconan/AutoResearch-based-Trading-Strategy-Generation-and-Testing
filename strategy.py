@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_trend_volume_v1
-Hypothesis: On 12h timeframe, use daily Camarilla pivot levels (L3/H3 for mean reversion, L4/H4 for breakout) with EMA trend filter and volume confirmation. Enter long when price crosses above H3 with EMA25 > EMA50 and volume > 1.5x average; enter short when price crosses below L3 with EMA25 < EMA50 and volume > 1.5x average. Exit when price reaches opposite L4/H4 level or EMA crossover reverses. This strategy combines mean reversion at extreme daily levels with breakout continuation, using volume to confirm institutional participation. The 12h timeframe reduces trade frequency to minimize fee drag while capturing multi-day trends. Works in bull/bear via EMA trend filter and pivot level structure. Targets 15-30 trades/year to minimize fee drag.
+4h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: On 4h timeframe, use daily Camarilla pivot levels (H3/L3 for mean reversion, H4/L4 for breakout) with EMA trend filter and volume confirmation. Enter long when price crosses above H3 with EMA20 > EMA50 and volume > 1.5x average; enter short when price crosses below L3 with EMA20 < EMA50 and volume > 1.5x average. Exit when price reaches opposite L4/H4 level or EMA crossover reverses. This strategy combines mean reversion at extreme daily levels with breakout continuation, using volume to confirm institutional participation. Works in bull/bear via EMA trend filter and pivot level structure. Targets 20-50 trades/year to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,8 +23,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA25 and EMA50 for trend filter
-    ema25 = pd.Series(close).ewm(span=25, min_periods=25, adjust=False).mean().values
+    # Calculate EMA20 and EMA50 for trend filter
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Calculate daily Camarilla pivot levels from prior day
@@ -41,39 +41,43 @@ def generate_signals(prices):
     camarilla_l4 = pc - 1.1 * (ph - pl) / 2
     camarilla_h3 = pc + 1.1 * (ph - pl) / 4
     camarilla_l3 = pc - 1.1 * (ph - pl) / 4
+    camarilla_h2 = pc + 1.1 * (ph - pl) / 6
+    camarilla_l2 = pc - 1.1 * (ph - pl) / 6
+    camarilla_h1 = pc + 1.1 * (ph - pl) / 12
+    camarilla_l1 = pc - 1.1 * (ph - pl) / 12
     
-    # Align to 12h timeframe (shifted by 1 day for look-ahead prevention)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align to 4h timeframe (shifted by 1 day for look-ahead prevention)
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation (24-period average on 12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation (12-period average on 4h = 2 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(ema25[i]) or np.isnan(ema50[i]) or 
-            np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or
+        if (np.isnan(ema20[i]) or np.isnan(ema50[i]) or 
+            np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or
+            np.isnan(h4_4h[i]) or np.isnan(l4_4h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 24-period average
+        # Volume confirmation: current volume > 1.5x 12-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
             # Exit if price reaches L4 level (opposite extreme)
-            if close[i] <= l4_12h[i]:
+            if close[i] <= l4_4h[i]:
                 exit_long = True
-            # Exit if EMA25 crosses below EMA50 (trend reversal)
-            elif ema25[i] < ema50[i] and ema25[i-1] >= ema50[i-1]:
+            # Exit if EMA20 crosses below EMA50 (trend reversal)
+            elif ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1]:
                 exit_long = True
             
             if exit_long:
@@ -86,10 +90,10 @@ def generate_signals(prices):
             # Exit conditions
             exit_short = False
             # Exit if price reaches H4 level (opposite extreme)
-            if close[i] >= h4_12h[i]:
+            if close[i] >= h4_4h[i]:
                 exit_short = True
-            # Exit if EMA25 crosses above EMA50 (trend reversal)
-            elif ema25[i] > ema50[i] and ema25[i-1] <= ema50[i-1]:
+            # Exit if EMA20 crosses above EMA50 (trend reversal)
+            elif ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1]:
                 exit_short = True
             
             if exit_short:
@@ -98,16 +102,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price crosses above H3 with EMA25 > EMA50 and volume confirmation
+            # Long entry: price crosses above H3 with EMA20 > EMA50 and volume confirmation
             long_entry = False
-            if (close[i] > h3_12h[i] and close[i-1] <= h3_12h[i-1] and
-                ema25[i] > ema50[i] and vol_confirm):
+            if (close[i] > h3_4h[i] and close[i-1] <= h3_4h[i-1] and
+                ema20[i] > ema50[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: price crosses below L3 with EMA25 < EMA50 and volume confirmation
+            # Short entry: price crosses below L3 with EMA20 < EMA50 and volume confirmation
             short_entry = False
-            if (close[i] < l3_12h[i] and close[i-1] >= l3_12h[i-1] and
-                ema25[i] < ema50[i] and vol_confirm):
+            if (close[i] < l3_4h[i] and close[i-1] >= l3_4h[i-1] and
+                ema20[i] < ema50[i] and vol_confirm):
                 short_entry = True
             
             if long_entry:
