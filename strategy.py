@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_1d_ema_volume_v1
-Hypothesis: On 6-hour timeframe, use daily Camarilla pivot levels with EMA filter and volume confirmation.
-Go long when price breaks above R4 with volume > 1.5x average and EMA(50) > EMA(200).
-Go short when price breaks below S4 with volume > 1.5x average and EMA(50) < EMA(200).
-Exit when price returns to the daily pivot (PP) or EMA crossover reverses.
-Designed for 15-30 trades/year to minimize fee dust while capturing strong breakouts in both bull and bear markets.
+12h_camarilla_pivot_1d_volume_v6
+Hypothesis: On 12-hour timeframe, use daily Camarilla pivot levels (H3/L3) with volume confirmation.
+Long when price crosses above H3 with volume > 1.5x 20-period average.
+Short when price crosses below L3 with volume > 1.5x 20-period average.
+Exit when price touches the opposite pivot level (L3 for longs, H3 for shorts).
+Designed for 15-30 trades/year to minimize fee drag while capturing institutional levels.
+Works in both bull/bear markets as pivot levels act as support/resistance regardless of trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_ema_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_volume_v6"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,100 +28,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA on 1d close
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    
     # Calculate Camarilla pivot levels for each day
-    # Based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point (PP) = (High + Low + Close) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla formulas
+    # H3 = close + (high - low) * 1.1/2
+    # L3 = close - (high - low) * 1.1/2
+    # H4 = close + (high - low) * 1.1
+    # L4 = close - (high - low) * 1.1
+    # We'll use H3/L3 for entries and H4/L4 for stronger signals
+    range_1d = high_1d - low_1d
+    H3_1d = close_1d + range_1d * 1.1 / 2
+    L3_1d = close_1d - range_1d * 1.1 / 2
+    H4_1d = close_1d + range_1d * 1.1
+    L4_1d = close_1d - range_1d * 1.1
     
-    # Camarilla levels
-    # R4 = Close + ((High - Low) * 1.1/2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # R2 = Close + ((High - Low) * 1.1/6)
-    # R1 = Close + ((High - Low) * 1.1/12)
-    # S1 = Close - ((High - Low) * 1.1/12)
-    # S2 = Close - ((High - Low) * 1.1/6)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
+    # Align pivot levels to 12h timeframe (using previous day's levels)
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    H4_1d_aligned = align_htf_to_ltf(prices, df_1d, H4_1d)
+    L4_1d_aligned = align_htf_to_ltf(prices, df_1d, L4_1d)
     
-    # Align 1d data to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate average volume (50-period)
-    vol_avg = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume filter: 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after EMA warmup
-        if not in_session[i]:
+    for i in range(20, n):
+        # Skip if pivot data not available
+        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Skip if data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(vol_avg[i])):
-            signals[i] = 0.0
-            continue
-            
-        # Volume filter: current volume > 1.5x average
-        vol_filter = volume[i] > (1.5 * vol_avg[i])
-        
-        # EMA trend filter
-        ema_bullish = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
-        ema_bearish = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
+        # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot or EMA crossover reverses
-            if close[i] <= pp_aligned[i] or not ema_bullish:
+            # Exit: price touches L3 (opposite level)
+            if low[i] <= L3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to pivot or EMA crossover reverses
-            if close[i] >= pp_aligned[i] or not ema_bearish:
+            # Exit: price touches H3 (opposite level)
+            if high[i] >= H3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume and EMA alignment
-            if vol_filter:
-                if ema_bullish and close[i] > r4_aligned[i]:
+            # Only enter with volume confirmation
+            if vol_ok:
+                # Long: price crosses above H3
+                if close[i] > H3_1d_aligned[i] and close[i-1] <= H3_1d_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                elif ema_bearish and close[i] < s4_aligned[i]:
+                # Short: price crosses below L3
+                elif close[i] < L3_1d_aligned[i] and close[i-1] >= L3_1d_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
