@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
-# Designed to work in both bull and bear markets by combining breakout momentum with volatility filtering
-# Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag
-name = "12h_donchian20_1d_volume_atr_v1"
-timeframe = "12h"
+# Strategy: 4h Donchian(20) breakout with daily volume confirmation and ATR volatility filter
+# Hypothesis: Breakouts with volume confirmation capture strong trends; volatility filter avoids choppy markets.
+# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
+# Target: 20-50 trades/year to minimize fee drag.
+name = "4h_donchian20_1d_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +32,7 @@ def generate_signals(prices):
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate ATR(14) for volatility filter and stop sizing
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -52,7 +53,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > daily average volume
+        # Volume confirmation: current 4h volume > daily average volume
         vol_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
