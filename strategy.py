@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-1h_pivot_reversal_4h1d_v1
-Hypothesis: On 1-hour timeframe, use mean-reversion at pivot points with 4h trend filter and daily volume confirmation.
-Long when price bounces off weekly pivot support with 4h EMA trending up and daily volume above average.
-Short when price reverses at weekly pivot resistance with 4h EMA trending down and daily volume above average.
-Exit when price reaches opposite pivot level or midpoint.
-Designed for 15-35 trades/year by combining pivot levels (institutional levels) with trend and volume filters.
-Works in bull/bear markets as pivots adapt to price action and filters avoid chop.
+6h_camarilla_pivot_1d_ema_volume_v2
+Hypothesis: On 6-hour timeframe, use daily Camarilla pivot levels with EMA trend filter and volume confirmation.
+Long when price breaks above R4 with daily EMA(50) trending up and volume > 1.5x 20-period average.
+Short when price breaks below S4 with daily EMA(50) trending down and volume > 1.5x 20-period average.
+Exit when price returns to the daily pivot point.
+Designed for 15-25 trades/year to minimize fee fade while capturing institutional breakout moves.
+Works in both bull/bear markets as Camarilla levels adapt to volatility and daily trend filter avoids counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_pivot_reversal_4h1d_v1"
-timeframe = "1h"
+name = "6h_camarilla_pivot_1d_ema_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -28,98 +28,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA(34) for trend filter
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # Determine 4h trend direction (using EMA slope)
-    trend_up = np.zeros(len(ema_34_4h_aligned), dtype=bool)
-    trend_down = np.zeros(len(ema_34_4h_aligned), dtype=bool)
-    for i in range(1, len(ema_34_4h_aligned)):
-        if not np.isnan(ema_34_4h_aligned[i]) and not np.isnan(ema_34_4h_aligned[i-1]):
-            trend_up[i] = ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1]
-            trend_down[i] = ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1]
-    
-    # Get 1d data for volume filter
+    # Get 1d data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily volume average
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate daily OHLC for pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # We'll approximate weekly from daily data: use prior 5 trading days
-    df_1d_for_pivot = df_1d.copy()
-    if len(df_1d_for_pivot) < 5:
-        return np.zeros(n)
+    # Calculate Camarilla pivot levels for each day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + (H - L) * 1.1 / 2
+    # S4 = C - (H - L) * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r4_1d = close_1d + range_1d * 1.1 / 2
+    s4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Calculate rolling weekly high/low/close from daily data
-    weekly_high = pd.Series(df_1d_for_pivot['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d_for_pivot['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d_for_pivot['close']).rolling(window=5, min_periods=5).last().values
+    # Align daily levels to 6h timeframe (with shift(1) for prior day's levels)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Standard pivot point formula: (H + L + C) / 3
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    # Support 1: (2 * P) - H
-    support_1 = (2 * pivot_point) - weekly_high
-    # Resistance 1: (2 * P) - L
-    resistance_1 = (2 * pivot_point) - weekly_low
+    # Calculate daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align pivot levels to 1h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d_for_pivot, pivot_point)
-    support_1_aligned = align_htf_to_ltf(prices, df_1d_for_pivot, support_1)
-    resistance_1_aligned = align_htf_to_ltf(prices, df_1d_for_pivot, resistance_1)
+    # Determine daily trend direction (using EMA slope)
+    daily_trend_up = np.zeros(len(ema_50_1d_aligned), dtype=bool)
+    daily_trend_down = np.zeros(len(ema_50_1d_aligned), dtype=bool)
+    for i in range(1, len(ema_50_1d_aligned)):
+        if not np.isnan(ema_50_1d_aligned[i]) and not np.isnan(ema_50_1d_aligned[i-1]):
+            daily_trend_up[i] = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1]
+            daily_trend_down[i] = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1]
+    
+    # Volume filter: 20-period average on 6h timeframe
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(max(20, 50), n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(support_1_aligned[i]) or 
-            np.isnan(resistance_1_aligned[i]) or np.isnan(ema_34_4h_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current 1h volume > daily average volume
-        vol_ok = volume[i] > vol_avg_1d_aligned[i]
+        # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches pivot point or resistance
-            if close[i] >= pivot_aligned[i]:
+            # Exit: price returns to daily pivot
+            if close[i] <= pivot_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches pivot point or support
-            if close[i] <= pivot_aligned[i]:
+            # Exit: price returns to daily pivot
+            if close[i] >= pivot_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter with volume confirmation and 4h trend alignment
+            # Only enter with volume confirmation and daily trend alignment
             if vol_ok:
-                # Long: price bounces off support with 4h uptrend
-                if (close[i] > support_1_aligned[i] and close[i-1] <= support_1_aligned[i-1] and 
-                    trend_up[i]):
+                # Long: price breaks above R4 with daily uptrend
+                if (close[i] > r4_1d_aligned[i] and close[i-1] <= r4_1d_aligned[i-1] and 
+                    daily_trend_up[i]):
                     position = 1
-                    signals[i] = 0.20
-                # Short: price reverses at resistance with 4h downtrend
-                elif (close[i] < resistance_1_aligned[i] and close[i-1] >= resistance_1_aligned[i-1] and 
-                      trend_down[i]):
+                    signals[i] = 0.25
+                # Short: price breaks below S4 with daily downtrend
+                elif (close[i] < s4_1d_aligned[i] and close[i-1] >= s4_1d_aligned[i-1] and 
+                      daily_trend_down[i]):
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
