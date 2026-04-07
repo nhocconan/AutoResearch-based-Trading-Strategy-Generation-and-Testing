@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_rsi_pullback_1d_trend_volume_v1
-Hypothesis: On 4h timeframe, enter long when RSI(14) pulls back to 40-50 during uptrend (price above 1d EMA50) with volume > 1.5x average, enter short when RSI pulls back to 50-60 during downtrend (price below 1d EMA50) with volume > 1.5x average. Uses 1d EMA50 trend filter to avoid counter-trend trades. Target: 20-40 trades/year to minimize fee drag while capturing pullbacks in trending markets.
+1d_rsi_200ma_breakout_v1
+Hypothesis: On daily timeframe, go long when RSI(14) crosses above 50 while price > EMA200, short when RSI crosses below 50 while price < EMA200, with volume > 1.5x 20-day average for confirmation. Uses weekly EMA200 trend filter to avoid counter-trend trades. Target: 15-30 trades/year to minimize fee dust.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_pullback_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_rsi_200ma_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,53 +33,58 @@ def generate_signals(prices):
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate daily EMA200 for trend filter
+    ema_200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
+    
+    # Calculate weekly EMA200 for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after RSI warmup
+    for i in range(200, n):  # Start after EMA200 warmup
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_200[i]) or 
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: > 1.5x average volume
         vol_ok = volume[i] > (vol_ma[i] * 1.5)
         
+        # Trend filter: price above/below weekly EMA200
+        uptrend = close[i] > ema_200_1w_aligned[i]
+        downtrend = close[i] < ema_200_1w_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: RSI crosses below 40 (end of pullback) or trend changes
-            if rsi[i] < 40 or close[i] < ema_50_1d_aligned[i]:
+            # Exit: RSI crosses below 50 or trend changes to downtrend
+            if rsi[i] < 50 or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 60 (end of pullback) or trend changes
-            if rsi[i] > 60 or close[i] > ema_50_1d_aligned[i]:
+            # Exit: RSI crosses above 50 or trend changes to uptrend
+            if rsi[i] > 50 or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: RSI pullback to 40-50 in uptrend (price above 1d EMA50)
-                if (40 <= rsi[i] <= 50 and 
-                    close[i] > ema_50_1d_aligned[i]):
+                # Long: RSI crosses above 50 in uptrend
+                if rsi[i] > 50 and rsi[i-1] <= 50 and uptrend:
                     position = 1
                     signals[i] = 0.25
-                # Short: RSI pullback to 50-60 in downtrend (price below 1d EMA50)
-                elif (50 <= rsi[i] <= 60 and 
-                      close[i] < ema_50_1d_aligned[i]):
+                # Short: RSI crosses below 50 in downtrend
+                elif rsi[i] < 50 and rsi[i-1] >= 50 and downtrend:
                     position = -1
                     signals[i] = -0.25
     
