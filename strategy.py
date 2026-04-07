@@ -11,7 +11,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
 # Target: 75-200 total trades over 4 years (19-50/year)
-# Designed to work in both bull and bear markets by requiring strong trend (ADX>22) and volume confirmation
 
 name = "12h_donchian20_1d_vol_1w_adx_v1"
 timeframe = "12h"
@@ -54,7 +53,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1w - np.roll(close_1w, 1))
     tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
+    tr3[0] = t1[0]
     tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
