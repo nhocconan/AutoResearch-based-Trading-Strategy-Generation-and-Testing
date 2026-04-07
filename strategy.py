@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_cci_momentum_v2
-Hypothesis: On 4h timeframe, enter long when CCI crosses above -100 (bullish momentum) with above-average volume and price above 20-period EMA, enter short when CCI crosses below +100 (bearish momentum) with above-average volume and price below 20-period EMA. Exit when CCI crosses zero (momentum exhaustion). Uses 1d CCI trend filter to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee drag while capturing momentum reversals in both bull and bear markets.
+12h_price_channel_breakout_v2
+Hypothesis: On 12h timeframe, enter long when price breaks above 20-period Donchian upper band with above-average volume and 1d ADX > 25 (trending market), enter short when price breaks below 20-period Donchian lower band with above-average volume and 1d ADX > 25. Exit when price crosses back below the 10-period EMA (for longs) or above the 10-period EMA (for shorts). Uses 1d ADX trend filter to avoid choppy markets. Designed for 15-30 trades/year to minimize fee decay while capturing trending moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_momentum_v2"
-timeframe = "4h"
+name = "12h_price_channel_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -23,92 +23,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h CCI (20-period)
-    if len(close) < 20:
+    # Calculate 12h Donchian channels (20-period)
+    if len(high) < 20:
         return np.zeros(n)
     
-    # Typical Price
-    tp = (high + low + close) / 3.0
+    # Donchian upper and lower bands
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Moving Average of TP
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    
-    # Mean Deviation
-    md = pd.Series(tp).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    
-    # CCI
-    cci = (tp - ma_tp) / (0.015 * md)
-    
-    # Calculate 20-period EMA for trend filter
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # 10-period EMA for exit
+    ema_10 = pd.Series(close).ewm(span=10, min_periods=10, adjust=False).mean().values
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d CCI for trend filter (avoid counter-trend trades)
+    # Calculate 1d ADX for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d Typical Price
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 1d MA of TP
-    ma_tp_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # 1d Mean Deviation
-    md_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
+    # Smoothed values (Wilder's smoothing = alpha = 1/period)
+    def wilde_rma(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])  # Skip first NaN
+        alpha = 1.0 / period
+        for i in range(period, len(data)):
+            if not np.isnan(data[i]) and not np.isnan(result[i-1]):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # 1d CCI
-    cci_1d = (tp_1d - ma_tp_1d) / (0.015 * md_1d)
+    atr = wilde_rma(tr, 14)
+    plus_di = 100 * wilde_rma(plus_dm, 14) / atr
+    minus_di = 100 * wilde_rma(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilde_rma(dx, 14)
     
-    # Align indicators to 4h timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Align ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(cci_1d_aligned[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_10[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: above average volume
         vol_ok = volume[i] > vol_ma[i]
         
+        # Trend filter: ADX > 25 indicates trending market
+        trend_ok = adx_1d_aligned[i] > 25
+        
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero (momentum exhaustion)
-            if cci[i] < 0 and cci[i-1] >= 0:
+            # Exit: price crosses below 10-period EMA
+            if close[i] < ema_10[i] and close[i-1] >= ema_10[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero (momentum exhaustion)
-            if cci[i] > 0 and cci[i-1] <= 0:
+            # Exit: price crosses above 10-period EMA
+            if close[i] > ema_10[i] and close[i-1] <= ema_10[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if vol_ok:
-                # Long: CCI crosses above -100 with price above EMA20 and 1d CCI bullish
-                if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema_20[i] and cci_1d_aligned[i] > 0:
+            if vol_ok and trend_ok:
+                # Long: price breaks above Donchian upper band
+                if close[i] > donch_high[i] and close[i-1] <= donch_high[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short: CCI crosses below +100 with price below EMA20 and 1d CCI bearish
-                elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema_20[i] and cci_1d_aligned[i] < 0:
+                # Short: price breaks below Donchian lower band
+                elif close[i] < donch_low[i] and close[i-1] >= donch_low[i-1]:
                     position = -1
                     signals[i] = -0.25
     
