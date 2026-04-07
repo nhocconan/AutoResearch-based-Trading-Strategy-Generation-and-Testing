@@ -1,85 +1,117 @@
 #!/usr/bin/env python3
 """
-4h_adx_trend_v1
-Hypothesis: On 4h timeframe, use ADX > 25 for trending market filter, with EMA crossover (12/26) for entry signals.
-Enter long when EMA12 > EMA26 and ADX > 25, short when EMA12 < EMA26 and ADX > 25.
-Exit when ADX drops below 20 or EMA crossover reverses. Uses ADX to avoid whipsaw in ranging markets.
-Targets 20-50 trades/year to minimize fee drag while capturing strong trends.
+6h_ichimoku_cloud_1d_trend_v1
+Hypothesis: On 6h timeframe, use Ichimoku cloud (TK cross) for entry signals with 1d trend filter (price above/below cloud) to capture trends in both bull and bear markets. Cloud acts as dynamic support/resistance. Targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_adx_trend_v1"
-timeframe = "4h"
+name = "6h_ichimoku_cloud_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # EMA crossover (fast=12, slow=26)
-    close_s = pd.Series(close)
-    ema12 = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
-    ema26 = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    # Ichimoku components on 6h (standard periods: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = ((high_9 + low_9) / 2).values
     
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = ((high_26 + low_26) / 2).values
     
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Smoothed values
-    tr_ma = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_dm_ma = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    minus_dm_ma = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + low)/2, shifted 26 periods ahead
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((high_52 + low_52) / 2)
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
+    # Get daily data for trend filter (calculate once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
+        return np.zeros(n)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Calculate Ichimoku on daily for trend filter
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Daily Tenkan and Kijun
+    dh9 = pd.Series(daily_high).rolling(window=9, min_periods=9).max()
+    dl9 = pd.Series(daily_low).rolling(window=9, min_periods=9).min()
+    d_tenkan = ((dh9 + dl9) / 2).values
+    
+    dh26 = pd.Series(daily_high).rolling(window=26, min_periods=26).max()
+    dl26 = pd.Series(daily_low).rolling(window=26, min_periods=26).min()
+    d_kijun = ((dh26 + dl26) / 2).values
+    
+    # Daily Senkou Span A and B
+    d_senkou_a = ((d_tenkan + d_kijun) / 2)
+    dh52 = pd.Series(daily_high).rolling(window=52, min_periods=52).max()
+    dl52 = pd.Series(daily_low).rolling(window=52, min_periods=52).min()
+    d_senkou_b = ((dh52 + dl52) / 2)
+    
+    # Align daily Ichimoku components to 6h (shifted by 1 day)
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, d_tenkan)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, d_kijun)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, d_senkou_a)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, d_senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after ADX warmup
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if required data not available
-        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
-            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # ADX trend strength filter
-        trending = adx[i] > 25
-        ranging = adx[i] < 20
+        # Cloud boundaries (Senkou Span A/B)
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        
+        # 1d Cloud boundaries
+        cloud_top_1d = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bottom_1d = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        
+        # TK cross signals
+        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
+        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        
+        # Price relative to cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # 1d trend filter: price relative to 1d cloud
+        price_above_1d_cloud = close[i] > cloud_top_1d
+        price_below_1d_cloud = close[i] < cloud_bottom_1d
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit on trend weakening (ADX < 20)
-            if adx[i] < 20:
+            # Exit on TK cross down
+            if tk_cross_down:
                 exit_long = True
-            # Exit on EMA crossover reversal
-            elif ema12[i] < ema26[i]:
+            # Exit when price falls below cloud
+            elif close[i] < cloud_top:
                 exit_long = True
             
             if exit_long:
@@ -91,11 +123,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit on trend weakening (ADX < 20)
-            if adx[i] < 20:
+            # Exit on TK cross up
+            if tk_cross_up:
                 exit_short = True
-            # Exit on EMA crossover reversal
-            elif ema12[i] > ema26[i]:
+            # Exit when price rises above cloud
+            elif close[i] > cloud_bottom:
                 exit_short = True
             
             if exit_short:
@@ -104,15 +136,17 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter in trending markets (ADX > 25)
-            if trending:
-                # Long entry: EMA12 > EMA26
-                if ema12[i] > ema26[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short entry: EMA12 < EMA26
-                elif ema12[i] < ema26[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Long entry: TK cross up, price above cloud, 1d trend up (price above 1d cloud)
+            long_entry = tk_cross_up and price_above_cloud and price_above_1d_cloud
+            
+            # Short entry: TK cross down, price below cloud, 1d trend down (price below 1d cloud)
+            short_entry = tk_cross_down and price_below_cloud and price_below_1d_cloud
+            
+            if long_entry:
+                position = 1
+                signals[i] = 0.25
+            elif short_entry:
+                position = -1
+                signals[i] = -0.25
     
     return signals
