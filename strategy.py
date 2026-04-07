@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_weekly_rsi_extreme_reversion_v1
-Hypothesis: On 1d timeframe, enter long when daily RSI(14) crosses below 20 (oversold) with above-average volume, enter short when RSI crosses above 80 (overbought) with above-average volume. Use 1-week RSI as trend filter to avoid counter-trend trades (only go long when weekly RSI > 50, short when weekly RSI < 50). Exit when RSI crosses back to 50 (mean reversion complete). Designed for 10-25 trades/year to minimize fee dust while capturing extreme reversals in both bull and bear markets.
+1d_camellia_pivot_1w_trend_volume_v1
+Hypothesis: On 1d timeframe, enter long at Camarilla L3 support with above-average volume and weekly uptrend, enter short at H3 resistance with above-average volume and weekly downtrend. Exit at L4/H4 levels. Uses weekly EMA filter to avoid counter-trend trades. Designed for 10-25 trades/year to minimize fee drift while capturing mean reversion in ranging markets and trend continuation in strong moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_rsi_extreme_reversion_v1"
+name = "1d_camellia_pivot_1w_trend_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -18,66 +18,56 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily RSI(14)
-    if len(close) < 14:
-        return np.zeros(n)
+    # Calculate daily Camarilla levels (using previous day's range)
+    # Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+    # H2 = close + 0.55*(high-low), L2 = close - 0.55*(high-low)
+    # H1 = close + 0.275*(high-low), L1 = close - 0.275*(high-low)
+    # Pivot = (high + low + close) / 3
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Use previous day's data to calculate today's levels (no look-ahead)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    daily_range = prev_high - prev_low
+    H4 = prev_close + 1.5 * daily_range
+    L4 = prev_close - 1.5 * daily_range
+    H3 = prev_close + 1.1 * daily_range
+    L3 = prev_close - 1.1 * daily_range
+    H2 = prev_close + 0.55 * daily_range
+    L2 = prev_close - 0.55 * daily_range
+    H1 = prev_close + 0.275 * daily_range
+    L1 = prev_close - 0.275 * daily_range
+    pivot = (prev_high + prev_low + prev_close) / 3.0
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate weekly RSI(14) for trend filter
+    # Calculate weekly EMA for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    
-    delta_1w = np.diff(close_1w, prepend=close_1w[0])
-    gain_1w = np.where(delta_1w > 0, delta_1w, 0.0)
-    loss_1w = np.where(delta_1w < 0, -delta_1w, 0.0)
-    
-    avg_gain_1w = np.zeros_like(gain_1w)
-    avg_loss_1w = np.zeros_like(loss_1w)
-    avg_gain_1w[13] = np.mean(gain_1w[1:14])
-    avg_loss_1w[13] = np.mean(loss_1w[1:14])
-    
-    for i in range(14, len(gain_1w)):
-        avg_gain_1w[i] = (avg_gain_1w[i-1] * 13 + gain_1w[i]) / 14
-        avg_loss_1w[i] = (avg_loss_1w[i-1] * 13 + loss_1w[i]) / 14
-    
-    rs_1w = np.where(avg_loss_1w != 0, avg_gain_1w / avg_loss_1w, 100)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(H4[i]) or np.isnan(L4[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_ema_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
@@ -85,28 +75,28 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 (mean reversion complete)
-            if rsi[i] > 50 and rsi[i-1] <= 50:
+            # Exit: price reaches H4 (take profit) or L4 (stop loss)
+            if close[i] >= H4[i] or close[i] <= L4[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (mean reversion complete)
-            if rsi[i] < 50 and rsi[i-1] >= 50:
+            # Exit: price reaches L4 (take profit) or H4 (stop loss)
+            if close[i] <= L4[i] or close[i] >= H4[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: RSI crosses below 20 with weekly RSI > 50 (bullish filter)
-                if rsi[i] < 20 and rsi[i-1] >= 20 and rsi_1w_aligned[i] > 50:
+                # Long: price at L3 support with weekly uptrend
+                if close[i] <= L3[i] and weekly_ema_aligned[i] > weekly_ema_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short: RSI crosses above 80 with weekly RSI < 50 (bearish filter)
-                elif rsi[i] > 80 and rsi[i-1] <= 80 and rsi_1w_aligned[i] < 50:
+                # Short: price at H3 resistance with weekly downtrend
+                elif close[i] >= H3[i] and weekly_ema_aligned[i] < weekly_ema_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
