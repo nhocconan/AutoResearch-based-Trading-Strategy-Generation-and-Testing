@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 12h Donchian Breakout with Daily Volume and ADX Filter
-# Hypothesis: Breakouts from 20-period Donchian channels on 12h timeframe,
-# filtered by daily volume surge and ADX trend strength, work in both bull and bear markets
-# by capturing momentum bursts. Target: 50-150 total trades over 4 years (12-37/year).
+# Strategy: 1d Weekly Pivot + Volume + ATR Trend Filter
+# Hypothesis: Trade reversals at weekly pivot levels (R1/S1) with volume confirmation
+# and trend filter using daily ATR-based trend. Works in bull/bear by fading extremes
+# in ranging markets and following trend in trending markets. Target: 15-30 trades/year.
 
-name = "12h_donchian20_volume_adx_v2"
-timeframe = "12h"
+name = "1d_weekly_pivot_volume_atr_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,93 +23,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for filters
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly pivot points (using prior week)
+    close_weekly = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    # Prior week's data for pivot calculation
+    prev_close = np.roll(close_weekly, 1)
+    prev_high = np.roll(high_weekly, 1)
+    prev_low = np.roll(low_weekly, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate daily ADX (14-period) for trend strength
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Standard pivot point calculation
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
     
-    # True Range
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First value has no previous close
+    # Align weekly pivots to daily
+    pivot_daily = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_daily = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_daily = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_daily = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_daily = align_htf_to_ltf(prices, df_weekly, s2)
     
-    # Directional Movement
-    up_move = high_daily - np.roll(high_daily, 1)
-    down_move = np.roll(low_daily, 1) - low_daily
+    # Daily ATR-based trend filter (using 14-period ATR)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Trend: price vs ATR-smoothed median
+    med_price = (high + low + close) / 3.0
+    med_smoothed = pd.Series(med_price).rolling(window=20, min_periods=20).median().values
+    trend_up = med_price > med_smoothed + 0.5 * atr
+    trend_down = med_price < med_smoothed - 0.5 * atr
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI values
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx[0:13] = np.nan  # First 13 values invalid
-    
-    adx_12h = align_htf_to_ltf(prices, df_daily, adx)
+    # Volume filter: volume > 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(vol_ma_12h[i]) or np.isnan(adx_12h[i])):
+        if (np.isnan(pivot_daily[i]) or np.isnan(r1_daily[i]) or np.isnan(s1_daily[i]) or
+            np.isnan(r2_daily[i]) or np.isnan(s2_daily[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x daily average
-        vol_surge = volume[i] > (1.5 * vol_ma_12h[i])
-        
-        # ADX filter: trend strength > 25
-        strong_trend = adx_12h[i] > 25
+        vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price touches opposite band or trend weakens
-            if low[i] <= low_min[i] or adx_12h[i] < 20:
+            # Exit: price reaches S1 or trend turns down
+            if low[i] <= s1_daily[i] or trend_down[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price touches opposite band or trend weakens
-            if high[i] >= high_max[i] or adx_12h[i] < 20:
+            # Exit: price reaches R1 or trend turns up
+            if high[i] >= r1_daily[i] or trend_up[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout with volume surge and strong trend
-            if vol_surge and strong_trend:
-                if high[i] >= high_max[i]:  # Break above upper band
-                    position = 1
-                    signals[i] = 0.25
-                elif low[i] <= low_min[i]:  # Break below lower band
-                    position = -1
-                    signals[i] = -0.25
+            # Fade at extremes in ranging markets, follow trend in trending markets
+            if vol_ok:
+                # In ranging market: fade at R1/S1
+                if not (trend_up[i] or trend_down[i]):  # Ranging
+                    if low[i] <= s1_daily[i] and close[i] > s1_daily[i]:  # Bounce off S1
+                        position = 1
+                        signals[i] = 0.25
+                    elif high[i] >= r1_daily[i] and close[i] < r1_daily[i]:  # Rejection at R1
+                        position = -1
+                        signals[i] = -0.25
+                # In trending market: pullback to pivot
+                else:
+                    if trend_up[i] and low[i] <= pivot_daily[i] and close[i] > pivot_daily[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    elif trend_down[i] and high[i] >= pivot_daily[i] and close[i] < pivot_daily[i]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
