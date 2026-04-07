@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
-Hypothesis: On 12-hour timeframe, use daily Camarilla pivot levels for mean reversion in ranging markets, with volume confirmation and 1-day EMA trend filter to avoid counter-trend trades. Enter long at S3 support in uptrend with volume spike, short at R3 resistance in downtrend with volume spike. Exit at opposite pivot level (S1/R1). Designed for low frequency (12-37 trades/year) to avoid fee drag while capturing mean reversion in chop and trend continuation in trends. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) by using 1-day trend filter.
+4h_donchian_20_12h_trend_volume_v3
+Hypothesis: On 4-hour timeframe, use Donchian(20) breakouts with trend filter from 12-hour EMA200 and volume confirmation. Enter long on upper band breakout in uptrend with volume > 1.5x average, short on lower band breakdown in downtrend with volume > 1.5x average. Exit on opposite band touch. Designed for low frequency (19-50 trades/year) to avoid fee drift while capturing trend continuation. Uses 12h trend filter for better alignment with 4h timeframe compared to daily. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) by using 12h trend filter.
+Improvements: Uses 12h EMA200 for trend filter (better aligned with 4h), volume confirmation filter, and ATR volatility filter to avoid chop.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_20_12h_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,86 +24,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12-hour data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # S1 = C - (Range * 1.1/6)
-    # S2 = C - (Range * 1.1/4)
-    # S3 = C - (Range * 1.1/2)
-    # R1 = C + (Range * 1.1/6)
-    # R2 = C + (Range * 1.1/4)
-    # R3 = C + (Range * 1.1/2)
-    pivot = (d_high + d_low + d_close) / 3.0
-    rng = d_high - d_low
-    s3 = d_close - (rng * 1.1 / 2.0)
-    s1 = d_close - (rng * 1.1 / 6.0)
-    r1 = d_close + (rng * 1.1 / 6.0)
-    r3 = d_close + (rng * 1.1 / 2.0)
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    
-    # 1-day EMA for trend filter (200-period)
+    d_close = df_12h['close'].values
     d_ema200 = pd.Series(d_close).ewm(span=200, adjust=False).mean().values
-    d_ema200_aligned = align_htf_to_ltf(prices, df_1d, d_ema200)
+    d_ema200_aligned = align_htf_to_ltf(prices, df_12h, d_ema200)
     
-    # Volume confirmation: current volume > 2.0x 24-period average (2 days worth)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 40-period average volume for confirmation
+    vol_avg = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
+    
+    # ATR for volatility filter (14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR ratio (current ATR / 50-period average ATR) to detect low volatility
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma  # High ratio = high volatility, good for breakouts
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):  # Start after volume average warmup
-        # Skip if daily data not available
-        if np.isnan(s3_aligned[i]) or np.isnan(d_ema200_aligned[i]):
+    for i in range(50, n):  # Start after EMA200 warmup
+        # Skip if 12h EMA200 not available
+        if np.isnan(d_ema200_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs daily EMA200
+        # Determine trend based on price vs 12h EMA200
         uptrend = close[i] > d_ema200_aligned[i]
         downtrend = close[i] < d_ema200_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 24-period average
-        vol_confirm = volume[i] > 2.0 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 1.5x 40-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i] if not np.isnan(vol_avg[i]) else False
+        
+        # Volatility filter: require ATR ratio > 0.8 (avoid extremely low volatility periods)
+        vol_filter = atr_ratio[i] > 0.8 if not np.isnan(atr_ratio[i]) else False
         
         if position == 1:  # Long position
-            # Exit when price reaches or goes above S1 (first support level)
-            if close[i] >= s1_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit when price touches or goes below lower Donchian(20)
+            # Calculate Donchian lower band for last 20 periods
+            if i >= 20:
+                donchian_low = np.min(low[i-20:i])
+                if close[i] <= donchian_low:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price reaches or goes below R1 (first resistance level)
-            if close[i] <= r1_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit when price touches or goes above upper Donchian(20)
+            if i >= 20:
+                donchian_high = np.max(high[i-20:i])
+                if close[i] >= donchian_high:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price at or below S3 support in uptrend with volume confirmation
-            long_entry = (close[i] <= s3_aligned[i]) and uptrend and vol_confirm
-            # Short entry: price at or above R3 resistance in downtrend with volume confirmation
-            short_entry = (close[i] >= r3_aligned[i]) and downtrend and vol_confirm
-            
-            if long_entry:
-                position = 1
-                signals[i] = 0.25
-            elif short_entry:
-                position = -1
-                signals[i] = -0.25
+            # Need at least 20 periods for Donchian calculation
+            if i >= 20:
+                donchian_high = np.max(high[i-20:i])
+                donchian_low = np.min(low[i-20:i])
+                
+                # Long entry: price breaks above upper Donchian(20) in uptrend with volume confirmation and volatility filter
+                long_entry = (close[i] > donchian_high) and uptrend and vol_confirm and vol_filter
+                # Short entry: price breaks below lower Donchian(20) in downtrend with volume confirmation and volatility filter
+                short_entry = (close[i] < donchian_low) and downtrend and vol_confirm and vol_filter
+                
+                if long_entry:
+                    position = 1
+                    signals[i] = 0.25
+                elif short_entry:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
