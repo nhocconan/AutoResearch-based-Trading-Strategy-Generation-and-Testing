@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour volume confirmation and daily ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + daily ADX > 25
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + daily ADX > 25
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour volume confirmation and 1-day ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.8x 20-period average + daily ADX > 25
+# Short when price breaks below 20-period Donchian low + volume > 1.8x 20-period average + daily ADX > 25
 # Exit when price crosses 4-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12-hour volume for confirmation and daily ADX for trend strength
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Target: 80-180 total trades over 4 years (20-45/year)
 
 name = "4h_donchian20_12h_vol_1d_adx_v1"
 timeframe = "4h"
@@ -53,7 +52,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = tr1[0]
-    tr3[0] = t1[0]
+    tr3[0] = tr1[0]
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
@@ -136,8 +135,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout with volume confirmation and ADX filter
-            # Volume filter: volume > 1.5x 20-period average
-            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
+            # Volume filter: volume > 1.8x 20-period average
+            volume_filter = volume[i] > 1.8 * volume_ma_aligned[i]
             # Trend filter: daily ADX > 25
             trend_filter = adx_aligned[i] > 25
             
