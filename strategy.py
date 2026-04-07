@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian Breakout with 1d ADX Filter and Volume Confirmation
-# Hypothesis: Breakouts of 20-period Donchian channels on 4h, filtered by 1d ADX > 25 (trending market) and volume > 1.5x 20-period average, capture strong momentum moves in both bull and bear markets. The ADX filter avoids choppy markets where breakouts fail, while volume confirmation ensures institutional participation. Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+# Strategy: 6h Elder Ray with 1d Regime Filter
+# Hypothesis: Elder Ray (Bull/Bear Power) combined with 1d ADX regime filter captures
+# trend continuations with pullback entries. Works in bull markets via bull power
+# and bear markets via bear power, while ADX avoids ranging markets.
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 
-name = "4h_donchian_breakout_1d_adx_volume_v1"
-timeframe = "4h"
+name = "6h_elder_ray_1d_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,9 +22,8 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for ADX
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -32,89 +34,95 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Smoothing (Wilder's)
+    # Smoothed TR, DM+
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) < period:
             return result
-        result[period-1] = np.mean(data[1:period])
+        result[period-1] = np.nanmean(data[1:period])
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus14 = wilders_smoothing(dm_plus, 14)
+    dm_minus14 = wilders_smoothing(dm_minus, 14)
     
     # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
+    di_plus = np.where(tr14 > 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 > 0, 100 * dm_minus14 / tr14, 0)
     
     # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align 1d ADX to 4h
+    # Align 1d ADX to 6h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Donchian Channel (20) on 4h
-    def donchian_channel(high, low, period):
-        upper = np.full_like(high, np.nan, dtype=float)
-        lower = np.full_like(low, np.nan, dtype=float)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
+    # Calculate Elder Ray on 6h
+    # EMA(13) for power calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
     
-    upper, lower = donchian_channel(high, low, 20)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan, dtype=float)
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_ratio = volume / vol_ma
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if np.isnan(adx_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             signals[i] = 0.0
             continue
         
+        # Regime filter: only trade when ADX > 25 (trending market)
+        if adx_aligned[i] <= 25:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower or ADX weakens
-            if close[i] < lower[i] or adx_aligned[i] < 20:
+            # Exit: Bear power becomes positive (momentum fading) or ADX weakens
+            if bear_power[i] > 0 or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper or ADX weakens
-            if close[i] > upper[i] or adx_aligned[i] < 20:
+            # Exit: Bull power becomes negative (momentum fading) or ADX weakens
+            if bull_power[i] < 0 or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # ADX > 25 indicates trending market
+            # Strong trend continuation: enter on pullbacks
             if adx_aligned[i] > 25:
-                # Long breakout: price closes above upper band with volume confirmation
-                if close[i] > upper[i] and vol_ratio[i] > 1.5:
+                # Uptrend: bull power rising but negative, bear power negative
+                if bull_power[i] > bull_power[i-1] and bull_power[i] < 0 and bear_power[i] < 0:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below lower band with volume confirmation
-                elif close[i] < lower[i] and vol_ratio[i] > 1.5:
+                # Downtrend: bear power falling but positive, bull power positive
+                elif bear_power[i] < bear_power[i-1] and bear_power[i] > 0 and bull_power[i] > 0:
                     position = -1
                     signals[i] = -0.25
     
