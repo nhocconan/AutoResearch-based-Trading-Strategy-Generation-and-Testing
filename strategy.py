@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_1d_trend_volume_v2
-Hypothesis: Camarilla pivot levels (S3/R3) from 1d combined with EMA trend filter and volume confirmation on 4h timeframe.
-In trending markets (price > EMA50), breakout at R4/S4; in ranging markets, mean reversion at S3/R3.
-Volume confirmation reduces false signals. Targets 20-50 trades/year (80-200 over 4 years).
-Works in both bull and bear markets by adapting to regime via EMA filter.
+1d_donchian_20_1w_trend_volume_v1
+Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+Breakouts above 20-day high (long) or below 20-day low (short) when price is above/below weekly EMA40,
+with volume > 1.5x 20-day average. Uses discrete position sizing (0.25) to limit turnover.
+Targets 7-25 trades/year (30-100 over 4 years). Works in bull markets via breakouts and bear
+markets via short breakdowns, with volume and trend filters reducing false signals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_trend_volume_v2"
-timeframe = "4h"
+name = "1d_donchian_20_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,92 +27,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily OHLC for pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA40 for trend filter
+    ema40_1w = pd.Series(df_1w['close'].values).ewm(span=40, adjust=False).mean().values
+    ema40_1d = align_htf_to_ltf(prices, df_1w, ema40_1w)
     
-    # Calculate Camarilla pivot levels for each day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Daily Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    
-    # Align daily levels to 4h timeframe
-    r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 20-period volume average on 4h
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 20-day average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or 
-            np.isnan(ema50_4h[i]) or np.isnan(vol_sma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema40_1d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 (mean reversion fail) OR 
-            # price breaks above R4 and EMA turns down (breakout fail)
-            if close[i] < s3_4h[i] or (close[i] > r4_4h[i] and close[i] < ema50_4h[i]):
+            # Exit: price breaks below Donchian low OR weekly trend turns down
+            if close[i] < low_min[i] or close[i] < ema40_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (mean reversion fail) OR
-            # price breaks below S4 and EMA turns up (breakout fail)
-            if close[i] > r3_4h[i] or (close[i] < s4_4h[i] and close[i] > ema50_4h[i]):
+            # Exit: price breaks above Donchian high OR weekly trend turns up
+            if close[i] > high_max[i] or close[i] > ema40_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Mean reversion longs at S3 in uptrend (price > EMA)
-            if (close[i] <= s3_4h[i] and 
-                vol_confirm and 
-                close[i] > ema50_4h[i]):
+            # Breakout long: price >= Donchian high, above weekly EMA, volume confirmation
+            if (close[i] >= high_max[i] and 
+                close[i] > ema40_1d[i] and 
+                vol_confirm):
                 position = 1
                 signals[i] = 0.25
-            # Mean reversion shorts at R3 in downtrend (price < EMA)
-            elif (close[i] >= r3_4h[i] and 
-                  vol_confirm and 
-                  close[i] < ema50_4h[i]):
-                position = -1
-                signals[i] = -0.25
-            # Breakout longs at R4 in uptrend
-            elif (close[i] >= r4_4h[i] and 
-                  vol_confirm and 
-                  close[i] > ema50_4h[i]):
-                position = 1
-                signals[i] = 0.25
-            # Breakout shorts at S4 in downtrend
-            elif (close[i] <= s4_4h[i] and 
-                  vol_confirm and 
-                  close[i] < ema50_4h[i]):
+            # Breakdown short: price <= Donchian low, below weekly EMA, volume confirmation
+            elif (close[i] <= low_min[i] and 
+                  close[i] < ema40_1d[i] and 
+                  vol_confirm):
                 position = -1
                 signals[i] = -0.25
     
