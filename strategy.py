@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Daily Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-Long when price breaks above 20-day Donchian high with above-average volume AND weekly trend up
-Short when price breaks below 20-day Donchian low with above-average volume AND weekly trend down
-Exit when price crosses back to Donchian middle (10-day average of high/low)
-Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+6H Fibonacci Retracement Pullback with 12h Trend Filter and Volume Confirmation
+Long when price pulls back to 61.8% Fib level in 12h uptrend with volume confirmation
+Short when price pulls back to 38.2% Fib level in 12h downtrend with volume confirmation
+Exit when price crosses 50% Fib level
+Uses Fibonacci retracements from recent swing highs/lows to catch trend continuations.
+Works in both bull and bear markets by following the 12h trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_fib_pullback_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,60 +27,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    # Upper: highest high of last 20 days
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower: lowest low of last 20 days
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Middle: average of upper and lower
-    donch_mid = (donch_high + donch_low) / 2
+    # === Swing detection (5-period lookback) ===
+    # Find recent swing high and low
+    swing_high = np.zeros(n)
+    swing_low = np.zeros(n)
     
-    # === Volume confirmation (20-day average) ===
+    for i in range(5, n):
+        # Swing high: highest high in last 5 bars
+        swing_high[i] = np.max(high[i-5:i+1])
+        # Swing low: lowest low in last 5 bars
+        swing_low[i] = np.min(low[i-5:i+1])
+    
+    # === Fibonacci levels ===
+    diff = swing_high - swing_low
+    fib_382 = swing_low + 0.382 * diff  # 38.2% retracement
+    fib_500 = swing_low + 0.500 * diff  # 50% retracement
+    fib_618 = swing_low + 0.618 * diff  # 61.8% retracement
+    
+    # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === Weekly trend filter (EMA 21) ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 12h trend filter (EMA 34) ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(swing_high[i]) or np.isnan(swing_low[i]) or 
+            np.isnan(fib_382[i]) or np.isnan(fib_500[i]) or np.isnan(fib_618[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back below middle line
-            if close[i] < donch_mid[i]:
+            # Exit: price crosses below 50% Fib level
+            if close[i] < fib_500[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above middle line
-            if close[i] > donch_mid[i]:
+            # Exit: price crosses above 50% Fib level
+            if close[i] > fib_500[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need above-average volume (at least 1.2x)
-            if vol_ratio[i] < 1.2:
+            # Need volume confirmation (above average)
+            if vol_ratio[i] < 1.1:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation AND weekly trend filter
-            if close[i] > donch_high[i] and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
-                # Breakout above upper channel with rising weekly EMA -> long
+            # Entry: Fibonacci pullback with 12h trend filter
+            # Long: pullback to 61.8% in uptrend
+            if (close[i] <= fib_618[i] * 1.001 and close[i] >= fib_618[i] * 0.999 and
+                ema_12h_aligned[i] > ema_12h_aligned[i-1]):
+                # Near 61.8% Fib level with rising 12h EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donch_low[i] and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
-                # Breakdown below lower channel with falling weekly EMA -> short
+            # Short: pullback to 38.2% in downtrend
+            elif (close[i] <= fib_382[i] * 1.001 and close[i] >= fib_382[i] * 0.999 and
+                  ema_12h_aligned[i] < ema_12h_aligned[i-1]):
+                # Near 38.2% Fib level with falling 12h EMA -> short
                 position = -1
                 signals[i] = -0.25
     
