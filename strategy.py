@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and 1d Trend Filter
-Long when price breaks above Donchian(20) upper band with expanding volume AND 1d EMA trend up
-Short when price breaks below Donchian(20) lower band with expanding volume AND 1d EMA trend down
-Exit when price crosses back to middle line (10-period EMA of Donchian)
-Uses Donchian channels that capture breakouts, with volume confirmation and trend filter.
+4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+Long when price breaks above Donchian(20) high with expanding volume AND 1d EMA trend up
+Short when price breaks below Donchian(20) low with expanding volume AND 1d EMA trend down
+Exit when price crosses back to Donchian middle line
+Uses Donchian channels for clear breakout levels, volume for confirmation, and 1d trend filter to avoid counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_1d_trend_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_1d_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,20 +26,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channels (20-period) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # === ATR (14) for volatility filter ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === Donchian Channels (20-period high/low) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_high + donchian_low) / 2
     
     # === Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,14 +44,14 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price crosses back below middle line
-            if close[i] < donch_mid[i]:
+            if close[i] < donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -69,7 +59,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price crosses back above middle line
-            if close[i] > donch_mid[i]:
+            if close[i] > donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -81,11 +71,11 @@ def generate_signals(prices):
                 continue
             
             # Entry: Donchian breakout with volume confirmation AND 1d trend filter
-            if close[i] > donch_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+            if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
                 # Breakout above upper channel with rising 1d EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donch_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+            elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
                 # Breakdown below lower channel with falling 1d EMA -> short
                 position = -1
                 signals[i] = -0.25
