@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1-week pivot direction and volume confirmation
-# Long when price breaks above 20-period high, weekly pivot shows bullish bias (close > pivot), and volume > 1.5x average
-# Short when price breaks below 20-period low, weekly pivot shows bearish bias (close < pivot), and volume > 1.5x average
-# Exit when price returns to 10-period midpoint or trend reverses
-# Stoploss at 2.5 * ATR(20)
+# Hypothesis: 4-hour Camarilla pivot levels from 12-hour chart + volume spike + ADX trend filter
+# Long when price touches S1 support with volume > 2x average and ADX > 25 (trending)
+# Short when price touches R1 resistance with volume > 2x average and ADX > 25 (trending)
+# Exit when price moves to opposite pivot level or ADX < 20 (range)
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses weekly pivot for trend bias and Donchian for breakout signals
-# Target: 50-150 total trades over 4 years (12-38/year)
+# Uses 12-hour Camarilla levels for structure and 4h volume/ADX for confirmation
+# Target: 80-120 total trades over 4 years (20-30/year)
 
-name = "6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "4h_camarilla_12h_vol_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,50 +27,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # 10-period midpoint for exit
-    donchian_mid_10 = (high_series.rolling(window=10, min_periods=10).max() + 
-                       low_series.rolling(window=10, min_periods=10).min()) / 2
-    donchian_mid_10 = donchian_mid_10.values
-    
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # 12-hour data for Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    # Calculate Camarilla levels from previous 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align weekly pivot to 6s timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Camarilla levels: based on previous day's range
+    # R4 = close + (high - low) * 1.500
+    # R3 = close + (high - low) * 1.250
+    # R2 = close + (high - low) * 1.166
+    # R1 = close + (high - low) * 1.083
+    # S1 = close - (high - low) * 1.083
+    # S2 = close - (high - low) * 1.166
+    # S3 = close - (high - low) * 1.250
+    # S4 = close - (high - low) * 1.500
+    r1_12h = close_12h + (high_12h - low_12h) * 1.083
+    s1_12h = close_12h - (high_12h - low_12h) * 1.083
     
-    # Weekly bias: bullish if close > pivot, bearish if close < pivot
-    weekly_bullish = close_1w > pivot_1w
-    weekly_bearish = close_1w < pivot_1w
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align Camarilla levels to 4h timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
-    # 6s volume average for confirmation
-    volume_series = pd.Series(volume)
-    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    # 4h volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # ATR(20) for stoploss and volatility filter
+    # ADX(14) for trend strength on 4h
+    # Calculate True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI values
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # ATR(14) for stoploss
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,9 +97,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -88,49 +106,47 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to 10-period midpoint or weekly bias turns bearish
-            elif close[i] <= donchian_mid_10[i] or weekly_bearish_aligned[i] > 0.5:
+            # Exit: price reaches R1 or ADX weakens (< 20)
+            elif close[i] >= r1_12h_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to 10-period midpoint or weekly bias turns bullish
-            elif close[i] >= donchian_mid_10[i] or weekly_bullish_aligned[i] > 0.5:
+            # Exit: price reaches S1 or ADX weakens (< 20)
+            elif close[i] <= s1_12h_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts with weekly bias and volume confirmation
-            # Bullish breakout: price breaks above Donchian high
-            bullish_breakout = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
-            # Bearish breakout: price breaks below Donchian low
-            bearish_breakout = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
+            # Look for entries: price touches S1/R1 with volume spike and strong trend
+            # Volume spike: > 2x average volume
+            volume_spike = volume[i] > 2.0 * volume_ma[i]
+            # Strong trend: ADX > 25
+            strong_trend = adx[i] > 25
             
-            # Long: bullish breakout, weekly bullish bias, volume spike
-            if (bullish_breakout and
-                weekly_bullish_aligned[i] > 0.5 and
-                volume[i] > 1.5 * volume_ma[i]):
+            # Long: price touches S1 support, volume spike, strong trend
+            if (close[i] <= s1_12h_aligned[i] * 1.001 and  # Allow small tolerance for touch
+                volume_spike and strong_trend):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: bearish breakout, weekly bearish bias, volume spike
-            elif (bearish_breakout and
-                  weekly_bearish_aligned[i] > 0.5 and
-                  volume[i] > 1.5 * volume_ma[i]):
+            # Short: price touches R1 resistance, volume spike, strong trend
+            elif (close[i] >= r1_12h_aligned[i] * 0.999 and  # Allow small tolerance for touch
+                  volume_spike and strong_trend):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
