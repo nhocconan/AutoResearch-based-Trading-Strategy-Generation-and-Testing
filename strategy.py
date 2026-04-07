@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
-# Uses Williams %R (14) on 6h for overbought/oversold signals:
-# - Buy when Williams %R crosses above -80 (oversold) in 1d uptrend
-# - Sell when Williams %R crosses below -20 (overbought) in 1d downtrend
+# Hypothesis: 12h Donchian channel breakout with 1d trend filter and volume confirmation
+# Uses Donchian(20) on 12h for breakout signals:
+# - Buy when price breaks above 20-period high in 1d uptrend
+# - Sell when price breaks below 20-period low in 1d downtrend
 # - 1d EMA50 filter ensures trades align with higher timeframe trend
 # - Volume confirmation (current volume > 20-period average) avoids false signals
-# Designed for low frequency (target: 15-35 trades/year) to minimize fee drag
-# Williams %R is effective in ranging markets and captures reversals in trends
+# Designed for low frequency (target: 12-37 trades/year) to minimize fee drag
+# Donchian breakouts work in trending markets and capture momentum in both bull and bear phases
 
-name = "6h_williamsr_1d_ema_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,14 +36,9 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams %R (14-period) on 6h data
-    # Calculate on 6h data then align (though we're already on 6h, this ensures proper handling)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    diff = highest_high - lowest_low
-    williams_r = np.where(diff != 0, -100 * (highest_high - close) / diff, -50)
+    # Donchian channel (20-period) on 12h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,7 +49,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(williams_r[i])):
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
@@ -65,33 +60,33 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Williams %R levels
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # Break above previous high
+        breakout_down = close[i] < lowest_low[i-1]  # Break below previous low
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit when overbought or trend changes
-            if overbought or not uptrend:
+            # Exit when price breaks below Donchian low or trend changes
+            if close[i] < lowest_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit when oversold or trend changes
-            if oversold or not downtrend:
+            # Exit when price breaks above Donchian high or trend changes
+            if close[i] > highest_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
             # Entry conditions with trend and volume confirmation
-            # Buy when coming out of oversold in uptrend
-            if oversold and uptrend and vol_confirm and i > 0 and williams_r[i-1] >= -80:
+            # Buy when breaking out upward in uptrend
+            if breakout_up and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Sell when coming out of overbought in downtrend
-            elif overbought and downtrend and vol_confirm and i > 0 and williams_r[i-1] <= -20:
+            # Sell when breaking out downward in downtrend
+            elif breakout_down and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
