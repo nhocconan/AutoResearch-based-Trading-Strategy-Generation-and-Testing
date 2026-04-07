@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily volume confirmation and daily RSI trend filter
-# Long when price breaks above 20-period Donchian high + daily volume > 1.5x 20-period daily average + daily RSI > 50
-# Short when price breaks below 20-period Donchian low + daily volume > 1.5x 20-period daily average + daily RSI < 50
+# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and 4-hour RSI trend filter
+# Long when price breaks above 20-period Donchian high + daily volume > 1.5x 20-period daily average + RSI(14) > 50
+# Short when price breaks below 20-period Donchian low + daily volume > 1.5x 20-period daily average + RSI(14) < 50
 # Exit when price crosses opposite Donchian level (long exits at Donchian low, short exits at Donchian high)
 # Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses daily volume for confirmation and daily RSI for trend strength
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Uses daily volume for confirmation and 4h RSI for trend strength
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "12h_donchian20_1d_vol_daily_rsi_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_vol_rsi_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     volume_ma = volume_1d_s.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Daily RSI (14-period) for trend filter
+    # 4-hour RSI (14-period) for trend filter
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -104,10 +104,10 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with volume confirmation and RSI trend filter
+            # Look for entries: Donchian breakout with volume confirmation and RSI filter
             # Volume filter: volume > 1.5x 20-period daily average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
-            # Trend filter: daily RSI > 50 for long, < 50 for short
+            # Trend filter: RSI > 50 for long, < 50 for short
             rsi_filter_long = rsi[i] > 50
             rsi_filter_short = rsi[i] < 50
             
