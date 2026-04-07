@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_aroon_oscillator_weekly_trend_volume_v1
-Hypothesis: Aroon Oscillator (25) on 1d identifies trend strength. When AO > 0 (uptrend) and price above weekly EMA10 with volume confirmation, go long. When AO < 0 (downtrend) and price below weekly EMA10 with volume confirmation, go short. Uses weekly trend filter to avoid whipsaws, targeting 10-25 trades/year.
+6h_cci_momentum_1d_trend_volume_v1
+Hypothesis: CCI(20) captures momentum on 6h. Long when CCI > 100 and price above 1d EMA200 (uptrend). Short when CCI < -100 and price below 1d EMA200 (downtrend). Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend. Target: 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_aroon_oscillator_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_cci_momentum_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,72 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA10 for trend filter
-    weekly_ema10 = df_weekly['close'].ewm(span=10, adjust=False).mean()
-    weekly_ema10_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema10.values)
+    # 1d EMA200 for trend filter
+    ema_200 = df_1d['close'].ewm(span=200, adjust=False).mean()
     
-    # Aroon Oscillator (25) on daily
-    # Aroon Up = ((Period - Days Since Highest High) / Period) * 100
-    # Aroon Down = ((Period - Days Since Lowest Low) / Period) * 100
-    # Aroon Oscillator = Aroon Up - Aroon Down
-    period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
+    # Align 1d EMA200 to 6h timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200.values)
     
-    for i in range(period - 1, n):
-        highest_high_idx = np.argmax(high[i - period + 1:i + 1])
-        lowest_low_idx = np.argmin(low[i - period + 1:i + 1])
-        days_since_high = period - 1 - highest_high_idx
-        days_since_low = period - 1 - lowest_low_idx
-        aroon_up[i] = ((period - days_since_high) / period) * 100
-        aroon_down[i] = ((period - days_since_low) / period) * 100
+    # CCI(20) on 6h: (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
+    tp = (high + low + close) / 3.0
+    tp_series = pd.Series(tp)
+    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp - sma_tp.values) / (0.015 * mad.values)
+    cci = np.nan_to_num(cci, nan=0.0)
     
-    aroon_osc = aroon_up - aroon_down
-    
-    # Volume confirmation (20-day average)
+    # Volume confirmation (20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(40, n):
         # Skip if required data not available
-        if (np.isnan(aroon_osc[i]) or np.isnan(weekly_ema10_aligned[i]) or 
+        if (np.isnan(cci[i]) or np.isnan(ema_200_aligned[i]) or 
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Aroon Oscillator <= 0 or price below weekly EMA10
-            if aroon_osc[i] <= 0 or close[i] < weekly_ema10_aligned[i]:
+            # Exit: CCI drops below 100 or price breaks below EMA200
+            if cci[i] < 100 or close[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: Aroon Oscillator >= 0 or price above weekly EMA10
-            if aroon_osc[i] >= 0 or close[i] > weekly_ema10_aligned[i]:
+            # Exit: CCI rises above -100 or price breaks above EMA200
+            if cci[i] > -100 or close[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Aroon Oscillator > 0, with volume and price above weekly EMA10
-            if (aroon_osc[i] > 0 and vol_confirm and 
-                close[i] > weekly_ema10_aligned[i]):
+            # Long entry: CCI > 100, with volume and price above EMA200
+            if (cci[i] > 100 and vol_confirm and 
+                close[i] > ema_200_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Aroon Oscillator < 0, with volume and price below weekly EMA10
-            elif (aroon_osc[i] < 0 and vol_confirm and 
-                  close[i] < weekly_ema10_aligned[i]):
+            # Short entry: CCI < -100, with volume and price below EMA200
+            elif (cci[i] < -100 and vol_confirm and 
+                  close[i] < ema_200_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
