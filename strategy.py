@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot levels from 12-hour chart + volume spike + ADX trend filter
-# Long when price touches S1 support with volume > 2x average and ADX > 25 (trending)
-# Short when price touches R1 resistance with volume > 2x average and ADX > 25 (trending)
-# Exit when price moves to opposite pivot level or ADX < 20 (range)
+# Hypothesis: 12-hour Donchian(20) breakout with volume confirmation and ADX trend filter
+# Long when price breaks above 20-period high with volume > 1.5x average and ADX > 25
+# Short when price breaks below 20-period low with volume > 1.5x average and ADX > 25
+# Exit when price returns to 10-period mid-point or ADX < 20
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12-hour Camarilla levels for structure and 4h volume/ADX for confirmation
-# Target: 80-120 total trades over 4 years (20-30/year)
+# Uses 1-day trend filter to avoid counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "4h_camarilla_12h_vol_adx_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_vol_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,37 +27,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1-day EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla levels: based on previous day's range
-    # R4 = close + (high - low) * 1.500
-    # R3 = close + (high - low) * 1.250
-    # R2 = close + (high - low) * 1.166
-    # R1 = close + (high - low) * 1.083
-    # S1 = close - (high - low) * 1.083
-    # S2 = close - (high - low) * 1.166
-    # S3 = close - (high - low) * 1.250
-    # S4 = close - (high - low) * 1.500
-    r1_12h = close_12h + (high_12h - low_12h) * 1.083
-    s1_12h = close_12h - (high_12h - low_12h) * 1.083
+    # 12-hour Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Align Camarilla levels to 4h timeframe
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # 12-hour volume average (20-period)
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # 4h volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # ADX(14) for trend strength on 4h
+    # ADX(14) for trend strength on 12h
     # Calculate True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -95,10 +86,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -111,8 +103,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price reaches R1 or ADX weakens (< 20)
-            elif close[i] >= r1_12h_aligned[i] or adx[i] < 20:
+            # Exit: price returns to midpoint or ADX weakens (< 20)
+            elif close[i] <= donchian_mid[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -124,29 +116,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price reaches S1 or ADX weakens (< 20)
-            elif close[i] <= s1_12h_aligned[i] or adx[i] < 20:
+            # Exit: price returns to midpoint or ADX weakens (< 20)
+            elif close[i] >= donchian_mid[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price touches S1/R1 with volume spike and strong trend
-            # Volume spike: > 2x average volume
-            volume_spike = volume[i] > 2.0 * volume_ma[i]
+            # Look for entries: Donchian breakout with volume spike and strong trend
+            # Volume spike: > 1.5x average volume
+            volume_spike = volume[i] > 1.5 * volume_ma[i]
             # Strong trend: ADX > 25
             strong_trend = adx[i] > 25
+            # Trend filter: price above/below 1-day EMA50
+            above_ema = close[i] > ema_50_1d_aligned[i]
+            below_ema = close[i] < ema_50_1d_aligned[i]
             
-            # Long: price touches S1 support, volume spike, strong trend
-            if (close[i] <= s1_12h_aligned[i] * 1.001 and  # Allow small tolerance for touch
-                volume_spike and strong_trend):
+            # Long: break above Donchian high, volume spike, strong trend, above EMA
+            if (close[i] > donchian_high[i] and 
+                volume_spike and strong_trend and above_ema):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price touches R1 resistance, volume spike, strong trend
-            elif (close[i] >= r1_12h_aligned[i] * 0.999 and  # Allow small tolerance for touch
-                  volume_spike and strong_trend):
+            # Short: break below Donchian low, volume spike, strong trend, below EMA
+            elif (close[i] < donchian_low[i] and 
+                  volume_spike and strong_trend and below_ema):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
