@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h Stochastic RSI + 4h Trend + 1d Volume Confirmation
-# Hypothesis: In strong trends (4h EMA20 > EMA50), buy pullbacks on 1h when StochRSI < 0.2 (oversold),
-# sell rallies when StochRSI > 0.8 (overbought), confirmed by 1d volume > 1.5x average.
-# Works in bull/bear: trend filter ensures we trade with higher timeframe momentum,
-# while StochRSI captures mean-reversion within the trend. Volume filter avoids low-liquidity traps.
-# Target: 15-35 trades/year (~60-140 over 4 years) to minimize fee drag.
-name = "1h_stochrsi_4h_trend_1d_volume_v1"
-timeframe = "1h"
+# Strategy: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+# Hypothesis: 6h Donchian breakouts capture medium-term momentum, filtered by weekly pivot trend
+# (price above/below weekly pivot) and volume confirmation to avoid false breakouts.
+# Works in bull (breakouts continue) and bear (failed breaks reverse) markets.
+# Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag.
+name = "6h_donchian20_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,90 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # 4h EMA20 and EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_range = weekly_high - weekly_low
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + weekly_range
+    weekly_s2 = weekly_pivot - weekly_range
     
-    # 1d volume average for filter
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align weekly pivot levels to 6h timeframe (shifted by 1 for completed weeks only)
+    pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
-    # 1h Stochastic RSI (14,14,3,3)
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Stochastic RSI
-    rsi_min = pd.Series(rsi).rolling(window=14, min_periods=14).min().values
-    rsi_max = pd.Series(rsi).rolling(window=14, min_periods=14).max().values
-    stoch_rsi = np.where((rsi_max - rsi_min) != 0, (rsi - rsi_min) / (rsi_max - rsi_min), 0)
-    # Smooth with K=3, D=3
-    stoch_rsi_k = pd.Series(stoch_rsi).rolling(window=3, min_periods=3).mean().values
-    stoch_rsi_d = pd.Series(stoch_rsi_k).rolling(window=3, min_periods=3).mean().values
+    # 6h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or
-            np.isnan(vol_avg_1d_aligned[i]) or np.isnan(stoch_rsi_d[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Check session
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: trend turns bearish or StochRSI overbought
-            if ema20_4h_aligned[i] < ema50_4h_aligned[i] or stoch_rsi_d[i] > 0.8:
+            # Exit: price breaks below weekly S1 or Donchian low breaks
+            if close[i] < s1_6h[i] or close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: trend turns bullish or StochRSI oversold
-            if ema20_4h_aligned[i] > ema50_4h_aligned[i] or stoch_rsi_d[i] < 0.2:
+            # Exit: price breaks above weekly R1 or Donchian high breaks
+            if close[i] > r1_6h[i] or close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume confirmation and in-session
-            if volume[i] > (vol_avg_1d_aligned[i] * 1.5):
-                # Long: uptrend (EMA20 > EMA50) + StochRSI oversold
-                if ema20_4h_aligned[i] > ema50_4h_aligned[i] and stoch_rsi_d[i] < 0.2:
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Long: price breaks above Donchian high AND above weekly pivot (bullish bias)
+                if close[i] > donchian_high[i] and close[i] > pivot_6h[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Short: downtrend (EMA20 < EMA50) + StochRSI overbought
-                elif ema20_4h_aligned[i] < ema50_4h_aligned[i] and stoch_rsi_d[i] > 0.8:
+                    signals[i] = 0.25
+                # Short: price breaks below Donchian low AND below weekly pivot (bearish bias)
+                elif close[i] < donchian_low[i] and close[i] < pivot_6h[i]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
