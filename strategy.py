@@ -1,15 +1,14 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h KAMA Trend + Volume Spike + Daily Close Filter
-# Hypothesis: KAMA adapts to market noise, reducing false signals in ranging markets.
-# Combined with volume spikes and daily close above/below KAMA, it captures strong trends
-# while avoiding whipsaws. Works in both bull and bear markets by following adaptive trend.
-# Target: 25-35 trades/year (100-140 total).
+# Strategy: 4h Donchian Breakout with Volume Spike and Daily Trend Filter
+# Hypothesis: Donchian(20) breakouts aligned with daily EMA(50) trend and volume spikes
+# capture momentum in both bull and bear markets. Volume filter reduces false breakouts.
+# Target: 20-40 trades/year (80-160 total) to avoid fee drag.
 
-name = "4h_kama_trend_volume_daily_close_v1"
+name = "4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,85 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for close filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # KAMA (Adaptive Moving Average) parameters
-    er_length = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    dir = np.abs(np.subtract(close, np.roll(close, er_length)))
-    vol = np.sum(np.lib.stride_tricks.sliding_window_view(change, er_length), axis=1)
-    # Handle edge case for vol calculation
-    vol_padded = np.concatenate([np.full(er_length-1, np.nan), vol])
-    er = np.where(vol_padded != 0, dir / vol_padded, 0)
+    # 4h Donchian(20) - use 20 lookback for 4h period
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Smoothing constants
-    sc = np.power(er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1), 2)
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.8 * vol_ma)
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(kama[i]) or np.isnan(vol_ma[i]) or 
-            i >= len(close_1d) or np.isnan(close_1d[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Get daily close (already aligned via index, but we need to map 4h to daily)
-        # Since we're on 4h timeframe, we use the most recent daily close
-        daily_idx = i // 16  # 16 four-hour bars per day
-        if daily_idx >= len(close_1d):
-            daily_idx = len(close_1d) - 1
-        daily_close = close_1d[daily_idx]
         
         # Check volume confirmation
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below KAMA or daily close turns bearish
-            if close[i] < kama[i] or daily_close < kama[i]:
+            # Exit: price crosses below Donchian low or trend turns bearish
+            if close[i] < low_20[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:  # Short position
-            # Exit: price crosses above KAMA or daily close turns bullish
-            if close[i] > kama[i] or daily_close > kama[i]:
+            # Exit: price crosses above Donchian high or trend turns bullish
+            if close[i] > high_20[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             if vol_ok:
-                # Long entry: price above KAMA and daily close above KAMA
-                if close[i] > kama[i] and daily_close > kama[i]:
+                # Breakout above Donchian high in uptrend
+                if close[i] > high_20[i] and close[i] > ema_50_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short entry: price below KAMA and daily close below KAMA
-                elif close[i] < kama[i] and daily_close < kama[i]:
+                    signals[i] = 0.30
+                # Breakdown below Donchian low in downtrend
+                elif close[i] < low_20[i] and close[i] < ema_50_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
