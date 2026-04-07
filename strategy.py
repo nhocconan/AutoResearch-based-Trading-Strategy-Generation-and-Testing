@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + 1d Trend Filter + Volume Spike + Chop Filter
-Long when price breaks above Donchian upper band (20) and price > 1d EMA50; 
-Short when price breaks below Donchian lower band (20) and price < 1d EMA50.
-Exit when price crosses back through Donchian midline (20-period average).
-Uses volume spike and chop filter (Choppiness Index > 61.8) for entry confirmation.
+4h Donchian Breakout with 1d Volume Confirmation and ADX Trend Filter
+Long when price breaks above Donchian(20) high + volume spike + ADX>25
+Short when price breaks below Donchian(20) low + volume spike + ADX>25
+Exit when price crosses opposite Donchian boundary or ADX<20 (range)
+Target: 20-40 trades/year per symbol with strong trend capture
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_chop_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_volume_adx_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,83 +26,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20) ===
-    # Upper band: highest high of last 20 periods
-    # Lower band: lowest low of last 20 periods
-    # Middle: average of upper and lower
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # === Donchian Channels (20-period) ===
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d EMA50 Trend Filter ===
+    # === ADX Calculation (14-period) ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # === 1d Volume Spike Detector ===
     df_1d = get_htf_data(prices, '1d')
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # === Volume Spike Detector (20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
-    
-    # === Choppiness Index (14) - Range filter ===
-    # CHOP > 61.8 = ranging market (good for mean reversion, but we avoid)
-    # CHOP < 38.2 = trending market (good for breakouts)
-    # We only take breakouts when CHOP < 61.8 (not extremely choppy)
-    tr = np.maximum(high - low, 
-                    np.maximum(np.abs(high - np.roll(close, 1)), 
-                               np.maximum(np.abs(low - np.roll(close, 1)), 0)))
-    # Handle first element
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of true ranges over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Maximum range over 14 periods
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    max_range = max_high - min_low
-    
-    # Avoid division by zero
-    chop = np.where(max_range > 0, 100 * np.log10(tr_sum / max_range) / np.log10(14), 50)
-    chop_filter = chop < 61.8  # Avoid extremely choppy markets
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (vol_ma_1d * 1.5)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(chop[i]):
+        # Skip if any NaN values
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian midline
-            if close[i] < donchian_mid[i]:
+            # Exit: price breaks below lower Donchian OR ADX weakens (<20)
+            if close[i] < low_20[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian midline
-            if close[i] > donchian_mid[i]:
+            # Exit: price breaks above upper Donchian OR ADX weakens (<20)
+            if close[i] > high_20[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: break above upper band + price above 1d EMA50 + volume spike + not too choppy
-            if (close[i] > donchian_high[i-1] and  # Break above previous bar's upper band
-                close[i] > ema_50_aligned[i] and 
-                vol_spike[i] and 
-                chop_filter[i]):
+            # Long: break above upper Donchian + volume spike + strong trend (ADX>25)
+            if (close[i] > high_20[i] and 
+                vol_spike_1d_aligned[i] and 
+                adx[i] > 25):
                 position = 1
                 signals[i] = 0.25
-            # Short: break below lower band + price below 1d EMA50 + volume spike + not too choppy
-            elif (close[i] < donchian_low[i-1] and  # Break below previous bar's lower band
-                  close[i] < ema_50_aligned[i] and 
-                  vol_spike[i] and 
-                  chop_filter[i]):
+            # Short: break below lower Donchian + volume spike + strong trend (ADX>25)
+            elif (close[i] < low_20[i] and 
+                  vol_spike_1d_aligned[i] and 
+                  adx[i] > 25):
                 position = -1
                 signals[i] = -0.25
     
