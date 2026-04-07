@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-6H Keltner Breakout with Volume Confirmation and 12h Trend Filter
-Long when price breaks above upper Keltner channel (2*ATR) with expanding volume AND 12h EMA trend up
-Short when price breaks below lower Keltner channel with expanding volume AND 12h EMA trend down
+4H Keltner Breakout with Volume Confirmation and 1D Trend Filter
+Long when price breaks above upper Keltner channel (2*ATR) with expanding volume AND 1D EMA trend up
+Short when price breaks below lower Keltner channel with expanding volume AND 1D EMA trend down
 Exit when price crosses back to middle line
 Uses ATR-based bands that adapt to volatility, reducing false breakouts in ranging markets.
+Target: 20-30 trades per year per symbol (<120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_breakout_volume_12h_trend_v1"
-timeframe = "6h"
+name = "4h_keltner_breakout_volume_1d_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,17 +46,17 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
     
-    # === 12h trend filter (EMA 21) ===
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # === 1D trend filter (EMA 21) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i])):
+            np.isnan(ema_mid[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -80,13 +81,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry: Keltner breakout with volume confirmation AND 12h trend filter
-            if close[i] > keltner_upper[i] and ema_12h_aligned[i] > ema_12h_aligned[i-1]:
-                # Breakout above upper channel with rising 12h EMA -> long
+            # Entry: Keltner breakout with volume confirmation AND 1D trend filter
+            if close[i] > keltner_upper[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Breakout above upper channel with rising 1D EMA -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < keltner_lower[i] and ema_12h_aligned[i] < ema_12h_aligned[i-1]:
-                # Breakdown below lower channel with falling 12h EMA -> short
+            elif close[i] < keltner_lower[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Breakdown below lower channel with falling 1D EMA -> short
                 position = -1
                 signals[i] = -0.25
     
