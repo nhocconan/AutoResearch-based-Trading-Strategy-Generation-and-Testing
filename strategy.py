@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-1h RSI Pullback with 4h Trend and Volume Confirmation
-Hypothesis: Pullbacks to RSI(30) in strong 4h trends capture mean reversion within trend.
-Volume confirms institutional participation. Works in both bull/bear by following 4h trend.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+6h Ichimoku Cloud with 1d Trend Filter and Volume Spike
+Hypothesis: Ichimoku TK cross with cloud filter identifies trend strength.
+Using 1d EMA200 as trend filter ensures alignment with higher timeframe trend.
+Volume spikes confirm institutional participation. Works in bull/bear by following trend.
+Target: 15-30 trades/year per symbol to minimize fee drag on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_pullback_4h_trend_volume_v1"
-timeframe = "1h"
+name = "6h_ichimoku_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,68 +26,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Ichimoku Components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # 4h EMA50 Trend Filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_50 = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
     
     # Volume Spike Detector
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 1d EMA200 Trend Filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
-        if np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
+    for i in range(52, n):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Cloud top and bottom
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 70 (overbought) or trend breaks
-            if rsi[i] > 70 or close[i] < ema_50_aligned[i]:
+            # Exit: price closes below cloud OR TK cross turns bearish
+            if (close[i] < cloud_bottom or 
+                (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1])):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 30 (oversold) or trend breaks
-            if rsi[i] < 30 or close[i] > ema_50_aligned[i]:
+            # Exit: price closes above cloud OR TK cross turns bullish
+            if (close[i] > cloud_top or 
+                (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1])):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: RSI < 30 (oversold) + price above 4h EMA50 + volume spike
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_aligned[i] and 
+            # Bullish TK cross above cloud + price above 1d EMA200 + volume spike
+            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and
+                close[i] > cloud_top and 
+                close[i] > ema_200_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: RSI > 70 (overbought) + price below 4h EMA50 + volume spike
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_aligned[i] and 
+                signals[i] = 0.25
+            # Bearish TK cross below cloud + price below 1d EMA200 + volume spike
+            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and
+                  close[i] < cloud_bottom and 
+                  close[i] < ema_200_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
