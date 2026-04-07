@@ -1,84 +1,96 @@
 #!/usr/bin/env python3
 """
-4h_cci_breakout_1d_trend_volume_v1
-Hypothesis: On 4-hour timeframe, use CCI (14) for momentum signals, filtered by daily trend (EMA20 > EMA50) and volume confirmation.
-Enter long when CCI crosses above +100 and daily trend is up with volume > 1.5x average.
-Enter short when CCI crosses below -100 and daily trend is down with volume > 1.5x average.
-Exit when CCI returns to neutral zone (-100 to 100) or trend reverses.
-Designed to work in both bull and bear markets by following daily trend direction.
-Targets 20-50 trades/year to minimize fee drift while capturing sustained moves.
+6h_weekly_pivot_reversal_v1
+Hypothesis: On 6-hour timeframe, use weekly pivot points (R3/S3) for mean reversion signals.
+When price reaches weekly R3 or S3 with rejection candle (pin bar) and volume confirmation,
+enter opposite direction. Weekly pivot acts as strong support/resistance in both bull and bear markets.
+Exit when price returns to weekly pivot point or opposite S1/R1 level.
+Targets 15-25 trades/year to minimize fee drag while capturing high-probability reversals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_weekly_pivot_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # CCI (14) calculation
-    typical_price = (high + low + close) / 3.0
-    tp_series = pd.Series(typical_price)
-    ma_tp = tp_series.rolling(window=14, min_periods=14).mean()
-    mad = tp_series.rolling(window=14, min_periods=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (tp_series - ma_tp) / (0.015 * mad)
-    cci_values = cci.values
-    
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get daily data for trend filter (calculate once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot points (calculate once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA20 and EMA50 on daily close
-    daily_close = df_1d['close'].values
-    daily_close_s = pd.Series(daily_close)
-    ema20_1d = daily_close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50_1d = daily_close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L
+    # S2 = P-(H-L), R2 = P+(H-L), S3 = L-2*(H-P), R3 = H+2*(P-L)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Align to 4h timeframe (shifted by 1 day to avoid look-ahead)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    s1 = 2 * pp - weekly_high
+    r1 = 2 * pp - weekly_low
+    s2 = pp - (weekly_high - weekly_low)
+    r2 = pp + (weekly_high - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    
+    # Align to 6h timeframe (shifted by 1 week to avoid look-ahead)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    
+    # Volume confirmation (24-period average = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after CCI warmup
+    for i in range(24, n):  # Start after volume MA warmup
         # Skip if required data not available
-        if (np.isnan(cci_values[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 24-period average
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend filter from daily: up if EMA20 > EMA50, down if EMA20 < EMA50
-        trend_up = ema20_1d_aligned[i] > ema50_1d_aligned[i]
-        trend_down = ema20_1d_aligned[i] < ema50_1d_aligned[i]
+        # Pin bar detection: small body, long wick in direction of rejection
+        body_size = abs(close[i] - open_price[i])
+        total_range = high[i] - low[i]
+        lower_wick = min(open_price[i], close[i]) - low[i]
+        upper_wick = high[i] - max(open_price[i], close[i])
+        
+        # Avoid division by zero
+        if total_range == 0:
+            signals[i] = 0.0
+            continue
+            
+        # Bullish pin bar: long lower wick, small body
+        bullish_pin = (lower_wick > 0.6 * total_range) and (body_size < 0.3 * total_range)
+        # Bearish pin bar: long upper wick, small body
+        bearish_pin = (upper_wick > 0.6 * total_range) and (body_size < 0.3 * total_range)
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when CCI returns to neutral zone (< 100)
-            if cci_values[i] < 100:
-                exit_long = True
-            # Exit on trend reversal
-            elif not trend_up:
+            # Exit when price returns to weekly pivot or reaches S1
+            if close[i] >= pp_aligned[i] or close[i] <= s1_aligned[i]:
                 exit_long = True
             
             if exit_long:
@@ -90,11 +102,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when CCI returns to neutral zone (> -100)
-            if cci_values[i] > -100:
-                exit_short = True
-            # Exit on trend reversal
-            elif not trend_down:
+            # Exit when price returns to weekly pivot or reaches R1
+            if close[i] <= pp_aligned[i] or close[i] >= r1_aligned[i]:
                 exit_short = True
             
             if exit_short:
@@ -103,11 +112,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI crosses above +100, daily trend up, volume confirmation
-            long_entry = (cci_values[i] > 100) and (cci_values[i-1] <= 100) and trend_up and vol_confirm
+            # Long entry: price at or below S3 with bullish pin bar and volume confirmation
+            long_entry = (low[i] <= s3_aligned[i]) and bullish_pin and vol_confirm
             
-            # Short entry: CCI crosses below -100, daily trend down, volume confirmation
-            short_entry = (cci_values[i] < -100) and (cci_values[i-1] >= -100) and trend_down and vol_confirm
+            # Short entry: price at or above R3 with bearish pin bar and volume confirmation
+            short_entry = (high[i] >= r3_aligned[i]) and bearish_pin and vol_confirm
             
             if long_entry:
                 position = 1
