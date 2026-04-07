@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h Volume Spike + 4h Trend + 1d Volatility Filter
-# Hypothesis: In 1h timeframe, volume spikes indicate institutional participation.
-# We combine with 4h EMA for trend direction and 1d ATR to filter low volatility periods.
-# This works in bull markets (trend following) and bear markets (mean reversion during volatility spikes).
-# Session filter (08-20 UTC) reduces noise. Target: 15-37 trades/year (60-150 over 4 years).
-name = "1h_volume_spike_4h_trend_1d_vol_filter_v1"
-timeframe = "1h"
+# Strategy: 6h Elder Ray Power + 1w Trend + Volume Confirmation
+# Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures bull/bear strength.
+# In weak trends (Elder Ray near zero), we mean-revert at EMA13 crossovers with volume.
+# In strong trends (|Elder Ray| > threshold), we trend-follow with 1-week EMA filter.
+# Volume confirms institutional participation. Works in bull/bear via regime adaptation.
+# 6h timeframe reduces noise. Target: 12-37 trades/year (50-150 over 4 years).
+name = "6h_elder_ray_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,82 +24,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Elder Ray components on 6h timeframe (EMA13)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean()
+    bull_power = high - ema13.values  # High - EMA13
+    bear_power = ema13.values - low   # EMA13 - Low
+    elder_ray = bull_power - bear_power  # Net strength: + = bullish, - = bearish
     
-    # 4h EMA(34) for trend
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=34, adjust=False).mean().values
-    ema_4h_1h = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Absolute Elder Ray for trend strength detection
+    abs_elder_ray = np.abs(elder_ray)
+    # Percentile rank of |Elder Ray| over 50 periods (adaptive regime detection)
+    abs_er_series = pd.Series(abs_elder_ray)
+    abs_er_percentile = abs_er_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.inf  # First period has no previous close
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_1h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1-week EMA(20) for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_ema_6h = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_4h_1h[i]) or np.isnan(atr_1d_1h[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(close[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        if not session_mask[i]:
+        if (np.isnan(abs_er_percentile[i]) or np.isnan(ema13.iloc[i]) or 
+            np.isnan(weekly_ema_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below 4h EMA or volatility too low
-            if close[i] < ema_4h_1h[i] or atr_1d_1h[i] < np.nanpercentile(atr_1d_1h[:i+1], 20):
+            # Exit: Elder Ray turns negative (bearish) OR price crosses below EMA13 with volume
+            if elder_ray[i] < 0 or (close[i] < ema13.iloc[i] and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price crosses above 4h EMA or volatility too low
-            if close[i] > ema_4h_1h[i] or atr_1d_1h[i] < np.nanpercentile(atr_1d_1h[:i+1], 20):
+            # Exit: Elder Ray turns positive (bullish) OR price crosses above EMA13 with volume
+            if elder_ray[i] > 0 or (close[i] > ema13.iloc[i] and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Require volume spike and sufficient volatility
-            if vol_spike[i] and atr_1d_1h[i] >= np.nanpercentile(atr_1d_1h[:i+1], 20):
-                # Long: price above 4h EMA (uptrend)
-                if close[i] > ema_4h_1h[i]:
-                    position = 1
-                    signals[i] = 0.20
-                # Short: price below 4h EMA (downtrend)
-                elif close[i] < ema_4h_1h[i]:
-                    position = -1
-                    signals[i] = -0.20
+            # Require volume confirmation
+            if vol_filter[i]:
+                # Weak trend regime (low |Elder Ray|): mean reversion at EMA13
+                if abs_er_percentile[i] < 40:  # Low |Elder Ray| = weak trend
+                    # Long: price crosses above EMA13 from below
+                    if close[i] > ema13.iloc[i] and close[i-1] <= ema13.iloc[i-1]:
+                        position = 1
+                        signals[i] = 0.25
+                    # Short: price crosses below EMA13 from above
+                    elif close[i] < ema13.iloc[i] and close[i-1] >= ema13.iloc[i-1]:
+                        position = -1
+                        signals[i] = -0.25
+                # Strong trend regime (high |Elder Ray|): trend following
+                elif abs_er_percentile[i] > 60:  # High |Elder Ray| = strong trend
+                    # Long: Elder Ray positive AND price above weekly EMA
+                    if elder_ray[i] > 0 and close[i] > weekly_ema_6h[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    # Short: Elder Ray negative AND price below weekly EMA
+                    elif elder_ray[i] < 0 and close[i] < weekly_ema_6h[i]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
