@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-1h_price_action_volume_confluence_v1
-Hypothesis: On 1h timeframe, price action (close relative to open) combined with 
-volume confirmation and 4h trend filter (EMA50) creates high-probability entries.
-In both bull and bear markets, we look for strong closes with volume in the 
-direction of the 4h trend. Time-based filter (08-20 UTC) reduces noise.
-Target: 15-37 trades/year per symbol by requiring volume > 2x average and 
-strong price action (>60% of range). Max 200 total trades over 4 years.
+6h_volume_price_action_v1
+Hypothesis: On 6h timeframe, combine volume spikes with price action at key levels.
+In ranging markets, fade extremes on volume exhaustion; in trending markets, 
+breakout on volume expansion. Uses 1w trend filter to avoid counter-trend trades.
+Works in bull/bear by adapting to weekly trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_price_action_volume_confluence_v1"
-timeframe = "1h"
+name = "6h_volume_price_action_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +22,77 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # 4h EMA50 for trend direction
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    close_1w = df_1w['close'].values
+    # Weekly EMA20 for trend
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    ema20_6h = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # 1h volume average (20-period)
+    # 6h indicators
+    # Volume spike: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 2.0 * vol_ma
     
-    # Pre-compute hour filter
-    hours = prices.index.hour
+    # Price position relative to recent range (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    range_size = high_max - low_min
+    # Avoid division by zero
+    range_size = np.where(range_size == 0, 1e-10, range_size)
+    price_pos = (close - low_min) / range_size  # 0=at low, 1=at high
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
         # Skip if required data not available
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(ema20_6h[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(high_max[i]) or np.isnan(low_min[i])):
             signals[i] = 0.0
             continue
-        
-        # Price action: close position in range
-        rng = high[i] - low[i]
-        if rng == 0:
-            close_pos = 0.5
-        else:
-            close_pos = (close[i] - low[i]) / rng
-        
-        # Volume confirmation: > 2x average
-        vol_confirm = volume[i] > 2.0 * vol_ma[i]
-        
-        # Strong close: >60% of range in direction
-        strong_close_up = close_pos > 0.6
-        strong_close_down = close_pos < 0.4
         
         if position == 1:  # Long position
-            # Exit: weak close or volume drops
-            if not (strong_close_up and vol_confirm):
+            # Exit: price reverses from high with volume spike OR weekly trend turns down
+            if (price_pos[i] > 0.8 and vol_spike[i]) or close[i] < ema20_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: weak close or volume drops
-            if not (strong_close_down and vol_confirm):
+            # Exit: price reverses from low with volume spike OR weekly trend turns up
+            if (price_pos[i] < 0.2 and vol_spike[i]) or close[i] > ema20_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: strong up close + volume + 4h uptrend
-            if (strong_close_up and 
-                vol_confirm and 
-                close[i] > ema50_4h_aligned[i]):
-                position = 1
-                signals[i] = 0.20
-            # Short: strong down close + volume + 4h downtrend
-            elif (strong_close_down and 
-                  vol_confirm and 
-                  close[i] < ema50_4h_aligned[i]):
+            # Fade high in ranging market (weekly trend weak)
+            if (price_pos[i] > 0.8 and vol_spike[i] and 
+                abs(close[i] - ema20_6h[i]) / ema20_6h[i] < 0.05):  # near weekly EMA
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
+            # Fade low in ranging market
+            elif (price_pos[i] < 0.2 and vol_spike[i] and 
+                  abs(close[i] - ema20_6h[i]) / ema20_6h[i] < 0.05):
+                position = 1
+                signals[i] = 0.25
+            # Breakout high in trending market
+            elif (price_pos[i] > 0.8 and vol_spike[i] and 
+                  close[i] > ema20_6h[i]):
+                position = 1
+                signals[i] = 0.25
+            # Breakout low in trending market
+            elif (price_pos[i] < 0.2 and vol_spike[i] and 
+                  close[i] < ema20_6h[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
