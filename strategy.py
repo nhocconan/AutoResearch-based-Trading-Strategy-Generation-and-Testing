@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-1d_sma_200_rsi_1w_trend_volume_v1
-Hypothesis: Long when price > SMA200 and RSI(14) > 50 on 1d, with volume > 1.5x 20-day average. Short when price < SMA200 and RSI(14) < 50 on 1d, with volume > 1.5x 20-day average. Uses 1w trend filter (price > SMA50 on 1w) to avoid counter-trend trades. Works in bull/bear by following higher timeframe trend. Target: 10-25 trades/year.
+6d_momentum_breakout_1d_trend_volume_v1
+Hypothesis: Price breaking above/below 20-period high/low with volume confirmation
+and 1d trend filter captures momentum moves while avoiding whipsaws. Works in
+both bull and bear by following higher timeframe trend. Target: 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_sma_200_rsi_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6d_momentum_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -23,39 +25,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d SMA200 for trend filter
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
-    
-    # 1d RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], 100)  # handle division by zero
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w SMA50 for trend filter
-    sma_50_1w = df_1w['close'].rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # 1d EMA50 for trend filter
+    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
     
-    # Volume confirmation (20-day average on 1d)
+    # Align 1d EMA50 to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    
+    # 6h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation (20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(sma_200[i]) or np.isnan(rsi[i]) or 
-            np.isnan(sma_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -63,28 +57,28 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price < SMA200 or RSI < 40 or 1w trend turns bearish
-            if close[i] < sma_200[i] or rsi[i] < 40 or close[i] < sma_50_1w_aligned[i]:
+            # Exit: price breaks below 20-period low or trend changes
+            if close[i] < low_20[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price > SMA200 or RSI > 60 or 1w trend turns bullish
-            if close[i] > sma_200[i] or rsi[i] > 60 or close[i] > sma_50_1w_aligned[i]:
+            # Exit: price breaks above 20-period high or trend changes
+            if close[i] > high_20[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price > SMA200 and RSI > 50 and 1w bullish trend with volume
-            if (close[i] > sma_200[i] and rsi[i] > 50 and 
-                close[i] > sma_50_1w_aligned[i] and vol_confirm):
+            # Long entry: price breaks above 20-period high with volume and uptrend
+            if (close[i] > high_20[i] and vol_confirm and 
+                close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price < SMA200 and RSI < 50 and 1w bearish trend with volume
-            elif (close[i] < sma_200[i] and rsi[i] < 50 and 
-                  close[i] < sma_50_1w_aligned[i] and vol_confirm):
+            # Short entry: price breaks below 20-period low with volume and downtrend
+            elif (close[i] < low_20[i] and vol_confirm and 
+                  close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
