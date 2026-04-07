@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Hypothesis: 6h Donchian breakout with weekly trend filter and volume confirmation
 # Long when price breaks above Donchian(20) high, weekly close > weekly EMA50 (uptrend), and volume > 1.5x 6h average volume
 # Short when price breaks below Donchian(20) low, weekly close < weekly EMA50 (downtrend), and volume > 1.5x 6h average volume
-# Exit when price returns to Donchian(20) midpoint or trend changes
+# Exit when price returns to Donchian midpoint or trend changes
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses weekly EMA50 for trend filter and 6h volume average for confirmation
@@ -77,7 +77,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to Donchian midpoint or trend changes
+            # Exit: price returns to Donchian midpoint or weekly trend turns down
             elif close[i] < donchian_mid[i] or close[i] < ema50_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -90,7 +90,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to Donchian midpoint or trend changes
+            # Exit: price returns to Donchian midpoint or weekly trend turns up
             elif close[i] > donchian_mid[i] or close[i] > ema50_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -98,10 +98,10 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with Donchian breakout, trend alignment, and volume confirmation
-            # Bullish breakout: price breaks above Donchian(20) high
+            # Look for entries with Donchian breakout, weekly trend alignment, and volume confirmation
+            # Bullish breakout: price breaks above Donchian high
             bullish_breakout = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
-            # Bearish breakout: price breaks below Donchian(20) low
+            # Bearish breakout: price breaks below Donchian low
             bearish_breakout = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
             
             # Long: bullish breakout, weekly uptrend, volume spike
