@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
 # Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + weekly ADX > 25
 # Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + weekly ADX > 25
 # Exit when price crosses 10-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1-day volume for confirmation and 1-week ADX for trend strength
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Target: 75-200 total trades over 4 years (19-50/year)
 
-name = "12h_donchian20_1d_vol_1w_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_vol_1w_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -77,14 +77,14 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # 20-period Donchian channels
+    # 4-period Donchian channels (20-period for breakout)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 10-period EMA for exit
     ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # ATR(14) for stoploss
+    # 4-period ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
