@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Volume Confirmation and ADX Trend Filter
-Long when price breaks above Donchian upper band with volume confirmation and ADX > 25.
-Short when price breaks below Donchian lower band with volume confirmation and ADX > 25.
-Exit when price crosses back to middle line.
-Uses 1D timeframe with weekly ADX filter for trend strength.
+6h Weekly Pivot Reversal with Volume Confirmation.
+Uses weekly pivot points calculated from previous week's OHLC.
+Long when price crosses above weekly pivot with volume expansion, short when below.
+Exit when price crosses back to weekly pivot or reaches weekly R3/S3.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_volume_adx_v1"
-timeframe = "1d"
+name = "6h_weekly_pivot_reversal_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,115 +25,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly ADX for trend filter (using 1w data) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # === Weekly OHLC data ===
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # True Range for ADX
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate weekly pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    # R3 = H + 2*(P - L)
+    # S3 = L - 2*(H - P)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_range = weekly_high - weekly_low
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + weekly_range
+    weekly_s2 = weekly_pivot - weekly_range
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align weekly pivot and levels to 6h timeframe (shifted by 1 week for no look-ahead)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
     
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        if len(data) < period:
-            return np.full(len(data), np.nan)
-        result = np.full(len(data), np.nan)
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Rest is Wilder smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_1w = wilder_smooth(tr_1w, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1w > 0, 100 * dm_plus_smooth / atr_1w, 0)
-    di_minus = np.where(atr_1w > 0, 100 * dm_minus_smooth / atr_1w, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1w = wilder_smooth(dx, 14)
-    
-    # Align weekly ADX to daily
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # === Daily Donchian Channels (20-period) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # === Volume confirmation ===
+    # === Volume confirmation (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)  # Avoid division by zero
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):  # Start after enough data for all indicators
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(adx_1w_aligned[i])):
+    for i in range(20, n):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when ADX > 25 (strong trend)
-        if adx_1w_aligned[i] < 25:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price crosses back below middle line
-            if close[i] < donch_mid[i]:
+            # Exit: price crosses back below pivot OR reaches R3 (take profit)
+            if close[i] < pivot_aligned[i] or close[i] >= r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back above middle line
-            if close[i] > donch_mid[i]:
+            # Exit: price crosses back above pivot OR reaches S3 (take profit)
+            if close[i] > pivot_aligned[i] or close[i] <= s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume confirmation (above average)
+            # Need volume expansion (above average)
             if vol_ratio[i] < 1.5:
                 signals[i] = 0.0
                 continue
             
-            # Entry: Donchian breakout with volume confirmation
-            if close[i] > donch_high[i]:
-                # Breakout above upper band -> long
+            # Entry: price crosses weekly pivot with volume confirmation
+            if close[i] > pivot_aligned[i] and close[i-1] <= pivot_aligned[i-1]:
+                # Crossed above pivot -> long
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donch_low[i]:
-                # Breakdown below lower band -> short
+            elif close[i] < pivot_aligned[i] and close[i-1] >= pivot_aligned[i-1]:
+                # Crossed below pivot -> short
                 position = -1
                 signals[i] = -0.25
     
