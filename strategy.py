@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with daily trend filter and volume confirmation
-# Long when price breaks above Donchian upper(20) and daily EMA(50) > EMA(200) (uptrend)
-# Short when price breaks below Donchian lower(20) and daily EMA(50) < EMA(200) (downtrend)
-# Exit when price crosses opposite Donchian level or stoploss at 2.0 * ATR
-# Volume confirmation: current volume > 1.3 * average volume of last 20 periods
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# Long when price breaks above Donchian upper(20) and 1w EMA > 1w EMA(50) (uptrend)
+# Short when price breaks below Donchian lower(20) and 1w EMA < 1w EMA(50) (downtrend)
+# Exit when price crosses opposite Donchian level or stoploss at 2.5 * ATR
+# Volume confirmation: current volume > 1.5 * average volume of last 20 periods
 # Position size: 0.25 (25% of capital)
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Target: 30-100 total trades over 4 years (7-25/year)
 
-name = "4h_donchian20_daily_trend_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,17 +26,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 200:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) and EMA(200) for trend filter
-    close_daily = df_daily['close'].values
-    ema_50_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_daily = pd.Series(close_daily).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
-    ema_200_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_200_daily)
+    # Calculate 1-week EMA(20) and EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -54,9 +54,9 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_daily_aligned[i]) or np.isnan(ema_200_daily_aligned[i]) or 
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -65,8 +65,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -78,8 +78,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -95,12 +95,12 @@ def generate_signals(prices):
             highest_high = high[i-20:i].max() if i >= 20 else high[:i].max()
             lowest_low = low[i-20:i].min() if i >= 20 else low[:i].min()
             
-            # Trend filter: daily EMA(50) > EMA(200) for uptrend, < for downtrend
-            uptrend = ema_50_daily_aligned[i] > ema_200_daily_aligned[i]
-            downtrend = ema_50_daily_aligned[i] < ema_200_daily_aligned[i]
+            # Trend filter: 1w EMA(20) > EMA(50) for uptrend, < for downtrend
+            uptrend = ema_20_1w_aligned[i] > ema_50_1w_aligned[i]
+            downtrend = ema_20_1w_aligned[i] < ema_50_1w_aligned[i]
             
-            # Volume confirmation: current volume > 1.3 * average volume
-            volume_confirm = volume[i] > 1.3 * vol_avg[i]
+            # Volume confirmation: current volume > 1.5 * average volume
+            volume_confirm = volume[i] > 1.5 * vol_avg[i]
             
             # Long: price breaks above Donchian upper(20) in uptrend with volume
             if close[i] > highest_high and uptrend and volume_confirm:
