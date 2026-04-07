@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.8x 20-period average + weekly ADX > 22
-# Short when price breaks below 20-period Donchian low + volume > 1.8x 20-period average + weekly ADX > 22
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period daily average + weekly ADX > 25
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period daily average + weekly ADX > 25
 # Exit when price crosses 12-period EMA in opposite direction
-# Stoploss at 2.5 * ATR(14)
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 1-day volume for confirmation and 1-week ADX for trend strength
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Target: 75-150 total trades over 4 years (19-38/year)
 
-name = "12h_donchian20_1d_vol_1w_adx_v2"
+name = "12h_donchian20_1d_vol_1w_adx_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -109,8 +108,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -122,8 +121,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -136,10 +135,10 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout with volume confirmation and ADX filter
-            # Volume filter: volume > 1.8x 20-period average
-            volume_filter = volume[i] > 1.8 * volume_ma_aligned[i]
-            # Trend filter: weekly ADX > 22
-            trend_filter = adx_aligned[i] > 22
+            # Volume filter: volume > 1.5x 20-period average
+            volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
+            # Trend filter: weekly ADX > 25
+            trend_filter = adx_aligned[i] > 25
             
             # Long: price breaks above Donchian high + volume filter + trend filter
             if close[i] > highest_high[i] and volume_filter and trend_filter:
