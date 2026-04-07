@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_atr_breakout_1w_trend_volume_v1
-Hypothesis: On 4h timeframe, use weekly ATR breakout combined with 1d EMA trend filter and volume confirmation. 
-Breakout direction follows weekly trend (EMA50 > EMA200 = long bias, EMA50 < EMA200 = short bias). 
-Enter long when price breaks above weekly ATR-based upper band with bullish trend and volume > 1.5x average. 
-Enter short when price breaks below weekly ATR-based lower band with bearish trend and volume > 1.5x average. 
-Exit on opposite band touch or trend reversal. Weekly ATR provides volatility-adaptive breakout levels 
-that work in both trending and ranging markets. Volume confirms institutional participation. 
-Targets 20-40 trades/year to minimize fee drag.
+12h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, use daily Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) with EMA trend filter and volume confirmation. Enter long when price crosses above R3 with EMA50 > EMA200 and volume > 1.5x average; enter short when price crosses below S3 with EMA50 < EMA200 and volume > 1.5x average. Exit when price reaches opposite H4/L4 level or EMA crossover reverses. This strategy combines mean reversion at extreme daily levels with breakout continuation, using volume to confirm institutional participation. Works in bull/bear via EMA trend filter and pivot level structure. Targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_atr_breakout_1w_trend_volume_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,40 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
+    # Calculate EMA50 and EMA200 for trend filter
     ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Calculate weekly ATR-based bands
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate daily Camarilla pivot levels from prior day
+    # Using daily high, low, close from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR(14) on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    ph = df_1d['high'].values  # previous day high
+    pl = df_1d['low'].values   # previous day low
+    pc = df_1d['close'].values # previous day close
     
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate Camarilla levels for each day
+    camarilla_h4 = pc + 1.1 * (ph - pl) / 2
+    camarilla_l4 = pc - 1.1 * (ph - pl) / 2
+    camarilla_h3 = pc + 1.1 * (ph - pl) / 4
+    camarilla_l3 = pc - 1.1 * (ph - pl) / 4
+    camarilla_h2 = pc + 1.1 * (ph - pl) / 6
+    camarilla_l2 = pc - 1.1 * (ph - pl) / 6
+    camarilla_h1 = pc + 1.1 * (ph - pl) / 12
+    camarilla_l1 = pc - 1.1 * (ph - pl) / 12
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align to 12h timeframe (shifted by 1 day for look-ahead prevention)
+    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate weekly ATR-based bands (using weekly close as anchor)
-    # Upper band: weekly close + 2.0 * ATR
-    # Lower band: weekly close - 2.0 * ATR
-    upper_band = close_1w + 2.0 * atr
-    lower_band = close_1w - 2.0 * atr
-    
-    # Align to 4h timeframe (shifted by 1 week for look-ahead prevention)
-    upper_band_4h = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_4h = align_htf_to_ltf(prices, df_1w, lower_band)
-    
-    # Volume confirmation (20-period average on 4h = ~3.3 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (24-period average on 12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,19 +62,20 @@ def generate_signals(prices):
     for i in range(200, n):
         # Skip if required data not available
         if (np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
-            np.isnan(upper_band_4h[i]) or np.isnan(lower_band_4h[i]) or
+            np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
+            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or
             np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.5x 24-period average
         vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit if price touches lower band (mean reversion)
-            if close[i] <= lower_band_4h[i]:
+            # Exit if price reaches L4 level (opposite extreme)
+            if close[i] <= l4_12h[i]:
                 exit_long = True
             # Exit if EMA50 crosses below EMA200 (trend reversal)
             elif ema50[i] < ema200[i] and ema50[i-1] >= ema200[i-1]:
@@ -97,8 +90,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit if price touches upper band (mean reversion)
-            if close[i] >= upper_band_4h[i]:
+            # Exit if price reaches H4 level (opposite extreme)
+            if close[i] >= h4_12h[i]:
                 exit_short = True
             # Exit if EMA50 crosses above EMA200 (trend reversal)
             elif ema50[i] > ema200[i] and ema50[i-1] <= ema200[i-1]:
@@ -110,15 +103,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band with bullish trend and volume confirmation
+            # Long entry: price crosses above H3 with EMA50 > EMA200 and volume confirmation
             long_entry = False
-            if (close[i] > upper_band_4h[i] and close[i-1] <= upper_band_4h[i-1] and
+            if (close[i] > h3_12h[i] and close[i-1] <= h3_12h[i-1] and
                 ema50[i] > ema200[i] and vol_confirm):
                 long_entry = True
             
-            # Short entry: price breaks below lower band with bearish trend and volume confirmation
+            # Short entry: price crosses below L3 with EMA50 < EMA200 and volume confirmation
             short_entry = False
-            if (close[i] < lower_band_4h[i] and close[i-1] >= lower_band_4h[i-1] and
+            if (close[i] < l3_12h[i] and close[i-1] >= l3_12h[i-1] and
                 ema50[i] < ema200[i] and vol_confirm):
                 short_entry = True
             
