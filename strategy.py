@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 1h ADX Trend + 4h/1d Higher Timeframe Trend + Volume Spike
-# Hypothesis: Strong trends on 4h/1d with volume confirmation on 1h capture
-# institutional moves while avoiding counter-trend noise. ADX filters weak trends.
-# Target: 15-37 trades/year (60-150 total over 4 years) for 1h timeframe.
+# Strategy: 12h Donchian Breakout with Volume Confirmation and ADX Trend Filter
+# Hypothesis: Breakouts of 20-period Donchian channels on 12h timeframe capture
+# significant moves, while volume confirmation and ADX > 25 filter false breakouts.
+# Works in bull markets (trend continuation) and bear markets (trend reversals).
+# Target: 12-37 trades per year (50-150 total over 4 years).
 
-name = "1h_adx_trend_4h1d_volume_v1"
-timeframe = "1h"
+name = "12h_donchian20_volume_adx_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +24,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for trend filter
+    # Get 1d data for higher timeframe trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 4h EMA(20) for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Donchian Channel (20-period) on 12h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA(20) for trend filter
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ADX(14) on 1h to measure trend strength
+    # ADX(14) on 12h to measure trend strength
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -73,17 +67,17 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=10).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    vol_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -91,28 +85,28 @@ def generate_signals(prices):
         vol_ok = vol_spike[i]
         
         if position == 1:  # Long position
-            # Exit: trend turns bearish or ADX weak
-            if close[i] < ema_20_4h_aligned[i] or close[i] < ema_20_1d_aligned[i] or adx[i] < 20:
+            # Exit: price breaks below lower Donchian or trend turns bearish
+            if close[i] < low_min[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: trend turns bullish or ADX weak
-            if close[i] > ema_20_4h_aligned[i] or close[i] > ema_20_1d_aligned[i] or adx[i] < 20:
+            # Exit: price breaks above upper Donchian or trend turns bullish
+            if close[i] > high_max[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok and adx[i] > 25:  # Strong trend + volume
-                # Strong uptrend on both timeframes
-                if close[i] > ema_20_4h_aligned[i] and close[i] > ema_20_1d_aligned[i]:
+                # Bullish breakout: price breaks above upper Donchian
+                if close[i] > high_max[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Strong downtrend on both timeframes
-                elif close[i] < ema_20_4h_aligned[i] and close[i] < ema_20_1d_aligned[i]:
+                    signals[i] = 0.25
+                # Bearish breakout: price breaks below lower Donchian
+                elif close[i] < low_min[i]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
