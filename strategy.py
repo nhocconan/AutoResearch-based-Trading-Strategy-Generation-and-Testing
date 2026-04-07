@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_atr_breakout_12h_trend_volume_v4
-Hypothesis: Use ATR-based breakouts on 4h timeframe with 12h EMA trend filter and volume confirmation.
-Breakouts occur when price moves beyond ATR(14) from recent high/low, capturing momentum in both bull and bear markets.
-The 12h EMA50 filter ensures alignment with higher timeframe trend, reducing whipsaw.
-Volume confirms genuine breakouts. Tightened entry conditions to maintain 20-30 trades/year.
+12h_camarilla_pivot_1d_trend_volume_v1
+Hypothesis: On 12h timeframe, use Camarilla pivot levels from daily chart for mean reversion entries, filtered by 1d EMA trend and volume confirmation. 
+In range-bound markets, price tends to revert to mean from L3/H3 levels. In trending markets, EMA filter ensures we only take trades in trend direction.
+Volume confirms genuine pivot touches. Target: 20-40 trades/year (~80-160 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_atr_breakout_12h_trend_volume_v4"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +25,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50 = df_12h['close'].ewm(span=50, adjust=False).mean()
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50.values)
+    # Calculate Camarilla pivot levels from previous day
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # We use L3 and H3 for mean reversion entries
+    prev_close = df_1d['close'].shift(1)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
     
-    # ATR(14) on 4h
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate pivot levels
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Recent high/low for breakout levels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels
+    h3 = pp + (range_hl * 1.1 / 4)  # High 3
+    l3 = pp - (range_hl * 1.1 / 4)  # Low 3
+    h4 = pp + (range_hl * 1.1 / 2)  # High 4 (stop level)
+    l4 = pp - (range_hl * 1.1 / 2)  # Low 4 (stop level)
     
-    # Volume confirmation (20-period average on 4h)
+    # Align 1d levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4.values)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4.values)
+    
+    # 1d EMA50 for trend filter
+    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean()
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
+    
+    # Volume confirmation (20-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(high_max[i]) or np.isnan(low_min[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -65,28 +75,30 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price breaks below recent low or trend changes
-            if close[i] < low_min[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price reaches H3 (take profit) or breaks below L4 (stop) or trend changes
+            if (close[i] >= h3_aligned[i] or close[i] <= l4_aligned[i] or 
+                close[i] < ema_50_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price breaks above recent high or trend changes
-            if close[i] > high_max[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price reaches L3 (take profit) or breaks above H4 (stop) or trend changes
+            if (close[i] <= l3_aligned[i] or close[i] >= h4_aligned[i] or 
+                close[i] > ema_50_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above recent high with volume and trend alignment
-            if (close[i] > high_max[i] and vol_confirm and 
-                close[i] > ema_50_aligned[i]):
+            # Long entry: price touches L3 from below, with volume and above EMA50 (bullish alignment)
+            if (close[i] <= l3_aligned[i] * 1.005 and close[i] > l3_aligned[i] * 0.995 and  # Near L3
+                vol_confirm and close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below recent low with volume and trend alignment
-            elif (close[i] < low_min[i] and vol_confirm and 
-                  close[i] < ema_50_aligned[i]):
+            # Short entry: price touches H3 from above, with volume and below EMA50 (bearish alignment)
+            elif (close[i] >= h3_aligned[i] * 0.995 and close[i] < h3_aligned[i] * 1.005 and  # Near H3
+                  vol_confirm and close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
