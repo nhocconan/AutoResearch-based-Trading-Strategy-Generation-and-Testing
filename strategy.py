@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_donchian_20_1d_trend_volume_v2
-Hypothesis: On 12h timeframe, buy when price breaks above 20-period Donchian high with 1d uptrend (EMA50 > EMA200) and volume > 1.5x average; sell when price breaks below 20-period Donchian low with 1d downtrend (EMA50 < EMA200) and volume > 1.5x average. Exit on opposite breakout or trend reversal. Uses tight entry conditions to target 12-37 trades/year, minimizing fee drag while capturing trends in both bull and bear markets.
+4h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: On 4h timeframe, use Donchian breakout (20-period) for entry signals, filtered by 1d trend (EMA50 > EMA200) and volume confirmation (volume > 1.5x 20-period average). Exits on trend reversal or volatility contraction. Designed for low trade frequency (~20-50/year) to minimize fee drag and perform in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_20_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
     ema50_1d = daily_close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema200_1d = daily_close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Align to 12h timeframe (shifted by 1 day to avoid look-ahead)
+    # Align to 4h timeframe (shifted by 1 day to avoid look-ahead)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
@@ -68,11 +68,11 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit on price breaking below Donchian low
+            # Exit on trend reversal (price breaks below Donchian low)
             if close[i] < donchian_low[i]:
                 exit_long = True
-            # Exit on trend reversal (EMA50 < EMA200)
-            elif trend_down:
+            # Exit when volume drops below average
+            elif volume[i] < vol_ma[i]:
                 exit_long = True
             
             if exit_long:
@@ -84,11 +84,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit on price breaking above Donchian high
+            # Exit on trend reversal (price breaks above Donchian high)
             if close[i] > donchian_high[i]:
                 exit_short = True
-            # Exit on trend reversal (EMA50 > EMA200)
-            elif trend_up:
+            # Exit when volume drops below average
+            elif volume[i] < vol_ma[i]:
                 exit_short = True
             
             if exit_short:
