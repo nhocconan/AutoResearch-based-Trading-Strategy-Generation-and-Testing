@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 12h Trend and Volume Confirmation
-Long when price breaks above Donchian(20) high and 12h EMA50 > EMA200 + volume spike
-Short when price breaks below Donchian(20) low and 12h EMA50 < EMA200 + volume spike
-Exit when price crosses Donchian midline (10-period average)
+1d KAMA with RSI and Chop Filter
+Long when KAMA rising and RSI > 50 and Chop < 61.8 (trending up)
+Short when KAMA falling and RSI < 50 and Chop < 61.8 (trending down)
+Exit when RSI crosses 50 or Chop > 61.8 (range)
+Designed to capture trends while avoiding choppy markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,59 +24,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Donchian Channel (20) ===
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2
+    # === KAMA (10) ===
+    change = abs(np.diff(close, prepend=close[0]))
+    volatility = abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === 12h EMA Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_200_12h = pd.Series(df_12h['close'].values).ewm(span=200, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
+    # === RSI (14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume Spike (2x 20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma_20)
+    # === Chop (14) ===
+    atr = np.zeros(n)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    max_h = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_l = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr * 14 / (max_h - min_l)) / np.log10(14)
+    chop = np.where((max_h - min_l) != 0, chop, 50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_200_12h_aligned[i]):
+    for i in range(14, n):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian midline
-            if close[i] < donchian_mid[i]:
+            # Exit: RSI < 50 or Chop > 61.8
+            if rsi[i] < 50 or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian midline
-            if close[i] > donchian_mid[i]:
+            # Exit: RSI > 50 or Chop > 61.8
+            if rsi[i] > 50 or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Bullish trend: 12h EMA50 > EMA200
-            if ema_50_12h_aligned[i] > ema_200_12h_aligned[i]:
-                # Long entry: price breaks above Donchian high + volume spike
-                if close[i] > highest_20[i] and volume_spike[i]:
-                    position = 1
-                    signals[i] = 0.25
-            # Bearish trend: 12h EMA50 < EMA200
-            elif ema_50_12h_aligned[i] < ema_200_12h_aligned[i]:
-                # Short entry: price breaks below Donchian low + volume spike
-                if close[i] < lowest_20[i] and volume_spike[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Trending up: KAMA rising and RSI > 50
+            if kama[i] > kama[i-1] and rsi[i] > 50 and chop[i] < 61.8:
+                position = 1
+                signals[i] = 0.25
+            # Trending down: KAMA falling and RSI < 50
+            elif kama[i] < kama[i-1] and rsi[i] < 50 and chop[i] < 61.8:
+                position = -1
+                signals[i] = -0.25
     
     return signals
