@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 12h_donchian_20_1d_trend_volume_v1
-Hypothesis: On 12-hour timeframe, buy when price breaks above Donchian(20) high with daily close above 200 EMA and volume > 1.5x 20-period average; sell when price breaks below Donchian(20) low with daily close below 200 EMA and volume > 1.5x 20-period average. Exit on opposite Donchian break. Uses daily trend filter to avoid counter-trend trades and volume confirmation to ensure institutional participation. Designed for 12-37 trades/year to minimize fee decay while capturing trends in both bull and bear markets.
+Hypothesis: On 12-hour timeframe, buy when price breaks above Donchian(20) high with daily close above 200 EMA and volume > 1.5x 20-period average; sell when price breaks below Donchian(20) low with daily close below 200 EMA and volume > 1.5x 20-period average. Exit on opposite Donchian break. Uses daily trend filter to avoid counter-trend trades and volume confirmation to ensure institutional participation. Designed for 12-37 trades/year to minimize fee drag while capturing trends in both bull and bear markets.
 """
 
 import numpy as np
@@ -65,7 +65,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price breaks above Donchian high
@@ -73,17 +73,17 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Only enter with volume confirmation
             if vol_ok:
                 # Long: price breaks above Donchian high with daily close above EMA200
-                if high[i] >= donchian_high[i] and close_1d[-1] > ema_200_1d[-1]:  # Use latest daily close
+                if high[i] >= donchian_high[i] and ema_200_1d_aligned[i] > ema_200_1d_aligned[i-1]:  # Daily EMA trending up
                     position = 1
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                 # Short: price breaks below Donchian low with daily close below EMA200
-                elif low[i] <= donchian_low[i] and close_1d[-1] < ema_200_1d[-1]:  # Use latest daily close
+                elif low[i] <= donchian_low[i] and ema_200_1d_aligned[i] < ema_200_1d_aligned[i-1]:  # Daily EMA trending down
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
