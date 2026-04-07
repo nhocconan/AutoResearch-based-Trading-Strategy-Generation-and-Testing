@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-1h Donchian Breakout with Volume and 4h/1d Trend Filter
-Long when price breaks above Donchian(20) with volume expansion and 4h/1d uptrend
-Short when price breaks below Donchian(20) with volume expansion and 4h/1d downtrend
-Exit when price returns to Donchian midpoint
-Uses 4h/1d for direction, 1h for entry timing to minimize whipsaw.
-Target: 15-35 trades/year per symbol.
+6H Weekly Pivot Reversion with Volume Confirmation and 1D Trend Filter
+Mean reversion at weekly support/resistance levels with volume exhaustion and 1D trend alignment.
+Long: price near weekly S1/S2 with bullish 1D EMA and volume drying up
+Short: price near weekly R1/R2 with bearish 1D EMA and volume drying up
+Exit: price returns to weekly pivot or opposite extreme
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_donchian_breakout_volume_4h1d_trend_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_reversion_volume_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,76 +26,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # === Weekly pivot points (using prior week) ===
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate pivot from previous week's OHLC (already shifted in align_htf_to_ltf)
+    pivot = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3
+    width = df_1w['high'].values - df_1w['low'].values
+    r1 = 2 * pivot - df_1w['low'].values
+    s1 = 2 * pivot - df_1w['high'].values
+    r2 = pivot + width
+    s2 = pivot - width
     
-    # === Volume confirmation (20-period avg) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align to 6h timeframe (already shifted by 1 week in align_htf_to_ltf)
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # === Volume exhaustion signal ===
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 4-day average
     vol_ratio = volume / (vol_ma + 1e-10)
     
-    # === 4h trend filter (EMA 34) ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # === 1d trend filter (EMA 34) ===
+    # === 1D trend filter (EMA 50) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # === Session filter: 08-20 UTC ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(ema_4h_aligned[i]) or 
+    for i in range(24, n):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(vol_ratio[i]) or 
             np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price returns to midpoint
-            if close[i] <= donch_mid[i]:
+            # Exit: price returns to pivot or reaches S2
+            if close[i] >= pivot_6h[i] or close[i] <= s2_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to midpoint
-            if close[i] >= donch_mid[i]:
+            # Exit: price returns to pivot or reaches R2
+            if close[i] <= pivot_6h[i] or close[i] >= r2_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need volume expansion
-            if vol_ratio[i] < 1.5:
+            # Volume exhaustion: below average volume
+            if vol_ratio[i] > 0.8:
                 signals[i] = 0.0
                 continue
             
-            # Both 4h and 1d must agree on trend
-            trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] and ema_1d_aligned[i] > ema_1d_aligned[i-1]
-            trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] and ema_1d_aligned[i] < ema_1d_aligned[i-1]
-            
-            # Entry: Donchian breakout with volume and trend alignment
-            if close[i] > donch_high[i] and trend_up:
-                # Breakout above upper band with uptrend -> long
+            # Entry conditions with 1D trend filter
+            # Long: price near support in uptrend
+            if (close[i] <= s1_6h[i] * 1.02 and close[i] >= s2_6h[i] * 0.98 and 
+                ema_1d_aligned[i] > ema_1d_aligned[i-1]):
                 position = 1
-                signals[i] = 0.20
-            elif close[i] < donch_low[i] and trend_down:
-                # Breakdown below lower band with downtrend -> short
+                signals[i] = 0.25
+            # Short: price near resistance in downtrend
+            elif (close[i] >= r1_6h[i] * 0.98 and close[i] <= r2_6h[i] * 1.02 and 
+                  ema_1d_aligned[i] < ema_1d_aligned[i-1]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
