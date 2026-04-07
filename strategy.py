@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
-# Long when price breaks above 20-day high + weekly close > weekly open (bullish weekly candle) + volume > 1.5x 20-day avg volume
-# Short when price breaks below 20-day low + weekly close < weekly open (bearish weekly candle) + volume > 1.5x 20-day avg volume
-# Exit when price crosses 10-day EMA or ATR-based stoploss (2.5 * ATR)
+# Hypothesis: 6-hour 14-period RSI with 1-day Bollinger Band regime filter
+# Long when RSI(14) < 30 + price < BB lower (oversold bounce) + 1-day BB width > 50th percentile (volatile regime)
+# Short when RSI(14) > 70 + price > BB upper (overbought reversal) + 1-day BB width > 50th percentile
+# Exit when RSI crosses 50 (mean reversion complete) or BB width < 30th percentile (low volatility)
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Target: 50-100 total trades over 4 years (12-25/year)
+# Uses 1-day Bollinger Bands for regime and volatility filtering
+# Target: 80-160 total trades over 4 years (20-40/year)
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "6h_rsi14_1d_bb_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,39 +25,45 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1-day data for Bollinger Bands and regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly trend: bullish if close > open, bearish if close < open
-    weekly_close = df_1w['close'].values
-    weekly_open = df_1w['open'].values
-    weekly_bullish = weekly_close > weekly_open
-    weekly_bearish = weekly_close < weekly_open
+    # Calculate 1-day Bollinger Bands (20, 2)
+    close_1d = df_1d['close'].values
+    close_1d_s = pd.Series(close_1d)
+    bb_mid = close_1d_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_1d_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Align weekly trend to daily
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Calculate percentile of BB width for regime filter (50th percentile = median)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     
-    # 20-day Donchian channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align BB levels to 6h
+    bb_mid_aligned = align_htf_to_ltf(prices, df_1d, bb_mid)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
-    # 10-day EMA for exit
-    close_series = pd.Series(close)
-    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 6-period RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_s = pd.Series(gain)
+    loss_s = pd.Series(loss)
+    avg_gain = gain_s.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = loss_s.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: current volume > 1.5x 20-day average volume
-    volume_series = pd.Series(volume)
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
-    
-    # ATR(14) for stoploss
+    # 6-period ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -70,9 +78,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_10[i]) or np.isnan(weekly_bullish_aligned[i]) or 
-            np.isnan(weekly_bearish_aligned[i]) or np.isnan(volume_filter[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(bb_upper_aligned[i]) or np.isnan(bb_width_percentile_aligned[i]) or 
             np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -86,8 +93,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below 10-day EMA
-            elif close[i] < ema_10[i]:
+            # Exit: RSI crosses 50 (mean reversion) or low volatility regime
+            elif rsi[i] >= 50 or bb_width_percentile_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -99,22 +106,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above 10-day EMA
-            elif close[i] > ema_10[i]:
+            # Exit: RSI crosses 50 (mean reversion) or low volatility regime
+            elif rsi[i] <= 50 or bb_width_percentile_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with weekly trend and volume confirmation
-            # Long: price breaks above 20-day high + weekly bullish + volume filter
-            if close[i] > donchian_high[i] and weekly_bullish_aligned[i] > 0.5 and volume_filter[i]:
+            # Look for entries: RSI extremes with BB bands and volatility regime
+            # Volatility filter: BB width > 50th percentile (volatile enough for mean reversion)
+            volatile_regime = bb_width_percentile_aligned[i] > 50
+            
+            # Long: RSI oversold + price below BB lower + volatile regime
+            if rsi[i] < 30 and close[i] < bb_lower_aligned[i] and volatile_regime:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below 20-day low + weekly bearish + volume filter
-            elif close[i] < donchian_low[i] and weekly_bearish_aligned[i] > 0.5 and volume_filter[i]:
+            # Short: RSI overbought + price above BB upper + volatile regime
+            elif rsi[i] > 70 and close[i] > bb_upper_aligned[i] and volatile_regime:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
