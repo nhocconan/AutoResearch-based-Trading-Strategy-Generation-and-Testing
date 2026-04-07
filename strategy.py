@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_cci_mean_reversion_1w_trend_volume_v1
-Hypothesis: CCI(20) identifies overbought/oversold conditions on 6h. 
-Long when CCI < -100 and price above 1w EMA50 (oversold + uptrend).
-Short when CCI > 100 and price below 1w EMA50 (overbought + downtrend).
-Volume confirmation filters weak signals. Works in bull/bear by following higher timeframe trend.
-Target: 15-30 trades/year.
+12h_camarilla_pivot_1w_trend_volume_v1
+Hypothesis: Camarilla pivot levels on 1w identify key support/resistance levels.
+Long when price touches S3 level with volume confirmation and price above 1w EMA50 (uptrend).
+Short when price touches R3 level with volume confirmation and price below 1w EMA50 (downtrend).
+Uses 1w trend filter to avoid counter-trend trades. Target: 12-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_mean_reversion_1w_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,26 +26,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
+    # 1w data for Camarilla pivot and trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels from previous week
+    # Using (H+L+C)/3 as pivot
+    ph = df_1w['high'].values
+    pl = df_1w['low'].values
+    pc = df_1w['close'].values
+    pivot = (ph + pl + pc) / 3.0
+    range_ = ph - pl
+    
+    # Camarilla levels: S3 = pivot - 1.1*range/2, R3 = pivot + 1.1*range/2
+    s3 = pivot - 1.1 * range_ / 2.0
+    r3 = pivot + 1.1 * range_ / 2.0
+    
     # 1w EMA50 for trend filter
     ema_50 = df_1w['close'].ewm(span=50, adjust=False).mean()
     
-    # Align 1w EMA50 to 6h timeframe
+    # Align all 1w data to 12h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50.values)
     
-    # CCI(20) on 6h
-    typical_price = (high + low + close) / 3.0
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
-    cci = (typical_price - tp_mean) / (0.015 * tp_std)
-    
-    # Volume confirmation (20-period average on 6h)
+    # Volume confirmation (20-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,36 +59,36 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: CCI crosses above -50 or price breaks below EMA50
-            if cci[i] > -50 or close[i] < ema_50_aligned[i]:
+            # Exit: price moves above S3 or breaks below EMA50
+            if close[i] > s3_aligned[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: CCI crosses below 50 or price breaks above EMA50
-            if cci[i] < 50 or close[i] > ema_50_aligned[i]:
+            # Exit: price moves below R3 or breaks above EMA50
+            if close[i] < r3_aligned[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI < -100 with volume and price above EMA50
-            if (cci[i] < -100 and vol_confirm and 
+            # Long entry: price touches S3 level with volume and price above EMA50
+            if (abs(close[i] - s3_aligned[i]) < 0.001 * close[i] and vol_confirm and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI > 100 with volume and price below EMA50
-            elif (cci[i] > 100 and vol_confirm and 
+            # Short entry: price touches R3 level with volume and price below EMA50
+            elif (abs(close[i] - r3_aligned[i]) < 0.001 * close[i] and vol_confirm and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
