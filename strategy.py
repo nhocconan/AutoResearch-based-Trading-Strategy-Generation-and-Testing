@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour volume confirmation and daily ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.3x 12-hour average volume + daily ADX > 20
-# Short when price breaks below 20-period Donchian low + volume > 1.3x 12-hour average volume + daily ADX > 20
-# Exit when price crosses opposite Donchian level or stoploss at 2.0 * ATR(14)
+# Hypothesis: 1-day Donchian(40) breakout with weekly volume confirmation and monthly ADX trend filter
+# Long when price breaks above 40-day Donchian high + weekly volume > 1.3x 4-week average + monthly ADX > 20
+# Short when price breaks below 40-day Donchian low + weekly volume > 1.3x 4-week average + monthly ADX > 20
+# Exit when price crosses opposite Donchian level
+# Stoploss at 2.0 * ATR(20)
 # Position size: 0.25 (25% of capital)
-# Target: 100-200 total trades over 4 years (25-50/year)
+# Target: 50-100 total trades over 4 years (12-25/year)
 
-name = "4h_donchian20_12h_vol_1d_adx_v1"
-timeframe = "4h"
+name = "1d_donchian40_1w_vol_1m_adx_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,44 +26,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 1-week data for volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 4:
         return np.zeros(n)
     
-    # 1-day data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 1-month data for ADX trend filter
+    df_1m = get_htf_data(prices, '1m')
+    if len(df_1m) < 20:
         return np.zeros(n)
     
-    # Calculate 12-hour volume average (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_12h_s = pd.Series(volume_12h)
-    volume_ma = volume_12h_s.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
+    # Calculate 1-week volume average (4-period)
+    volume_1w = df_1w['volume'].values
+    volume_1w_s = pd.Series(volume_1w)
+    volume_ma_4w = volume_1w_s.rolling(window=4, min_periods=4).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_4w)
     
-    # Calculate 1-day ADX (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1-month ADX (14-period)
+    high_1m = df_1m['high'].values
+    low_1m = df_1m['low'].values
+    close_1m = df_1m['close'].values
     
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_1m - low_1m
+    tr2 = np.abs(high_1m - np.roll(close_1m, 1))
+    tr3 = np.abs(low_1m - np.roll(close_1m, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1m = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # invert to positive
+    up_move = np.diff(high_1m, prepend=high_1m[0])
+    down_move = np.diff(low_1m, prepend=low_1m[0]) * -1  # invert to positive
     
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
     # Smoothed values
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_14 = pd.Series(tr_1m).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
@@ -73,26 +74,26 @@ def generate_signals(prices):
     # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1m, adx)
     
-    # 20-period Donchian channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 40-period Donchian channels
+    highest_high = pd.Series(high).rolling(window=40, min_periods=40).max().values
+    lowest_low = pd.Series(low).rolling(window=40, min_periods=40).min().values
     
-    # ATR(14) for stoploss
+    # ATR(20) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(40, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
@@ -131,9 +132,9 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout with volume confirmation and ADX filter
-            # Volume filter: volume > 1.3x 12-hour average volume
+            # Volume filter: volume > 1.3x 4-week average
             volume_filter = volume[i] > 1.3 * volume_ma_aligned[i]
-            # Trend filter: daily ADX > 20
+            # Trend filter: monthly ADX > 20
             trend_filter = adx_aligned[i] > 20
             
             # Long: price breaks above Donchian high + volume filter + trend filter
