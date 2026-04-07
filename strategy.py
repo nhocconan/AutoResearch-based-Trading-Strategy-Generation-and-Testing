@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_pivot_12h_volume_v1
-Hypothesis: On 6h timeframe, use Camarilla pivot levels from 12h timeframe for reversal/fade signals with volume confirmation.
-Fade at R3/S3 levels (mean reversion), breakout continuation at R4/S4 levels (trend following).
-Volume > 1.3x average confirms the move. Targets 15-25 trades/year to minimize fee drag.
+1d_donchian_20_breakout_1w_trend_volume_v1
+Hypothesis: On 1d timeframe, enter long when price breaks above 20-day Donchian high with 1w uptrend and volume confirmation.
+Enter short when price breaks below 20-day Donchian low with 1w downtrend and volume confirmation.
+Uses 1w EMA20 for trend filter and 20-day average volume for confirmation.
+Targets 7-25 trades/year to minimize fee drag while capturing major trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_12h_volume_v1"
-timeframe = "6h"
+name = "1d_donchian_20_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +26,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume confirmation (20-period average)
+    # Volume confirmation (20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h data for Camarilla pivot calculation (calculate once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for trend filter (calculate once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 12h bar
-    # Camarilla formulas: 
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    prev_high = df_12h['high'].shift(1).values  # Previous 12h high
-    prev_low = df_12h['low'].shift(1).values    # Previous 12h low
-    prev_close = df_12h['close'].shift(1).values # Previous 12h close
+    # Calculate EMA20 on weekly close
+    weekly_close = df_1w['close'].values
+    weekly_close_s = pd.Series(weekly_close)
+    ema20_1w = weekly_close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Calculate pivot levels
-    r4 = prev_close + 1.5 * (prev_high - prev_low)
-    r3 = prev_close + 1.1 * (prev_high - prev_low)
-    s3 = prev_close - 1.1 * (prev_high - prev_low)
-    s4 = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Align to 6h timeframe (shifted by 1 to avoid look-ahead)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    # Align to 1d timeframe (shifted by 1 week to avoid look-ahead)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after volume MA warmup
+    for i in range(20, n):  # Start after Donchian20 warmup
         # Skip if required data not available
         if (np.isnan(vol_ma[i]) or vol_ma[i] <= 0 or
-            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(ema20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
+        # Calculate 20-day Donchian channels
+        # Lookback 20 periods including current
+        start_idx = max(0, i - 19)
+        highest_high = np.max(high[start_idx:i+1])
+        lowest_low = np.min(low[start_idx:i+1])
+        
+        # Volume confirmation: current volume > 1.3x 20-day average
         vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Trend filter from 1w: up if close > EMA20, down if close < EMA20
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit on breakdown below S3 (mean reversion failed)
-            if close[i] < s3_aligned[i]:
-                exit_long = True
-            # Exit when volume drops below average
-            elif volume[i] < vol_ma[i]:
+            # Exit when price breaks below 10-day Donchian low (shorter lookback for faster exit)
+            if i >= 9:
+                lowest_low_10 = np.min(low[i-9:i+1])
+                if close[i] < lowest_low_10:
+                    exit_long = True
+            # Exit when trend reverses
+            elif not trend_up:
                 exit_long = True
             
             if exit_long:
@@ -88,11 +86,13 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit on breakout above R3 (mean reversion failed)
-            if close[i] > r3_aligned[i]:
-                exit_short = True
-            # Exit when volume drops below average
-            elif volume[i] < vol_ma[i]:
+            # Exit when price breaks above 10-day Donchian high
+            if i >= 9:
+                highest_high_10 = np.max(high[i-9:i+1])
+                if close[i] > highest_high_10:
+                    exit_short = True
+            # Exit when trend reverses
+            elif not trend_down:
                 exit_short = True
             
             if exit_short:
@@ -101,18 +101,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Fade at R3/S3 (mean reversion)
-            fade_long = (close[i] <= s3_aligned[i]) and vol_confirm
-            fade_short = (close[i] >= r3_aligned[i]) and vol_confirm
+            # Long entry: price breaks above 20-day Donchian high, 1w trend up, volume confirmation
+            long_entry = (close[i] > highest_high) and trend_up and vol_confirm
             
-            # Breakout continuation at R4/S4 (trend following)
-            breakout_long = (close[i] >= r4_aligned[i]) and vol_confirm
-            breakout_short = (close[i] <= s4_aligned[i]) and vol_confirm
+            # Short entry: price breaks below 20-day Donchian low, 1w trend down, volume confirmation
+            short_entry = (close[i] < lowest_low) and trend_down and vol_confirm
             
-            if fade_long or breakout_long:
+            if long_entry:
                 position = 1
                 signals[i] = 0.25
-            elif fade_short or breakout_short:
+            elif short_entry:
                 position = -1
                 signals[i] = -0.25
     
