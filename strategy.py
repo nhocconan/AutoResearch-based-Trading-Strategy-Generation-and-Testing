@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_keltner_channel_1w_trend_v1
-Hypothesis: On daily timeframe, use Keltner Channel (ATR-based) to detect breakouts, filtered by weekly Supertrend for higher timeframe alignment. 
-Keltner Channel breakouts capture momentum moves, while the weekly Supertrend filter ensures we only trade in the direction of the higher timeframe trend, 
-reducing whipsaws in both bull and bear markets. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
+6h_camarilla_pivot_1d_ema_volume_v1
+Hypothesis: On 6h timeframe, use Camarilla pivot levels from daily timeframe to identify key support/resistance. Fade at R3/S3 levels (mean reversion) and breakout continuation at R4/S4 levels (trend following). Filter by daily EMA trend and volume confirmation to avoid false signals. Works in both bull and bear markets by adapting to market structure - mean reversion in ranging markets, trend following in strong trends. Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity with fee minimization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_keltner_channel_1w_trend_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,123 +21,118 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Keltner Channel parameters
-    ema_period = 20
-    atr_period = 10
-    atr_multiplier = 2.0
-    
-    # Calculate EMA (middle line)
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
-    
-    # Calculate ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Calculate Keltner Channel bands
-    upper_keltner = ema + (atr_multiplier * atr)
-    lower_keltner = ema - (atr_multiplier * atr)
-    
-    # Load weekly Supertrend for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < atr_period:
+    # Calculate EMA on daily timeframe for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Supertrend
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate ATR for weekly
-    tr1_1w = high_1w[1:] - low_1w[1:]
-    tr2_1w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_1w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
-                            np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))])
-    atr_1w = pd.Series(tr_1w).ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    hl2_1w = (high_1w + low_1w) / 2
-    upper_band_1w = hl2_1w + (3.0 * atr_1w)  # ATR multiplier 3 for Supertrend
-    lower_band_1w = hl2_1w - (3.0 * atr_1w)
+    # Previous day's OHLC for pivot calculation
+    pp_1d = np.zeros_like(high_1d)
+    r1_1d = np.zeros_like(high_1d)
+    s1_1d = np.zeros_like(high_1d)
+    r2_1d = np.zeros_like(high_1d)
+    s2_1d = np.zeros_like(high_1d)
+    r3_1d = np.zeros_like(high_1d)
+    s3_1d = np.zeros_like(high_1d)
+    r4_1d = np.zeros_like(high_1d)
+    s4_1d = np.zeros_like(high_1d)
     
-    supertrend_1w = np.full(len(df_1w), np.nan)
-    direction_1w = np.full(len(df_1w), 1)
+    for i in range(1, len(df_1d)):
+        # Previous day's values
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        
+        # Pivot point
+        pp = (ph + pl + pc) / 3
+        pp_1d[i] = pp
+        
+        # Camarilla levels
+        range_ = ph - pl
+        r1_1d[i] = pc + (range_ * 1.1 / 12)
+        s1_1d[i] = pc - (range_ * 1.1 / 12)
+        r2_1d[i] = pc + (range_ * 1.1 / 6)
+        s2_1d[i] = pc - (range_ * 1.1 / 6)
+        r3_1d[i] = pc + (range_ * 1.1 / 4)
+        s3_1d[i] = pc - (range_ * 1.1 / 4)
+        r4_1d[i] = pc + (range_ * 1.1 / 2)
+        s4_1d[i] = pc - (range_ * 1.1 / 2)
     
-    for i in range(atr_period, len(df_1w)):
-        if np.isnan(atr_1w[i]) or np.isnan(upper_band_1w[i]) or np.isnan(lower_band_1w[i]):
-            continue
-            
-        if i == atr_period:
-            supertrend_1w[i] = upper_band_1w[i]
-            direction_1w[i] = -1
-        else:
-            if close_1w[i] <= supertrend_1w[i-1]:
-                supertrend_1w[i] = upper_band_1w[i]
-                direction_1w[i] = -1
-            else:
-                supertrend_1w[i] = lower_band_1w[i]
-                direction_1w[i] = 1
-            
-            # Adjust bands
-            if direction_1w[i] == 1:  # uptrend
-                if lower_band_1w[i] < lower_band_1w[i-1]:
-                    lower_band_1w[i] = lower_band_1w[i-1]
-            else:  # downtrend
-                if upper_band_1w[i] > upper_band_1w[i-1]:
-                    upper_band_1w[i] = upper_band_1w[i-1]
-            
-            # Recalculate supertrend with adjusted bands
-            if direction_1w[i] == 1:
-                supertrend_1w[i] = lower_band_1w[i]
-            else:
-                supertrend_1w[i] = upper_band_1w[i]
+    # Align Camarilla levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Align weekly Supertrend to daily
-    supertrend_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w)
-    direction_1w_aligned = align_htf_to_ltf(prices, df_1w, direction_1w)
+    # Calculate volume moving average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(max(ema_period, atr_period), n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(ema[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(close[i]) or np.isnan(supertrend_1w_aligned[i]) or np.isnan(direction_1w_aligned[i])):
+        if (np.isclose(pp_aligned[i], 0) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: only trade in direction of weekly trend
-        weekly_uptrend = direction_1w_aligned[i] == 1
+        # Volume confirmation: above average volume
+        vol_ok = volume[i] > vol_ma[i]
+        
+        # Trend filter: price above/below daily EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below lower Keltner Channel (trend weakness)
-            if close[i] < lower_keltner[i]:
+            # Exit: price crosses below S3 (mean reversion failure) or above R4 (take profit)
+            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper Keltner Channel (trend weakness)
-            if close[i] > upper_keltner[i]:
+            # Exit: price crosses above R3 (mean reversion failure) or below S4 (take profit)
+            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only enter if weekly trend aligns
-            if weekly_uptrend:
-                # Long entry: price closes above upper Keltner Channel (breakout)
-                if close[i] > upper_keltner[i]:
+            if vol_ok:
+                # Mean reversion fade at R3/S3
+                if close[i] > r3_aligned[i] and below_ema:
+                    # Fade rejection at R3 - go short
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] < s3_aligned[i] and above_ema:
+                    # Fade rejection at S3 - go long
                     position = 1
                     signals[i] = 0.25
-            else:
-                # Short entry: price closes below lower Keltner Channel (breakdown)
-                if close[i] < lower_keltner[i]:
+                # Breakout continuation at R4/S4
+                elif close[i] > r4_aligned[i] and above_ema:
+                    # Break above R4 with trend - go long
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < s4_aligned[i] and below_ema:
+                    # Break below S4 with trend - go short
                     position = -1
                     signals[i] = -0.25
     
