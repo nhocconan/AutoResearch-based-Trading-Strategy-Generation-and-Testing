@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h Parabolic SAR with Volume Filter
+12h Parabolic SAR with Volume Filter (Revised)
 Long when Parabolic SAR flips below price with above-average volume
 Short when Parabolic SAR flips above price with above-average volume
 Exit when SAR flips opposite direction
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_parabolic_sar_volume_filter_v1"
+name = "12h_parabolic_sar_volume_filter_v2"
 timeframe = "12h"
 leverage = 1.0
 
