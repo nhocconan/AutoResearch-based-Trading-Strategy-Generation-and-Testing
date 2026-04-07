@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Supertrend with weekly trend filter and volume confirmation
-# Long when Supertrend turns green, weekly close > weekly EMA50 (uptrend), and volume > 1.5x 6h average volume
-# Short when Supertrend turns red, weekly close < weekly EMA50 (downtrend), and volume > 1.5x 6h average volume
-# Exit when Supertrend reverses or weekly trend changes
-# Stoploss at 2.5 * ATR(10)
+# Hypothesis: 12h Donchian channel breakout with 1-week EMA200 trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high, weekly EMA200 trend up, volume > 1.5x average
+# Short when price breaks below Donchian(20) low, weekly EMA200 trend down, volume > 1.5x average
+# Exit when price crosses opposite Donchian band or trend reverses
+# Stoploss at 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses weekly EMA50 for trend filter and 6h volume average for confirmation
-# Target: 80-160 total trades over 4 years (20-40/year)
+# Target: 75-150 total trades over 4 years (19-38/year)
 
-name = "6h_supertrend_weekly_ema50_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema200_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,54 +26,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Supertrend
-    atr_period = 10
-    multiplier = 3.0
+    # 12h Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
+    # 1-week EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # 12h volume average for confirmation
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.full(n, np.nan)
-    dir = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, n):
-        if close[i] > upper_band[i-1]:
-            dir[i] = 1
-        elif close[i] < lower_band[i-1]:
-            dir[i] = -1
-        else:
-            dir[i] = dir[i-1]
-            if dir[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if dir[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-    
-        if dir[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
-        return np.zeros(n)
-    
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
-    
-    # 6h volume average for confirmation
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,8 +60,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(supertrend[i]) or np.isnan(ema50_weekly_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -96,8 +75,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Supertrend reverses or weekly trend changes
-            elif dir[i] == -1 or close[i] < ema50_weekly_aligned[i]:
+            # Exit: price crosses below Donchian low or trend reverses
+            elif close[i] < donchian_low[i] or close[i] < ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -109,25 +88,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: Supertrend reverses or weekly trend changes
-            elif dir[i] == 1 or close[i] > ema50_weekly_aligned[i]:
+            # Exit: price crosses above Donchian high or trend reverses
+            elif close[i] > donchian_high[i] or close[i] > ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with Supertrend signal, weekly trend alignment, and volume confirmation
-            # Long: Supertrend uptrend, weekly uptrend, volume spike
-            if (dir[i] == 1 and
-                close[i] > ema50_weekly_aligned[i] and
+            # Look for entries with Donchian breakout, trend alignment, and volume confirmation
+            # Bullish breakout: price crosses above Donchian high
+            bullish_breakout = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
+            # Bearish breakout: price crosses below Donchian low
+            bearish_breakout = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
+            
+            # Long: bullish breakout, weekly uptrend, volume spike
+            if (bullish_breakout and
+                close[i] > ema200_1w_aligned[i] and
                 volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: Supertrend downtrend, weekly downtrend, volume spike
-            elif (dir[i] == -1 and
-                  close[i] < ema50_weekly_aligned[i] and
+            # Short: bearish breakout, weekly downtrend, volume spike
+            elif (bearish_breakout and
+                  close[i] < ema200_1w_aligned[i] and
                   volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
