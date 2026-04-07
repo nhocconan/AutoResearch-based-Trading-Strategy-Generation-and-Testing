@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(7) with 4-hour Donchian(20) and 1-day trend filter
-# Long when RSI(7) < 30 + price > 4h Donchian upper (breakout in oversold) + 1-day close > SMA50 (uptrend)
-# Short when RSI(7) > 70 + price < 4h Donchian lower (breakdown in overbought) + 1-day close < SMA50 (downtrend)
-# Exit when RSI crosses 50 (mean reversion) or price crosses opposite Donchian band
-# Session filter: 08-20 UTC to avoid low-volume Asian session
-# Position size: 0.20 (20% of capital)
-# Target: 80-160 total trades over 4 years (20-40/year)
+# Hypothesis: 6-hour Ichimoku with 1-day cloud filter
+# Long when TK crosses above Kijun + price above cloud (from 1d) + Kijun > Senkou Span A (bullish cloud)
+# Short when TK crosses below Kijun + price below cloud + Kijun < Senkou Span A (bearish cloud)
+# Exit when TK crosses back through Kijun or price exits cloud
+# Stoploss at 2 * ATR(14)
+# Position size: 0.25 (25% of capital)
+# Uses 1-day Ichimoku cloud for trend filter, targeting 80-160 total trades over 4 years (20-40/year)
 
-name = "1h_rsi7_4h_donchian_1d_trend_v1"
-timeframe = "1h"
+name = "6h_ichimoku_1d_trend_filter_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +25,108 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # 4-hour data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 4-hour Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    high_4h_s = pd.Series(high_4h)
-    low_4h_s = pd.Series(low_4h)
-    donchian_upper = high_4h_s.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_4h_s.rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 1h
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    
-    # 1-day data for trend filter
+    # 1-day data for Ichimoku cloud filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 1-day SMA(50)
+    # Calculate 1-day Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    sma50_1d = close_1d_s.rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # 1-hour RSI(7)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_s = pd.Series(gain)
-    loss_s = pd.Series(loss)
-    avg_gain = gain_s.ewm(alpha=1/7, adjust=False, min_periods=7).mean().values
-    avg_loss = loss_s.ewm(alpha=1/7, adjust=False, min_periods=7).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
     
-    # Session filter: 08-20 UTC (already datetime64[ms])
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # 6-period ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(52, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(sma50_1d_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
         if position == 1:  # long position
-            # Exit: RSI crosses 50 or price breaks below Donchian lower
-            if rsi[i] >= 50 or close[i] < donchian_lower_aligned[i]:
+            # Stoploss: 2 * ATR
+            if close[i] < entry_price - 2 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: TK crosses below Kijun OR price falls below cloud
+            elif tenkan_sen_aligned[i] < kijun_sen_aligned[i] or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI crosses 50 or price breaks above Donchian upper
-            if rsi[i] <= 50 or close[i] > donchian_upper_aligned[i]:
+            # Stoploss: 2 * ATR
+            if close[i] > entry_price + 2 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: TK crosses above Kijun OR price rises above cloud
+            elif tenkan_sen_aligned[i] > kijun_sen_aligned[i] or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries only during session
-            if in_session:
-                # Long: RSI oversold + price breaks above Donchian upper + 1-day uptrend
-                if rsi[i] < 30 and close[i] > donchian_upper_aligned[i] and close[i] > sma50_1d_aligned[i]:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = close[i]
-                # Short: RSI overbought + price breaks below Donchian lower + 1-day downtrend
-                elif rsi[i] > 70 and close[i] < donchian_lower_aligned[i] and close[i] < sma50_1d_aligned[i]:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = close[i]
+            # Look for entries: TK cross with cloud filter
+            # Bullish: TK crosses above Kijun + price above cloud + bullish cloud (Span A > Span B)
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and
+                close[i] > cloud_top and 
+                senkou_span_a_aligned[i] > senkou_span_b_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Bearish: TK crosses below Kijun + price below cloud + bearish cloud (Span A < Span B)
+            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                  tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and
+                  close[i] < cloud_bottom and 
+                  senkou_span_a_aligned[i] < senkou_span_b_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
     
     return signals
