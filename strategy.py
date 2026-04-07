@@ -1,94 +1,118 @@
 #!/usr/bin/env python3
 """
-4h_camarilla_pivot_12h_volume_v1
-Hypothesis: On 4-hour timeframe, use Camarilla pivot levels from 12-hour timeframe for support/resistance levels.
-Enter long when price touches S1 level with volume confirmation (volume > 1.5x 20-period average).
-Enter short when price touches R1 level with volume confirmation.
-Exit when price reaches opposite pivot level (S3/R3) or reverses from touch point.
-Camarilla levels provide statistically significant support/resistance; volume confirms institutional interest.
-12h timeframe reduces noise vs 1d while capturing meaningful structure. Target: 25-35 trades/year.
+6h_adx_di_crossover_1w_trend_v1
+Hypothesis: On 6-hour timeframe, use weekly ADX and DI crossover to identify strong trends, 
+entering long when +DI crosses above -DI with ADX > 25, short when -DI crosses above +DI with ADX > 25.
+Exit when ADX falls below 20 (trend weakening) or opposite DI crossover occurs.
+Weekly trend filter ensures alignment with major trend, reducing whipsaw in ranging markets.
+ADX > 25 ensures we only trade strong trends, avoiding chop.
+Target: 20-30 trades/year to minimize fee decay while capturing sustained trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_12h_volume_v1"
-timeframe = "4h"
+name = "6h_adx_di_crossover_1w_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Price and volume data
-    close = prices['close'].values
+    # Price data
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for ADX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 12h bar
-    # Based on previous day's high, low, close
-    h_12h = df_12h['high'].values
-    l_12h = df_12h['low'].values
-    c_12h = df_12h['close'].values
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
     
-    # Pivot point
-    pivot = (h_12h + l_12h + c_12h) / 3
-    # Camarilla levels
-    s1 = c_12h - (h_12h - l_12h) * 1.1 / 12
-    s2 = c_12h - (h_12h - l_12h) * 1.1 / 6
-    s3 = c_12h - (h_12h - l_12h) * 1.1 / 4
-    r1 = c_12h + (h_12h - l_12h) * 1.1 / 12
-    r2 = c_12h + (h_12h - l_12h) * 1.1 / 6
-    r3 = c_12h + (h_12h - l_12h) * 1.1 / 4
+    # Calculate ADX and DI on weekly
+    period = 14
     
-    # Align all levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    # True Range
+    tr1 = wh[1:] - wl[1:]
+    tr2 = np.abs(wh[1:] - wc[:-1])
+    tr3 = np.abs(wl[1:] - wc[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # first value NaN
     
-    # Volume filter: 4h volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = vol_series / vol_ma
-    vol_ratio = vol_ratio.fillna(0).values
+    # Directional Movement
+    dm_plus = np.where((wh[1:] - wh[:-1]) > (wl[:-1] - wl[1:]), np.maximum(wh[1:] - wh[:-1], 0), 0)
+    dm_minus = np.where((wl[:-1] - wl[1:]) > (wh[1:] - wh[:-1]), np.maximum(wl[:-1] - wl[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        """Wilder smoothing (same as RSI)"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])  # skip first NaN
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr_smooth = smooth_wilder(tr, period)
+    dm_plus_smooth = smooth_wilder(dm_plus, period)
+    dm_minus_smooth = smooth_wilder(dm_minus, period)
+    
+    # DI+
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    # DI-
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    
+    # ADX (smoothed DX)
+    adx = smooth_wilder(dx, period)
+    
+    # Align to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    di_plus_aligned = align_htf_to_ltf(prices, df_1w, di_plus)
+    di_minus_aligned = align_htf_to_ltf(prices, df_1w, di_minus)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
-        # Skip if pivot data not available
-        if np.isnan(pivot_aligned[i]):
+    for i in range(1, n):  # Start from 1 to avoid NaN issues
+        # Skip if ADX not available
+        if np.isnan(adx_aligned[i]) or np.isnan(di_plus_aligned[i]) or np.isnan(di_minus_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Price levels
-        s1_level = s1_aligned[i]
-        s3_level = s3_aligned[i]
-        r1_level = r1_aligned[i]
-        r3_level = r3_aligned[i]
+        adx_val = adx_aligned[i]
+        di_plus_val = di_plus_aligned[i]
+        di_minus_val = di_minus_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_ratio[i] > 1.5
+        # Previous values for crossover detection
+        if i > 1:
+            di_plus_prev = di_plus_aligned[i-1]
+            di_minus_prev = di_minus_aligned[i-1]
+        else:
+            di_plus_prev = di_plus_val
+            di_minus_prev = di_minus_val
         
         if position == 1:  # Long position
             # Exit conditions
             exit_long = False
-            # Exit when price reaches S3 (strong support) or reverses from S1
-            if close[i] <= s3_level:
+            # Exit when ADX falls below 20 (trend weakening)
+            if adx_val < 20:
                 exit_long = True
-            elif close[i] < s1_level and i > 1 and close[i-1] >= s1_level:
+            # Exit when -DI crosses above +DI
+            elif di_minus_prev <= di_plus_prev and di_minus_val > di_plus_val:
                 exit_long = True
             
             if exit_long:
@@ -100,10 +124,11 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit conditions
             exit_short = False
-            # Exit when price reaches R3 (strong resistance) or reverses from R1
-            if close[i] >= r3_level:
+            # Exit when ADX falls below 20 (trend weakening)
+            if adx_val < 20:
                 exit_short = True
-            elif close[i] > r1_level and i > 1 and close[i-1] <= r1_level:
+            # Exit when +DI crosses above -DI
+            elif di_plus_prev <= di_minus_prev and di_plus_val > di_minus_val:
                 exit_short = True
             
             if exit_short:
@@ -112,11 +137,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price touches S1 level with volume confirmation
-            long_entry = (abs(close[i] - s1_level) < 0.001 * close[i]) and vol_confirmed
+            # Long entry: ADX > 25 AND +DI crosses above -DI
+            long_entry = (adx_val > 25) and (di_plus_prev <= di_minus_prev) and (di_plus_val > di_minus_val)
             
-            # Short entry: price touches R1 level with volume confirmation
-            short_entry = (abs(close[i] - r1_level) < 0.001 * close[i]) and vol_confirmed
+            # Short entry: ADX > 25 AND -DI crosses above +DI
+            short_entry = (adx_val > 25) and (di_minus_prev <= di_plus_prev) and (di_minus_val > di_plus_val)
             
             if long_entry:
                 position = 1
