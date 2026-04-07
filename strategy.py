@@ -3,12 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 4h Donchian breakout with daily volume confirmation and ATR volatility filter
-# Hypothesis: Donchian breakouts capture trends, volume confirms institutional participation,
-# volatility filter avoids chop. Works in bull (breakouts) and bear (volatility-filtered mean reversion).
-# Target: 20-50 trades/year, low frequency to minimize fee drag
-name = "4h_donchian20_1d_volume_atr_v1"
-timeframe = "4h"
+# Hypothesis: 6h Elder Ray Power with 1d regime filter
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# In bull regime (1d close > 50 EMA): enter long when Bull Power crosses above 0
+# In bear regime (1d close < 50 EMA): enter short when Bear Power crosses above 0
+# Exit when power crosses back below 0
+# Target: 12-37 trades/year, works in both bull and bear via regime adaptation
+
+name = "6h_elder_ray_1d_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,67 +23,57 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for volume confirmation
+    # Get 1d data for regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily 20-period volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate 13-period EMA for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False).mean().values
     
-    # Calculate ATR(14) for volatility filter and stop sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
     
-    # Calculate Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d regime: close > 50 EMA = bull regime, close < 50 EMA = bear regime
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    bull_regime = close_1d > ema50_1d  # True for bull regime
+    bull_regime_aligned = align_htf_to_ltf(prices, df_1d, bull_regime)
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(bull_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
-        
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
-        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
-        
         if position == 1:  # Long position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] <= lowest_low[i] or not vol_filter:
+            # Exit: Bull Power crosses below 0
+            if bull_power[i] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: price touches opposite band OR volatility drops
-            if close[i] >= highest_high[i] or not vol_filter:
+            # Exit: Bear Power crosses below 0
+            if bear_power[i] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above upper band + volume confirmation + volatility filter
-            if close[i] > highest_high[i] and vol_confirm and vol_filter:
+            # Enter long: Bull Power crosses above 0 in bull regime
+            if bull_power[i] > 0 and bull_power[i-1] <= 0 and bull_regime_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band + volume confirmation + volatility filter
-            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
+            # Enter short: Bear Power crosses above 0 in bear regime
+            elif bear_power[i] > 0 and bear_power[i-1] <= 0 and not bull_regime_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
