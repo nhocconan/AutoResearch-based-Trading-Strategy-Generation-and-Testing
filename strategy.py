@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v1
+4h_camarilla_pivot_1d_volume_v1
 Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
 Long when price breaks above R4 with volume confirmation (bullish continuation).
 Short when price breaks below S4 with volume confirmation (bearish continuation).
 Otherwise, fade at R3/S3 levels with volume divergence (mean reversion in ranging markets).
 Works in both bull/bear markets by adapting to volatility and volume.
-Target: 50-150 trades over 4 years on 12h timeframe.
+Target: 20-40 trades/year on 4h timeframe to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_pivot_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prices)
-    if n < 20:
+    n = len(prrices)
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -43,7 +43,7 @@ def generate_signals(prices):
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First day has no previous
+    prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
@@ -58,13 +58,13 @@ def generate_signals(prices):
     s3 = prev_close - range_1d * 1.1 / 4
     s4 = prev_close - range_1d * 1.1 / 2
     
-    # Align to 12h timeframe (previous day's levels are valid for current day)
+    # Align to 4h timeframe (previous day's levels are valid for current day)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 20-period average (longer period for 12h)
+    # Volume confirmation: volume > 20-period average (4h = ~3.3 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -81,7 +81,7 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below R3 (mean reversion) or stop at S4 break
+            # Exit: price crosses below R3 (mean reversion)
             if close[i] < r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -89,7 +89,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above S3 (mean reversion) or stop at R4 break
+            # Exit: price crosses above S3 (mean reversion)
             if close[i] > s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -105,13 +105,13 @@ def generate_signals(prices):
                 position = -1
                 signals[i] = -0.25
             # Mean reversion long: price rejects S3 with volume divergence (lower volume on test)
-            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
+            elif close[i] < s3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
                 # Look for bullish rejection (close > open)
                 if close[i] > open_price[i]:
                     position = 1
                     signals[i] = 0.25
             # Mean reversion short: price rejects R3 with volume divergence
-            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.8:
+            elif close[i] > r3_aligned[i] and volume[i] < vol_ma[i] * 0.7:
                 # Look for bearish rejection (close < open)
                 if close[i] < open_price[i]:
                     position = -1
