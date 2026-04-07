@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: 6h Elder Ray Index with 1d trend filter and volume confirmation
-# Hypothesis: Elder Ray measures bull/bear power relative to EMA13. Combined with 1d trend filter
-# (price above/below EMA50) and volume confirmation, it captures strong directional moves
-# while avoiding chop. Works in bull via bull power signals, in bear via bear power signals.
+# Strategy: 12h Donchian(20) breakout with weekly volume confirmation and ATR volatility filter
+# Hypothesis: Breakouts with volume confirmation capture strong trends; volatility filter avoids choppy markets.
+# Works in bull via breakouts, in bear via volatility-filtered mean reversion at bands.
 # Target: 12-37 trades/year to minimize fee drag.
-name = "6h_elder_ray_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,64 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (6-period EMA approximation for 6h)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False).mean().values
+    # Calculate weekly 20-period volume moving average
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate ATR(14) for volatility filter and stop sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    daily_close_s = pd.Series(daily_close)
-    ema50_1d = daily_close_s.ewm(span=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate daily volume moving average for confirmation
-    daily_volume = df_1d['volume'].values
-    vol_ma_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Donchian channels (20-period high/low)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # Track position: 1=long, -1=short, 0=flat
     
-    for i in range(13, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > daily average volume
-        vol_confirm = volume[i] > vol_ma_1d_aligned[i]
+        # Volume confirmation: current 12h volume > weekly average volume
+        vol_confirm = volume[i] > vol_ma_1w_aligned[i]
+        
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
+        atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+        vol_filter = atr[i] > atr_ma[i] if not np.isnan(atr_ma[i]) else True
         
         if position == 1:  # Long position
-            # Exit: bear power becomes positive (bulls losing control) OR trend fails
-            if bear_power[i] > 0 or close[i] < ema50_1d_aligned[i]:
+            # Exit: price touches opposite band OR volatility drops
+            if close[i] <= lowest_low[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit: bull power becomes negative (bears losing control) OR trend fails
-            if bull_power[i] < 0 or close[i] > ema50_1d_aligned[i]:
+            # Exit: price touches opposite band OR volatility drops
+            if close[i] >= highest_high[i] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: bull power positive (bulls in control) + uptrend + volume confirmation
-            if bull_power[i] > 0 and close[i] > ema50_1d_aligned[i] and vol_confirm:
+            # Enter long: price breaks above upper band + volume confirmation + volatility filter
+            if close[i] > highest_high[i] and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: bear power negative (bears in control) + downtrend + volume confirmation
-            elif bear_power[i] < 0 and close[i] < ema50_1d_aligned[i] and vol_confirm:
+            # Enter short: price breaks below lower band + volume confirmation + volatility filter
+            elif close[i] < lowest_low[i] and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
