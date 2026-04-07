@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_ema_bounce_volume_trend_v1
-Hypothesis: Price retests EMA(21) with volume confirmation and trend alignment (EMA50) provides high-probability entries in both bull and bear markets.
-In bull markets, price bounces off EMA21 support; in bear markets, price rejects EMA21 resistance.
-Volume filter ensures institutional participation; EMA50 confirms trend direction.
-Targets 20-50 trades/year by requiring confluence of EMA21 bounce/rejection, volume spike, and EMA50 trend filter.
+1d_donchian_breakout_1w_trend_volume_v1
+Hypothesis: Daily Donchian channel breakouts with weekly trend filter and volume
+confirmation capture momentum moves. In bull markets, breakouts above upper band
+with uptrend continue upward. In bear markets, breakdowns below lower band with
+downtrend continue downward. Volume confirms institutional participation.
+Targets 7-25 trades/year by requiring confluence of breakout, trend, and volume.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ema_bounce_volume_trend_v1"
-timeframe = "4h"
+name = "1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,55 +27,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA21 for dynamic support/resistance
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Weekly OHLC for Donchian calculation (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # EMA50 for trend filter
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels (20-period high/low)
+    high_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Volume average for confirmation
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align to daily timeframe (shift by 1 week for completed bars only)
+    donchian_high = align_htf_to_ltf(prices, df_1w, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_1w, low_20)
+    
+    # Weekly EMA100 for trend filter
+    ema100_1w = pd.Series(df_1w['close'].values).ewm(span=100, adjust=False).mean().values
+    ema100_1d = align_htf_to_ltf(prices, df_1w, ema100_1w)
+    
+    # 20-period volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(ema21[i]) or np.isnan(ema50[i]) or np.isnan(vol_sma[i]):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(ema100_1d[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below EMA21 OR trend turns down
-            if close[i] < ema21[i] or close[i] < ema50[i]:
+            # Exit: price breaks below Donchian low OR trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema100_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit: price closes above EMA21 OR trend turns up
-            if close[i] > ema21[i] or close[i] > ema50[i]:
+            # Exit: price breaks above Donchian high OR trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema100_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price touches/bounces off EMA21 support + volume + uptrend
-            if (low[i] <= ema21[i] * 1.005 and  # Allow small tolerance for wick
-                close[i] > ema21[i] and
+            # Long: price breaks above Donchian high + volume + uptrend
+            if (close[i] > donchian_high[i] and 
                 vol_confirm and 
-                close[i] > ema50[i]):
+                close[i] > ema100_1d[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches/rejects EMA21 resistance + volume + downtrend
-            elif (high[i] >= ema21[i] * 0.995 and  # Allow small tolerance for wick
-                  close[i] < ema21[i] and 
+            # Short: price breaks below Donchian low + volume + downtrend
+            elif (close[i] < donchian_low[i] and 
                   vol_confirm and 
-                  close[i] < ema50[i]):
+                  close[i] < ema100_1d[i]):
                 position = -1
                 signals[i] = -0.25
     
