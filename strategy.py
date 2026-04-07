@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Bollinger squeeze breakout with 1-day volume confirmation and 1-week ADX trend filter
-# Long when price breaks above upper Bollinger band + volume > 1.5x 20-period average + weekly ADX > 25
-# Short when price breaks below lower Bollinger band + volume > 1.5x 20-period average + weekly ADX > 25
-# Exit when price crosses middle Bollinger band (20-period SMA) in opposite direction
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and 1-week ADX trend filter
+# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period average + weekly ADX > 25
+# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period average + weekly ADX > 25
+# Exit when price crosses 10-period EMA in opposite direction
 # Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses Bollinger Bands (20,2) for squeeze detection and breakout signals
+# Uses 1-day volume for confirmation and 1-week ADX for trend strength
 # Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "6h_bb_squeeze_breakout_1d_vol_1w_adx_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_vol_1w_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -77,13 +77,14 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # 6-period Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # 12-period Donchian channels (20-period for breakout)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6-period ATR(14) for stoploss
+    # 10-period EMA for exit
+    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # 12-period ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -98,9 +99,9 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(sma_20[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr[i])):
+            np.isnan(ema_10[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -113,8 +114,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses below middle Bollinger band (SMA20)
-            elif close[i] < sma_20[i]:
+            # Exit: price crosses below 10-period EMA
+            elif close[i] < ema_10[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -126,27 +127,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses above middle Bollinger band (SMA20)
-            elif close[i] > sma_20[i]:
+            # Exit: price crosses above 10-period EMA
+            elif close[i] > ema_10[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Bollinger Band breakout with volume confirmation and ADX trend filter
+            # Look for entries: Donchian breakout with volume confirmation and ADX trend filter
             # Volume filter: volume > 1.5x 20-period average
             volume_filter = volume[i] > 1.5 * volume_ma_aligned[i]
             # Trend filter: weekly ADX > 25
             trend_filter = adx_aligned[i] > 25
             
-            # Long: price breaks above upper Bollinger band + volume filter + trend filter
-            if close[i] > upper_bb[i] and volume_filter and trend_filter:
+            # Long: price breaks above Donchian high + volume filter + trend filter
+            if close[i] > highest_high[i] and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower Bollinger band + volume filter + trend filter
-            elif close[i] < lower_bb[i] and volume_filter and trend_filter:
+            # Short: price breaks below Donchian low + volume filter + trend filter
+            elif close[i] < lowest_low[i] and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
