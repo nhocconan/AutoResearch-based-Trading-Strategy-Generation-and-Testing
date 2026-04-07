@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day trend filter and volume confirmation
-# Donchian breakouts capture momentum in trending markets while avoiding whipsaws.
-# Daily trend filter ensures trades align with higher timeframe direction.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter and volume confirmation
+# Captures momentum in trending markets while avoiding whipsaws.
+# Daily trend filter ensures alignment with higher timeframe direction.
 # Volume confirmation filters for institutional participation.
-# Designed for low frequency: target 12-37 trades/year to minimize fee drag.
+# Designed for low frequency: target 20-50 trades/year to minimize fee drag.
 # Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
 
-name = "12h_donchian20_1d_trend_volume_v1"
-timezone = "12h"
+name = "4h_donchian20_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
