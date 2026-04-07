@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_ema_cross_volume_v3
-Hypothesis: On 4h timeframe, enter long when fast EMA crosses above slow EMA with above-average volume and price above 100-period SMA (bullish trend), enter short when fast EMA crosses below slow EMA with above-average volume and price below 100-period SMA (bearish trend). Exit when EMA cross reverses. Uses 1d EMA trend filter to avoid counter-trend trades. Designed for 20-30 trades/year to minimize fee drag while capturing major trends in both bull and bear markets.
+12h_price_channel_breakout_1w_trend_volume_v1
+Hypothesis: On 12h timeframe, enter long when price breaks above weekly Donchian high with volume above 20-period average and 1d close above 20 EMA, enter short when price breaks below weekly Donchian low with volume above average and 1d close below 20 EMA. Exit when price crosses the 20-period EMA. Uses 1d EMA trend filter to avoid counter-trend trades. Designed for 15-30 trades/year to minimize fee drag while capturing trend continuation in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ema_cross_volume_v3"
-timeframe = "4h"
+name = "12h_price_channel_breakout_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,38 +23,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMAs
-    ema_fast = pd.Series(close).ewm(span=9, min_periods=9, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # Calculate 100-period SMA for trend filter
-    sma_100 = pd.Series(close).rolling(window=100, min_periods=100).mean().values
+    # Calculate 20-period EMA for trend filter and exit
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d EMA for trend filter (avoid counter-trend trades)
+    # Calculate weekly Donchian channels for breakout signals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Weekly Donchian high (20-period)
+    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Weekly Donchian low (20-period)
+    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian levels to 12h timeframe
+    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
+    
+    # Calculate 1d EMA for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_fast_1d = pd.Series(close_1d).ewm(span=9, min_periods=9, adjust=False).mean().values
-    ema_slow_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # 1d EMA crossover signal (1 = bullish, -1 = bearish)
-    ema_cross_1d = np.where(ema_fast_1d > ema_slow_1d, 1, -1)
-    
-    # Align indicators to 4h timeframe
-    ema_cross_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_cross_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if data not available
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(sma_100[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_cross_1d_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(vol_ma[i]) or np.isnan(close[i]) or 
+            np.isnan(donchian_high_1w_aligned[i]) or np.isnan(donchian_low_1w_aligned[i]) or
+            np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -62,28 +70,28 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: EMA cross turns bearish
-            if ema_fast[i] < ema_slow[i]:
+            # Exit: price crosses below 20-period EMA
+            if close[i] < ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA cross turns bullish
-            if ema_fast[i] > ema_slow[i]:
+            # Exit: price crosses above 20-period EMA
+            if close[i] > ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if vol_ok:
-                # Long: EMA bullish cross with price above SMA100 and 1d trend bullish
-                if ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1] and close[i] > sma_100[i] and ema_cross_1d_aligned[i] > 0:
+                # Long: price breaks above weekly Donchian high with 1d EMA uptrend
+                if close[i] > donchian_high_1w_aligned[i] and close[i-1] <= donchian_high_1w_aligned[i-1] and ema_20_1d_aligned[i] > ema_20_1d_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short: EMA bearish cross with price below SMA100 and 1d trend bearish
-                elif ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1] and close[i] < sma_100[i] and ema_cross_1d_aligned[i] < 0:
+                # Short: price breaks below weekly Donchian low with 1d EMA downtrend
+                elif close[i] < donchian_low_1w_aligned[i] and close[i-1] >= donchian_low_1w_aligned[i-1] and ema_20_1d_aligned[i] < ema_20_1d_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
