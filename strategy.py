@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour price action trading with weekly trend filter and volume confirmation
-# Uses Donchian channel breakouts from the 12h timeframe, filtered by weekly trend (EMA50)
-# Volume confirms institutional participation at breakout
-# Designed for low frequency: 12-37 trades per year to minimize fee drag in 12h timeframe
-# Works in both bull and bear markets by only trading in direction of higher timeframe trend
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
+# Donchian breakout captures momentum in both bull and bear markets
+# Weekly EMA50 filter ensures we only trade in direction of higher timeframe trend
+# Volume confirms institutional participation at entry
+# Designed for low frequency: 7-25 trades per year to minimize fee drag in 1d timeframe
 
-name = "12h_donchian20_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "1d_donchian20_weekly_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,9 +34,15 @@ def generate_signals(prices):
     ema50_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on daily data
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper[i] = np.max(high[i-19:i+1])
+        lower[i] = np.min(low[i-19:i+1])
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,7 +52,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
             np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -60,26 +66,26 @@ def generate_signals(prices):
         
         # Exit conditions
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian low or trend changes
-            if close[i] < low_20[i] or not uptrend:
+            # Exit if price breaks below lower Donchian band or breaks weekly EMA50
+            if close[i] < lower[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian high or trend changes
-            if close[i] > high_20[i] or not downtrend:
+            # Exit if price breaks above upper Donchian band or breaks weekly EMA50
+            if close[i] > upper[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Enter long: price breaks above Donchian high AND uptrend AND volume confirmation
-            if close[i] > high_20[i] and uptrend and vol_confirm:
+            # Enter long: price breaks above upper Donchian band AND uptrend AND volume confirmation
+            if close[i] > upper[i] and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low AND downtrend AND volume confirmation
-            elif close[i] < low_20[i] and downtrend and vol_confirm:
+            # Enter short: price breaks below lower Donchian band AND downtrend AND volume confirmation
+            elif close[i] < lower[i] and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
