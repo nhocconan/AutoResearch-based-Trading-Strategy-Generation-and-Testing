@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly volume filter and ATR volatility scaling
-# Uses Donchian(20) channels for breakout signals, weekly average volume to confirm
-# institutional interest, and ATR-based volatility scaling to reduce position size
-# during high volatility periods. Designed for low trade frequency (target: 15-25 trades/year)
-# to minimize fee drag while capturing major trends in both bull and bear markets.
+# Hypothesis: Daily Donchian breakout with volume confirmation and ATR stoploss
+# Uses 20-day Donchian channels on daily timeframe for breakout signals,
+# confirmed by daily volume > 1.5x 20-day average volume.
+# Includes ATR-based stoploss and volatility-adjusted position sizing.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
 
-name = "daily_donchian20_weekly_vol_scaled_v1"
+name = "daily_donchian20_volume_vol_scaled_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,21 +25,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for volume filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate Donchian channels (20-period)
+    # Daily Donchian(20) - upper and lower bands
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly average volume
-    vol_1w = df_1w['volume'].values
-    vol_avg_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
+    # Volume confirmation: current volume > 1.5x 20-day average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
-    # ATR(20) for volatility scaling
+    # ATR(20) for volatility and stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -49,34 +44,76 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
+    position = 0  # Track position: 0=flat, 1=long, -1=short
     
     for i in range(50, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_avg_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(atr_ma[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: scale position size inversely with volatility
-        vol_ratio = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
-        vol_scale = np.clip(1.0 / vol_ratio, 0.5, 1.0)  # scale between 0.5 and 1.0
+        # Volatility regime: scale position size based on volatility
+        vol_ratio_atr = atr[i] / atr_ma[i] if atr_ma[i] > 0 else 1.0
+        vol_scale = np.clip(1.0 / vol_ratio_atr, 0.5, 1.5)  # scale between 0.5 and 1.5
         base_size = 0.25
         
-        # Volume confirmation: current volume > weekly average volume
-        vol_confirm = volume[i] > vol_avg_1w_aligned[i]
+        # Breakout conditions with volume confirmation
+        vol_confirmed = vol_ratio[i] > 1.5
         
-        # Donchian breakout signals
-        long_breakout = close[i] > highest_high[i-1]  # break above previous high
-        short_breakout = close[i] < lowest_low[i-1]   # break below previous low
+        # Long breakout: price breaks above upper Donchian band with volume
+        long_breakout = (close[i] > highest_high[i]) and vol_confirmed
         
-        # Long conditions: bullish breakout with volume confirmation
-        if long_breakout and vol_confirm:
+        # Short breakdown: price breaks below lower Donchian band with volume
+        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Stoploss: exit if price moves against position by 2*ATR
+        if position == 1 and i > 0:
+            # Track entry price approximation (using close of entry bar)
+            if signals[i-1] == 0 and signals[i-1] != position:
+                entry_price = close[i-1]  # approximate entry at previous close
+            else:
+                # Find actual entry price by looking back
+                j = i-1
+                while j > 0 and signals[j] == position:
+                    j -= 1
+                if j >= 0 and signals[j] == 0 and signals[j+1] == position:
+                    entry_price = close[j+1]
+                else:
+                    entry_price = close[i-1]  # fallback
+            
+            if close[i] < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        elif position == -1 and i > 0:
+            # Track entry price approximation
+            if signals[i-1] == 0 and signals[i-1] != position:
+                entry_price = close[i-1]
+            else:
+                j = i-1
+                while j > 0 and signals[j] == position:
+                    j -= 1
+                if j >= 0 and signals[j] == 0 and signals[j+1] == position:
+                    entry_price = close[j+1]
+                else:
+                    entry_price = close[i-1]
+            
+            if close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Generate new signals
+        if long_breakout and position != 1:
             signals[i] = base_size * vol_scale
-        # Short conditions: bearish breakout with volume confirmation
-        elif short_breakout and vol_confirm:
+            position = 1
+        elif short_breakout and position != -1:
             signals[i] = -base_size * vol_scale
+            position = -1
         else:
-            signals[i] = 0.0
+            # Hold current position
+            signals[i] = base_size * vol_scale if position == 1 else (-base_size * vol_scale if position == -1 else 0.0)
     
     return signals
