@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Strategy: Daily Donchian Breakout with Weekly Trend Filter
-# Hypothesis: Daily Donchian(20) breakouts in direction of weekly trend capture
-# momentum while avoiding whipsaws. Weekly trend filter ensures alignment with
-# higher timeframe momentum, reducing false signals in choppy markets.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
-# Works in bull markets (trend continuation) and bear markets (trend reversals).
+# Strategy: 6h Camarilla Pivot from 1d + Volume Confirmation + ADX Trend Filter
+# Hypothesis: Camarilla levels from daily chart provide strong intraday support/resistance.
+# In trending markets (ADX > 25), breakouts beyond R4/S4 with volume continue the trend.
+# In ranging markets (ADX < 25), reversals at R3/S3 with volume capture mean reversion.
+# Uses 6h timeframe for execution, 1d for pivot calculation and trend filter.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 
-name = "daily_donchian_breakout_weekly_trend_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,63 +25,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Get daily data for Camarilla pivot and ADX
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA(21) for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False).mean().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_daily['high'].shift(1).values
+    prev_low = df_daily['low'].shift(1).values
+    prev_close = df_daily['close'].shift(1).values
     
-    # Daily Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    daily_high_20 = high_series.rolling(window=20, min_periods=20).max().values
-    daily_low_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # Camarilla pivot levels (based on previous day)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # Align weekly EMA to daily timeframe
-    weekly_ema21_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema21)
+    # Resistance levels
+    r1 = pivot + (range_ * 1.1 / 12)
+    r2 = pivot + (range_ * 1.1 / 6)
+    r3 = pivot + (range_ * 1.1 / 4)
+    r4 = pivot + (range_ * 1.1 / 2)
     
-    # Volume filter: volume > 1.5x 20-day average
+    # Support levels
+    s1 = pivot - (range_ * 1.1 / 12)
+    s2 = pivot - (range_ * 1.1 / 6)
+    s3 = pivot - (range_ * 1.1 / 4)
+    s4 = pivot - (range_ * 1.1 / 2)
+    
+    # Calculate ADX on daily data for trend filter
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
+    
+    # True Range
+    tr1 = daily_high[1:] - daily_low[1:]
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((daily_high[1:] - daily_high[:-1]) > (daily_low[:-1] - daily_low[1:]),
+                       np.maximum(daily_high[1:] - daily_high[:-1], 0), 0)
+    dm_minus = np.where((daily_low[:-1] - daily_low[1:]) > (daily_high[1:] - daily_high[:-1]),
+                        np.maximum(daily_low[:-1] - daily_low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) / period
+        # Subsequent values
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align daily indicators to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    
+    # Volume filter on 6h: volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(40, n):
         # Skip if required data not available
-        if (np.isnan(daily_high_20[i]) or np.isnan(daily_low_20[i]) or
-            np.isnan(weekly_ema21_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls back below 20-day low or weekly trend turns bearish
-            if close[i] < daily_low_20[i] or close[i] < weekly_ema21_aligned[i]:
+            # Exit: price falls back below S3 or ADX weakens significantly
+            if close[i] < s3_aligned[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long
         elif position == -1:  # Short position
-            # Exit: price rises back above 20-day high or weekly trend turns bullish
-            if close[i] > daily_high_20[i] or close[i] > weekly_ema21_aligned[i]:
+            # Exit: price rises back above R3 or ADX weakens significantly
+            if close[i] > r3_aligned[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: breakout above 20-day high with volume and bullish weekly trend
-            if (high[i] > daily_high_20[i] and close[i] > daily_high_20[i] and
-                vol_filter[i] and close[i] > weekly_ema21_aligned[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: breakdown below 20-day low with volume and bearish weekly trend
-            elif (low[i] < daily_low_20[i] and close[i] < daily_low_20[i] and
-                  vol_filter[i] and close[i] < weekly_ema21_aligned[i]):
-                position = -1
-                signals[i] = -0.25
+            if adx_aligned[i] >= 25:  # Trending market
+                # Breakout continuation: beyond R4/S4 with volume
+                if (high[i] > r4_aligned[i] and close[i] > r4_aligned[i] and vol_filter[i]):
+                    position = 1
+                    signals[i] = 0.25
+                elif (low[i] < s4_aligned[i] and close[i] < s4_aligned[i] and vol_filter[i]):
+                    position = -1
+                    signals[i] = -0.25
+            else:  # Ranging market (ADX < 25)
+                # Mean reversion at R3/S3 with volume
+                if (low[i] < s3_aligned[i] and close[i] > s3_aligned[i] and vol_filter[i]):
+                    position = 1
+                    signals[i] = 0.25
+                elif (high[i] > r3_aligned[i] and close[i] < r3_aligned[i] and vol_filter[i]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
