@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_camarilla_pivot_1d_volume_v5
-Hypothesis: On 12-hour timeframe, trade reversals at daily Camarilla pivot levels (H3/L3, H4/L4) with volume confirmation.
-Long when price touches L3/L4 with volume > 1.5x average; short when touches H3/H4 with volume > 1.5x average.
-Exit on opposite touch or when price moves beyond H5/L5. Works in ranging markets (2025-2026) and captures mean reversion.
-Designed for 15-30 trades/year to minimize fee drag while capturing reversals in both bull and bear markets.
+4h_camarilla_pivot_1d_volume_v1
+Hypothesis: On 4-hour timeframe, use daily Camarilla pivot levels for mean reversion in ranging markets. 
+Long when price touches S3 level with volume confirmation in ranging market (CHOP > 61.8).
+Short when price touches R3 level with volume confirmation in ranging market.
+Exit when price moves to opposite pivot level or volatility expands (CHOP < 38.2).
+Designed for 20-40 trades/year to minimize fee drag while capturing mean reversion in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v5"
-timezone = "12h"
+name = "4h_camarilla_pivot_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,88 +27,129 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivots and CHOP
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
+    # Calculate Camarilla pivot levels for 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla multipliers
-    H4 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 2
-    H3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
-    L3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
-    L4 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 2
-    H5 = close_1d + 1.1 * (high_1d - low_1d) * 1.1
-    L5 = close_1d - 1.1 * (high_1d - low_1d) * 1.1
+    # Pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Align to 12h timeframe
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
-    H5_12h = align_htf_to_ltf(prices, df_1d, H5)
-    L5_12h = align_htf_to_ltf(prices, df_1d, L5)
+    # Camarilla levels
+    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    r2_1d = pivot_1d + (range_1d * 1.1 / 6)
+    r1_1d = pivot_1d + (range_1d * 1.1 / 12)
+    s1_1d = pivot_1d - (range_1d * 1.1 / 12)
+    s2_1d = pivot_1d - (range_1d * 1.1 / 6)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Volume filter: 1.5x average volume
-    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_filter = volume > (1.5 * vol_ma)
+    # Align Camarilla levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Calculate Choppiness Index for 1d (CHOP)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR(14) - Wilder's smoothing
+    period = 14
+    alpha = 1.0 / period
+    
+    def wilders_smoothing(arr):
+        smoothed = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if np.isnan(arr[i]):
+                if i == 0:
+                    smoothed[i] = np.nan
+                else:
+                    smoothed[i] = smoothed[i-1]
+            else:
+                if i == 0 or np.isnan(smoothed[i-1]):
+                    smoothed[i] = arr[i]
+                else:
+                    smoothed[i] = smoothed[i-1] + alpha * (arr[i] - smoothed[i-1])
+        return smoothed
+    
+    atr = wilders_smoothing(tr)
+    
+    # CHOP = 100 * log10(sum(ATR,14)/(n*(high-low))) / log10(n)
+    # where n=14
+    atr_sum = np.convolve(atr, np.ones(14), 'full')[:len(atr)]
+    atr_sum[:13] = np.nan
+    high_low_sum = np.convolve(range_1d, np.ones(14), 'full')[:len(range_1d)]
+    high_low_sum[:13] = np.nan
+    
+    chop = 100 * np.log10(atr_sum / (14 * high_low_sum)) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume ratio: current volume / 20-period average
+    vol_ma = np.convolve(volume, np.ones(20)/20, 'same')
+    vol_ma[:10] = np.nan
+    vol_ma[-10:] = np.nan
+    vol_ratio = volume / vol_ma
+    
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if pivot data not available
-        if np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]):
+    for i in range(30, n):  # Start after warmup
+        if not in_session[i]:
             signals[i] = 0.0
             continue
             
-        # Long conditions: touch L3 or L4 with volume confirmation
-        long_signal = (
-            (low[i] <= L3_12h[i] * 1.001 or low[i] <= L4_12h[i] * 1.001) and
-            vol_filter[i]
-        )
-        
-        # Short conditions: touch H3 or H4 with volume confirmation
-        short_signal = (
-            (high[i] >= H3_12h[i] * 0.999 or high[i] >= H4_12h[i] * 0.999) and
-            vol_filter[i]
-        )
-        
-        # Exit conditions: opposite touch or beyond H5/L5
-        exit_long = (
-            high[i] >= H3_12h[i] * 0.999 or  # Touch H3 on long
-            high[i] >= H5_12h[i] * 0.999     # Beyond H5
-        )
-        
-        exit_short = (
-            low[i] <= L3_12h[i] * 1.001 or   # Touch L3 on short
-            low[i] <= L5_12h[i] * 1.001      # Beyond L5
-        )
+        # Skip if data not available
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ratio[i])):
+            signals[i] = 0.0
+            continue
+            
+        # Range market condition: CHOP > 61.8
+        ranging = chop_aligned[i] > 61.8
+        trending = chop_aligned[i] < 38.2
         
         if position == 1:  # Long position
-            if exit_long:
+            # Exit: price reaches R1 or volatility expands (trending market)
+            if close[i] >= r1_aligned[i] or trending:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if exit_short:
+            # Exit: price reaches S1 or volatility expands (trending market)
+            if close[i] <= s1_aligned[i] or trending:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            if long_signal:
-                position = 1
-                signals[i] = 0.25
-            elif short_signal:
-                position = -1
-                signals[i] = -0.25
+            # Only enter in ranging market with volume confirmation
+            if ranging and vol_ratio[i] > 1.5:
+                # Long at S3
+                if close[i] <= s3_aligned[i] and low[i] <= s3_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short at R3
+                elif close[i] >= r3_aligned[i] and high[i] >= r3_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
