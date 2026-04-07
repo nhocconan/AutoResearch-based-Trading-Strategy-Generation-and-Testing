@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with 1w Trend Filter
-Breakout long when price > Donchian(20) high and weekly close > weekly SMA50
-Breakout short when price < Donchian(20) low and weekly close < weekly SMA50
-Exit on opposite Donchian breakout or trend reversal
-Designed to capture trends in both bull and bear markets with controlled risk
+6h Chaikin Money Flow with 12h Trend Filter
+Long when CMF > 0.1 and 12h close > 12h EMA50 (bullish momentum)
+Short when CMF < -0.1 and 12h close < 12h EMA50 (bearish momentum)
+Exit when CMF crosses back through zero
+Uses volume to confirm institutional participation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_v1"
-timeframe = "1d"
+name = "6h_cmf_12h_trend_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,48 +24,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === Donchian Channel (20) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Chaikin Money Flow (20) ===
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfm = np.where(high == low, 0, mfm)  # Avoid division by zero
+    # Money Flow Volume = MFM * Volume
+    mfv = mfm * volume
+    # CMF = 20-period sum of MFV / 20-period sum of Volume
+    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = mfv_sum / vol_sum
+    cmf = np.where(vol_sum == 0, 0, cmf)  # Avoid division by zero
     
-    # === Weekly Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    sma_50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50)
+    # === 12h EMA Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(sma_50_aligned[i]):
+        if np.isnan(cmf[i]) or np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR weekly trend turns bearish
-            if close[i] < donch_low[i] or weekly_close[-1] < sma_50[-1]:  # Use last known weekly values
+            # Exit: CMF crosses below zero
+            if cmf[i] < 0 and cmf[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR weekly trend turns bullish
-            if close[i] > donch_high[i] or weekly_close[-1] > sma_50[-1]:
+            # Exit: CMF crosses above zero
+            if cmf[i] > 0 and cmf[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high AND weekly bullish
-            if close[i] > donch_high[i] and weekly_close[-1] > sma_50[-1]:
-                position = 1
-                signals[i] = 0.30
-            # Short: price breaks below Donchian low AND weekly bearish
-            elif close[i] < donch_low[i] and weekly_close[-1] < sma_50[-1]:
-                position = -1
-                signals[i] = -0.30
+            # Bullish trend: 12h close > 12h EMA50
+            # Bearish trend: 12h close < 12h EMA50
+            if close[i] > ema_50_aligned[i]:
+                # Bullish trend - look for long
+                if cmf[i] > 0.1 and cmf[i-1] <= 0.1:
+                    position = 1
+                    signals[i] = 0.25
+            elif close[i] < ema_50_aligned[i]:
+                # Bearish trend - look for short
+                if cmf[i] < -0.1 and cmf[i-1] >= -0.1:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
