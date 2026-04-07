@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Williams Alligator with 1d Trend Filter and Volume Confirmation.
-Long when price > Alligator's Jaw in 1d uptrend with volume confirmation.
-Short when price < Alligator's Jaw in 1d downtrend with volume confirmation.
-Exit when price crosses back below/above Jaw.
+1d Donchian Breakout with 1w Trend and Volume Confirmation.
+Long when price breaks above upper Donchian(20) with 1w uptrend and volume confirmation.
+Short when price breaks below lower Donchian(20) with 1w downtrend and volume confirmation.
+Exit when price crosses back below midpoint (long) or above midpoint (short).
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_alligator_1d_trend_volume_v1"
-timeframe = "12h"
+name = "1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,74 +26,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D EMA TREND FILTER (HTF) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # === 1W EMA TREND FILTER (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
-    one_d_close = df_1d['close'].values
-    one_d_ema = pd.Series(one_d_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    one_d_ema_aligned = align_htf_to_ltf(prices, df_1d, one_d_ema)
+    one_w_close = df_1w['close'].values
+    one_w_ema = pd.Series(one_w_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    one_w_ema_aligned = align_htf_to_ltf(prices, df_1w, one_w_ema)
     
-    # === WILLIAMS ALLIGATOR (12H) ===
-    # Jaw: 13-period SMMA shifted 8 bars forward
-    # Teeth: 8-period SMMA shifted 5 bars forward  
-    # Lips: 5-period SMMA shifted 3 bars forward
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # === DAILY DONCHIAN CHANNEL (20) ===
+    # Using previous 20 days (excluding current)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    midpoint = np.full(n, np.nan)
     
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
+        midpoint[i] = (upper[i] + lower[i]) / 2
     
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # First 8 values of jaw_shifted are invalid
-    jaw_shifted[:8] = np.nan
-    # First 5 values of teeth_shifted are invalid
-    teeth_shifted[:5] = np.nan
-    # First 3 values of lips_shifted are invalid
-    lips_shifted[:3] = np.nan
-    
-    # === VOLUME CONFIRMATION (12H) ===
+    # === VOLUME CONFIRMATION (DAILY) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        if (np.isnan(one_d_ema_aligned[i]) or np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(midpoint[i]) or 
+            np.isnan(one_w_ema_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1d EMA
-        uptrend = close[i] > one_d_ema_aligned[i]
-        downtrend = close[i] < one_d_ema_aligned[i]
+        # Determine trend direction from 1w EMA
+        uptrend = close[i] > one_w_ema_aligned[i]
+        downtrend = close[i] < one_w_ema_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below Jaw OR trend turns down
-            if close[i] < jaw_shifted[i] or downtrend:
+            # Exit: price crosses below midpoint OR trend turns down
+            if close[i] < midpoint[i] or downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Jaw OR trend turns up
-            if close[i] > jaw_shifted[i] or uptrend:
+            # Exit: price crosses above midpoint OR trend turns up
+            if close[i] > midpoint[i] or uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,15 +82,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Entry: Alligator alignment with trend
-            # Mouth open upwards (Lips > Teeth > Jaw) in uptrend -> long
-            # Mouth open downwards (Lips < Teeth < Jaw) in downtrend -> short
-            if (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]) and uptrend:
-                # Mouth open up in uptrend -> long
+            # Entry: Donchian breakout with trend alignment
+            if close[i] > upper[i] and uptrend:
+                # Breakout above upper Donchian in uptrend -> long
                 position = 1
                 signals[i] = 0.25
-            elif (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]) and downtrend:
-                # Mouth open down in downtrend -> short
+            elif close[i] < lower[i] and downtrend:
+                # Breakdown below lower Donchian in downtrend -> short
                 position = -1
                 signals[i] = -0.25
     
