@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_cci_breakout_12h_trend_volume_v1
-Hypothesis: On 4h timeframe, use CCI(20) breakouts for entry signals, filtered by 12h EMA trend and volume confirmation. 
-In bull markets, CCI > 100 captures momentum; in bear markets, CCI < -100 captures short opportunities. 
-Volume confirms genuine breakouts. 12h EMA filter ensures alignment with higher timeframe trend, reducing whipsaw.
-Target: 20-40 trades/year (~80-160 total over 4 years).
+1h_ema_cci_pullback_4d_trend_volume_v1
+Hypothesis: On 1h timeframe, use CCI(14) pullbacks to 4h EMA(50) for entries, filtered by 1d EMA(200) trend and volume confirmation.
+In bull markets, pullbacks to rising 4h EMA during uptrend (1d EMA200 up) offer long entries.
+In bear markets, pullbacks to declining 4h EMA during downtrend (1d EMA200 down) offer short entries.
+Volume confirms genuine pullback/respect of dynamic support/resistance.
+Target: 15-37 trades/year (~60-150 total over 4 years) by using strict pullback conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_ema_cci_pullback_4d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -26,65 +27,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter (more responsive than 200 for 4h trading)
-    ema_50 = df_12h['close'].ewm(span=50, adjust=False).mean()
+    # 1d EMA200 for trend filter
+    ema_200_1d = df_1d['close'].ewm(span=200, adjust=False).mean()
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d.values)
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50.values)
+    # 4h data for EMA50 and CCI calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # CCI(20) on 4h: (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
+    # 4h EMA50 for dynamic support/resistance
+    ema_50_4h = df_4h['close'].ewm(span=50, adjust=False).mean()
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h.values)
+    
+    # CCI(14) on 1h: (Typical Price - SMA(TP,14)) / (0.015 * Mean Deviation)
     tp = (high + low + close) / 3.0
     tp_series = pd.Series(tp)
-    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
-    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    sma_tp = tp_series.rolling(window=14, min_periods=14).mean()
+    mad = tp_series.rolling(window=14, min_periods=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
     cci = (tp - sma_tp.values) / (0.015 * mad.values)
     cci = np.nan_to_num(cci, nan=0.0)
     
-    # Volume confirmation (20-period average on 4h)
+    # Volume confirmation (20-period average on 1h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(100, n):
         # Skip if required data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
+        if (np.isnan(cci[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Trend filter: 1d EMA200 slope (use 5-period change)
+        ema_200_slope = ema_200_1d_aligned[i] - ema_200_1d_aligned[i-5] if i >= 5 else 0
         
         if position == 1:  # Long position
-            # Exit: CCI drops below 0 or price breaks below EMA50
-            if cci[i] < 0 or close[i] < ema_50_aligned[i]:
+            # Exit: price breaks below 4h EMA50 or CCI drops below -50
+            if close[i] < ema_50_4h_aligned[i] or cci[i] < -50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # Short position
-            # Exit: CCI rises above 0 or price breaks above EMA50
-            if cci[i] > 0 or close[i] > ema_50_aligned[i]:
+            # Exit: price breaks above 4h EMA50 or CCI rises above 50
+            if close[i] > ema_50_4h_aligned[i] or cci[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: CCI > 100, with volume and price above EMA50
-            if (cci[i] > 100 and vol_confirm and 
-                close[i] > ema_50_aligned[i]):
+            # Long entry: CCI between -50 and 50 (pullback zone), price near 4h EMA50, uptrend, volume
+            if (cci[i] > -50 and cci[i] < 50 and
+                abs(close[i] - ema_50_4h_aligned[i]) < (ema_50_4h_aligned[i] * 0.005) and  # within 0.5% of EMA
+                ema_200_slope > 0 and  # 1d uptrend
+                vol_confirm):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: CCI < -100, with volume and price below EMA50
-            elif (cci[i] < -100 and vol_confirm and 
-                  close[i] < ema_50_aligned[i]):
+                signals[i] = 0.20
+            # Short entry: CCI between -50 and 50 (pullback zone), price near 4h EMA50, downtrend, volume
+            elif (cci[i] > -50 and cci[i] < 50 and
+                  abs(close[i] - ema_50_4h_aligned[i]) < (ema_50_4h_aligned[i] * 0.005) and  # within 0.5% of EMA
+                  ema_200_slope < 0 and  # 1d downtrend
+                  vol_confirm):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
