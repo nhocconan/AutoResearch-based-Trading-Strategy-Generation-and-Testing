@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend and Volume Confirmation v2
-Hypothesis: Price breaking above/below 20-period Donchian channel on 12h timeframe,
+6h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Price breaking above/below 20-period Donchian channel on 6h timeframe,
 filtered by 1d EMA(50) trend direction and volume spikes, captures strong momentum moves
 while avoiding false breakouts. Works in bull via breakouts, in bear via short breakdowns.
 Target: 12-37 trades/year (50-150 total over 4 years).
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "12h"
+name = "6h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period) on 12h data
+    # Donchian Channel (20-period) on 6h data
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = high_20
@@ -55,9 +55,9 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     vol_filter = atr > atr_ma
     
-    # Volume filter: current volume > 2.0x 24-period average (more restrictive)
+    # Volume filter: current volume > 1.8x 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
