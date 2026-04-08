@@ -1,14 +1,13 @@
-#%%
 #!/usr/bin/env python3
 """
-4h_1w_1d_price_action_v3
+4h_1w_1d_price_action_v4
 Hypothesis: Weekly bias (from previous week close vs open) filters daily breakouts on 4h timeframe.
 - Weekly bullish bias: weekly close > open → only look for long entries
 - Weekly bearish bias: weekly close < open → only look for short entries  
 - Daily high/low as dynamic support/resistance levels
 - Enter on 4h breakout of daily levels in direction of weekly bias
 - Exit on opposite daily level touch or weekly bias reversal
-- Works in bull/bear via weekly filter; avoids counter-trend trades
+- Uses tighter entry conditions and position sizing to reduce trade frequency
 Target: 20-40 trades/year
 """
 
@@ -16,7 +15,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w_1d_price_action_v3"
+name = "4h_1w_1d_price_action_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -91,7 +90,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Reduced position size
                 
         elif position == -1:  # Short position
             # Exit: price touches daily high (resistance) or weekly bias turns bullish
@@ -99,15 +98,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Reduced position size
         else:  # Flat, look for entry
             # Long entry: price breaks above daily high with weekly bullish bias
             if high[i] > daily_high_aligned[i] and weekly_bullish_aligned[i]:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.20
             # Short entry: price breaks below daily low with weekly bearish bias
             elif low[i] < daily_low_aligned[i] and weekly_bearish_aligned[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
