@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_1w_camarilla_pivot_breakout_volume_v1
-# Hypothesis: 12h Camarilla pivot (R4/S4) breakouts with volume confirmation (>2.0x 20-period average) and 1d/1w VWAP regime filter.
-# Long: price > R4(1d) AND volume > 2.0x vol_MA20 AND VWAP_1d > VWAP_1w (bullish regime)
-# Short: price < S4(1d) AND volume > 2.0x vol_MA20 AND VWAP_1d < VWAP_1w (bearish regime)
-# Exit: price returns to VWAP_1d (mean reversion) OR breaks R3/S3 with volume confirmation
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
-# Works in bull/bear via regime filter (1d vs 1w VWAP) and pivot structure.
+# 12h_1d_1w_pivot_breakout_volume_v2
+# Hypothesis: 12h Camarilla pivot breakouts with volume confirmation and 1d/1w trend filter.
+# Long: price breaks above R4 (1d) with volume > 2.0x 20-period average AND 1d close > 1w VWAP (bullish regime)
+# Short: price breaks below S4 (1d) with volume > 2.0x 20-period average AND 1d close < 1w VWAP (bearish regime)
+# Exit: price returns to 1d VWAP or opposite pivot level (R3/S3) with volume confirmation
+# Uses 12h primary timeframe with 1d HTF for pivot levels and 1w HTF for regime filter.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_pivot_breakout_volume_v1"
+name = "12h_1d_1w_pivot_breakout_volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,35 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume ratio: current vs 20-period SMA (min_periods=20)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
     vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Get 1d data for Camarilla pivots and VWAP
+    # Get 1d data for Camarilla pivot levels and VWAP
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels from previous day
     camarilla_r4 = np.full(len(df_1d), np.nan)
     camarilla_r3 = np.full(len(df_1d), np.nan)
     camarilla_s3 = np.full(len(df_1d), np.nan)
     camarilla_s4 = np.full(len(df_1d), np.nan)
     vwap_1d = np.full(len(df_1d), np.nan)
     
-    cum_vol = 0
-    cum_pv = 0
     for i in range(len(df_1d)):
         typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
-        cum_pv += typical_price * volume[i]
-        cum_vol += volume[i]
-        vwap_1d[i] = cum_pv / cum_vol if cum_vol > 0 else typical_price
+        if i == 0:
+            vwap_1d[i] = typical_price
+        else:
+            vwap_1d[i] = (vwap_1d[i-1] * np.sum(volume[:i]) + typical_price * volume[i]) / (np.sum(volume[:i]) + volume[i])
         
         if i > 0:
             prev_close = close_1d[i-1]
@@ -71,32 +70,33 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
+    # Calculate 1w VWAP
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     volume_1w = df_1w['volume'].values
     
     vwap_1w = np.full(len(df_1w), np.nan)
-    cum_vol_w = 0
-    cum_pv_w = 0
     for i in range(len(df_1w)):
         typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
-        cum_pv_w += typical_price * volume_1w[i]
-        cum_vol_w += volume_1w[i]
-        vwap_1w[i] = cum_pv_w / cum_vol_w if cum_vol_w > 0 else typical_price
+        if i == 0:
+            vwap_1w[i] = typical_price
+        else:
+            vwap_1w[i] = (vwap_1w[i-1] * np.sum(volume_1w[:i]) + typical_price * volume_1w[i]) / (np.sum(volume_1w[:i]) + volume_1w[i])
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 12h timeframe
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Align 1w VWAP to 12h
+    # Align 1w VWAP to 12h timeframe
     vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
     for i in range(50, n):
         vol_r = vol_ratio[i]
@@ -123,29 +123,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 1:  # Long
-            # Exit: price returns to VWAP_1d OR breaks below R3 with volume
+        if position == 1:  # Long position
+            # Exit: price returns to 1d VWAP or breaks below R3 with volume
             if price <= vwap1d or (price < r3 and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
-        elif position == -1:  # Short
-            # Exit: price returns to VWAP_1d OR breaks above S3 with volume
+        elif position == -1:  # Short position
+            # Exit: price returns to 1d VWAP or breaks above S3 with volume
             if price >= vwap1d or (price > s3 and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: break above R4 with volume AND bullish regime (VWAP_1d > VWAP_1w)
+            # Long entry: price breaks above R4 with volume AND 1d close > 1w VWAP (bullish regime)
             if price > r4 and vol_r > 2.0 and vwap1d > vwap1w:
                 position = 1
+                entry_price = price
                 signals[i] = 0.25
-            # Short: break below S4 with volume AND bearish regime (VWAP_1d < VWAP_1w)
+            # Short entry: price breaks below S4 with volume AND 1d close < 1w VWAP (bearish regime)
             elif price < s4 and vol_r > 2.0 and vwap1d < vwap1w:
                 position = -1
+                entry_price = price
                 signals[i] = -0.25
     
     return signals
