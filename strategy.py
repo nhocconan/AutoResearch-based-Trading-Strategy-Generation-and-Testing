@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h ADX filter and volume confirmation
-# Uses 20-period Donchian channels from 4h data for trend direction and breakout levels.
-# Filters by 12h ADX > 20 for trend strength and volume > 1.5x 20-period average.
-# In trending markets (ADX>20): breakout continuation at Donchian breakout levels.
-# In ranging markets (ADX<=20): no trades to avoid whipsaw.
-# Designed to capture strong trends while avoiding choppy markets.
-# Target: 20-50 trades/year via Donchian + trend + volume confluence on 4h timeframe.
+# Hypothesis: 4h Donchian breakout with 1d ADX filter and volume confirmation
+# Uses 20-period Donchian channels from 4h data for breakout levels.
+# Filters by 1d ADX > 25 for strong trend and volume > 1.8x 20-period average.
+# Only takes long positions in uptrends and short positions in downtrends.
+# Designed to capture strong trends while avoiding whipsaw in weak trends.
+# Target: 20-40 trades/year via strict Donchian + strong trend + volume confluence.
 
-name = "4h_donchian_12h_trend_volume_v1"
+name = "4h_donchian_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,28 +25,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for ADX (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate 20-period Donchian channels on 4h data
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 14-period ADX for trend strength on 12h data
+    # Calculate 14-period ADX for trend strength on 1d data
     # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -80,14 +79,14 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned 12h values for current 4h bar
-        adx_aligned = align_htf_to_ltf(prices, df_12h, adx)[i]
+        # Get aligned 1d values for current 4h bar
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
         
-        # Regime filter: only trade in trending markets
-        trending = adx_aligned > 20
+        # Regime filter: only trade in strong trending markets
+        strong_trend = adx_aligned > 25
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_confirm = volume[i] > 1.8 * vol_avg_20[i]
         
         if position == 1:  # Long position
             # Exit conditions: close below lower Donchian channel
@@ -105,8 +104,8 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade with volume confirmation and in trending markets
-            if volume_confirm and trending:
+            # Only trade with volume confirmation and in strong trending markets
+            if volume_confirm and strong_trend:
                 # Breakout entry: long on break above upper channel, short on break below lower channel
                 if close[i] > high_20[i]:  # Bullish breakout
                     position = 1
