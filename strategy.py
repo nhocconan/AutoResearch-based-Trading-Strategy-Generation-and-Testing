@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_williams_alligator_v1"
+name = "6h_12h_donchian_breakout_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -18,34 +18,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get 12h data for trend and Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Williams Alligator lines from 1d data
-    close_1d = df_1d['close'].values
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
-    # Teeth: 8-period SMMA, shifted 5 bars forward
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # Convert to numpy arrays
-    jaw = jaw.values
-    teeth = teeth.values
-    lips = lips.values
+    # 12-period Donchian channels on 12h (20 periods for breakout)
+    donchian_period = 20
+    dc_high = pd.Series(high_12h).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    dc_low = pd.Series(low_12h).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align 1d indicators to 6h
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema_50_12h
+    trend_12h_down = close_12h < ema_50_12h
     
-    # Volume filter on 6h
+    # Forward fill trend
+    trend_12h_up_series = pd.Series(trend_12h_up)
+    trend_12h_down_series = pd.Series(trend_12h_down)
+    trend_12h_up_ffilled = trend_12h_up_series.ffill().values
+    trend_12h_down_ffilled = trend_12h_down_series.ffill().values
+    
+    # Align 12h indicators to 6h
+    dc_high_aligned = align_htf_to_ltf(prices, df_12h, dc_high)
+    dc_low_aligned = align_htf_to_ltf(prices, df_12h, dc_low)
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up_ffilled)
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down_ffilled)
+    
+    # Volume confirmation: 6h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -53,11 +58,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+        if (np.isnan(dc_high_aligned[i]) or np.isnan(dc_low_aligned[i]) or
+            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -67,27 +73,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Alligator lines converge (teeth crosses below lips) OR volume filter fails
-            if teeth_aligned[i] < lips_aligned[i] or not volume_filter[i]:
+            # Exit: price breaks below Donchian low OR trend turns down
+            if close[i] <= dc_low_aligned[i] or trend_12h_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: Alligator lines converge (teeth crosses above lips) OR volume filter fails
-            if teeth_aligned[i] > lips_aligned[i] or not volume_filter[i]:
+            # Exit: price breaks above Donchian high OR trend turns up
+            if close[i] >= dc_high_aligned[i] or trend_12h_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: Lips > Teeth > Jaw (bullish alignment) + volume
-            if lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and volume_filter[i]:
+            # Long entry: price breaks above Donchian high + 12h uptrend + volume
+            if close[i] >= dc_high_aligned[i] and trend_12h_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Lips < Teeth < Jaw (bearish alignment) + volume
-            elif lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and volume_filter[i]:
+            # Short entry: price breaks below Donchian low + 12h downtrend + volume
+            elif close[i] <= dc_low_aligned[i] and trend_12h_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
