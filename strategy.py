@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 12h_alligator_trend_volume_v1
-# Hypothesis: Uses 12-hour Williams Alligator (SMAs with smoothing) to identify trends, with volume confirmation for entry.
-# Long when price > Alligator Jaw (13-period SMA shifted 8 bars) and Teeth > Lips (bullish alignment), short when opposite.
-# Includes volume filter (>1.5x 20-period average) to avoid false breakouts. Designed for low trade frequency (~15-30/year)
-# to minimize fee drag while capturing major trends in both bull and bear markets.
+# 1d_weekly_ema_breakout_volume
+# Hypothesis: Uses 1-day Exponential Moving Average (EMA200) for trend filter with weekly EMA20 for momentum confirmation and volume spike on breakout.
+# Enters long when price breaks above weekly EMA20 in a daily uptrend with volume confirmation; short when price breaks below weekly EMA20 in a daily downtrend with volume confirmation.
+# Exits on opposite weekly EMA crossover or trend reversal. Designed for low trade frequency (~10-25/year) to minimize fee drift.
+# Uses weekly EMA for stronger trend filter to reduce whipsaw and improve performance in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_alligator_trend_volume_v1"
-timeframe = "12h"
+name = "1d_weekly_ema_breakout_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     # Price data
@@ -24,68 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for Alligator (Williams Alligator uses SMAs)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly data for trend and momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator: Jaw (13 SMA, 8 shift), Teeth (8 SMA, 5 shift), Lips (5 SMA, 3 shift)
-    jaw_raw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth_raw = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips_raw = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Weekly EMA20 for momentum
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Align to 12h timeframe
-    jaw = align_htf_to_ltf(prices, df_1d, jaw_raw)
-    teeth = align_htf_to_ltf(prices, df_1d, teeth_raw)
-    lips = align_htf_to_ltf(prices, df_1d, lips_raw)
+    # Daily EMA200 for trend filter
+    ema200_daily = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume confirmation (20-period average)
+    # Volume confirmation (20-day average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50
+    start_idx = 200  # Wait for daily EMA200
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema20_1w_aligned[i]) or np.isnan(ema200_daily[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend conditions
-        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
-        price_above_jaw = close[i] > jaw[i]
-        price_below_jaw = close[i] < jaw[i]
+        # Trend filter
+        daily_uptrend = close[i] > ema200_daily[i]
+        daily_downtrend = close[i] < ema200_daily[i]
+        
+        # Weekly EMA crossover signals
+        weekly_bullish = close[i] > ema20_1w_aligned[i]
+        weekly_bearish = close[i] < ema20_1w_aligned[i]
         
         # Volume confirmation
-        volume_ok = volume[i] > 1.5 * avg_volume[i]
+        volume_ok = volume[i] > 2.0 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: bearish alignment or price below jaw
-            if bearish_alignment or price_below_jaw:
+            # Exit: Price breaks below weekly EMA20 or trend change
+            if weekly_bearish or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish alignment or price above jaw
-            if bullish_alignment or price_above_jaw:
+            # Exit: Price breaks above weekly EMA20 or trend change
+            if weekly_bullish or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if volume_ok:
-                # Long entry: bullish alignment and price above jaw
-                if bullish_alignment and price_above_jaw:
+                # Long entry: Price above weekly EMA20 in daily uptrend
+                if daily_uptrend and weekly_bullish:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: bearish alignment and price below jaw
-                elif bearish_alignment and price_below_jaw:
+                # Short entry: Price below weekly EMA20 in daily downtrend
+                elif daily_downtrend and weekly_bearish:
                     position = -1
                     signals[i] = -0.25
     
