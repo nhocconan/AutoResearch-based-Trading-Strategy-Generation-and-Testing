@@ -1,9 +1,10 @@
-# 12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-# Hypothesis: In trending markets (1d EMA alignment + ADX > 25), 12h Donchian breakouts with volume
-# confirmation capture continuation of the trend. Works in bull/bear by requiring trend alignment.
-# Volume spike = current 12h volume > 2.0 x 20-period average. Targets 15-35 trades/year.
-# Targets 15-35 trades per year to avoid fee drag.
-
+#!/usr/bin/env python3
+"""
+12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: In trending markets (1d EMA alignment + ADX > 25), 12h Donchian breakouts with volume
+confirmation capture continuation of the trend. Works in bull/bear by requiring trend alignment.
+Volume spike = current 12h volume > 2.0 x 20-period average. Targets 15-35 trades/year.
+"""
 name = "12h_donchian_breakout_1d_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
