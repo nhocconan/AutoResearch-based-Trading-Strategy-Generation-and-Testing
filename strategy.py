@@ -1,134 +1,93 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with Weekly Trend Filter
-Hypothesis: Ichimoku TK cross on 6h timeframe, filtered by weekly Kumo (cloud) direction,
-captures trend continuation in both bull and bear markets while avoiding counter-trend signals.
-Weekly cloud acts as a strong regime filter - price above weekly cloud = bullish bias,
-price below = bearish bias. Targets 15-25 trades/year (60-100 total over 4 years).
+4h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Price breaking above/below 20-period Donchian channel on 4h timeframe,
+filtered by 1d EMA trend direction and volume spikes, captures strong momentum moves
+while avoiding false breakouts in ranging markets. Targets 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_weekly_trend"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for trend filter (Kumo/cloud)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Donchian Channel (20-period) on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_20
+    donchian_lower = low_20
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Align Donchian levels to avoid look-ahead
+    donchian_upper_aligned = align_htf_to_ltf(prices, prices, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, prices, donchian_lower)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Weekly Kumo (cloud) components
-    high_1w_9 = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    low_1w_9 = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan_1w = (high_1w_9 + low_1w_9) / 2
-    
-    high_1w_26 = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    low_1w_26 = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_1w = (high_1w_26 + low_1w_26) / 2
-    
-    # Weekly Senkou Span A and B
-    senkou_a_1w = (tenkan_1w + kijun_1w) / 2
-    high_1w_52 = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    low_1w_52 = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_b_1w = (high_1w_52 + low_1w_52) / 2
-    
-    # Align all indicators to avoid look-ahead
-    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, prices, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
-    
-    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
-    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
-    senkou_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_a_1w)
-    senkou_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w)
+    # Volume filter: current volume > 1.8x 24-period average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Need enough data for Ichimoku calculations
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or
-            np.isnan(senkou_a_1w_aligned[i]) or np.isnan(senkou_b_1w_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Determine weekly cloud boundaries and color
-        weekly_leading_span_a = senkou_a_1w_aligned[i]
-        weekly_leading_span_b = senkou_b_1w_aligned[i]
-        weekly_kumo_top = max(weekly_leading_span_a, weekly_leading_span_b)
-        weekly_kumo_bottom = min(weekly_leading_span_a, weekly_leading_span_b)
-        weekly_kumo_bullish = weekly_leading_span_a > weekly_leading_span_b  # Green cloud
-        
         if position == 1:  # Long position
-            # Exit: TK cross down OR price closes below weekly cloud
-            tk_cross_down = tenkan_aligned[i] < kijun_aligned[i]
-            price_below_weekly_kumo = close[i] < weekly_kumo_bottom
-            if tk_cross_down or price_below_weekly_kumo:
+            # Exit: price closes below Donchian lower or trend reverses
+            if close[i] < donchian_lower_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TK cross up OR price closes above weekly cloud
-            tk_cross_up = tenkan_aligned[i] > kijun_aligned[i]
-            price_above_weekly_kumo = close[i] > weekly_kumo_top
-            if tk_cross_up or price_above_weekly_kumo:
+            # Exit: price closes above Donchian upper or trend reverses
+            if close[i] > donchian_upper_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # TK cross signals
-            tk_cross_up = tenkan_aligned[i] > kijun_aligned[i]
-            tk_cross_down = tenkan_aligned[i] < kijun_aligned[i]
+            # Trend filter: price vs 1d EMA50
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Price position relative to weekly cloud
-            price_above_weekly_kumo = close[i] > weekly_kumo_top
-            price_below_weekly_kumo = close[i] < weekly_kumo_bottom
-            
-            # Long: TK cross up + price above weekly cloud (bullish alignment)
-            if tk_cross_up and price_above_weekly_kumo:
+            # Long: price breaks above Donchian upper + uptrend + volume spike
+            if (close[i] > donchian_upper_aligned[i] and 
+                uptrend and 
+                vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: TK cross down + price below weekly cloud (bearish alignment)
-            elif tk_cross_down and price_below_weekly_kumo:
+            # Short: price breaks below Donchian lower + downtrend + volume spike
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  downtrend and 
+                  vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
     
