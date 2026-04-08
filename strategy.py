@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_trend_following"
-timeframe = "1h"
+name = "6h_1d_pivot_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -18,43 +18,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1-day data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 20 or len(df_1d) < 50:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # 4h trend: 20 EMA
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d trend: 50 EMA
+    # Calculate daily pivot points (standard floor trader's pivots)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: 1h volume > 1.5x 20-period average
+    # Pivot point and support/resistance levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
+    
+    # Align pivot levels to 6h timeframe (wait for daily bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation on 6h: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume / vol_ma > 1.5
+    vol_ratio = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma!=0)
+    vol_confirm = vol_ratio > 1.3
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup
-    start_idx = max(20, 50) + 1
+    # Start after warmup period
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if indicators not available
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        # Skip if pivot levels are not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]):
             if position != 0:
-                pass  # hold position
+                # Hold position until exit
+                pass
             else:
                 signals[i] = 0.0
             continue
@@ -62,36 +74,35 @@ def generate_signals(prices):
         # Only consider new signals during session with volume confirmation
         if not (in_session[i] and vol_confirm[i]):
             if position != 0:
-                pass  # hold position
+                # Hold existing position
+                pass
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: close below 4h EMA
-            if close[i] < ema_4h_aligned[i]:
+            # Exit: price reaches or exceeds R1 (take profit)
+            if close[i] >= r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long
+                signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: close above 4h EMA
-            if close[i] > ema_4h_aligned[i]:
+            # Exit: price reaches or falls below S1 (take profit)
+            if close[i] <= s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price above both 4h and 1d EMA with volume
-            if (close[i] > ema_4h_aligned[i] and 
-                close[i] > ema_1d_aligned[i]):
+            # Long entry: price touches or crosses below S1 with reversal signs
+            if close[i] <= s1_aligned[i] and i > 0 and close[i] > close[i-1]:
                 position = 1
-                signals[i] = 0.20
-            # Short entry: price below both 4h and 1d EMA with volume
-            elif (close[i] < ema_4h_aligned[i] and 
-                  close[i] < ema_1d_aligned[i]):
+                signals[i] = 0.25
+            # Short entry: price touches or crosses above R1 with reversal signs
+            elif close[i] >= r1_aligned[i] and i > 0 and close[i] < close[i-1]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
