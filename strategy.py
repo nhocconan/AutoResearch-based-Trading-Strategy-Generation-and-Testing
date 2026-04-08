@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# 4h_cci_breakout_12h_trend_volume_v1
-# Hypothesis: CCI(20) extreme breakouts on 4h with 12h EMA trend filter and volume confirmation.
-# Long when CCI crosses above +100 with uptrend (price > 12h EMA50) and volume > 1.3x average.
-# Short when CCI crosses below -100 with downtrend (price < 12h EMA50) and volume > 1.3x average.
-# Exit when CCI returns to neutral zone (-50 to 50).
-# Designed to capture momentum bursts with trend alignment in both bull and bear markets.
-# Target: 60-120 total trades over 4 years (~15-30/year).
+# 1h_momentum_reversal_4h_trend_volume_v1
+# Hypothesis: On 1h timeframe, enter short-term reversals when price deviates from 4h VWAP
+# with volume confirmation, but only in direction of 4h trend (EMA50). This captures
+# mean-reversion within stronger trends, working in both bull (buy dips) and bear (sell rallies).
+# Uses 4h for trend direction and 1h for entry timing to limit trades to ~15-30/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_momentum_reversal_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend and VWAP
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate CCI(20) on 4h data
-    typical_price = (high + low + close) / 3
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    tp_std_safe = np.where(tp_std == 0, 1e-10, tp_std)
-    cci = (typical_price - tp_mean) / (0.015 * tp_std_safe)
+    # Calculate 4h VWAP (typical price * volume / cumulative volume)
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3
+    vwap_4h = (typical_price_4h * volume_4h).cumsum() / volume_4h.cumsum()
+    # Handle division by zero on first bar
+    vwap_4h = np.where(volume_4h.cumsum() == 0, typical_price_4h, vwap_4h)
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
     
-    # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1h RSI(14) for overbought/oversold
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 1h volume ratio (current vs 20-period average)
+    avg_volume_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vwap_4h_aligned[i]) or np.isnan(avg_volume_1h[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -66,30 +75,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI returns to neutral zone (below 50)
-            if cci[i] < 50:
+            # Exit: RSI returns to neutral (above 40) or price crosses above VWAP
+            if rsi[i] > 40 or close[i] > vwap_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: CCI returns to neutral zone (above -50)
-            if cci[i] > -50:
+            # Exit: RSI returns to neutral (below 60) or price crosses below VWAP
+            if rsi[i] < 60 or close[i] < vwap_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.3x average volume
-            volume_ok = volume[i] > 1.3 * avg_volume[i]
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume_1h[i]
             
-            # CCI breakout entries: CCI > +100 (long) and CCI < -100 (short)
-            if (cci[i] > 100) and (close[i] > ema_50_12h_aligned[i]) and volume_ok:
+            # Look for mean-reversion opportunities:
+            # Long: RSI oversold (<30), price below 4h VWAP, but in 4h uptrend
+            # Short: RSI overbought (>70), price above 4h VWAP, but in 4h downtrend
+            if (rsi[i] < 30) and (close[i] < vwap_4h_aligned[i]) and \
+               (close[i] > ema_50_4h_aligned[i]) and volume_ok:
                 position = 1
-                signals[i] = 0.25
-            elif (cci[i] < -100) and (close[i] < ema_50_12h_aligned[i]) and volume_ok:
+                signals[i] = 0.20
+            elif (rsi[i] > 70) and (close[i] > vwap_4h_aligned[i]) and \
+                 (close[i] < ema_50_4h_aligned[i]) and volume_ok:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
