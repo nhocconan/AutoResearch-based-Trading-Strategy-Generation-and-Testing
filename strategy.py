@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# 1h_volume_breakout_4h_trend_v1
-# Hypothesis: In 1h timeframe, capture breakouts with volume confirmation aligned with 4h trend direction.
-# Uses 4h EMA50 for trend filter and 1h volume spike for entry timing. Limits trades to 15-35/year via
-# strict volume threshold (2.0x average) and trend alignment. Works in bull/bear by following 4h trend.
+# 1d_cci_trend_1w_volume_v1
+# Hypothesis: On daily timeframe, capture CCI(20) breakouts with volume confirmation aligned with weekly EMA50 trend.
+# Works in bull/bear by following weekly trend. Targets 8-20 trades/year via strict CCI threshold (>100/<-100) and volume filter (2.0x average).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_breakout_4h_trend_v1"
-timeframe = "1h"
+name = "1d_cci_trend_1w_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -23,27 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for EMA50 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 4h EMA50 to 1h
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align weekly EMA50 to daily
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1h EMA20 for dynamic support/resistance
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate CCI(20) on daily
+    tp = (high + low + close) / 3.0
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp - sma_tp) / (0.015 * mad)
     
-    # Volume filter: 1h volume > 2.0x 20-period average (very strict to limit trades)
+    # Volume filter: daily volume > 2.0x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
-    
-    # Session filter: 08-20 UTC (reduce noise outside active hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -53,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(session_filter[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -63,30 +61,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price < EMA20 OR trend turns bearish (price < 4h EMA50)
-            if (close[i] < ema_20[i]) or (close[i] < ema_50_4h_aligned[i]):
+            # Exit: CCI < 0 OR trend turns bearish (close < weekly EMA50)
+            if (cci[i] < 0) or (close[i] < ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > EMA20 OR trend turns bullish (price > 4h EMA50)
-            if (close[i] > ema_20[i]) or (close[i] > ema_50_4h_aligned[i]):
+            # Exit: CCI > 0 OR trend turns bullish (close > weekly EMA50)
+            if (cci[i] > 0) or (close[i] > ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Require session filter and volume spike
-            if session_filter[i] and volume_spike[i]:
-                # Long entry: price > EMA20 AND price > 4h EMA50 (bullish alignment)
-                if (close[i] > ema_20[i]) and (close[i] > ema_50_4h_aligned[i]):
+            # Require volume spike
+            if volume_spike[i]:
+                # Long entry: CCI > 100 AND close > weekly EMA50 (bullish alignment)
+                if (cci[i] > 100) and (close[i] > ema_50_1w_aligned[i]):
                     position = 1
-                    signals[i] = 0.20
-                # Short entry: price < EMA20 AND price < 4h EMA50 (bearish alignment)
-                elif (close[i] < ema_20[i]) and (close[i] < ema_50_4h_aligned[i]):
+                    signals[i] = 0.25
+                # Short entry: CCI < -100 AND close < weekly EMA50 (bearish alignment)
+                elif (cci[i] < -100) and (close[i] < ema_50_1w_aligned[i]):
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
