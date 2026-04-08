@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_1d_1w_camarilla_pivot_volume_regime_v1
-# Hypothesis: 4h Camarilla pivot breakouts with volume confirmation and 1d/1w regime filter.
-# Long: price breaks above R4 (1d) with volume > 2.0x 20-period average AND 1d close > 1w VWAP (bullish regime)
-# Short: price breaks below S4 (1d) with volume > 2.0x 20-period average AND 1d close < 1w VWAP (bearish regime)
-# Exit: price returns to 1d VWAP or opposite pivot level (R3/S3) with volume confirmation
-# Uses 4h primary timeframe with 1d HTF for pivot levels and 1w HTF for regime filter.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# 12h_1d_1w_kama_rsi_chop_regime_v1
+# Hypothesis: 12h KAMA trend with RSI momentum filter and 1d/1w choppiness regime filter.
+# Long: KAMA rising, RSI > 50, and 1d/1w CHOP > 61.8 (range regime) → mean reversion long from oversold
+# Short: KAMA falling, RSI < 50, and 1d/1w CHOP > 61.8 (range regime) → mean reversion short from overbought
+# Uses 12h primary timeframe with 1d/1w HTF for choppiness regime filter.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in both bull/bear markets by adapting to range regimes where mean reversion performs best.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_camarilla_pivot_volume_regime_v1"
-timeframe = "4h"
+name = "12h_1d_1w_kama_rsi_chop_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,129 +25,139 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
-    vol_sma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_sma[i] = np.mean(volume[i-20:i])
-    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
+    # Calculate 12h KAMA (adaptive trend)
+    # Efficiency Ratio over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Get 1d data for Camarilla pivot levels and VWAP
+    # Calculate 12h RSI (14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get 1d data for choppiness index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_r4 = np.full(len(df_1d), np.nan)
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
-    camarilla_s4 = np.full(len(df_1d), np.nan)
-    vwap_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(len(df_1d)):
-        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
-        if i == 0:
-            vwap_1d[i] = typical_price
+    # Calculate 1d Choppiness Index (14)
+    atr_1d = np.zeros(len(df_1d))
+    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                                  np.abs(low_1d[1:] - close_1d[:-1])))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    for i in range(1, len(tr_1d)):
+        if i < 14:
+            atr_1d[i] = np.nan
         else:
-            vwap_1d[i] = (vwap_1d[i-1] * np.sum(volume[:i]) + typical_price * volume[i]) / (np.sum(volume[:i]) + volume[i])
-        
-        if i > 0:
-            prev_close = close_1d[i-1]
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            range_val = prev_high - prev_low
-            
-            camarilla_r4[i] = prev_close + range_val * 1.1 / 2.0
-            camarilla_r3[i] = prev_close + range_val * 1.1 / 4.0
-            camarilla_s3[i] = prev_close - range_val * 1.1 / 4.0
-            camarilla_s4[i] = prev_close - range_val * 1.1 / 2.0
+            if np.isnan(atr_1d[i-1]):
+                atr_1d[i] = np.nanmean(tr_1d[i-13:i+1])
+            else:
+                atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
-    # Get 1w data for VWAP regime filter
+    # Highest high and lowest low over 14 periods
+    hh_1d = np.full(len(df_1d), np.nan)
+    ll_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if i >= 13:
+            hh_1d[i] = np.max(high_1d[i-13:i+1])
+            ll_1d[i] = np.min(low_1d[i-13:i+1])
+    
+    chop_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not np.isnan(hh_1d[i]) and not np.isnan(ll_1d[i]) and hh_1d[i] > ll_1d[i]:
+            sum_atr = np.nansum(atr_1d[i-13:i+1]) if i >= 13 else np.nan
+            if not np.isnan(sum_atr) and sum_atr > 0:
+                chop_1d[i] = 100 * np.log10(sum_atr / (hh_1d[i] - ll_1d[i])) / np.log10(14)
+    
+    # Get 1w data for choppiness index
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w VWAP
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
     
-    vwap_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
-        if i == 0:
-            vwap_1w[i] = typical_price
+    # Calculate 1w Choppiness Index (14)
+    atr_1w = np.zeros(len(df_1w))
+    tr_1w = np.maximum(high_1w[1:] - low_1w[1:], 
+                       np.maximum(np.abs(high_1w[1:] - close_1w[:-1]),
+                                  np.abs(low_1w[1:] - close_1w[:-1])))
+    tr_1w = np.concatenate([[np.nan], tr_1w])
+    for i in range(1, len(tr_1w)):
+        if i < 14:
+            atr_1w[i] = np.nan
         else:
-            vwap_1w[i] = (vwap_1w[i-1] * np.sum(volume_1w[:i]) + typical_price * volume_1w[i]) / (np.sum(volume_1w[:i]) + volume_1w[i])
+            if np.isnan(atr_1w[i-1]):
+                atr_1w[i] = np.nanmean(tr_1w[i-13:i+1])
+            else:
+                atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Highest high and lowest low over 14 periods
+    hh_1w = np.full(len(df_1w), np.nan)
+    ll_1w = np.full(len(df_1w), np.nan)
+    for i in range(len(df_1w)):
+        if i >= 13:
+            hh_1w[i] = np.max(high_1w[i-13:i+1])
+            ll_1w[i] = np.min(low_1w[i-13:i+1])
     
-    # Align 1w VWAP to 4h timeframe
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    chop_1w = np.full(len(df_1w), np.nan)
+    for i in range(len(df_1w)):
+        if not np.isnan(hh_1w[i]) and not np.isnan(ll_1w[i]) and hh_1w[i] > ll_1w[i]:
+            sum_atr = np.nansum(atr_1w[i-13:i+1]) if i >= 13 else np.nan
+            if not np.isnan(sum_atr) and sum_atr > 0:
+                chop_1w[i] = 100 * np.log10(sum_atr / (hh_1w[i] - ll_1w[i])) / np.log10(14)
+    
+    # Align 1d and 1w chop to 12h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
     for i in range(50, n):
-        vol_r = vol_ratio[i]
-        price = close[i]
-        
-        if np.isnan(vol_r):
-            if position != 0:
-                pass  # Hold position
-            else:
-                signals[i] = 0.0
+        # Skip if not enough data
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_1d_aligned[i]) or np.isnan(chop_1w_aligned[i]):
+            signals[i] = 0.0
             continue
         
-        r4 = camarilla_r4_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        s4 = camarilla_s4_aligned[i]
-        vwap1d = vwap_1d_aligned[i]
-        vwap1w = vwap_1w_aligned[i]
-        
-        if np.isnan(r4) or np.isnan(r3) or np.isnan(s3) or np.isnan(s4) or np.isnan(vwap1d) or np.isnan(vwap1w):
-            if position != 0:
-                pass  # Hold position
-            else:
-                signals[i] = 0.0
+        # Regime filter: both 1d and 1w must be in range (CHOP > 61.8)
+        if chop_1d_aligned[i] <= 61.8 or chop_1w_aligned[i] <= 61.8:
+            signals[i] = 0.0
             continue
         
-        if position == 1:  # Long position
-            # Exit: price returns to 1d VWAP or breaks below R3 with volume
-            if price <= vwap1d or (price < r3 and vol_r > 1.5):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Exit: price returns to 1d VWAP or breaks above S3 with volume
-            if price >= vwap1d or (price > s3 and vol_r > 1.5):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat
-            # Long entry: price breaks above R4 with volume AND 1d close > 1w VWAP (bullish regime)
-            if price > r4 and vol_r > 2.0 and vwap1d > vwap1w:
-                position = 1
-                entry_price = price
-                signals[i] = 0.25
-            # Short entry: price breaks below S4 with volume AND 1d close < 1w VWAP (bearish regime)
-            elif price < s4 and vol_r > 2.0 and vwap1d < vwap1w:
-                position = -1
-                entry_price = price
-                signals[i] = -0.25
+        # Mean reversion signals in range market
+        # Long: KAMA rising (trend up) but RSI not overbought -> pullback long
+        # Short: KAMA falling (trend down) but RSI not oversold -> pullback short
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
+        if kama_rising and rsi[i] < 50:  # Pullback in uptrend
+            signals[i] = 0.25
+        elif kama_falling and rsi[i] > 50:  # Pullback in downtrend
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
