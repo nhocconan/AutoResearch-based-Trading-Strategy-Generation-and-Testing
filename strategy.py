@@ -1,11 +1,13 @@
-# 4h_vwap_reversion_1d_trend_volume_v1
-# Hypothesis: Mean reversion to VWAP on 4h timeframe, filtered by 1d trend (EMA50) and volume confirmation.
-# In bull markets, buy pullbacks to VWAP in uptrend; in bear markets, sell rallies to VWAP in downtrend.
-# Volume filter ensures institutional participation, reducing false signals.
-# Target: 20-40 trades/year via VWAP reversion + 1d trend filter + volume confirmation.
+#!/usr/bin/env python3
+# 12h_ema_crossover_volume_filter_v1
+# Hypothesis: 12h EMA crossover (fast/slow) with volume confirmation and daily trend filter.
+# Uses fast EMA crossing above/below slow EMA for entry, volume > 1.5x average for confirmation,
+# and daily EMA trend filter to avoid counter-trend trades. Works in bull markets by catching
+# uptrend continuations and in bear markets by catching downtrend continuations.
+# Volume filter reduces false signals, targeting 20-40 trades/year.
 
-name = "4h_vwap_reversion_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_ema_crossover_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,32 +25,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # VWAP calculation (cumulative)
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.zeros_like(vwap_num), where=vwap_den!=0)
+    # EMA indicators
+    fast_period = 9
+    slow_period = 21
     
-    # Price deviation from VWAP (as percentage)
-    vwap_deviation = (close - vwap) / vwap * 100
+    # Fast EMA
+    ema_fast = np.zeros_like(close)
+    ema_fast[fast_period-1] = np.mean(close[:fast_period])
+    for i in range(fast_period, len(close)):
+        ema_fast[i] = (close[i] * 2 + ema_fast[i-1] * (fast_period - 1)) / (fast_period + 1)
     
-    # RSI for momentum confirmation (14-period)
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Slow EMA
+    ema_slow = np.zeros_like(close)
+    ema_slow[slow_period-1] = np.mean(close[:slow_period])
+    for i in range(slow_period, len(close)):
+        ema_slow[i] = (close[i] * 2 + ema_slow[i-1] * (slow_period - 1)) / (slow_period + 1)
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-    
-    for i in range(rsi_period, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # EMA crossover signals
+    ema_crossover = np.where(ema_fast > ema_slow, 1, -1)  # 1 for bullish, -1 for bearish
     
     # Volume filter: 20-period average volume
     vol_ma = np.zeros_like(volume)
@@ -66,7 +60,7 @@ def generate_signals(prices):
     for i in range(ema_period, len(close_daily)):
         ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Align daily EMA to 4h timeframe
+    # Align daily EMA to 12h timeframe
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -77,7 +71,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(20, rsi_period, ema_period) + 5
+    start_idx = max(fast_period, slow_period, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -86,9 +80,8 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(vwap[i]) or np.isnan(vwap_deviation[i]) or 
-            np.isnan(rsi[i]) or np.isnan(ema_daily_aligned[i]) or 
-            np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
@@ -100,31 +93,29 @@ def generate_signals(prices):
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if price returns to VWAP or momentum fails
-            if vwap_deviation[i] >= 0 or rsi[i] < 40:
+            # Exit if trend reverses or volume fails
+            if ema_crossover[i] == -1 or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price returns to VWAP or momentum fails
-            if vwap_deviation[i] <= 0 or rsi[i] > 60:
+            # Exit if trend reverses or volume fails
+            if ema_crossover[i] == 1 or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price below VWAP, RSI momentum, volume, and HTF uptrend
-            if (vwap_deviation[i] < -1.0 and  # Price below VWAP by at least 1%
-                rsi[i] > 30 and rsi[i] < 50 and  # Not oversold, but bullish momentum
+            # Long entry: bullish EMA crossover, volume confirmation, and daily uptrend
+            if (ema_crossover[i] == 1 and 
                 volume_filter and 
                 uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price above VWAP, RSI momentum, volume, and HTF downtrend
-            elif (vwap_deviation[i] > 1.0 and   # Price above VWAP by at least 1%
-                  rsi[i] > 50 and rsi[i] < 70 and  # Not overbought, but bearish momentum
+            # Short entry: bearish EMA crossover, volume confirmation, and daily downtrend
+            elif (ema_crossover[i] == -1 and 
                   volume_filter and 
                   downtrend_htf):
                 position = -1
