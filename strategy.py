@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Williams Fractal Breakout with 1d Trend and Volume Confirmation v5
+4h Williams Fractal Breakout with 1d Trend and Volume Confirmation v6
 Hypothesis: Williams Fractal breakouts aligned with 1d EMA trend and ADX > 25,
 confirmed by volume spikes, capture strong momentum moves with fewer trades
 than Donchian breaks. Works in bull/bear by requiring trend alignment.
 Target: 20-30 trades/year. Uses more selective volume threshold (4.0x) and 
 requires both fractal and price confirmation to reduce false signals.
 """
-name = "4h_williams_fractal_breakout_1d_trend_volume_v5"
+name = "4h_williams_fractal_breakout_1d_trend_volume_v6"
 timeframe = "4h"
 leverage = 1.0
 
