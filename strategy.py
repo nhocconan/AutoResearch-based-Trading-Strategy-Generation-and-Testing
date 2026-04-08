@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
-# 1d_weekly_fractal_breakout_volume_v3
-# Hypothesis: 1d timeframe trading using weekly Williams Fractal breakouts with volume confirmation. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Weekly trend filter ensures alignment with higher timeframe direction. Target: 10-30 trades/year per symbol.
+# 1d_weekly_fractal_breakout_volume_v4
+# Hypothesis: 1d timeframe trading using weekly Williams Fractal breakouts with volume confirmation and weekly trend filter.
+# Uses fractals as key support/resistance levels; breakouts with volume capture momentum.
+# Trend filter ensures alignment with weekly direction. Target: 10-30 trades/year per symbol.
 
-name = "1d_weekly_fractal_breakout_volume_v3"
+name = "1d_weekly_fractal_breakout_volume_v4"
 timeframe = "1d"
 leverage = 1.0
 
@@ -72,8 +73,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 2.0x 20-period average (stricter for fewer trades)
-        vol_breakout = volume[i] > 2.0 * vol_ma[i]
+        # Volume breakout condition: current volume > 2.5x 20-period average (stricter for fewer trades)
+        vol_breakout = volume[i] > 2.5 * vol_ma[i]
         
         # Trend filter: price above/below weekly EMA20
         uptrend = close[i] > ema20_val
