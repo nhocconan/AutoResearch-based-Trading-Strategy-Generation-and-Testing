@@ -1,34 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_12h1d_camarilla_pivot_v5
-Hypothesis: Tighten entry criteria to reduce trade frequency while maintaining signal quality.
-- Only trade when price touches H3/L3 on 12h and volume > 2.5x average
-- Require price to be on correct side of 1d EMA200 (strong trend filter)
-- Exit when price crosses opposite H3/L3 or volume drops below average
-- Use discrete position size of 0.25 to balance risk and reward
-- Target: 15-25 trades/year to minimize fee drag
+1d_keltner_rsi_v1
+Hypothesis: Keltner channel (EMA-based) breakout with RSI momentum and volume filter for 1d timeframe.
+- Long: Close > Upper Keltner + RSI > 55 + volume > 1.5x 20-day avg
+- Short: Close < Lower Keltner + RSI < 45 + volume > 1.5x 20-day avg
+- Exit: Close crosses back below/above EMA(20) or volume drops below average
+- Uses 1w EMA200 trend filter: only long when price > weekly EMA200, short when price < weekly EMA200
+- Designed for 10-20 trades/year to avoid fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h1d_camarilla_pivot_v5"
-timeframe = "4h"
+name = "1d_keltner_rsi_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    if len(high) < 1:
-        return np.full(len(high), np.nan), np.full(len(high), np.nan)
-    
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    H3 = pivot + (range_val * 1.1 / 4)
-    L3 = pivot - (range_val * 1.1 / 4)
-    
-    return H3, L3
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -42,9 +29,26 @@ def calculate_ema(close, period):
         ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
     return ema
 
+def calculate_atr(high, low, close, period):
+    """Calculate ATR with proper handling"""
+    if len(high) < period:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    
+    atr = np.full_like(close, np.nan, dtype=float)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -52,44 +56,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = calculate_ema(close_1w, 200)
     
-    # Calculate 12-hour Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily EMA20 for Keltner center
+    ema_20 = calculate_ema(close, 20)
     
-    camarilla_H3_12h, camarilla_L3_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    # Calculate ATR(10) for Keltner width
+    atr_10 = calculate_atr(high, low, close, 10)
     
-    # Calculate 1-day EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = calculate_ema(close_1d, 200)
+    # Calculate Keltner bands
+    keltner_upper = ema_20 + (2 * atr_10)
+    keltner_lower = ema_20 - (2 * atr_10)
     
-    # Align indicators to 4-hour timeframe
-    camarilla_H3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H3_12h)
-    camarilla_L3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L3_12h)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: 20-period average
+    avg_gain = np.full_like(close, np.nan, dtype=float)
+    avg_loss = np.full_like(close, np.nan, dtype=float)
+    
+    # Wilder's smoothing
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # Align weekly EMA200 to daily
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(camarilla_H3_12h_aligned[i]) or np.isnan(camarilla_L3_12h_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_200_1w_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -98,32 +116,33 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        H3 = camarilla_H3_12h_aligned[i]
-        L3 = camarilla_L3_12h_aligned[i]
-        trend_up_1d = price > ema_200_1d_aligned[i]
+        upper = keltner_upper[i]
+        lower = keltner_lower[i]
+        rsi_val = rsi[i]
+        trend_filter = ema_200_1w_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below L3 or volume drops below average
-            if price < L3 or vol_ratio < 1.0:
+            # Exit: price closes below EMA20 or volume drops below average
+            if price < ema_20[i] or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above H3 or volume drops below average
-            if price > H3 or vol_ratio < 1.0:
+            # Exit: price closes above EMA20 or volume drops below average
+            if price > ema_20[i] or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches H3 with volume expansion and strong uptrend on 1d
-            if abs(price - H3) < H3 * 0.001 and vol_ratio > 2.5 and trend_up_1d:
+            # Enter long: price breaks above upper Keltner with RSI > 55, volume expansion, and uptrend on weekly
+            if price > upper and rsi_val > 55 and vol_ratio > 1.5 and price > trend_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches L3 with volume expansion and strong downtrend on 1d
-            elif abs(price - L3) < L3 * 0.001 and vol_ratio > 2.5 and not trend_up_1d:
+            # Enter short: price breaks below lower Keltner with RSI < 45, volume expansion, and downtrend on weekly
+            elif price < lower and rsi_val < 45 and vol_ratio > 1.5 and price < trend_filter:
                 position = -1
                 signals[i] = -0.25
     
