@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_pivot_v1
-Hypothesis: 12-hour strategy using daily context with Camarilla pivot levels.
-Long when price crosses above daily R1 with volume > 1.8x average and price > daily EMA200.
-Short when price crosses below daily S1 with volume > 1.8x average and price < daily EMA200.
-Exit when price crosses opposite daily support/resistance or volume drops below 1.5x average.
-Uses discrete position sizing (0.25) to reduce trade frequency. Target: 12-37 trades/year.
+4h_1d_camarilla_pivot_v9
+Hypothesis: 4-hour strategy using daily context with refined entry conditions.
+Long when price breaks above daily R1 with volume > 2x average and price > daily EMA200.
+Short when price breaks below daily S1 with volume > 2x average and price < daily EMA200.
+Exit when price crosses opposite daily level OR volume falls below 1.5x average.
+Uses discrete sizing (0.25) to reduce churn. Target: 15-25 trades/year to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_v9"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for context and Pivot
+    # Get daily data for context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 200:
         return np.zeros(n)
@@ -57,7 +57,7 @@ def generate_signals(prices):
     # Calculate daily EMA for trend filter
     ema_200_1d = calculate_ema(close_1d, 200)
     
-    # Align indicators to 12-hour timeframe
+    # Align indicators to 4-hour timeframe
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
@@ -102,12 +102,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price crosses above daily R1 with volume expansion and uptrend on daily
-            if price > R1 and vol_ratio > 1.8 and trend_up_1d:
+            # Enter long: price breaks above daily R1 with volume expansion and uptrend on daily
+            if price > R1 and vol_ratio > 2.0 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price crosses below daily S1 with volume expansion and downtrend on daily
-            elif price < S1 and vol_ratio > 1.8 and not trend_up_1d:
+            # Enter short: price breaks below daily S1 with volume expansion and downtrend on daily
+            elif price < S1 and vol_ratio > 2.0 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
