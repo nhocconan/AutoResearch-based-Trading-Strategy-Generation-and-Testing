@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian breakout with 1w trend filter and volume concentration
-Hypothesis: Price breaking Donchian(20) channels in direction of 1w EMA(30) trend with volume concentration (current volume > 1.8x 20-period average) captures momentum on daily timeframe. Uses 1w trend filter for better trend detection, reducing whipsaws. Target: 10-25 trades/year on 1d timeframe.
+12h Donchian breakout with 1d trend filter and volume concentration
+Hypothesis: Price breaking Donchian(20) channels in direction of 1d EMA(50) trend with volume concentration (current volume > 2.0x 20-period average) captures momentum in both bull and bear markets. The 1d trend filter reduces whipsaws, while volume confirmation ensures institutional participation. Designed for 12h timeframe to achieve 12-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,24 +23,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(30) for trend filter
-    ema_30_1w = pd.Series(close_1w).ewm(span=30, min_periods=30, adjust=False).mean().values
-    ema_30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_30_1w)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (vol_ma * 1.8)
+    vol_surge = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_30_1w_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_surge[i])):
             signals[i] = 0.0
             continue
@@ -48,7 +48,7 @@ def generate_signals(prices):
         if position == 1:  # Long position
             # Exit: trend turns bearish OR price breaks below Donchian(10) low
             donchian_low = np.min(low[max(0, i-10):i+1])
-            if (close[i] <= ema_30_1w_aligned[i] or 
+            if (close[i] <= ema_50_1d_aligned[i] or 
                 close[i] <= donchian_low):
                 position = 0
                 signals[i] = 0.0
@@ -58,7 +58,7 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Exit: trend turns bullish OR price breaks above Donchian(10) high
             donchian_high = np.max(high[max(0, i-10):i+1])
-            if (close[i] >= ema_30_1w_aligned[i] or 
+            if (close[i] >= ema_50_1d_aligned[i] or 
                 close[i] >= donchian_high):
                 position = 0
                 signals[i] = 0.0
@@ -71,13 +71,13 @@ def generate_signals(prices):
             
             # Long: price breaks above Donchian(20) high + volume surge + uptrend
             if (close[i] > donchian_high and
-                close[i] > ema_30_1w_aligned[i] and
+                close[i] > ema_50_1d_aligned[i] and
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
             # Short: price breaks below Donchian(20) low + volume surge + downtrend
             elif (close[i] < donchian_low and
-                  close[i] < ema_30_1w_aligned[i] and
+                  close[i] < ema_50_1d_aligned[i] and
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
