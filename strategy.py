@@ -1,18 +1,21 @@
-# 4h_12h_1d_ema_crossover_v3
-# Hypothesis: Trend following with EMA crossovers on multiple timeframes.
-# - Primary: 4h EMA(21) vs EMA(50) for entry/exit
-# - Trend filter: 12h EMA(50) direction (bullish if close > EMA, bearish if close < EMA)
-# - Higher timeframe filter: 1d EMA(50) to avoid counter-trend trades in strong trends
-# - Volume confirmation: 4h volume > 1.5x 20-period average to avoid false breakouts
-# - Position sizing: 0.25 for long, -0.25 for short
-# Target: 20-50 trades/year (80-200 total over 4 years)
+#!/usr/bin/env python3
+"""
+6h_1d_1w_donchian_breakout_volume_v1
+Hypothesis: Donchian breakouts with weekly trend filter and volume confirmation.
+- Primary: 6h Donchian(20) breakout with volume > 1.5x 20-period average
+- Trend filter: 1d close > weekly EMA(50) for longs, < for shorts
+- Exit: Opposite Donchian break of 10-period channel
+- Position sizing: 0.25 for long, -0.25 for short
+Target: 50-150 total trades over 4 years (12-37/year)
+Works in bull (breakouts) and bear (short breakdowns) with trend filter preventing counter-trend trades.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_ema_crossover_v3"
-timeframe = "4h"
+name = "6h_1d_1w_donchian_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,51 +29,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 12h EMA(50) for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema_50_12h
-    trend_12h_down = close_12h < ema_50_12h
-    
-    # Forward fill trend
-    trend_12h_up_series = pd.Series(trend_12h_up)
-    trend_12h_down_series = pd.Series(trend_12h_down)
-    trend_12h_up_ffilled = trend_12h_up_series.ffill().values
-    trend_12h_down_ffilled = trend_12h_down_series.ffill().values
-    
-    # Align 12h trend to 4h
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up_ffilled)
-    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down_ffilled)
-    
-    # Get 1d data for higher timeframe filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend
+    # Get weekly data for EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1d close values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema_50_1d
-    trend_1d_down = close_1d < ema_50_1d
     
-    # Forward fill trend
-    trend_1d_up_series = pd.Series(trend_1d_up)
-    trend_1d_down_series = pd.Series(trend_1d_down)
-    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
-    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema_50_1w
+    trend_1w_down = close_1w < ema_50_1w
     
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
+    # Forward fill weekly trend
+    trend_1w_up_series = pd.Series(trend_1w_up)
+    trend_1w_down_series = pd.Series(trend_1w_down)
+    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
+    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
     
-    # 4h EMA crossovers
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly trend to 1d (then to 6h)
+    trend_1w_up_aligned_1d = align_htf_to_ltf(df_1d, df_1w, trend_1w_up_ffilled)
+    trend_1w_down_aligned_1d = align_htf_to_ltf(df_1d, df_1w, trend_1w_down_ffilled)
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1w_up_aligned_1d)
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1w_down_aligned_1d)
+    
+    # 6h Donchian channels (20-period for entry, 10-period for exit)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,13 +74,13 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(high_10[i]) or np.isnan(low_10[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -95,27 +89,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: EMA cross down OR 12h trend turns down OR 1d trend turns down
-            if (ema_21[i] < ema_50[i]) or trend_12h_down_aligned[i] or trend_1d_down_aligned[i]:
+            # Exit: price breaks below 10-period low OR weekly trend turns down
+            if low[i] <= low_10[i] or trend_1w_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: EMA cross up OR 12h trend turns up OR 1d trend turns up
-            if (ema_21[i] > ema_50[i]) or trend_12h_up_aligned[i] or trend_1d_up_aligned[i]:
+            # Exit: price breaks above 10-period high OR weekly trend turns up
+            if high[i] >= high_10[i] or trend_1w_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: EMA cross up + 12h uptrend + 1d uptrend + volume
-            if (ema_21[i] > ema_50[i]) and trend_12h_up_aligned[i] and trend_1d_up_aligned[i] and volume_filter[i]:
+            # Long entry: price breaks above 20-period high + weekly uptrend + volume
+            if high[i] >= high_20[i] and trend_1w_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: EMA cross down + 12h downtrend + 1d downtrend + volume
-            elif (ema_21[i] < ema_50[i]) and trend_12h_down_aligned[i] and trend_1d_down_aligned[i] and volume_filter[i]:
+            # Short entry: price breaks below 20-period low + weekly downtrend + volume
+            elif low[i] <= low_20[i] and trend_1w_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
