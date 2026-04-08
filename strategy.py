@@ -1,51 +1,69 @@
 #!/usr/bin/env python3
-# 12h_trix_volume_sr_1d
-# Hypothesis: TRIX momentum + volume spike + daily support/resistance. Long when TRIX crosses above zero with volume > 1.5x avg and price above daily pivot; short when TRIX crosses below zero with volume > 1.5x avg and price below daily pivot. Exit on TRIX reversal or price reaching opposite pivot. Designed to capture momentum bursts in both bull and bear markets with controlled trade frequency.
+# 12h_engulfing_1w1d_volume_v1
+# Hypothesis: Weekly and daily bullish/bearish engulfing candles combined with volume confirmation on 12h chart.
+# Long when daily candle is bullish engulfing, weekly trend is up, and 12h volume > 1.5x average.
+# Short when daily candle is bearish engulfing, weekly trend is down, and 12h volume > 1.5x average.
+# Exit on opposite engulfing signal or when price reaches opposite engulfing level.
+# Designed to capture momentum shifts at key turning points with volume confirmation.
+# Target: 15-25 trades/year to minimize fee drift while capturing high-probability moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_trix_volume_sr_1d"
+name = "12h_engulfing_1w1d_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for pivot points (calculate once before loop)
+    # Get daily data for engulfing patterns
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard)
+    # Daily OHLC
+    open_1d = df_1d['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Align daily pivot to 12-hour chart
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    # Bullish engulfing: current close > previous open AND current open < previous close
+    bullish_engulf = (close_1d > open_1d[:-1]) & (open_1d < close_1d[:-1])
+    bullish_engulf = np.concatenate([np.array([False]), bullish_engulf])
     
-    # Get 1-day data for TRIX (same timeframe as pivot for alignment)
-    # TRIX: triple exponential smoothing of close, then % change
-    close_1d_series = pd.Series(close_1d)
-    ema1 = close_1d_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix_raw = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = trix_raw.fillna(0).values  # TRIX indicator
+    # Bearish engulfing: current close < previous open AND current open > previous close
+    bearish_engulf = (close_1d < open_1d[:-1]) & (open_1d > close_1d[:-1])
+    bearish_engulf = np.concatenate([np.array([False]), bearish_engulf])
     
-    # Align TRIX to 12-hour chart
-    trix_12h = align_htf_to_ltf(prices, df_1d, trix)
+    # Align daily engulfing signals to 12h chart
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Weekly trend: based on close vs open
+    open_1w = df_1w['open'].values
+    close_1w = df_1w['close'].values
+    weekly_up = close_1w > open_1w
+    weekly_down = close_1w < open_1w
+    
+    # Align weekly trend to 12h chart
+    weekly_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_up.astype(float))
+    weekly_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_down.astype(float))
     
     # Volume confirmation: 24-period average (2 days of 12h data)
     avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -58,7 +76,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(pivot_12h[i]) or np.isnan(trix_12h[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or \
+           np.isnan(weekly_up_aligned[i]) or np.isnan(weekly_down_aligned[i]) or \
+           np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -67,16 +87,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: TRIX turns down or price reaches opposite pivot (below pivot)
-            if trix_12h[i] < 0 or close[i] < pivot_12h[i]:
+            # Exit: bearish engulfing signal or opposite conditions
+            if bearish_engulf_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TRIX turns up or price reaches opposite pivot (above pivot)
-            if trix_12h[i] > 0 or close[i] > pivot_12h[i]:
+            # Exit: bullish engulfing signal or opposite conditions
+            if bullish_engulf_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,12 +105,12 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: TRIX crosses above zero with volume and price above pivot
-            if i > 0 and trix_12h[i-1] <= 0 and trix_12h[i] > 0 and volume_ok and close[i] > pivot_12h[i]:
+            # Long entry: daily bullish engulfing, weekly up trend, volume confirmation
+            if bullish_engulf_aligned[i] > 0.5 and weekly_up_aligned[i] > 0.5 and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: TRIX crosses below zero with volume and price below pivot
-            elif i > 0 and trix_12h[i-1] >= 0 and trix_12h[i] < 0 and volume_ok and close[i] < pivot_12h[i]:
+            # Short entry: daily bearish engulfing, weekly down trend, volume confirmation
+            elif bearish_engulf_aligned[i] > 0.5 and weekly_down_aligned[i] > 0.5 and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
