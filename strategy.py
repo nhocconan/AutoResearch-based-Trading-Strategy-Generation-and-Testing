@@ -1,118 +1,125 @@
 #!/usr/bin/env python3
-# 1d_weekly_kama_rsi_regime_v1
-# Hypothesis: On 1d timeframe, use weekly HTF regime filter (EMA50) with KAMA trend and RSI mean reversion.
-# Long: price > KAMA(10) AND RSI(14) < 40 AND weekly close > weekly EMA50 (bullish regime)
-# Short: price < KAMA(10) AND RSI(14) > 60 AND weekly close < weekly EMA50 (bearish regime)
-# Exit: opposite signal or RSI crosses 50 (mean reversion)
-# Uses discrete sizing 0.25 to limit fee drag. Target 20-60 trades/year.
+# 12h_daily_camarilla_pivot_volume_regime_v1
+# Hypothesis: 12h Camarilla pivot reversals with daily volume confirmation and 1d regime filter.
+# Long: price touches Camarilla L3 support with volume > 1.8x 20-period average AND 1d close > 1d EMA50 (bullish regime)
+# Short: price touches Camarilla H3 resistance with volume > 1.8x 20-period average AND 1d close < 1d EMA50 (bearish regime)
+# Exit: price crosses Camarilla H4/L4 levels or ATR-based stoploss (2x ATR)
+# Uses 12h primary timeframe with 1d HTF for EMA regime filter.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_kama_rsi_regime_v1"
-timeframe = "1d"
+name = "12h_daily_camarilla_pivot_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate KAMA(10, 2, 30)
-    # ER = |Close - Close[10]| / Sum(|Close - Close[1]|, 10)
-    change = np.abs(np.diff(close, n=10))  # |Close - Close[10]|
-    volatility = np.zeros(n)
+    # Calculate ATR(14) for stoploss
+    tr = np.zeros(n)
     for i in range(1, n):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility = np.where(np.arange(n) >= 10, volatility[9:] - np.concatenate([np.zeros(9), volatility[:-9]]), volatility)
-    er = np.zeros(n)
-    er[10:] = change[9:] / np.where(volatility[9:] > 0, volatility[9:], 1)
-    # Smooth constant
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full(n, np.nan)
-    kama[9] = np.mean(close[:10])
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr = np.full(n, np.nan)
     for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+        atr[i] = np.mean(tr[i-14:i])
     
-    # Get weekly data for EMA regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate volume ratio (current vs 20-period average)
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
+    
+    # Get 1d data for HTF regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA(50) on weekly
-    ema_50_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(df_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 / (50 + 1)) + (ema_50_1w[i-1] * (49 / (50 + 1)))
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align weekly EMA to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate EMA(50) on 1d for regime filter
+    ema_50_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(df_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / (50 + 1)) + (ema_50_1d[i-1] * (49 / (50 + 1)))
+    
+    # Align 1d EMA to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
     for i in range(50, n):
+        vol_r = vol_ratio[i]
         price = close[i]
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        weekly_ema = ema_50_1w_aligned[i]
         
-        if np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(weekly_ema):
+        if np.isnan(vol_r) or np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        regime_bullish = close[i] > weekly_ema
-        regime_bearish = close[i] < weekly_ema
+        regime_bullish = close[i] > ema_50_1d_aligned[i]
+        regime_bearish = close[i] < ema_50_1d_aligned[i]
+        
+        # Calculate Camarilla pivot levels using previous 12h bar's OHLC
+        if i >= 1:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            pivot = (prev_high + prev_low + prev_close) / 3.0
+            range_hl = prev_high - prev_low
+            
+            # Camarilla levels
+            h4 = pivot + range_hl * 1.1 / 2
+            h3 = pivot + range_hl * 1.1 / 4
+            l3 = pivot - range_hl * 1.1 / 4
+            l4 = pivot - range_hl * 1.1 / 2
+        else:
+            h4 = h3 = l3 = l4 = np.nan
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 OR short signal
-            if rsi_val >= 50 or (price < kama_val and rsi_val > 60 and regime_bearish):
+            # Exit: price crosses H4 OR stoploss hit (2x ATR below entry)
+            if price >= h4 or price <= entry_price - 2.0 * atr_stop:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 OR long signal
-            if rsi_val <= 50 or (price > kama_val and rsi_val < 40 and regime_bullish):
+            # Exit: price crosses L4 OR stoploss hit (2x ATR above entry)
+            if price <= l4 or price >= entry_price + 2.0 * atr_stop:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price > KAMA AND RSI < 40 AND bullish weekly regime
-            if price > kama_val and rsi_val < 40 and regime_bullish:
+            # Long entry: price touches L3 support with volume AND bullish regime
+            if price <= l3 and vol_r > 1.8 and regime_bullish:
                 position = 1
+                entry_price = price
+                atr_stop = atr[i]
                 signals[i] = 0.25
-            # Short entry: price < KAMA AND RSI > 60 AND bearish weekly regime
-            elif price < kama_val and rsi_val > 60 and regime_bearish:
+            # Short entry: price touches H3 resistance with volume AND bearish regime
+            elif price >= h3 and vol_r > 1.8 and regime_bearish:
                 position = -1
+                entry_price = price
+                atr_stop = atr[i]
                 signals[i] = -0.25
     
     return signals
