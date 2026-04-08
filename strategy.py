@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4H Donchian Breakout + Volume + Trend Filter
-Hypothesis: Donchian(20) breakouts with volume confirmation and 4h EMA(50) trend filter capture strong momentum while avoiding whipsaws.
-Designed for 4h timeframe to maintain low trade frequency (target 20-50/year) and work in both bull and bear markets.
+4H Donchian Breakout + Daily Trend + Volume Confirmation
+Hypothesis: Donchian(20) breakouts on 4h timeframe capture momentum, 
+filtered by daily EMA trend and volume spikes to avoid false breakouts.
+Works in both bull and bear markets by trading breakouts in direction of daily trend.
+Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_trend_v1"
+name = "4h_donchian_breakout_daily_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,14 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Daily EMA(21) for trend filter
+    ema_21 = df_1d['close'].ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h = align_htf_to_ltf(prices, df_1d, ema_21)
+    
     # Donchian channels (20-period) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # EMA(50) for trend filter on 4h
-    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Volume filter (>1.5x 20-period average)
+    # Volume filter (>1.5x 20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
@@ -40,35 +46,36 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_50[i]) or np.isnan(vol_filter[i]):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_21_4h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if close[i] < low_20[i] or close[i] < ema_50[i]:
+            # Exit: price closes below Donchian lower band or trend reverses
+            if close[i] <= low_min[i] or close[i] < ema_21_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if close[i] > high_20[i] or close[i] > ema_50[i]:
+            # Exit: price closes above Donchian upper band or trend reverses
+            if close[i] >= high_max[i] or close[i] > ema_21_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long with trend and volume confirmation
-            if (close[i] > high_20[i] and 
-                close[i] > ema_50[i] and 
+            # Breakout long above upper band with trend alignment
+            if (close[i] > high_max[i] and 
+                close[i] > ema_21_4h[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Breakout short with trend and volume confirmation
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_50[i] and 
+            # Breakout short below lower band with trend alignment
+            elif (close[i] < low_min[i] and 
+                  close[i] < ema_21_4h[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
