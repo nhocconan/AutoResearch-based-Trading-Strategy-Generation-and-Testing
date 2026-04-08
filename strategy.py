@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX filter and volume confirmation
-# Uses 20-period Donchian channels from 4h data for breakout levels.
-# Filters by 1d ADX > 25 for strong trend and volume > 1.8x 20-period average.
-# Only takes long positions in uptrends and short positions in downtrends.
-# Designed to capture strong trends while avoiding whipsaw in weak trends.
-# Target: 20-40 trades/year via strict Donchian + strong trend + volume confluence.
+# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
+# Uses Williams Fractals on 6h data to identify potential turning points.
+# Filters by 1d ADX > 25 for strong trend and volume > 1.5x 20-period average.
+# Only takes long positions on bullish fractal breaks in uptrends and short positions on bearish fractal breaks in downtrends.
+# Designed to capture trend continuations after pullbacks while avoiding whipsaw in weak trends.
+# Target: 50-150 total trades over 4 years via strict fractal + strong trend + volume confluence.
 
-name = "4h_donchian_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,9 +31,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Fractals on 6h data (5-point pattern)
+    # Bullish fractal: low[i-2] > low[i] and low[i-1] > low[i] and low[i+1] > low[i] and low[i+2] > low[i]
+    # Bearish fractal: high[i-2] < high[i] and high[i-1] < high[i] and high[i+1] < high[i] and high[i+2] < high[i]
+    bullish_fractal = np.zeros(n, dtype=bool)
+    bearish_fractal = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n-2):
+        # Bullish fractal (support level)
+        if (low[i-2] > low[i] and low[i-1] > low[i] and 
+            low[i+1] > low[i] and low[i+2] > low[i]):
+            bullish_fractal[i] = True
+        # Bearish fractal (resistance level)
+        if (high[i-2] < high[i] and high[i-1] < high[i] and 
+            high[i+1] < high[i] and high[i+2] < high[i]):
+            bearish_fractal[i] = True
     
     # Calculate 14-period ADX for trend strength on 1d data
     # True Range
@@ -70,35 +82,46 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 50  # Need 20 for Donchian + 14 for ADX + buffer
+    start_idx = 30  # Need fractal calculation buffer + ADX buffer
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
+        # Get aligned 1d values for current 6h bar
         adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
         
         # Regime filter: only trade in strong trending markets
         strong_trend = adx_aligned > 25
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirm = volume[i] > 1.8 * vol_avg_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
         if position == 1:  # Long position
-            # Exit conditions: close below lower Donchian channel
-            if close[i] < low_20[i]:
+            # Exit conditions: close below bullish fractal level (support break)
+            # Find most recent bullish fractal level
+            fractal_level = 0
+            for j in range(i, max(0, i-20), -1):  # Look back up to 20 bars
+                if bullish_fractal[j]:
+                    fractal_level = low[j]
+                    break
+            if fractal_level > 0 and close[i] < fractal_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: close above upper Donchian channel
-            if close[i] > high_20[i]:
+            # Exit conditions: close above bearish fractal level (resistance break)
+            # Find most recent bearish fractal level
+            fractal_level = 0
+            for j in range(i, max(0, i-20), -1):  # Look back up to 20 bars
+                if bearish_fractal[j]:
+                    fractal_level = high[j]
+                    break
+            if fractal_level > 0 and close[i] > fractal_level:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,11 +129,27 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Only trade with volume confirmation and in strong trending markets
             if volume_confirm and strong_trend:
-                # Breakout entry: long on break above upper channel, short on break below lower channel
-                if close[i] > high_20[i]:  # Bullish breakout
+                # Look for recent fractal breaks
+                # Bullish entry: price breaks above recent bearish fractal (resistance) in uptrend
+                resistance_break = False
+                support_break = False
+                
+                # Check for resistance break (bearish fractal broken to upside)
+                for j in range(max(0, i-5), i):  # Look back 5 bars for fractal
+                    if bearish_fractal[j] and close[i] > high[j]:
+                        resistance_break = True
+                        break
+                
+                # Check for support break (bullish fractal broken to downside) - for short
+                for j in range(max(0, i-5), i):  # Look back 5 bars for fractal
+                    if bullish_fractal[j] and close[i] < low[j]:
+                        support_break = True
+                        break
+                
+                if resistance_break:  # Bullish breakout
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < low_20[i]:  # Bearish breakout
+                elif support_break:  # Bearish breakout
                     position = -1
                     signals[i] = -0.25
     
