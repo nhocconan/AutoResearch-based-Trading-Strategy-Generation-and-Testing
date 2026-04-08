@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_volume_reversion_v1
-# Hypothesis: 4-hour mean reversion at Camarilla pivot levels (S3/S4 for long, R3/R4 for short)
-# with 1-day volume confirmation and chop regime filter. Works in both bull and bear markets
-# by fading extremes in ranging conditions while avoiding strong trends.
+# [24947] 6h_1d_ichimoku_trend_follow_v1
+# Hypothesis: 6-hour Ichimoku system with 1-day trend filter. Uses daily Kumo (cloud) as trend bias and
+# Tenkan/Kijun cross on 6h for entry. In bullish cloud (price > cloud), look for TK cross up to go long.
+# In bearish cloud (price < cloud), look for TK cross down to go short. Avoids chop by requiring cloud
+# thickness > 0.1% of price. Works in both bull/bear by following higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_volume_reversion_v1"
-timeframe = "4h"
+name = "6h_1d_ichimoku_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,124 +18,126 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 1-day data for Camarilla pivot and volume
+    # Get 1-day data for Ichimoku (cloud)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 1-day volume moving average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Based on previous day's high, low, close
+    # Calculate Ichimoku components on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_s3 = np.full(len(close_1d), np.nan)
-    camarilla_s4 = np.full(len(close_1d), np.nan)
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_r4 = np.full(len(close_1d), np.nan)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_1d = np.full(len(close_1d), np.nan)
+    for i in range(8, len(close_1d)):
+        tenkan_1d[i] = (np.max(high_1d[i-8:i+1]) + np.min(low_1d[i-8:i+1])) / 2
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's data
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        rang = ph - pl
-        
-        camarilla_s3[i] = pc - (1.1 * rang / 6)
-        camarilla_s4[i] = pc - (1.1 * rang / 4)
-        camarilla_r3[i] = pc + (1.1 * rang / 6)
-        camarilla_r4[i] = pc + (1.1 * rang / 4)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_1d = np.full(len(close_1d), np.nan)
+    for i in range(25, len(close_1d)):
+        kijun_1d[i] = (np.max(high_1d[i-25:i+1]) + np.min(low_1d[i-25:i+1])) / 2
     
-    # Calculate 4-hour Choppiness Index (14-period) for regime filter
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a_1d = np.full(len(close_1d), np.nan)
+    for i in range(25, len(close_1d)):
+        if not np.isnan(tenkan_1d[i]) and not np.isnan(kijun_1d[i]):
+            senkou_a_1d[i] = (tenkan_1d[i] + kijun_1d[i]) / 2
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = true_range(high[i], low[i], close[i-1])
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_b_1d = np.full(len(close_1d), np.nan)
+    for i in range(51, len(close_1d)):
+        senkou_b_1d[i] = (np.max(high_1d[i-51:i+1]) + np.min(low_1d[i-51:i+1])) / 2
     
-    atr_14 = np.full(n, np.nan)
-    for i in range(14, n):
-        atr_14[i] = np.mean(tr[i-14:i])
+    # Chikou Span (Lagging Span): not used for trend bias
     
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        sum_tr = np.sum(tr[i-14:i])
-        max_h = np.max(high[i-14:i])
-        min_l = np.min(low[i-14:i])
-        if max_h > min_l and sum_tr > 0:
-            chop[i] = 100 * np.log10(sum_tr / (max_h - min_l)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
+    # Determine cloud (Kumo) and its color
+    # Bullish cloud: Senkou A > Senkou B
+    # Bearish cloud: Senkou A < Senkou B
+    cloud_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    cloud_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
+    cloud_bullish_1d = senkou_a_1d > senkou_b_1d  # True if bullish
     
-    # Align 1-day data to 4-hour timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    # Align Ichimoku components to 6-hour timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    cloud_top_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
+    cloud_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
+    cloud_bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_bullish_1d.astype(float))
+    
+    # Calculate Tenkan and Kijun on 6h for entry signals
+    tenkan_6h = np.full(n, np.nan)
+    kijun_6h = np.full(n, np.nan)
+    for i in range(8, n):
+        tenkan_6h[i] = (np.max(high[i-8:i+1]) + np.min(low[i-8:i+1])) / 2
+    for i in range(25, n):
+        kijun_6h[i] = (np.max(high[i-25:i+1]) + np.min(low[i-25:i+1])) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(26, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(vol_ma_1d_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(cloud_top_1d_aligned[i]) or np.isnan(cloud_bottom_1d_aligned[i]) or
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma_1d_aligned[i] if vol_ma_1d_aligned[i] > 0 else 0
+        # Cloud thickness filter: avoid chop when cloud is too thin
+        cloud_thickness = abs(cloud_top_1d_aligned[i] - cloud_bottom_1d_aligned[i])
         price = close[i]
-        
-        # Chop regime filter: only trade when chop > 50 (ranging market)
-        if chop[i] <= 50:
+        if cloud_thickness < 0.001 * price:  # Less than 0.1% of price
             if position != 0:
-                position = 0
-                signals[i] = 0.0
+                pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
+        # Determine trend bias from daily Ichimoku
+        # Bullish bias: price above cloud AND cloud is bullish
+        # Bearish bias: price below cloud AND cloud is bearish
+        bullish_bias = (price > cloud_top_1d_aligned[i]) and (cloud_bullish_1d_aligned[i] > 0.5)
+        bearish_bias = (price < cloud_bottom_1d_aligned[i]) and (cloud_bullish_1d_aligned[i] < 0.5)
+        
         if position == 1:  # Long
-            # Exit: price reaches S3 or volume drops
-            if price <= camarilla_s3_aligned[i] or vol_ratio < 1.5:
+            # Exit: TK cross down OR price re-enters cloud
+            tk_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
+            re_enter_cloud = (price >= cloud_bottom_1d_aligned[i]) and (price <= cloud_top_1d_aligned[i])
+            if tk_cross_down or re_enter_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price reaches R3 or volume drops
-            if price >= camarilla_r3_aligned[i] or vol_ratio < 1.5:
+            # Exit: TK cross up OR price re-enters cloud
+            tk_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+            re_enter_cloud = (price >= cloud_bottom_1d_aligned[i]) and (price <= cloud_top_1d_aligned[i])
+            if tk_cross_up or re_enter_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches/below S4 with volume confirmation
-            if price <= camarilla_s4_aligned[i] and vol_ratio > 1.8:
-                position = 1
-                signals[i] = 0.25
-            # Enter short: price touches/above R4 with volume confirmation
-            elif price >= camarilla_r4_aligned[i] and vol_ratio > 1.8:
-                position = -1
-                signals[i] = -0.25
+            # Enter long: bullish bias AND TK cross up
+            if bullish_bias:
+                tk_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+                if tk_cross_up:
+                    position = 1
+                    signals[i] = 0.25
+            # Enter short: bearish bias AND TK cross down
+            elif bearish_bias:
+                tk_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
+                if tk_cross_down:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
