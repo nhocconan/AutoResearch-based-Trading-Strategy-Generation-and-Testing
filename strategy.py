@@ -1,73 +1,80 @@
 #!/usr/bin/env python3
-# 12h_camilla_pivot_breakout_volume_v1
-# Hypothesis: Camarilla pivot breakouts with volume confirmation on 12h timeframe.
-# Long when price breaks above R4 with volume > 1.5x average.
-# Short when price breaks below S4 with volume > 1.5x average.
-# Exit when price crosses the opposite pivot level (S3/R3) or volume drops below average.
-# Uses Camarilla levels from 1d timeframe for structure, volume for confirmation.
-# Target: 12-37 trades/year with strict entry conditions to avoid overtrading.
+# 4h_donchian20_volatility_breakout_v3
+# Hypothesis: Donchian channel breakouts with volatility filter on 4h timeframe.
+# Long when price breaks above 20-period high with ATR(14) > 0.5 * ATR(50).
+# Short when price breaks below 20-period low with ATR(14) > 0.5 * ATR(50).
+# Exit when price crosses the opposite Donchian level.
+# Uses 1d Donchian for trend filter: long only if price > 1d Donchian mid, short only if price < 1d Donchian mid.
+# Target: 20-40 trades/year with strict volatility and trend filters.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camilla_pivot_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_donchian20_volatility_breakout_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (calculate once before loop)
+    # Get 4h and 1d data (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    
+    if len(df_4h) < 20 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    # 4h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20-1, n):
+        donchian_high[i] = np.max(high[i-20+1:i+1])
+        donchian_low[i] = np.min(low[i-20+1:i+1])
     
-    # Calculate pivot levels
-    camarilla_r4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
-    camarilla_s4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    # 1d Donchian mid for trend filter
+    prev_1d_high = df_1d['high'].values
+    prev_1d_low = df_1d['low'].values
+    prev_1d_close = df_1d['close'].values
+    donchian_1d_high = np.full(len(prev_1d_high), np.nan)
+    donchian_1d_low = np.full(len(prev_1d_low), np.nan)
+    for i in range(20-1, len(prev_1d_high)):
+        donchian_1d_high[i] = np.max(prev_1d_high[i-20+1:i+1])
+        donchian_1d_low[i] = np.min(prev_1d_low[i-20+1:i+1])
+    donchian_1d_mid = (donchian_1d_high + donchian_1d_low) / 2
+    donchian_1d_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_1d_mid)
     
-    # Align to 12h timeframe (wait for 1d bar to close)
-    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # ATR for volatility filter
+    atr_period = 14
+    atr_slow_period = 50
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
+    atr_slow = np.full(n, np.nan)
+    for i in range(atr_slow_period, n):
+        atr_slow[i] = np.mean(tr[i-atr_slow_period+1:i+1])
     
-    # Volume filter: 1.5x 20-period average (using 12h bars)
-    vol_ma_period = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
-    
-    vol_surge = np.full(n, False)
-    for i in range(n):
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
+    volatility_filter = (atr > 0.5 * atr_slow) & ~np.isnan(atr_slow)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = vol_ma_period + 1
+    start_idx = max(20, atr_slow_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or 
-            np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_1d_mid_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -75,27 +82,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below S3 or volume drops below average
-            if close[i] < s3_12h[i] or volume[i] < vol_ma[i]:
+            # Exit: Price below 4h Donchian low
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above R3 or volume drops below average
-            if close[i] > r3_12h[i] or volume[i] < vol_ma[i]:
+            # Exit: Price above 4h Donchian high
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above R4 with volume surge
-            if (close[i] > r4_12h[i] and vol_surge[i]):
+            # Long entry: Price above 4h Donchian high + volatility filter + price > 1d Donchian mid
+            if (close[i] > donchian_high[i] and 
+                volatility_filter[i] and 
+                close[i] > donchian_1d_mid_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below S4 with volume surge
-            elif (close[i] < s4_12h[i] and vol_surge[i]):
+            # Short entry: Price below 4h Donchian low + volatility filter + price < 1d Donchian mid
+            elif (close[i] < donchian_low[i] and 
+                  volatility_filter[i] and 
+                  close[i] < donchian_1d_mid_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
