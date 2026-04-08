@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h price channel with 1d trend filter
-Hypothesis: Price breaking above/below 12-hour Donchian channels during strong daily trends
-(captured by ADX > 25 on daily timeframe) with volume capture sustained moves while avoiding whipsaw.
-Designed to work in both bull and bear markets by requiring strong trend alignment.
-Target 12-37 trades/year on 12h timeframe to minimize fee drag.
+4h Donchian breakout with 1d trend filter and volume confirmation
+Hypothesis: Price breaking above/below 4-hour Donchian channels during strong daily trends
+(captured by ADX > 25 on daily) with volume confirmation captures sustained moves while
+avoiding whipsaw. Using higher timeframe trend filter reduces trade frequency to target
+20-50 trades/year. Works in both bull and bear markets by requiring strong daily trend alignment.
 """
 
-name = "12h_price_channel_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -63,7 +63,7 @@ def generate_signals(prices):
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 20-period Donchian channels for breakout signals on 12h data
+    # 20-period Donchian channels for breakout signals on 4h data
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -81,10 +81,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 12h bar
+        # Get aligned 1d value for current 4h bar
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
-        # Regime filter: only trade in strong trending markets on daily timeframe
+        # Regime filter: only trade in strong trending markets on daily
         strong_trend_1d = adx_1d_aligned > 25
         
         # Volume confirmation: current volume > 1.5x 20-period average
@@ -106,7 +106,7 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade with volume confirmation and in strong trending markets on daily timeframe
+            # Only trade with volume confirmation and in strong trending markets on daily
             if volume_confirm and strong_trend_1d:
                 # Long entry: price breaks above Donchian high
                 if close[i] > donchian_high[i]:
