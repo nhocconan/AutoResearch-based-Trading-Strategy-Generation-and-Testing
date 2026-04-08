@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-4h_1w_1d_price_action_v4
-Hypothesis: Weekly bias (from previous week close vs open) filters daily breakouts on 4h timeframe.
+12h_1w_1d_price_action_v1
+Hypothesis: Weekly bias from previous week close vs open filters daily breakouts on 12h timeframe.
 - Weekly bullish bias: weekly close > open → only look for long entries
-- Weekly bearish bias: weekly close < open → only look for short entries  
+- Weekly bearish bias: weekly close < open → only look for short entries
 - Daily high/low as dynamic support/resistance levels
-- Enter on 4h breakout of daily levels in direction of weekly bias
+- Enter on 12h breakout of daily levels in direction of weekly bias
 - Exit on opposite daily level touch or weekly bias reversal
-- Uses tighter entry conditions and position sizing to reduce trade frequency
-Target: 20-40 trades/year
+- Reduced trade frequency via 12h timeframe and tighter conditions
+Target: 12-37 trades/year (50-150 total over 4 years)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w_1d_price_action_v4"
-timeframe = "4h"
+name = "12h_1w_1d_price_action_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
     weekly_bullish_ffilled = weekly_bullish_series.ffill().values
     weekly_bearish_ffilled = weekly_bearish_series.ffill().values
     
-    # Align weekly bias to 4h
+    # Align weekly bias to 12h
     weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_ffilled)
     weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish_ffilled)
     
@@ -63,7 +63,7 @@ def generate_signals(prices):
     daily_high_ffilled = daily_high_series.ffill().values
     daily_low_ffilled = daily_low_series.ffill().values
     
-    # Align daily levels to 4h
+    # Align daily levels to 12h
     daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high_ffilled)
     daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low_ffilled)
     
@@ -90,7 +90,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Reduced position size
+                signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
             # Exit: price touches daily high (resistance) or weekly bias turns bullish
@@ -98,15 +98,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Reduced position size
+                signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
             # Long entry: price breaks above daily high with weekly bullish bias
             if high[i] > daily_high_aligned[i] and weekly_bullish_aligned[i]:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             # Short entry: price breaks below daily low with weekly bearish bias
             elif low[i] < daily_low_aligned[i] and weekly_bearish_aligned[i]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
