@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1h Breakout with 4h Trend Filter and Volume Spike v1
+1h Breakout with 4h Trend Filter and Volume Spike v2
 Hypothesis: 1h price breakouts from 20-period ranges, aligned with strong 4h trend (ADX>25) 
-and volume confirmation (>2x average), capture momentum moves while avoiding false breakouts.
+and volume confirmation (>2x average), capture momentum while avoiding false breakouts.
 Uses 4h for trend direction, 1h for precise entry timing. Target: 15-30 trades/year.
 Works in bull/bear by requiring trend alignment and volume confirmation.
 """
 
-name = "1h_breakout_4h_trend_volume_v1"
+name = "1h_breakout_4h_trend_volume_v2"
 timeframe = "1h"
 leverage = 1.0
 
@@ -68,6 +68,10 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
@@ -77,7 +81,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(adx_4h[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            not session_mask[i]):
             signals[i] = 0.0
             continue
         
