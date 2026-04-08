@@ -1,77 +1,135 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h RSI with 1d Bollinger Band Filter v1
-Hypothesis: RSI extremes (overbought/oversold) filtered by 1d Bollinger Band position (inside/outside bands) capture mean reversals in ranging markets and trend continuations in strong trends. The 1d Bollinger Band filter adapts to volatility regimes, avoiding trades during low-volatility squeezes and favoring breakouts during high volatility. This works in both bull and bear markets by dynamically adjusting to market conditions.
+1h Donchian Breakout with 4h/1d Trend and Volume Filter
+Hypothesis: In both bull and bear markets, strong directional moves break Donchian channels with above-average volume.
+Use 4h EMA trend and 1d ADX trend strength as filters to avoid counter-trend whipsaws.
+1-hour timeframe provides timely entry while higher timeframes reduce noise.
+Target: 15-37 trades/year (60-150 over 4 years) with disciplined trend-following.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_rsi_1d_bb_filter_v1"
-timeframe = "6h"
+name = "1h_donchian_breakout_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 6s RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_20_4h = df_4h['close'].ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # 1d Bollinger Bands
+    # 1d data for trend strength (ADX)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + (2.0 * std_20)
-    lower_bb = ma_20 - (2.0 * std_20)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    
+    # True Range for ADX
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            result[period-1] = np.nansum(arr[:period])
+            for i in range(period, len(arr)):
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr_1d = wilder_smooth(tr_1d, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
+    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 1h Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter (>1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(adx_14_1d_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_filter[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Require ADX > 25 for trending market
+        if adx_14_1d_aligned[i] < 25:
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral (40-60) or price touches opposite BB
-            if rsi[i] >= 40 and rsi[i] <= 60:
+            # Exit: price closes below Donchian lower or trend reverses
+            if close[i] <= lowest_low[i] or close[i] < ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral (40-60) or price touches opposite BB
-            if rsi[i] >= 40 and rsi[i] <= 60:
+            # Exit: price closes above Donchian upper or trend reverses
+            if close[i] >= highest_high[i] or close[i] > ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long: RSI oversold (<30) and price below lower Bollinger Band (oversold extreme)
-            if rsi[i] < 30 and close[i] < lower_bb_aligned[i]:
+            # Long breakout with trend alignment and volume
+            if (close[i] >= highest_high[i] and 
+                close[i] > ema_20_4h_aligned[i] and 
+                vol_filter[i] and 
+                session_filter[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: RSI overbought (>70) and price above upper Bollinger Band (overbought extreme)
-            elif rsi[i] > 70 and close[i] > upper_bb_aligned[i]:
+                signals[i] = 0.20
+            # Short breakdown with trend alignment and volume
+            elif (close[i] <= lowest_low[i] and 
+                  close[i] < ema_20_4h_aligned[i] and 
+                  vol_filter[i] and 
+                  session_filter[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
