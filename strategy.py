@@ -1,58 +1,53 @@
 #!/usr/bin/env python3
-# 6h_fisher_transform_volume_v1
-# Hypothesis: Ehlers Fisher Transform identifies turning points in price cycles.
-# Works in both bull and bear markets by detecting extreme reversals.
-# Fisher > 1.5 = overbought (short), Fisher < -1.5 = oversold (long).
-# Volume confirmation filters weak signals.
-# Exit on opposite Fisher cross or volume drop.
-# Target: 60-120 total trades over 4 years (~15-30/year).
+# 4h_donchian_breakout_1d_trend_volume_v6
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel with price > 1d EMA and volume > 1.5x average.
+# Short when price breaks below lower Donchian channel with price < 1d EMA and volume > 1.5x average.
+# Exit on opposite Donchian breakout or when volume drops below average.
+# Uses 1d EMA for trend filter to capture multi-day trends while minimizing whipsaw in ranging markets.
+# Target: 150-250 total trades over 4 years (~38-63/year) with strong trend capture.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_fisher_transform_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Fisher Transform (9-period)
-    hl2 = (prices['high'].values + prices['low'].values) / 2
-    max_hl2 = pd.Series(hl2).rolling(window=9, min_periods=9).max().values
-    min_hl2 = pd.Series(hl2).rolling(window=9, min_periods=9).min().values
-    range_hl2 = max_hl2 - min_hl2
-    range_hl2 = np.where(range_hl2 == 0, 1e-10, range_hl2)  # avoid division by zero
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Normalize to [-1, 1]
-    value = 2 * ((hl2 - min_hl2) / range_hl2) - 1
-    value = np.clip(value, -0.999, 0.999)  # prevent log domain issues
-    
-    # Fisher Transform
-    fish = np.zeros(n)
-    fish[0] = 0
-    for i in range(1, n):
-        fish[i] = 0.5 * np.log((1 + value[i]) / (1 - value[i])) + 0.5 * fish[i-1]
-    
-    # Average volume for confirmation (20-period)
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(fish[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(avg_volume[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -61,30 +56,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Fisher crosses above -1.5 (overbought) or volume drops below average
-            if fish[i] > -1.5 or volume[i] < avg_volume[i]:
+            # Exit: price breaks below lower Donchian or volume drops below average
+            if close[i] < low_20[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: Fisher crosses below 1.5 (oversold) or volume drops below average
-            if fish[i] < 1.5 or volume[i] < avg_volume[i]:
+            # Exit: price breaks above upper Donchian or volume drops below average
+            if close[i] > high_20[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.3x average volume
-            volume_ok = volume[i] > 1.3 * avg_volume[i]
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Fisher Transform entries: Fisher < -1.5 (long) or > 1.5 (short)
-            if fish[i] < -1.5 and volume_ok:
-                position = 1
-                signals[i] = 0.25
-            elif fish[i] > 1.5 and volume_ok:
-                position = -1
-                signals[i] = -0.25
+            # Donchian breakout entries with 1d EMA trend filter
+            if (close[i] > high_20[i]) and volume_ok and (close[i] > ema_50_1d_aligned[i]):
+                # Additional confirmation: previous close was at or below upper channel
+                if i > 0 and close[i-1] <= high_20[i-1]:
+                    position = 1
+                    signals[i] = 0.30
+            elif (close[i] < low_20[i]) and volume_ok and (close[i] < ema_50_1d_aligned[i]):
+                # Additional confirmation: previous close was at or above lower channel
+                if i > 0 and close[i-1] >= low_20[i-1]:
+                    position = -1
+                    signals[i] = -0.30
     
     return signals
