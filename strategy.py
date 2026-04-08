@@ -1,35 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_camarilla_volume_v2
-Hypothesis: Camarilla pivot levels from daily timeframe with volume confirmation and weekly trend filter.
-- Entry: Price touches Camarilla S3 (long) or R3 (short) with volume spike
-- Trend filter: Weekly EMA(50) direction - only trade long in weekly uptrend, short in downtrend
-- Exit: Price reaches Camarilla C level (midpoint) or opposite S/R level
-- Position sizing: 0.25
-- Designed to work in ranging markets (camarilla reversals) and trending markets (weekly filter)
+4h_12h_1d_donchian_breakout_volume_v1
+Hypothesis: 4-hour Donchian breakout with 12-hour trend filter and 1-day volume confirmation.
+- Entry: Price breaks above/below 20-period Donchian channel + 12h trend alignment + volume surge
+- Exit: Opposite Donchian break or trend reversal
+- Position sizing: 0.25 long, -0.25 short
+- Designed for trending markets with volume confirmation to avoid false breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_volume_v2"
-timeframe = "12h"
+name = "4h_12h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    c = (high + low + close) / 3
-    s3 = c - (range_val * 1.1 / 4)
-    s2 = c - (range_val * 1.1 / 6)
-    s1 = c - (range_val * 1.1 / 12)
-    r1 = c + (range_val * 1.1 / 12)
-    r2 = c + (range_val * 1.1 / 6)
-    r3 = c + (range_val * 1.1 / 4)
-    return s1, s2, s3, r1, r2, r3, c
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,63 +27,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    s1_1d = np.full_like(close_1d, np.nan)
-    s2_1d = np.full_like(close_1d, np.nan)
-    s3_1d = np.full_like(close_1d, np.nan)
-    r1_1d = np.full_like(close_1d, np.nan)
-    r2_1d = np.full_like(close_1d, np.nan)
-    r3_1d = np.full_like(close_1d, np.nan)
-    c_1d = np.full_like(close_1d, np.nan)
-    
-    for i in range(len(close_1d)):
-        s1, s2, s3, r1, r2, r3, c = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        s1_1d[i] = s1
-        s2_1d[i] = s2
-        s3_1d[i] = s3
-        r1_1d[i] = r1
-        r2_1d[i] = r2
-        r3_1d[i] = r3
-        c_1d[i] = c
-    
-    # Align Camarilla levels to 12h
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA(50) for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema_50_1w
-    trend_1w_down = close_1w < ema_50_1w
+    # 12h EMA(50) for trend
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema_50_12h
+    trend_12h_down = close_12h < ema_50_12h
     
     # Forward fill trend
-    trend_1w_up_series = pd.Series(trend_1w_up)
-    trend_1w_down_series = pd.Series(trend_1w_down)
-    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
-    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
+    trend_12h_up_series = pd.Series(trend_12h_up)
+    trend_12h_down_series = pd.Series(trend_12h_down)
+    trend_12h_up_ffilled = trend_12h_up_series.ffill().values
+    trend_12h_down_ffilled = trend_12h_down_series.ffill().values
     
-    # Align weekly trend to 12h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
+    # Align 12h trend to 4h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up_ffilled)
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down_ffilled)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1d volume average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = vol_1d / vol_ma_1d
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # 4h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -108,9 +71,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(s3_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(c_1d_aligned[i]) or np.isnan(trend_1w_up_aligned[i]) or
-            np.isnan(trend_1w_down_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -119,27 +81,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price reaches Camarilla C level OR R3 level (take profit)
-            if close[i] >= c_1d_aligned[i] or close[i] >= r3_1d_aligned[i]:
+            # Exit: Price breaks below Donchian low OR 12h trend turns down
+            if (close[i] <= donchian_low[i]) or trend_12h_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: Price reaches Camarilla C level OR S3 level (take profit)
-            if close[i] <= c_1d_aligned[i] or close[i] <= s3_1d_aligned[i]:
+            # Exit: Price breaks above Donchian high OR 12h trend turns up
+            if (close[i] >= donchian_high[i]) or trend_12h_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: Price touches S3 level + weekly uptrend + volume spike
-            if (abs(close[i] - s3_1d_aligned[i]) < 0.001 * close[i]) and trend_1w_up_aligned[i] and volume_filter[i]:
+            # Long entry: Price breaks above Donchian high + 12h uptrend + volume surge
+            if (close[i] > donchian_high[i]) and trend_12h_up_aligned[i] and (vol_ratio_1d_aligned[i] > 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price touches R3 level + weekly downtrend + volume spike
-            elif (abs(close[i] - r3_1d_aligned[i]) < 0.001 * close[i]) and trend_1w_down_aligned[i] and volume_filter[i]:
+            # Short entry: Price breaks below Donchian low + 12h downtrend + volume surge
+            elif (close[i] < donchian_low[i]) and trend_12h_down_aligned[i] and (vol_ratio_1d_aligned[i] > 1.5):
                 position = -1
                 signals[i] = -0.25
     
