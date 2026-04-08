@@ -66,6 +66,9 @@ def generate_signals(prices):
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
+    # Precompute ADX aligned to avoid calling align_htf_to_ltf inside loop
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
@@ -74,16 +77,13 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx[i]) or np.isnan(vol_avg_20[i]) or 
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20[i]) or 
             np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
-        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
-        
         # Regime filter: only trade in strong trending markets
-        strong_trend = adx_aligned > 25
+        strong_trend = adx_aligned[i] > 25
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
