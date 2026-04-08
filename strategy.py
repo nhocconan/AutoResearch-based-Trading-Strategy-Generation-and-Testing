@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_12h1d_camarilla_pivot_v3
-Hypothesis: Refined 12h/1d Camarilla pivot strategy with stricter entry criteria to reduce trade frequency.
-- Long when price crosses above Camarilla H3 (12h) with volume > 2x avg, price > 1d EMA20, and price > 4h EMA50 (trend filter)
-- Short when price crosses below Camarilla L3 (12h) with volume > 2x avg, price < 1d EMA20, and price < 4h EMA50
+4h_12h1d_camarilla_pivot_v4
+Hypothesis: Further refined 12h/1d Camarilla pivot strategy with stricter entry criteria to reduce trade frequency.
+- Long when price crosses above Camarilla H3 (12h) with volume > 2.5x avg, price > 1d EMA50 (trend filter)
+- Short when price crosses below Camarilla L3 (12h) with volume > 2.5x avg, price < 1d EMA50 (trend filter)
 - Exit when price crosses opposite H3/L3 level or volume drops below average
-- Uses discrete position sizing (0.25) to minimize churn
-- Designed for 15-30 trades/year to avoid fee drag
+- Uses discrete position sizing (0.20) to minimize churn
+- Designed for 10-20 trades/year to avoid fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h1d_camarilla_pivot_v3"
+name = "4h_12h1d_camarilla_pivot_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -59,7 +59,7 @@ def generate_signals(prices):
     
     # Get 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 12-hour Camarilla levels
@@ -71,16 +71,12 @@ def generate_signals(prices):
     
     # Calculate 1-day EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_20_1d = calculate_ema(close_1d, 20)
-    
-    # Calculate 4-hour EMA for additional trend filter
-    ema_50_4h = calculate_ema(close, 50)
+    ema_50_1d = calculate_ema(close_1d, 50)
     
     # Align indicators to 4-hour timeframe
     camarilla_H3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H3_12h)
     camarilla_L3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L3_12h)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    ema_50_4h_aligned = ema_50_4h  # already on 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -93,7 +89,7 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(camarilla_H3_12h_aligned[i]) or np.isnan(camarilla_L3_12h_aligned[i]) or
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -104,8 +100,7 @@ def generate_signals(prices):
         price = close[i]
         H3 = camarilla_H3_12h_aligned[i]
         L3 = camarilla_L3_12h_aligned[i]
-        trend_up_1d = price > ema_20_1d_aligned[i]
-        trend_up_4h = price > ema_50_4h_aligned[i]
+        trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
             # Exit: price closes below L3 or volume drops below average
@@ -113,7 +108,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short
             # Exit: price closes above H3 or volume drops below average
@@ -121,15 +116,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter long: price crosses above H3 with volume expansion and uptrend on both timeframes
-            if price > H3 and vol_ratio > 2.0 and trend_up_1d and trend_up_4h:
+            # Enter long: price crosses above H3 with volume expansion and uptrend on 1d
+            if price > H3 and vol_ratio > 2.5 and trend_up_1d:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price crosses below L3 with volume expansion and downtrend on both timeframes
-            elif price < L3 and vol_ratio > 2.0 and not trend_up_1d and not trend_up_4h:
+                signals[i] = 0.20
+            # Enter short: price crosses below L3 with volume expansion and downtrend on 1d
+            elif price < L3 and vol_ratio > 2.5 and not trend_up_1d:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
