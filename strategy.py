@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,38 +18,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume baseline
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 1d high/low
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    # Calculate 20-period EMA on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate 20-period average volume on 1d
     volume_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Volume confirmation: 12h volume > 1.5x 1d average volume (scaled to 12h)
-    # 1d volume represents 2x 12h periods, so divide by 2 for per-period comparison
-    vol_threshold = vol_avg_1d_aligned / 2.0
+    # Volume confirmation: 4h volume > 1.5x 1d average volume (scaled to 4h)
+    # 1d volume represents 6x 4h periods, so divide by 6 for per-period comparison
+    vol_threshold = vol_avg_1d_aligned / 6.0
     vol_confirm = volume > vol_threshold * 1.5
+    
+    # Donchian channels on 4h data (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = max(20, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if Donchian or volume average not available
-        if np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
+        # Skip if EMA or volume average not available
+        if np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or \
+           np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -58,27 +60,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 12-period Donchian low (trend change)
-            if close[i] < donch_low_1d_aligned[i]:
+            # Exit: price closes below Donchian low or below 1d EMA (trend change)
+            if close[i] < donchian_low[i] or close[i] < ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 12-period Donchian high (trend change)
-            if close[i] > donch_high_1d_aligned[i]:
+            # Exit: price closes above Donchian high or above 1d EMA (trend change)
+            if close[i] > donchian_high[i] or close[i] > ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 20-period Donchian high with volume confirmation
-            if close[i] > donch_high_1d_aligned[i] and vol_confirm[i]:
+            # Long entry: price breaks above Donchian high with volume confirmation and above 1d EMA
+            if high[i] > donchian_high[i-1] and vol_confirm[i] and close[i] > ema_20_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 20-period Donchian low with volume confirmation
-            elif close[i] < donch_low_1d_aligned[i] and vol_confirm[i]:
+            # Short entry: price breaks below Donchian low with volume confirmation and below 1d EMA
+            elif low[i] < donchian_low[i-1] and vol_confirm[i] and close[i] < ema_20_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
