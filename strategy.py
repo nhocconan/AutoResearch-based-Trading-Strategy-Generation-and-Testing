@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_weekly_trend_with_daily_pullback_v1
-Hypothesis: Weekly trend filter with daily pullback to value area for continuation.
-- Only trade in direction of weekly trend (above/below weekly pivot)
-- Long: Weekly bullish + price pulls back to daily pivot then closes above it
-- Short: Weekly bearish + price pulls back to daily pivot then closes below it
-- Exit on opposite pullback or weekly trend reversal
-- Target: 15-25 trades/year to avoid overtrading
+6h_volume_regime_follow_v1
+Hypothesis: 6h trends are stronger when volume confirms price direction.
+Use 1d ATR regime filter to distinguish trending vs ranging markets.
+- In trending regime (ATR rising): follow 6h EMA crossover with volume confirmation
+- In ranging regime (ATR falling): mean revert at Bollinger Bands
+- Volume confirmation: current volume > 1.5 * 20-period average
+- This filters false breakouts and improves win rate in both bull/bear markets
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_weekly_trend_with_daily_pullback_v1"
-timeframe = "12h"
+name = "6h_volume_regime_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,79 +25,73 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for pivot calculation (12h data is used as proxy for daily)
-    # Since we're on 12h timeframe, we'll use 12h bars for pivot (more frequent)
-    high_12h = high
-    low_12h = low
-    close_12h = close
+    # 6h indicators
+    # EMA crossover for trend
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).values
     
-    # Previous 12h bar's OHLC for pivot
-    high_12h_prev = np.roll(high_12h, 1)
-    low_12h_prev = np.roll(low_12h, 1)
-    close_12h_prev = np.roll(close_12h, 1)
-    # Set first value to NaN to avoid using uninitialized data
-    high_12h_prev[0] = np.nan
-    low_12h_prev[0] = np.nan
-    close_12h_prev[0] = np.nan
+    # Bollinger Bands for mean reversion
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
-    # Pivot point (value area)
-    pivot = (high_12h_prev + low_12h_prev + close_12h_prev) / 3
+    # Volume average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d ATR for regime detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3
-    weekly_bullish = close_1w > weekly_pivot
-    weekly_bearish = close_1w < weekly_pivot
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly trend to 12h
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    
+    # ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR trend: rising if current > previous
+    atr_rising = np.concatenate([[False], atr_14[1:] > atr_14[:-1]])
+    
+    # Align 1d indicators to 6h
+    atr_rising_aligned = align_htf_to_ltf(prices, df_1d, atr_rising.astype(float))
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(pivot[i]) or np.isnan(weekly_bullish_aligned[i]) or 
-            np.isnan(weekly_bearish_aligned[i])):
-            if position != 0:
-                pass  # Hold
-            else:
-                signals[i] = 0.0
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(vol_avg_20[i]) or np.isnan(atr_rising_aligned[i])):
             continue
         
-        if position == 1:  # Long
-            # Exit: pullback below pivot or weekly turns bearish
-            if close[i] < pivot[i] or weekly_bearish_aligned[i] > 0.5:
-                position = 0
-                signals[i] = 0.0
-            else:
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        
+        # Trend following regime (ATR rising)
+        if atr_rising_aligned[i] > 0.5:
+            # EMA crossover with volume
+            if ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1] and vol_confirm:
                 signals[i] = 0.25
-                
-        elif position == -1:  # Short
-            # Exit: pullback above pivot or weekly turns bullish
-            if close[i] > pivot[i] or weekly_bullish_aligned[i] > 0.5:
-                position = 0
-                signals[i] = 0.0
-            else:
+            elif ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1] and vol_confirm:
                 signals[i] = -0.25
-        else:  # Flat
-            # Long: weekly bullish + pullback to pivot then close above
-            if (weekly_bullish_aligned[i] > 0.5 and 
-                close[i-1] <= pivot[i-1] and close[i] > pivot[i]):
-                position = 1
+        
+        # Mean reversion regime (ATR falling)
+        else:
+            # Buy at lower band, sell at upper band
+            if close[i] <= bb_lower[i] and close[i-1] > bb_lower[i-1]:
                 signals[i] = 0.25
-            # Short: weekly bearish + pullback to pivot then close below
-            elif (weekly_bearish_aligned[i] > 0.5 and 
-                  close[i-1] >= pivot[i-1] and close[i] < pivot[i]):
-                position = -1
+            elif close[i] >= bb_upper[i] and close[i-1] < bb_upper[i-1]:
                 signals[i] = -0.25
     
     return signals
