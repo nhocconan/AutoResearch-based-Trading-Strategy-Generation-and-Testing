@@ -6,6 +6,8 @@
 - Signal at bar `t` → position change at bar `t+1` open price
 - This is enforced by the engine: signal array is shifted by `fill_delay_bars` (default: 1)
 - The strategy code does NOT need to handle this - just generate clean signals
+- The strategy code must NOT emulate fills internally with `entry_price = close[i]`
+  or intrabar stop checks using `high[i]` / `low[i]`
 
 ### Signal Convention
 
@@ -60,6 +62,8 @@
 - No `.shift(-n)` (negative shifts look into future)
 - All rolling windows use only past data
 - No future information in feature engineering
+- No manual intrabar execution simulation inside `generate_signals()`
+- If using HTF data, the aligned value must become available only after the HTF bar closes
 
 ## Capital and Risk
 
@@ -69,6 +73,8 @@
 - Position size is fraction of current equity
 
 ## Evaluation Metrics
+
+Threshold source: [`research_rules.py`](../research_rules.py) defines the authoritative train/test pass rules used by the code.
 
 ### Primary: Sharpe Ratio
 - Annualized, excess return over risk-free rate (5%)
@@ -82,9 +88,11 @@
 ### Auto-Rejection Thresholds
 | Metric | Threshold | Reason |
 |--------|-----------|--------|
-| Max drawdown | > -50% avg across symbols | Too risky — capital preservation |
-| Trades | ≥ 10 | Trivial strategies don't count |
-| Sharpe | > 0 | Must beat doing nothing |
+| Train max drawdown | > -50% per symbol | Too risky — capital preservation |
+| Test max drawdown | > -50% per symbol | Do not keep symbols that blow up out of sample |
+| Train trades | ≥ 5 per symbol | Trivial strategies don't count |
+| Test trades | ≥ 3 per symbol | Minimum out-of-sample activity |
+| Sharpe | > 0 per symbol | Must beat doing nothing |
 | SOL-only | Must work across BTC/ETH/SOL | SOL rally 2021-2024 creates bias |
 | 1m timeframe | Banned | Too noisy, excessive costs |
 | Backtest time | < 120s per symbol | Prevents hung strategies |
@@ -96,7 +104,8 @@ The [validator](../validator.py) checks every strategy for:
 2. **Required fields** — name, timeframe, leverage, generate_signals
 3. **Leverage bounds** — max 5.0x (warning above 3.0x)
 4. **Valid timeframe** — must be one of 5m, 15m, 1h, 4h, 1d
-5. **Syntax validity** — AST parsing
+5. **No manual execution simulation** — rejects intrabar `stop_level` / `entry_price=close[i]`
+6. **Syntax validity** — AST parsing
 
 Strategies failing compliance are auto-rejected before backtest.
 

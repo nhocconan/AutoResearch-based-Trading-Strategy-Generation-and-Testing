@@ -14,6 +14,7 @@ from strategy_generator import (
 from backtest import run_strategy_backtest
 from evaluate import compute_metrics
 from agent_research import append_results
+from research_rules import test_symbol_pass, train_symbol_pass
 
 STRATEGIES_DIR = Path("strategies")
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
@@ -69,7 +70,7 @@ def main():
                 
                 m["strategy"] = name
                 m["symbol"] = sym
-                train_pass = sharpe > 0 and trades >= 5 and m["max_drawdown_pct"] > -50
+                train_pass = train_symbol_pass(m)
                 append_results([m], "keep" if train_pass else "discard", name, "train")
 
                 if not train_pass:
@@ -80,7 +81,7 @@ def main():
                 mt = compute_metrics(rt)
                 mt["strategy"] = name
                 mt["symbol"] = sym
-                test_pass = mt["sharpe_ratio"] > 0 and mt["num_trades"] >= 3
+                test_pass = test_symbol_pass(mt)
                 append_results([mt], "keep" if test_pass else "discard", name, "test")
 
                 if test_pass:

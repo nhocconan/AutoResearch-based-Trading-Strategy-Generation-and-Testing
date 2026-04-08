@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12-hour strategy using 1-day Donchian channel breakouts with volume confirmation.
+# Goes long when price breaks above 24-period Donchian high with volume, short when breaks below 24-period low with volume.
+# Uses 1-day trend (EMA50) as filter to avoid counter-trend trades.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Volatility filter: only trade when ATR ratio indicates expanding volatility.
+
+name = "exp_13765_12h_donchian24_1d_ema_vol_volat"
+timeframe = "12h"
+leverage = 1.0
+
+# Parameters
+DONCHIAN_PERIOD = 24  # 1-day = 24 * 12h bars
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 8
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+VOLATILITY_PERIOD = 10
+VOLATILITY_THRESHOLD = 1.2  # ATR ratio > 1.2 indicates expanding volatility
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load 1d data for Donchian channels and trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 1d Donchian channels (using 24-period = 1 day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_upper, donchian_lower = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
+    
+    # Align Donchian levels to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    
+    # 12h data for entry timing and ATR
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # ATR for stop loss and volatility filter
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    atr_ma = pd.Series(atr).rolling(window=VOLATILITY_PERIOD, min_periods=VOLATILITY_PERIOD).mean().values
+    volatility_ratio = atr / atr_ma  # Current ATR vs average ATR
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    
+    # Start from warmup period
+    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, VOLATILITY_PERIOD, DONCHIAN_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(volatility_ratio[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Check stops
+        if position == 1:  # long position
+            # Check stop loss
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        elif position == -1:  # short position
+            # Check stop loss
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        
+        # Volatility filter: only trade when volatility is expanding
+        volatility_ok = volatility_ratio[i] > VOLATILITY_THRESHOLD
+        
+        # Trend direction from 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
+        
+        # Donchian breakout signals
+        long_signal = volume_ok and volatility_ok and above_ema and close[i] > donchian_upper_aligned[i]
+        short_signal = volume_ok and volatility_ok and below_ema and close[i] < donchian_lower_aligned[i]
+        
+        # Generate signals
+        if position == 0:
+            if long_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long on close below Donchian lower (mean reversion or trend change)
+            if close[i] < donchian_lower_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            # Exit short on close above Donchian upper (mean reversion or trend change)
+            if close[i] > donchian_upper_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -SIGNAL_SIZE
+    
+    return signals

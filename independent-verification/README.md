@@ -54,6 +54,18 @@ Wrapper with custom worker count:
 IV_WORKERS=6 ./independent-verification/run.sh
 ```
 
+Recent-strategy remediation pass:
+
+```bash
+./.venv/bin/python verification_remediation.py --recent-limit 25
+```
+
+Scheduled integration:
+
+- `auto_concept_research.sh` runs concept discovery first and then `verification_remediation.py` in the same scheduled job.
+- If remediation finds invalid saved results, it writes `logs/restart_agent_research.flag` so `watchdog.sh` restarts the live research loop with patched logic.
+- The restart is resume-safe because `agent_research.py` restores the next experiment number from persisted state plus `results.db`.
+
 Fast mode without deep checks:
 
 ```bash
@@ -72,3 +84,11 @@ Audit rules implemented here:
 - Emit sample rows proving next-bar execution timing
 - Flag cross-symbol claims that are not backed by observed external data reads
 - Compare train/test outputs against `results.tsv`
+
+The repo-level remediation helper adds:
+
+- audit the most recent saved strategies from `results.db`
+- purge critical failures from `results.db`, `results.tsv`, and `docs/strategies/`
+- rerun stale or purged strategies with the current engine
+- re-audit rerun strategies so failed fixes are removed again
+- request a live autoresearch restart when invalid saved results imply the running process must reload fixed logic

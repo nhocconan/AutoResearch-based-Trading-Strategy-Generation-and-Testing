@@ -33,6 +33,8 @@ LOG_FILE = Path("auto_concept_research.log")
 PROGRAM_MD = Path("program.md")
 DB_FILE = Path("results.db")
 MARKER = "## RECENTLY DISCOVERED CONCEPTS"
+LATEST_DISCOVERY_MD = Path("docs/latest_strategy_discovery.md")
+PROCESS_REVIEW_MD = Path("docs/auto_research_review.md")
 
 
 def log(msg: str):
@@ -105,6 +107,12 @@ def build_prompt(program_content: str, exhausted: list[str], stats: dict) -> str
     existing_tiers = re.findall(r'### TIER \d+.*?(?=### TIER|\Z)', program_content, re.DOTALL)
     existing_names = re.findall(r'\*\*\d+\. ([^\*]+)\*\*', program_content)
     top_test = stats.get("top_test", [])
+    latest_discovery = ""
+    process_review = ""
+    if LATEST_DISCOVERY_MD.exists():
+        latest_discovery = LATEST_DISCOVERY_MD.read_text(encoding="utf-8")[:5000]
+    if PROCESS_REVIEW_MD.exists():
+        process_review = PROCESS_REVIEW_MD.read_text(encoding="utf-8")[:4000]
 
     existing_summary = ", ".join(existing_names[:30]) if existing_names else "many standard indicators"
 
@@ -119,9 +127,16 @@ CONTEXT:
 - Already covered strategies: {existing_summary}
 - Cost: 0.10% round trip (taker 0.04%/side + slippage 0.01%/side)
 - Best test results so far: {top_test_str}
+- You also have a fresh internet-discovery digest and a process-review memo. Use them to bias toward NEW external ideas that still fit current repo winners.
 
 MOST EXHAUSTED COMBINATIONS (do NOT suggest these):
 {exhausted_str}
+
+LATEST INTERNET DISCOVERY DIGEST:
+{latest_discovery or "(none yet)"}
+
+LATEST PROCESS REVIEW:
+{process_review or "(none yet)"}
 
 TASK: Generate 4-6 SPECIFIC, NOVEL trading strategy concepts NOT already listed above. These must be:
 1. Implementable in Python with numpy/pandas (vectorized, no external data other than OHLCV + funding rate)
@@ -129,6 +144,7 @@ TASK: Generate 4-6 SPECIFIC, NOVEL trading strategy concepts NOT already listed 
 3. Novel — not simple variations of EMA/SMA crossover or basic RSI mean reversion
 4. Include SPECIFIC parameters and formulas (not vague descriptions)
 5. Prioritize: market microstructure, order flow proxies, cross-timeframe divergence, volatility regime, seasonality patterns
+6. Prefer combinations that are fresh in the web digest but still consistent with repo evidence from results.db
 
 FORMAT: For each strategy, use this exact format (markdown):
 **N. Strategy Name** *(best timeframe(s))*

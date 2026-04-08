@@ -244,6 +244,8 @@ def render_report(
 def run(args: argparse.Namespace) -> None:
     verifier = load_verifier()
     run_dir = args.run_dir.resolve() if args.run_dir else default_run_dir().resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     results = load_csv(run_dir, "verification_results.csv")
     summary = load_csv(run_dir, "strategy_summary.csv")
@@ -278,9 +280,19 @@ def run(args: argparse.Namespace) -> None:
             execution_rows.extend(sample_rows)
             execution_summary_rows.append(sample_summary)
 
-    dense_df = pd.DataFrame(dense_rows).sort_values(["strategy_name", "symbol", "checkpoint"]).reset_index(drop=True)
+    dense_df = pd.DataFrame(dense_rows)
+    if dense_df.empty:
+        dense_df = pd.DataFrame(columns=["strategy_name", "symbol", "checkpoint", "pass", "max_abs_diff"])
+    else:
+        dense_df = dense_df.sort_values(["strategy_name", "symbol", "checkpoint"]).reset_index(drop=True)
+
     execution_df = pd.DataFrame(execution_rows)
+    if execution_df.empty:
+        execution_df = pd.DataFrame(columns=["strategy_name", "symbol", "signal_time"])
+
     execution_summary_df = pd.DataFrame(execution_summary_rows)
+    if execution_summary_df.empty:
+        execution_summary_df = pd.DataFrame(columns=["strategy_name", "position_change_events"])
     cross_df = cross_asset_audit(summary)
 
     if not execution_df.empty:
@@ -298,9 +310,21 @@ def run(args: argparse.Namespace) -> None:
                 "cross_asset_claim": bool(len(cross_row) > 0),
             }
         )
-    deep_summary_df = pd.DataFrame(deep_summary_rows).sort_values(
-        ["dense_prefix_failures", "dense_prefix_max_abs_diff"], ascending=[False, False]
-    ).reset_index(drop=True)
+    deep_summary_df = pd.DataFrame(deep_summary_rows)
+    if deep_summary_df.empty:
+        deep_summary_df = pd.DataFrame(
+            columns=[
+                "strategy_name",
+                "dense_prefix_failures",
+                "dense_prefix_max_abs_diff",
+                "execution_samples_checked",
+                "cross_asset_claim",
+            ]
+        )
+    else:
+        deep_summary_df = deep_summary_df.sort_values(
+            ["dense_prefix_failures", "dense_prefix_max_abs_diff"], ascending=[False, False]
+        ).reset_index(drop=True)
 
     report = render_report(run_dir, candidates, dense_df, cross_df, execution_df, execution_summary_df)
 

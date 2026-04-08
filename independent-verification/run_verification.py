@@ -20,6 +20,8 @@ import json
 import math
 import os
 import re
+import sqlite3
+import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -53,8 +55,11 @@ TIMEFRAME_TO_FREQ = {
     "1m": "1min",
     "5m": "5min",
     "15m": "15min",
+    "30m": "30min",
     "1h": "1h",
     "4h": "4h",
+    "6h": "6h",
+    "12h": "12h",
     "1d": "1d",
 }
 
@@ -62,8 +67,11 @@ TIMEFRAME_BARS_PER_YEAR = {
     "1m": 365.25 * 24 * 60,
     "5m": 365.25 * 24 * 12,
     "15m": 365.25 * 24 * 4,
+    "30m": 365.25 * 24 * 2,
     "1h": 365.25 * 24,
     "4h": 365.25 * 6,
+    "6h": 365.25 * 4,
+    "12h": 365.25 * 2,
     "1d": 365.25,
 }
 
@@ -110,6 +118,12 @@ class TradeRecord:
 PRICE_CACHE: dict[tuple[str, str], pd.DataFrame] = {}
 GAP_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 CLAIMS_DF: pd.DataFrame | None = None
+ALLOWED_IO_ROOTS = [
+    (ROOT / "data" / "processed").resolve(),
+]
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,8 +142,34 @@ def parse_args() -> argparse.Namespace:
 def load_claims() -> pd.DataFrame:
     global CLAIMS_DF
     if CLAIMS_DF is None:
-        claims = pd.read_csv(RESULTS_FILE, sep="\t")
+        db_path = ROOT / "results.db"
         current = {path.stem for path in STRATEGIES_DIR.glob("*.py")}
+        if db_path.exists():
+            with sqlite3.connect(db_path) as conn:
+                claims = pd.read_sql_query(
+                    """
+                    SELECT
+                        git_commit AS git_commit,
+                        strategy,
+                        symbol,
+                        sharpe,
+                        return_pct,
+                        cagr_pct,
+                        max_dd_pct,
+                        win_rate,
+                        profit_factor,
+                        trades,
+                        sortino,
+                        calmar,
+                        status,
+                        description,
+                        period
+                    FROM results
+                    """,
+                    conn,
+                )
+        else:
+            claims = pd.read_csv(RESULTS_FILE, sep="\t")
         claims = claims[claims["strategy"].isin(current)].copy()
         CLAIMS_DF = claims
     return CLAIMS_DF.copy()
@@ -258,8 +298,17 @@ def gap_stats(symbol: str, timeframe: str) -> dict[str, Any]:
 def sandbox_external_io() -> Any:
     attempts: list[str] = []
 
-    def block(label: str):
+    def _allowed_path(candidate: Any) -> bool:
+        try:
+            path = Path(candidate).resolve()
+        except Exception:
+            return False
+        return any(path == root or path.is_relative_to(root) for root in ALLOWED_IO_ROOTS)
+
+    def block(label: str, original: Any):
         def inner(*args: Any, **kwargs: Any) -> Any:
+            if args and _allowed_path(args[0]):
+                return original(*args, **kwargs)
             detail = label
             if args:
                 detail = f"{label}: {args[0]}"
@@ -274,18 +323,18 @@ def sandbox_external_io() -> Any:
             patches.append((obj, attr, getattr(obj, attr)))
             setattr(obj, attr, replacement)
 
-    patch(pd, "read_parquet", block("pandas.read_parquet"))
-    patch(pd, "read_csv", block("pandas.read_csv"))
-    patch(pd, "read_json", block("pandas.read_json"))
-    patch(pd, "read_pickle", block("pandas.read_pickle"))
-    patch(pd, "read_excel", block("pandas.read_excel"))
-    patch(np, "load", block("numpy.load"))
-    patch(Path, "open", block("Path.open"))
-    patch(builtins, "open", block("builtins.open"))
+    patch(pd, "read_parquet", block("pandas.read_parquet", pd.read_parquet))
+    patch(pd, "read_csv", block("pandas.read_csv", pd.read_csv))
+    patch(pd, "read_json", block("pandas.read_json", pd.read_json))
+    patch(pd, "read_pickle", block("pandas.read_pickle", pd.read_pickle))
+    patch(pd, "read_excel", block("pandas.read_excel", pd.read_excel))
+    patch(np, "load", block("numpy.load", np.load))
+    patch(Path, "open", block("Path.open", Path.open))
+    patch(builtins, "open", block("builtins.open", builtins.open))
 
     try:
         import requests  # type: ignore
-        patch(requests, "request", block("requests.request"))
+        patch(requests, "request", block("requests.request", requests.request))
     except Exception:
         pass
 
@@ -892,10 +941,14 @@ def classify_strategy_severity(group: pd.DataFrame) -> str:
     return "ok"
 
 
-def build_dataset_summary(symbols: list[str]) -> list[dict[str, Any]]:
+def build_dataset_summary(symbols: list[str], timeframes: list[str] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    target_timeframes = timeframes or ["15m", "30m", "1h", "4h", "6h", "12h", "1d"]
     for symbol in symbols:
-        for timeframe in ("15m", "1h", "4h"):
+        for timeframe in target_timeframes:
+            path = KLINES_DIR / symbol / f"{timeframe}.parquet"
+            if not path.exists():
+                continue
             gap = gap_stats(symbol, timeframe)
             prices = load_prices(symbol, timeframe)
             rows.append(
@@ -1399,10 +1452,36 @@ def run(args: argparse.Namespace) -> None:
                 print(f"[{completed}/{len(strategy_paths)}] {path.stem}", flush=True)
 
     results = pd.DataFrame(results_rows)
+    for col, default in {
+        "period": "",
+        "error": "",
+        "return_match": None,
+        "sharpe_match": None,
+        "return_diff_pct_pts": 0.0,
+        "sharpe_diff": 0.0,
+        "claimed_return_pct": 0.0,
+        "claimed_sharpe": 0.0,
+        "concerns": "",
+        "ind_sharpe": 0.0,
+        "ind_return_pct": 0.0,
+        "ind_max_dd_pct": 0.0,
+        "ind_trades": 0,
+        "lookahead_pass": False,
+        "signal_range_ok": False,
+        "io_sandbox_pass": False,
+        "uses_fixed_date_range": False,
+        "uses_synthetic_open_from_close": False,
+        "mentions_cross_asset": False,
+        "timeframe": "",
+        "strategy_name": "",
+        "symbol": "",
+    }.items():
+        if col not in results.columns:
+            results[col] = default
 
     results = results.sort_values(["strategy_name", "symbol", "period"]).reset_index(drop=True)
     strategy_summary = build_strategy_summary(results.copy())
-    dataset_summary = build_dataset_summary(args.symbols)
+    dataset_summary = build_dataset_summary(args.symbols, sorted(results["timeframe"].dropna().unique().tolist()))
 
     report_md = render_report(results, strategy_summary, dataset_summary)
     dashboard_html = render_dashboard(results, strategy_summary, dataset_summary)
