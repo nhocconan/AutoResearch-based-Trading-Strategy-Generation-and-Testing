@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 12h_rsi_trend_volume_v1
-# Hypothesis: Uses RSI(14) extremes with 1d trend filter and volume confirmation.
-# Goes long when RSI < 30 in uptrend (price > 1d EMA50) with volume surge.
-# Goes short when RSI > 70 in downtrend (price < 1d EMA50) with volume surge.
-# Designed for low trade frequency (12-37/year) to avoid fee drift, works in bull/bear via trend filter.
+# 4h_kama_trend_volume_v1
+# Hypothesis: Uses KAMA to determine trend direction and Donchian breakout with volume confirmation.
+# Goes long when price breaks above Donchian high in KAMA uptrend with volume surge.
+# Goes short when price breaks below Donchian low in KAMA downtrend with volume surge.
+# Designed for low trade frequency (20-50/year) to avoid fee drift, works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_rsi_trend_volume_v1"
-timeframe = "12h"
+name = "4h_kama_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 14:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -24,22 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate KAMA for trend direction
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(10))
+    volatility = abs(close_series.diff(1)).rolling(window=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * 0.58 + 0.42) ** 2
+    kama = close_series.copy()
+    for i in range(1, len(kama)):
+        kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (close_series.iloc[i] - kama.iloc[i-1])
+    kama_values = kama.values
     
-    # Daily trend filter: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,50 +45,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 14
+    start_idx = 30
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(kama_values[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend filter
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        # Trend filter: price relative to KAMA
+        kama_uptrend = close[i] > kama_values[i]
+        kama_downtrend = close[i] < kama_values[i]
         
-        # RSI signals
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Donchian breakout signals
+        breakout_high = close[i] > donchian_high[i-1]
+        breakout_low = close[i] < donchian_low[i-1]
         
         # Volume confirmation
-        volume_ok = volume[i] > 1.8 * avg_volume[i]
+        volume_ok = volume[i] > 2.0 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 or trend change
-            if rsi[i] > 50 or not daily_uptrend:
+            # Exit: Donchian breakdown or trend change
+            if close[i] < donchian_low[i] or not kama_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 or trend change
-            if rsi[i] < 50 or not daily_downtrend:
+            # Exit: Donchian breakout or trend change
+            if close[i] > donchian_high[i] or not kama_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if volume_ok:
-                # Long entry: RSI oversold in uptrend
-                if daily_uptrend and rsi_oversold:
+                # Long entry: Donchian breakout in uptrend
+                if kama_uptrend and breakout_high:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: RSI overbought in downtrend
-                elif daily_downtrend and rsi_overbought:
+                # Short entry: Donchian breakdown in downtrend
+                elif kama_downtrend and breakout_low:
                     position = -1
                     signals[i] = -0.25
     
