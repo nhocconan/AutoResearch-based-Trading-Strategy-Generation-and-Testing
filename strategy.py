@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v9
-# Hypothesis: Focus on high-probability breakouts using daily timeframe for trend (EMA20) and fractal structure (Williams Fractals with 2-bar confirmation),
-# and 4h for entry with volume confirmation (>2x average) and RSI filter (40-60). 
-# Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.25.
-# Target: 20-50 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
-# Works in bull/bear via trend filter and avoids chop with RSI range filter.
+# 4h_fractal_breakout_1d_trend_volume_v10
+# Hypothesis: Refine fractal breakout strategy with stricter volume confirmation (3x average) and tighter RSI range (45-55) to reduce trade frequency and improve quality.
+# Uses Williams Fractals from daily timeframe with 2-bar confirmation, trend filter via daily EMA20, and momentum filter via RSI.
+# Trades only during 08-20 UTC to avoid low-liquidity periods. Position size fixed at 0.25.
+# Target: 20-40 trades/year by requiring confluence of trend, fractal breakout, high volume, and neutral momentum.
+# Designed to work in both bull and bear markets via trend filter and avoid chop with tight RSI range.
 
-name = "4h_fractal_breakout_1d_trend_volume_v9"
+name = "4h_fractal_breakout_1d_trend_volume_v10"
 timeframe = "4h"
 leverage = 1.0
 
@@ -113,15 +113,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 2.0x 20-period average
-        vol_breakout = volume[i] > 2.0 * vol_ma_val
+        # Volume breakout condition: current volume > 3.0x 20-period average (stricter)
+        vol_breakout = volume[i] > 3.0 * vol_ma_val
         
         # Trend filter: price above/below daily EMA20
         uptrend = close[i] > ema20_val
         downtrend = close[i] < ema20_val
         
-        # Momentum filter: RSI in 40-60 range for pullback entries in trend
-        rsi_healthy = 40 <= rsi_val <= 60
+        # Momentum filter: RSI in tight 45-55 range for pullback entries in trend
+        rsi_healthy = 45 <= rsi_val <= 55
         
         if position == 1:  # Long position
             # Exit if price breaks below bullish fractal (support)
