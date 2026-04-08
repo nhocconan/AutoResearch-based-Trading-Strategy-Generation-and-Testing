@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_donchian20_volatility_breakout_v2
-# Hypothesis: Breakouts from Donchian channels with volatility compression (ATR ratio) and volume confirmation.
-# Long when price breaks above Donchian(20) high, ATR ratio > 1.5 (expanding volatility), and volume > 1.5x average.
+# 4h_donchian_volatility_breakout_v2
+# Hypothesis: Breakouts from Donchian channels with volatility expansion (ATR ratio > 1.5) and volume confirmation.
+# Long when price breaks above Donchian(20) high, ATR ratio > 1.5, and volume > 1.5x average.
 # Short when price breaks below Donchian(20) low, ATR ratio > 1.5, and volume > 1.5x average.
-# Exit when price crosses the opposite Donchian band or ATR ratio falls below 0.8 (volatility contraction).
+# Exit when price crosses opposite Donchian band or ATR ratio < 0.8 (volatility contraction).
 # Uses volatility expansion to capture true breakouts and avoid false signals in ranging markets.
 # Target: 20-40 trades/year with strict entry conditions.
 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volatility_breakout_v2"
+name = "4h_donchian_volatility_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,7 +39,7 @@ def generate_signals(prices):
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]  # First value has no previous close
+    tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
