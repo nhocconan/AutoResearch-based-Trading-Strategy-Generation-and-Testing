@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_cci_volatility_breakout_v1
-Hypothesis: On 12h timeframe, price breaking above/below 20-period CCI bands with volatility expansion and daily trend alignment captures sustained moves. Daily trend filter avoids counter-trend breakouts in ranging markets. Volatility filter (ATR ratio) ensures breaks occur during expanded volatility regimes. Designed for trending markets while avoiding false breakouts in low volatility environments.
-- Long: CCI(20) > +100 + ATR(14)/ATR(50) > 1.2 + daily uptrend (price > EMA50)
-- Short: CCI(20) < -100 + ATR(14)/ATR(50) > 1.2 + daily downtrend (price < EMA50)
-- Exit: CCI crosses back through zero or daily trend reversal
+1d_1w_momentum_reversal_v1
+Hypothesis: On daily timeframe, momentum reversals at weekly extremes with volume confirmation capture swing moves in both bull and bear markets. Weekly trend filter ensures we trade with the higher timeframe momentum, while volume filters false signals. Designed for lower frequency to avoid fee drag.
+- Long: RSI(14) < 30 + price > weekly EMA(20) + volume > 1.5x 20-day average
+- Short: RSI(14) > 70 + price < weekly EMA(20) + volume > 1.5x 20-day average
+- Exit: RSI returns to neutral zone (40-60) or weekly trend reversal
 - Position sizing: 0.25 long, -0.25 short
 """
 
@@ -12,74 +12,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_cci_volatility_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_momentum_reversal_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Daily EMA(50) for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema_50_1d
-    trend_1d_down = close_1d < ema_50_1d
+    # Weekly EMA(20) for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_1w_up = close_1w > ema_20_1w
+    trend_1w_down = close_1w < ema_20_1w
     
-    # Forward fill trend
-    trend_1d_up_series = pd.Series(trend_1d_up)
-    trend_1d_down_series = pd.Series(trend_1d_down)
-    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
-    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
+    # Forward fill weekly trend
+    trend_1w_up_series = pd.Series(trend_1w_up)
+    trend_1w_down_series = pd.Series(trend_1w_down)
+    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
+    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
     
-    # Align 1d trend to 12h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
+    # Align weekly trend to daily
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
     
-    # Calculate CCI(20) on 12h data
-    typical_price = (high + low + close) / 3.0
-    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # Avoid division by zero
-    tp_mad = np.where(tp_mad == 0, 1e-10, tp_mad)
-    cci = (typical_price - tp_ma) / (0.015 * tp_mad)
-    
-    # Calculate ATR ratio for volatility filter
-    # ATR(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR(50)
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    # Avoid division by zero
-    atr_ratio = np.where(atr_50 == 0, 0, atr_14 / atr_50)
+    # Volume filter: daily volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 35
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(atr_ratio[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
+        if (np.isnan(rsi_values[i]) or np.isnan(trend_1w_up_aligned[i]) or 
+            np.isnan(trend_1w_down_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -88,27 +80,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero OR daily trend turns down
-            if (cci[i] < 0) or trend_1d_down_aligned[i]:
+            # Exit: RSI returns to neutral (40-60) OR weekly trend turns down
+            if (rsi_values[i] >= 40 and rsi_values[i] <= 60) or trend_1w_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero OR daily trend turns up
-            if (cci[i] > 0) or trend_1d_up_aligned[i]:
+            # Exit: RSI returns to neutral (40-60) OR weekly trend turns up
+            if (rsi_values[i] >= 40 and rsi_values[i] <= 60) or trend_1w_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: CCI > +100 + volatility expansion + daily uptrend
-            if (cci[i] > 100) and (atr_ratio[i] > 1.2) and trend_1d_up_aligned[i]:
+            # Long entry: RSI oversold + price above weekly EMA + volume
+            if (rsi_values[i] < 30) and trend_1w_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI < -100 + volatility expansion + daily downtrend
-            elif (cci[i] < -100) and (atr_ratio[i] > 1.2) and trend_1d_down_aligned[i]:
+            # Short entry: RSI overbought + price below weekly EMA + volume
+            elif (rsi_values[i] > 70) and trend_1w_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
