@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# [24902] 12h_1d_donchian_volume_v2
-# Hypothesis: 12-hour Donchian(20) breakout with volume confirmation and 1-day trend filter.
-# Long when price breaks above 20-period Donchian high with volume > 1.8x average and price > 1-day EMA50.
-# Short when price breaks below 20-period Donchian low with volume > 1.8x average and price < 1-day EMA50.
-# Exit when price crosses the opposite Donchian boundary or volume falls below 1.3x average.
+# [24909] 4h_1d_donchian_volume_v5
+# Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and 1-day trend filter, with tighter entry/exit conditions to reduce trade frequency and avoid overtrading.
+# Long when price breaks above 20-period Donchian high with volume > 2.0x average and price > 1-day EMA50.
+# Short when price breaks below 20-period Donchian low with volume > 2.0x average and price < 1-day EMA50.
+# Exit when price crosses the opposite Donchian boundary or volume falls below 1.5x average.
+# Uses very tight entry conditions (volume > 2.0x) to limit trades (~10-20/year) and reduce fee drag.
 # Designed to work in both bull and bear markets by combining breakout momentum with trend filter.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_volume_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,7 +39,7 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Calculate 12-hour Donchian channels (20-period)
+    # Calculate 4-hour Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -51,7 +51,7 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1-day EMA50 to 12-hour timeframe
+    # Align 1-day EMA50 to 4-hour timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
@@ -74,27 +74,27 @@ def generate_signals(prices):
         trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below Donchian low or volume drops below 1.3x average
-            if price < dl or vol_ratio < 1.3:
+            # Exit: price crosses below Donchian low or volume drops below 1.5x average
+            if price < dl or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above Donchian high or volume drops below 1.3x average
-            if price > dh or vol_ratio < 1.3:
+            # Exit: price crosses above Donchian high or volume drops below 1.5x average
+            if price > dh or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Enter long: price breaks above Donchian high with volume expansion and uptrend on 1d
-            if price > dh and vol_ratio > 1.8 and trend_up_1d:
+            if price > dh and vol_ratio > 2.0 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price breaks below Donchian low with volume expansion and downtrend on 1d
-            elif price < dl and vol_ratio > 1.8 and not trend_up_1d:
+            elif price < dl and vol_ratio > 2.0 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
