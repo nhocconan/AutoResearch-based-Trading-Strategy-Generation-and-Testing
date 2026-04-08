@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-1d Weekly Donchian Breakout + Volume Confirmation v1
-Hypothesis: Weekly Donchian breakouts with volume confirmation and trend filter work in both bull and bear markets by capturing major trend continuations while avoiding whipsaws. The 1d timeframe targets 10-25 trades/year, minimizing fee drag. Volume ensures breakout validity, and weekly trend filter prevents counter-trend entries.
+6h Keltner Channel Breakout + 12h Trend + Volume Confirmation v1
+Hypothesis: Keltner Channel breakouts with volatility-adjusted bands, filtered by 12h EMA trend and volume confirmation, capture sustained moves while avoiding whipsaws. The 6h timeframe targets 15-40 trades/year, balancing responsiveness with low turnover. Volume validates breakout strength, and 12h trend ensures alignment with higher-timeframe momentum, working in both bull and bear regimes by adapting to volatility regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_keltner_breakout_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter and Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA(50) for trend filter
-    ema_50_weekly = df_weekly['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # 12h EMA(30) for trend filter
+    ema_30_12h = df_12h['close'].ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_30_12h)
     
-    # Weekly Donchian channels (20-period high/low)
-    high_series = pd.Series(df_weekly['high'].values)
-    low_series = pd.Series(df_weekly['low'].values)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    # 6h ATR(20) for Keltner Channel
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar TR
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Volume filter (>1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # 6h EMA(20) for Keltner Channel middle line
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channel bands
+    upper_keltner = ema_20 + (2.0 * atr)
+    lower_keltner = ema_20 - (2.0 * atr)
+    
+    # Volume filter (>1.8x 30-period average)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_weekly_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_30_12h_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly Donchian low or trend reverses
-            if close[i] <= donchian_low_aligned[i] or close[i] < ema_50_weekly_aligned[i]:
+            # Exit: price closes below lower Keltner or trend reverses
+            if close[i] <= lower_keltner[i] or close[i] < ema_30_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly Donchian high or trend reverses
-            if close[i] >= donchian_high_aligned[i] or close[i] > ema_50_weekly_aligned[i]:
+            # Exit: price closes above upper Keltner or trend reverses
+            if close[i] >= upper_keltner[i] or close[i] > ema_30_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Long breakout with trend alignment and volume
-            if (close[i] >= donchian_high_aligned[i] and 
-                close[i] > ema_50_weekly_aligned[i] and 
+            if (close[i] >= upper_keltner[i] and 
+                close[i] > ema_30_12h_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
             # Short breakdown with trend alignment and volume
-            elif (close[i] <= donchian_low_aligned[i] and 
-                  close[i] < ema_50_weekly_aligned[i] and 
+            elif (close[i] <= lower_keltner[i] and 
+                  close[i] < ema_30_12h_aligned[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
