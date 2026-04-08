@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-1h RSI Pullback with 4h Trend Filter and Volume Confirmation
-Hypothesis: In strong trends (4h), pullbacks to RSI(14) < 30 (long) or > 70 (short) offer high-probability entries.
-Volume > 1.5x average confirms conviction. Works in bull/bear by following 4h trend direction.
-Target: 15-30 trades/year (~60-120 total over 4 years) with 1h timeframe.
+1d Weekly Donchian Breakout with Volume and Trend Filter
+Hypothesis: Weekly Donchian breakouts capture major trends. Filter by daily EMA trend and volume confirmation. Works in bull/bear by using volatility-adjusted position sizing and trend alignment. Targets 10-25 trades/year on 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_pullback_4h_trend_volume_v1"
-timeframe = "1h"
+name = "1d_weekly_donchian_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,19 +23,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = df_4h['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly Donchian Channel (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    highest_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    highest_high_aligned = align_htf_to_ltf(prices, df_1w, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1w, lowest_low)
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,40 +44,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_high_aligned[i]) or 
+            np.isnan(lowest_low_aligned[i]) or 
             np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) or trend reversal
-            if rsi[i] >= 70 or close[i] < ema_50_4h_aligned[i]:
+            # Exit: price closes below weekly Donchian low OR trend reverses
+            if (close[i] <= lowest_low_aligned[i] or 
+                close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) or trend reversal
-            if rsi[i] <= 30 or close[i] > ema_50_4h_aligned[i]:
+            # Exit: price closes above weekly Donchian high OR trend reverses
+            if (close[i] >= highest_high_aligned[i] or 
+                close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long pullback in uptrend: RSI < 30 + volume
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
+            # Long breakout with trend alignment and volume
+            if (close[i] > highest_high_aligned[i-1] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short pullback in downtrend: RSI > 70 + volume
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
+                signals[i] = 0.25
+            # Short breakdown with trend alignment and volume
+            elif (close[i] < lowest_low_aligned[i-1] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
