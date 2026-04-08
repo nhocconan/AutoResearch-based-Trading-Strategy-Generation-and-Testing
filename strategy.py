@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# 6h_adaptive_keltner_breakout_1d_trend_volume_v1
-# Hypothesis: On 6h timeframe, adaptive Keltner breakout with volume confirmation and 1d EMA50 trend alignment captures momentum moves. 
-# The adaptive ATR multiplier (based on volatility regime) prevents whipsaws in ranging markets while allowing breakouts in trending periods.
-# Works in both bull and bear markets by following the higher timeframe trend.
-# Entry: Long when price > upper Keltner band + volume > 1.5x 20-period average + price > 1d EMA50
-# Entry: Short when price < lower Keltner band + volume > 1.5x 20-period average + price < 1d EMA50
-# Exit: Price crosses back below/above middle line (EMA20) or trend reversal
+# 12h_camarilla_pivot_volume_chop_v1
+# Hypothesis: On 12h timeframe, price retracement to Camarilla pivot levels (S3/S4 for longs, R3/R4 for shorts) with volume expansion and low choppiness (trending regime) captures high-probability mean-reversion entries. Works in bull/bear via regime filter.
+# Entry: Long when price <= S3 + volume > 1.5x 20-period avg + CHOP > 61.8 (range)
+# Entry: Short when price >= R3 + volume > 1.5x 20-period avg + CHOP > 61.8 (range)
+# Exit: Price crosses opposite pivot level (S3/R3) or CHOP < 38.2 (trend) or volume fails
 # Position sizing: 0.25 long, -0.25 short
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adaptive_keltner_breakout_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,57 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend
+    # Get 1d data for Camarilla pivots and CHOP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla pivot levels (based on prior day)
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * hl_range
+    s3 = close_1d - 1.1 * hl_range
     
-    # EMA20 for middle line (60 periods for 6m data)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align pivots to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # ATR for Keltner bands (20 periods)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
+    # Choppiness Index (CHOP) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr[0] = tr1[0]  # first period
     
-    # Volatility regime detection: ATR ratio (short/long)
-    atr_short = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_long = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_ratio = atr_short / (atr_long + 1e-10)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Adaptive multiplier: higher in low volatility (tighter bands), lower in high volatility (wider bands)
-    # Normal range 0.5-2.0, inverted so low vol = higher multiplier
-    multiplier = np.clip(2.0 - (atr_ratio - 0.5) * 2, 0.5, 2.5)
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    chop = np.where(denominator != 0, 100 * np.log10(np.sum(tr[-14:]) / denominator) / np.log10(14), 50)
+    # For rolling calculation, we need full array
+    chop_full = np.zeros(len(close_1d))
+    for i in range(13, len(close_1d)):
+        tr_sum = np.sum(tr[i-13:i+1])
+        denom = highest_high[i] - lowest_low[i]
+        chop_full[i] = 100 * np.log10(tr_sum / denom) / np.log10(14) if denom != 0 else 50
     
-    # Keltner bands
-    upper_band = ema_20 + multiplier * atr
-    lower_band = ema_20 - multiplier * atr
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_full)
     
-    # Volume filter: 6h volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume filter: 12h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -86,27 +93,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price below EMA20 OR price below 1d EMA50 (trend reversal)
-            if (close[i] < ema_20[i]) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: price >= R3 OR CHOP < 38.2 (trending) OR volume filter fails
+            if (close[i] >= r3_aligned[i]) or (chop_aligned[i] < 38.2) or not volume_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: price above EMA20 OR price above 1d EMA50 (trend reversal)
-            if (close[i] > ema_20[i]) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: price <= S3 OR CHOP < 38.2 (trending) OR volume filter fails
+            if (close[i] <= s3_aligned[i]) or (chop_aligned[i] < 38.2) or not volume_filter[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: price > upper Keltner band + volume + price > 1d EMA50
-            if (close[i] > upper_band[i]) and volume_filter[i] and (close[i] > ema_50_1d_aligned[i]):
+            # Long entry: price <= S3 + volume + CHOP > 61.8 (range)
+            if (close[i] <= s3_aligned[i]) and volume_filter[i] and (chop_aligned[i] > 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price < lower Keltner band + volume + price < 1d EMA50
-            elif (close[i] < lower_band[i]) and volume_filter[i] and (close[i] < ema_50_1d_aligned[i]):
+            # Short entry: price >= R3 + volume + CHOP > 61.8 (range)
+            elif (close[i] >= r3_aligned[i]) and volume_filter[i] and (chop_aligned[i] > 61.8):
                 position = -1
                 signals[i] = -0.25
     
