@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_ema_trend_with_volume
-# Hypothesis: Use 1d EMA for long-term trend direction, 4h EMA for medium-term trend confirmation,
-# and 1h for entry timing with volume confirmation. Trades only in direction of higher timeframe
-# trends to avoid whipsaw. Volume filter ensures momentum behind moves. Designed for 1h timeframe
-# to target 15-35 trades/year by requiring multi-timeframe alignment and volume confirmation.
-# Works in bull markets (trend following) and bear markets (counter-trend bounces when 1d trend
-# is weak but 4h/1d alignment occurs).
+# 6h_1d_1w_rsi_momentum_reversal_v1
+# Hypothesis: Uses RSI momentum reversal on 6h timeframe with 1d trend filter and 1w regime filter.
+# In bull markets (1w RSI > 50), look for 6h RSI < 30 reversals; in bear markets (1w RSI < 50),
+# look for 6h RSI > 70 reversals. Requires 1d EMA(50) alignment to avoid counter-trend trades.
+# Designed for 6h timeframe targeting 20-40 trades/year by requiring multi-timeframe alignment
+# and extreme RSI readings. Works in bull markets (buying dips) and bear markets (selling rallies).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_ema_trend_with_volume"
-timeframe = "1h"
+name = "6h_1d_1w_rsi_momentum_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,33 +21,43 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for medium-term trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for long-term trend
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA(21) for medium-term trend
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Get 1w data for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate 1d EMA(50) for long-term trend
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: volume > 1.8x average of last 24 periods (1 day)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_confirm = volume > vol_ma * 1.8
+    # Calculate 1w RSI(14) for regime filter
+    close_1w = df_1w['close'].values
+    delta_1w = pd.Series(close_1w).diff()
+    gain_1w = delta_1w.where(delta_1w > 0, 0)
+    loss_1w = -delta_1w.where(delta_1w < 0, 0)
+    avg_gain_1w = gain_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1w = loss_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1w = avg_gain_1w / avg_loss_1w.replace(0, np.nan)
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w_values = rsi_1w.fillna(50).values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    
+    # Calculate 6h RSI(14) for entry signals
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -58,7 +67,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_values[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -67,32 +76,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h EMA or loses upward momentum
-            if close[i] < ema_4h_aligned[i]:
+            # Exit: RSI crosses above 70 (overbought) or trend breaks
+            if rsi_values[i] >= 70 or close[i] < ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h EMA or loses downward momentum
-            if close[i] > ema_4h_aligned[i]:
+            # Exit: RSI crosses below 30 (oversold) or trend breaks
+            if rsi_values[i] <= 30 or close[i] > ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price above both EMAs with volume confirmation
-            if (close[i] > ema_4h_aligned[i] and 
-                close[i] > ema_1d_aligned[i] and 
-                vol_confirm[i]):
+            # Determine market regime from 1w RSI
+            bull_regime = rsi_1w_aligned[i] > 50
+            bear_regime = rsi_1w_aligned[i] < 50
+            
+            # Long entry: RSI oversold in bull regime or any oversold with strong uptrend
+            if ((bull_regime and rsi_values[i] < 30) or 
+                (rsi_values[i] < 25 and close[i] > ema_1d_aligned[i])):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: price below both EMAs with volume confirmation
-            elif (close[i] < ema_4h_aligned[i] and 
-                  close[i] < ema_1d_aligned[i] and 
-                  vol_confirm[i]):
+                signals[i] = 0.25
+            # Short entry: RSI overbought in bear regime or any overbought with strong downtrend
+            elif ((bear_regime and rsi_values[i] > 70) or 
+                  (rsi_values[i] > 75 and close[i] < ema_1d_aligned[i])):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
