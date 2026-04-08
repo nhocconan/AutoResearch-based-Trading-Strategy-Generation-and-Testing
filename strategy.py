@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1w_trend_volume_v1
-# Hypothesis: On 12h timeframe, use weekly Donchian channel breakouts with weekly trend filter and volume confirmation.
-# Long when price breaks above weekly Donchian high (20) with volume > 1.5x average and weekly trend up.
-# Short when price breaks below weekly Donchian low (20) with volume > 1.5x average and weekly trend down.
-# Exit when price returns to weekly Donchian midpoint or volume drops below average.
-# Weekly trend defined by price above/below weekly EMA20.
-# This strategy targets fewer trades (12-37/year) by using higher timeframe structure and tight entry conditions.
-# Works in both bull and bear markets via trend filter and mean reversion in ranging markets.
+# 4h_rsi_cci_confluence_v1
+# Hypothesis: On 4h timeframe, combine RSI(14) and CCI(20) for mean-reversion entries during low volatility periods.
+# Long when RSI < 30 and CCI < -100 with volatility below median.
+# Short when RSI > 70 and CCI > 100 with volatility below median.
+# Exit when RSI crosses 50 or volatility expands above 1.5x median.
+# Uses daily trend filter: only trade in direction of daily EMA50 to avoid counter-trend in strong trends.
+# Designed for low frequency (20-40 trades/year) to minimize fee drag and work in both bull/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1w_trend_volume_v1"
-timeframe = "12h"
+name = "4h_rsi_cci_confluence_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,43 +26,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels and trend
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # CCI(20) calculation
+    typical_price = (high + low + close) / 3
+    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (typical_price - ma_tp) / (0.015 * mad + 1e-10)
+    cci = cci.fillna(0).values
+    
+    # Volatility filter: ATR(14) normalized by price
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    vol_norm = atr / close
+    
+    # Daily trend filter: EMA50
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Weekly high, low, close
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    daily_close = df_daily['close'].values
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema50_4h = align_htf_to_ltf(prices, df_daily, daily_ema50)
     
-    # Calculate weekly Donchian channels (20-period)
-    # Using previous week's data to avoid look-ahead
-    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().shift(1).values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Align weekly Donchian levels to 12h timeframe
-    donchian_high_12h = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    donchian_mid_12h = align_htf_to_ltf(prices, df_weekly, donchian_mid)
-    
-    # Weekly trend filter: price above/below weekly EMA20
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().shift(1).values
-    weekly_ema20_12h = align_htf_to_ltf(prices, df_weekly, weekly_ema20)
-    
-    # Volume confirmation: 20-period average on 12h
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Median volatility for filter
+    vol_median = np.nanmedian(vol_norm[20:]) if np.sum(~np.isnan(vol_norm[20:])) > 0 else 0.01
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or np.isnan(donchian_mid_12h[i]) or np.isnan(weekly_ema20_12h[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(rsi[i]) or np.isnan(cci[i]) or np.isnan(daily_ema50_4h[i]) or np.isnan(vol_norm[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -72,34 +81,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to midpoint or volume drops below average
-            if close[i] <= donchian_mid_12h[i] or volume[i] < avg_volume[i]:
+            # Exit: RSI crosses above 50 or volatility expands
+            if rsi[i] >= 50 or vol_norm[i] > 1.5 * vol_median:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to midpoint or volume drops below average
-            if close[i] >= donchian_mid_12h[i] or volume[i] < avg_volume[i]:
+            # Exit: RSI crosses below 50 or volatility expands
+            if rsi[i] <= 50 or vol_norm[i] > 1.5 * vol_median:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volatility filter: only trade in low volatility
+            vol_ok = vol_norm[i] < vol_median
             
-            # Weekly trend filter
-            weekly_uptrend = close[i] > weekly_ema20_12h[i]
-            weekly_downtrend = close[i] < weekly_ema20_12h[i]
+            # Daily trend filter
+            daily_uptrend = close[i] > daily_ema50_4h[i]
+            daily_downtrend = close[i] < daily_ema50_4h[i]
             
-            # Long entry: price breaks above weekly Donchian high with volume and uptrend
-            if close[i] > donchian_high_12h[i] and volume_ok and weekly_uptrend:
+            # Long entry: oversold conditions with volatility filter and uptrend bias
+            if rsi[i] < 30 and cci[i] < -100 and vol_ok and daily_uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below weekly Donchian low with volume and downtrend
-            elif close[i] < donchian_low_12h[i] and volume_ok and weekly_downtrend:
+            # Short entry: overbought conditions with volatility filter and downtrend bias
+            elif rsi[i] > 70 and cci[i] > 100 and vol_ok and daily_downtrend:
                 position = -1
                 signals[i] = -0.25
     
