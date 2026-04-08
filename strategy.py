@@ -1,19 +1,16 @@
-#!/usr/bin/env python3
-"""
-4h Daily Pivot Breakout with Volume and Momentum Confirmation v2
-Hypothesis: Price breaking above/below daily pivot levels on 4h timeframe,
-filtered by 1d trend direction and volume spikes, captures strong momentum moves
-while avoiding false breakouts. Daily pivots provide strong support/resistance
-levels that work in both bull (breakouts above daily resistance) and bear 
-(breakdowns below daily support). Reduced frequency to avoid overtrading.
-Target: 18-48 trades/year (75-200 total over 4 years).
-"""
+# 4h Daily Pivot Breakout with Volume and Momentum Confirmation v3
+# Hypothesis: Price breaking above/below daily pivot levels on 4h timeframe,
+# filtered by 1d trend direction and volume spikes, captures strong momentum moves
+# while avoiding false breakouts. Daily pivots provide strong support/resistance
+# levels that work in both bull (breakouts above daily resistance) and bear 
+# (breakdowns below daily support). Reduced frequency to avoid overtrading.
+# Target: 18-48 trades/year (75-200 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_pivot_breakout_1d_trend_volume_v2"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
