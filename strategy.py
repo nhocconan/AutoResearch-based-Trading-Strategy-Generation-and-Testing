@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1d_trend_volume_v1
-# Hypothesis: On 12h timeframe, use Camarilla pivot levels from 1d combined with 1d trend filter and volume confirmation.
-# Long when price closes above Camarilla resistance level R3 with volume > 1.5x average and 1d uptrend.
-# Short when price closes below Camarilla support level S3 with volume > 1.5x average and 1d downtrend.
-# Exit when price returns to Camarilla pivot point or volume drops below average.
-# This strategy targets 10-30 trades/year by using 12h timeframe with strict pivot-based entries.
-# Works in both bull and bear markets via trend filter and volatility-based structure.
+# 1d_ema200_rsi14_volume_v1
+# Hypothesis: On daily timeframe, use EMA200 trend filter with RSI14 for mean reversion entries and volume confirmation.
+# Long when price is above EMA200, RSI < 30 (oversold), and volume > 1.5x average.
+# Short when price is below EMA200, RSI > 70 (overbought), and volume > 1.5x average.
+# Exit when RSI returns to neutral zone (40-60) or volume drops below average.
+# Works in both bull and bear markets via EMA200 trend filter and RSI mean reversion.
+# Target: 10-25 trades/year by using strict daily signals with volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "1d_ema200_rsi14_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,43 +26,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's range)
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
-        return np.zeros(n)
+    # Calculate EMA200 for trend filter
+    ema200 = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate RSI14
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Fill NaN with neutral 50
     
-    # Calculate pivot and support/resistance levels
-    pivot = (daily_high + daily_low + daily_close) / 3
-    range_hl = daily_high - daily_low
-    r3 = pivot + (range_hl * 1.1)
-    s3 = pivot - (range_hl * 1.1)
-    
-    # Align to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_daily, pivot)
-    r3_12h = align_htf_to_ltf(prices, df_daily, r3)
-    s3_12h = align_htf_to_ltf(prices, df_daily, s3)
-    
-    # Calculate 1d trend filter: EMA20
-    daily_ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    daily_ema20_12h = align_htf_to_ltf(prices, df_daily, daily_ema20)
-    
-    # Volume confirmation: 20-period average on 12h
+    # Volume confirmation: 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(pivot_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or \
-           np.isnan(daily_ema20_12h[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema200[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -71,16 +59,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot point or volume drops below average
-            if close[i] <= pivot_12h[i] or volume[i] < avg_volume[i]:
+            # Exit: RSI returns to neutral (40-60) or volume drops below average
+            if rsi[i] >= 40 and rsi[i] <= 60 or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to pivot point or volume drops below average
-            if close[i] >= pivot_12h[i] or volume[i] < avg_volume[i]:
+            # Exit: RSI returns to neutral (40-60) or volume drops below average
+            if rsi[i] >= 40 and rsi[i] <= 60 or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -89,16 +77,16 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Daily trend filter
-            daily_uptrend = close[i] > daily_ema20_12h[i]
-            daily_downtrend = close[i] < daily_ema20_12h[i]
+            # Trend filter
+            uptrend = close[i] > ema200[i]
+            downtrend = close[i] < ema200[i]
             
-            # Long entry: price closes above R3 with volume and uptrend
-            if close[i] > r3_12h[i] and volume_ok and daily_uptrend:
+            # Long entry: price above EMA200, RSI oversold (<30), volume confirmation
+            if uptrend and rsi[i] < 30 and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price closes below S3 with volume and downtrend
-            elif close[i] < s3_12h[i] and volume_ok and daily_downtrend:
+            # Short entry: price below EMA200, RSI overbought (>70), volume confirmation
+            elif downtrend and rsi[i] > 70 and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
