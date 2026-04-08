@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-# 4h_volume_price_action_v3
-# Hypothesis: Price action with volume confirmation on 4h timeframe.
-# Long when price closes above prior swing high with volume > 1.5x average.
-# Short when price closes below prior swing low with volume > 1.5x average.
-# Exit on opposite signal or when volume drops below average.
-# Uses swing points to capture momentum with volume confirmation to reduce whipsaw.
-# Target: 75-150 total trades over 4 years (~19-38/year).
+# 12h_camarilla_pivot_1d_volume_v1
+# Hypothesis: Camarilla pivot levels on 1-day timeframe act as strong support/resistance.
+# Long when price touches or breaks above S3 with volume > 1.3x average, short when touches or breaks below R3 with volume > 1.3x average.
+# Exit when price returns to the daily Pivot Point (mean reversion to mean).
+# Uses 12h timeframe for lower frequency trading to reduce fee drag, with 1d pivot levels for structure.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_price_action_v3"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -26,21 +25,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate swing highs and lows (5-period lookback)
-    swing_high = np.full(n, np.nan)
-    swing_low = np.full(n, np.nan)
+    # Calculate 1-day Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
     
-    for i in range(5, n-5):
-        # Swing high: highest high in 5 bars before and after
-        if high[i] == np.max(high[i-5:i+6]):
-            swing_high[i] = high[i]
-        # Swing low: lowest low in 5 bars before and after
-        if low[i] == np.min(low[i-5:i+6]):
-            swing_low[i] = low[i]
+    # Typical price for pivot calculation
+    tp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     
-    # Forward fill swing levels for comparison
-    swing_high = pd.Series(swing_high).ffill().bfill().values
-    swing_low = pd.Series(swing_low).ffill().bfill().values
+    # Pivot point
+    pivot_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    
+    # Ranges
+    range_1d = df_1d['high'] - df_1d['low']
+    
+    # Camarilla levels
+    r3_1d = pivot_1d + range_1d * 1.1 / 2
+    s3_1d = pivot_1d - range_1d * 1.1 / 2
+    pivot_1d_arr = pivot_1d.values
+    
+    # Align to 12h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d.values)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d.values)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d_arr)
     
     # Average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,11 +54,11 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 10
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(swing_high[i]) or np.isnan(swing_low[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,33 +67,33 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below swing low or volume drops below average
-            if close[i] < swing_low[i] or volume[i] < avg_volume[i]:
+            # Exit: price returns to or below pivot point (mean reversion)
+            if close[i] <= pivot_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above swing high or volume drops below average
-            if close[i] > swing_high[i] or volume[i] < avg_volume[i]:
+            # Exit: price returns to or above pivot point (mean reversion)
+            if close[i] >= pivot_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volume confirmation: current volume > 1.3x average volume
+            volume_ok = volume[i] > 1.3 * avg_volume[i]
             
-            # Price action entries
-            if close[i] > swing_high[i] and volume_ok:
-                # Additional confirmation: previous close was at or below swing high
-                if i > 0 and close[i-1] <= swing_high[i-1]:
+            # Entry conditions
+            if close[i] >= s3_1d_aligned[i] and volume_ok:
+                # Additional confirmation: price was below S3 in previous bar
+                if i > 0 and close[i-1] < s3_1d_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-            elif close[i] < swing_low[i] and volume_ok:
-                # Additional confirmation: previous close was at or above swing low
-                if i > 0 and close[i-1] >= swing_low[i-1]:
+            elif close[i] <= r3_1d_aligned[i] and volume_ok:
+                # Additional confirmation: price was above R3 in previous bar
+                if i > 0 and close[i-1] > r3_1d_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
