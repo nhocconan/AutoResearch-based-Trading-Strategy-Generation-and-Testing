@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# daily_ema_rsi_weekly_v1
-# Hypothesis: 1-day EMA200 trend filter with RSI(14) mean reversion and weekly trend confirmation.
-# Long when: price > EMA200 AND RSI < 30 AND weekly close > weekly EMA50
-# Short when: price < EMA200 AND RSI > 70 AND weekly close < weekly EMA50
-# Exit when: price crosses EMA200 OR RSI crosses back above 50 (long) or below 50 (short)
-# Uses daily for entry/exit and weekly for trend filter to avoid counter-trend trades.
-# Target: 10-25 trades/year to minimize fee drag while capturing high-probability mean reversions.
+# 4h_1d_donchian_vol_breakout_v3
+# Hypothesis: 4-hour Donchian breakout with volume confirmation and 1-day EMA trend filter.
+# Long: price > Donchian(20) high AND volume > 1.5x 20-period average volume AND price > 1-day EMA50.
+# Short: price < Donchian(20) low AND volume > 1.5x 20-period average volume AND price < 1-day EMA50.
+# Exit: price crosses Donchian midpoint or opposite breakout with volume.
+# Designed to capture strong trending moves in both bull and bear markets with strict entry criteria to limit trades.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "daily_ema_rsi_weekly_v1"
-timeframe = "1d"
+name = "4h_1d_donchian_vol_breakout_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,87 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate daily EMA200 for trend filter
-    ema200 = np.full(n, np.nan)
-    ema200[199] = np.mean(close[:200])
-    for i in range(200, n):
-        ema200[i] = close[i] * 0.00995 + ema200[i-1] * 0.99005
+    # 4h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # 20-period average volume
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
-    for i in range(14, n):
-        avg_gain[i] = (gain[i] * 1/14 + avg_gain[i-1] * 13/14)
-        avg_loss[i] = (loss[i] * 1/14 + avg_loss[i-1] * 13/14)
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1-day EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate weekly EMA50
-    ema_1w_50 = np.zeros(len(close_1w))
-    ema_1w_50[:] = np.nan
-    ema_1w_50[49] = np.mean(close_1w[:50])
-    for i in range(50, len(close_1w)):
-        ema_1w_50[i] = close_1w[i] * 0.0377 + ema_1w_50[i-1] * 0.9623
+    close_1d = df_1d['close'].values
+    ema_1d_50 = np.full(len(close_1d), np.nan)
+    ema_1d_50[49] = np.mean(close_1d[:50])
+    for i in range(50, len(close_1d)):
+        ema_1d_50[i] = close_1d[i] * (2/51) + ema_1d_50[i-1] * (49/51)
     
-    # Align both weekly close and weekly EMA50 to daily timeframe
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         price = close[i]
-        ema = ema200[i]
-        rsi_val = rsi[i]
-        weekly_close = close_1w_aligned[i]
-        weekly_ema = ema_1w_50_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        d_high = donchian_high[i]
+        d_low = donchian_low[i]
+        d_mid = donchian_mid[i]
+        ema_1d = ema_1d_50_aligned[i]
         
-        if np.isnan(ema) or np.isnan(rsi_val) or np.isnan(weekly_close) or np.isnan(weekly_ema):
+        if np.isnan(d_high) or np.isnan(d_low) or np.isnan(d_mid) or np.isnan(avg_vol) or np.isnan(ema_1d):
             if position != 0:
-                pass  # Hold
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        if position == 1:  # Long
-            # Exit: price below EMA200 OR RSI > 50
-            if price < ema or rsi_val > 50:
+        vol_surge = vol > 1.5 * avg_vol
+        
+        if position == 1:  # Long position
+            if price < d_mid or (price < d_low and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
-        elif position == -1:  # Short
-            # Exit: price above EMA200 OR RSI < 50
-            if price > ema or rsi_val < 50:
+        elif position == -1:  # Short position
+            if price > d_mid or (price > d_high and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
-            # Entry: long setup
-            if price > ema and rsi_val < 30 and weekly_close > weekly_ema:
+            if price > d_high and vol_surge and price > ema_1d:
                 position = 1
-                signals[i] = 0.25
-            # Entry: short setup
-            elif price < ema and rsi_val > 70 and weekly_close < weekly_ema:
+                signals[i] = 0.30
+            elif price < d_low and vol_surge and price < ema_1d:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
