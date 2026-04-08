@@ -1,16 +1,26 @@
+#SBATCH --job-name=1d_breakout_trend_volume
+#SBATCH --output=slurm-%j.out
+#SBATCH --time=00:30:00
+#SBATCH --mem=4GB
+
 #!/usr/bin/env python3
-# 4h_camilla_pivot_volume_reversal_v1
-# Hypothesis: Uses 1d Camarilla pivot levels (L3, H3) for mean reversion entries
-# with volume confirmation and 4h momentum filter. Works in both bull/bear
-# as pivots act as support/resistance in ranging markets and trend continuations
-# in trending markets. Target: 20-40 trades/year.
+"""
+1d_breakout_trend_volume_v1
+Hypothesis: On daily timeframe, combine Donchian channel breakout (20-period) 
+with weekly trend filter (price above/below weekly SMA50) and volume confirmation.
+Long when price breaks above Donchian upper band, weekly trend is up, and volume surges.
+Short when price breaks below Donchian lower band, weekly trend is down, and volume surges.
+Exit when price crosses opposite Donchian band or volume drops below average.
+Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
+Works in both bull and bear markets via trend filter.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camilla_pivot_volume_reversal_v1"
-timeframe = "4h"
+name = "1d_breakout_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,20 +33,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h RSI(14) for momentum filter
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-    for i in range(rsi_period+1, n):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian channel (20-period) on daily
+    donchian_period = 20
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_band = high_series.rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_band = low_series.rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
@@ -49,38 +51,29 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for previous day
-    # H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
-    # H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
-    # H2 = close + 0.75*(high-low), L2 = close - 0.75*(high-low)
-    # H1 = close + 0.5*(high-low), L1 = close - 0.5*(high-low)
-    # Pivot = (high + low + close)/3
-    camarilla_H3 = np.zeros(len(close_1d))
-    camarilla_L3 = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        high_low = high_1d[i-1] - low_1d[i-1]
-        camarilla_H3[i] = close_1d[i-1] + 1.125 * high_low
-        camarilla_L3[i] = close_1d[i-1] - 1.125 * high_low
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    # Weekly trend filter: price vs weekly SMA50
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    # Trend: 1 if price > SMA50, -1 if price < SMA50
+    weekly_trend = np.full(len(close_1w), 0)
+    for i in range(len(close_1w)):
+        if not np.isnan(close_1w[i]) and not np.isnan(sma50_1w[i]):
+            if close_1w[i] > sma50_1w[i]:
+                weekly_trend[i] = 1
+            elif close_1w[i] < sma50_1w[i]:
+                weekly_trend[i] = -1
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(rsi_period, vol_ma_period, 1) + 1
+    start_idx = max(donchian_period, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_trend_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -88,31 +81,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price reaches H3 or RSI > 70 (overbought)
-            if close[i] >= camarilla_H3_aligned[i] or rsi[i] > 70:
+            # Exit: Price below lower Donchian band or volume drops below average
+            if close[i] < lower_band[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price reaches L3 or RSI < 30 (oversold)
-            if close[i] <= camarilla_L3_aligned[i] or rsi[i] < 30:
+            # Exit: Price above upper Donchian band or volume drops below average
+            if close[i] > upper_band[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price touches L3 with volume surge and RSI < 40 (not overbought)
-            if (close[i] <= camarilla_L3_aligned[i] and 
-                vol_surge[i] and 
-                rsi[i] < 40):
+            # Long entry: Price above upper Donchian band, weekly trend up, volume surge
+            if (close[i] > upper_band[i] and 
+                weekly_trend_aligned[i] == 1 and 
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price touches H3 with volume surge and RSI > 60 (not oversold)
-            elif (close[i] >= camarilla_H3_aligned[i] and 
-                  vol_surge[i] and 
-                  rsi[i] > 60):
+            # Short entry: Price below lower Donchian band, weekly trend down, volume surge
+            elif (close[i] < lower_band[i] and 
+                  weekly_trend_aligned[i] == -1 and 
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
