@@ -1,39 +1,23 @@
-#!/usr/bin/env python3
-"""
-12h_1d_1w_camarilla_volume
-Hypothesis: Camarilla pivot levels on daily chart provide strong support/resistance.
-Breakouts above/below H4/L4 levels with volume confirmation and 1w trend filter.
-Works in both bull/bear markets: breakouts capture momentum, trend filter avoids counter-trend trades.
-"""
+# 4h_12h_1d_ema_crossover_v3
+# Hypothesis: Trend following with EMA crossovers on multiple timeframes.
+# - Primary: 4h EMA(21) vs EMA(50) for entry/exit
+# - Trend filter: 12h EMA(50) direction (bullish if close > EMA, bearish if close < EMA)
+# - Higher timeframe filter: 1d EMA(50) to avoid counter-trend trades in strong trends
+# - Volume confirmation: 4h volume > 1.5x 20-period average to avoid false breakouts
+# - Position sizing: 0.25 for long, -0.25 for short
+# Target: 20-50 trades/year (80-200 total over 4 years)
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_volume"
-timeframe = "12h"
+name = "4h_12h_1d_ema_crossover_v3"
+timeframe = "4h"
 leverage = 1.0
-
-def camarilla_pivot(high, low, close):
-    """
-    Calculate Camarilla pivot levels for given high, low, close.
-    Returns: H4, H3, H2, H1, L1, L2, L3, L4
-    """
-    typical = (high + low + close) / 3
-    range_val = high - low
-    H4 = close + range_val * 1.1 / 2
-    H3 = close + range_val * 1.1 / 4
-    H2 = close + range_val * 1.1 / 6
-    H1 = close + range_val * 1.1 / 12
-    L1 = close - range_val * 1.1 / 12
-    L2 = close - range_val * 1.1 / 6
-    L3 = close - range_val * 1.1 / 4
-    L4 = close - range_val * 1.1 / 2
-    return H4, H3, H2, H1, L1, L2, L3, L4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -42,84 +26,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Initialize arrays for Camarilla levels
-    H4 = np.full_like(close_1d, np.nan)
-    H3 = np.full_like(close_1d, np.nan)
-    H2 = np.full_like(close_1d, np.nan)
-    H1 = np.full_like(close_1d, np.nan)
-    L1 = np.full_like(close_1d, np.nan)
-    L2 = np.full_like(close_1d, np.nan)
-    L3 = np.full_like(close_1d, np.nan)
-    L4 = np.full_like(close_1d, np.nan)
-    
-    # Calculate pivots for each day
-    for i in range(len(close_1d)):
-        if i >= 1:  # Need previous day's data
-            H4[i], H3[i], H2[i], H1[i], L1[i], L2[i], L3[i], L4[i] = camarilla_pivot(
-                high_1d[i-1], low_1d[i-1], close_1d[i-1]
-            )
-    
-    # Forward fill the levels (they remain valid until next day's calculation)
-    H4_series = pd.Series(H4)
-    H3_series = pd.Series(H3)
-    H2_series = pd.Series(H2)
-    H1_series = pd.Series(H1)
-    L1_series = pd.Series(L1)
-    L2_series = pd.Series(L2)
-    L3_series = pd.Series(L3)
-    L4_series = pd.Series(L4)
-    
-    H4_ffilled = H4_series.ffill().values
-    H3_ffilled = H3_series.ffill().values
-    H2_ffilled = H2_series.ffill().values
-    H1_ffilled = H1_series.ffill().values
-    L1_ffilled = L1_series.ffill().values
-    L2_ffilled = L2_series.ffill().values
-    L3_ffilled = L3_series.ffill().values
-    L4_ffilled = L4_series.ffill().values
-    
-    # Align 1d Camarilla levels to 12h
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4_ffilled)
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3_ffilled)
-    H2_12h = align_htf_to_ltf(prices, df_1d, H2_ffilled)
-    H1_12h = align_htf_to_ltf(prices, df_1d, H1_ffilled)
-    L1_12h = align_htf_to_ltf(prices, df_1d, L1_ffilled)
-    L2_12h = align_htf_to_ltf(prices, df_1d, L2_ffilled)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3_ffilled)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4_ffilled)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # 1w EMA(20) for trend
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1w_up = close_1w > ema_20_1w
-    trend_1w_down = close_1w < ema_20_1w
+    # 12h EMA(50) for trend
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema_50_12h
+    trend_12h_down = close_12h < ema_50_12h
     
     # Forward fill trend
-    trend_1w_up_series = pd.Series(trend_1w_up)
-    trend_1w_down_series = pd.Series(trend_1w_down)
-    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
-    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
+    trend_12h_up_series = pd.Series(trend_12h_up)
+    trend_12h_down_series = pd.Series(trend_12h_down)
+    trend_12h_up_ffilled = trend_12h_up_series.ffill().values
+    trend_12h_down_ffilled = trend_12h_down_series.ffill().values
     
-    # Align 1w trend to 12h
-    trend_1w_up_12h = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
-    trend_1w_down_12h = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
+    # Align 12h trend to 4h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up_ffilled)
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down_ffilled)
     
-    # Volume filter: 12h volume > 1.5x 20-period average
+    # Get 1d data for higher timeframe filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 1d EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema_50_1d
+    trend_1d_down = close_1d < ema_50_1d
+    
+    # Forward fill trend
+    trend_1d_up_series = pd.Series(trend_1d_up)
+    trend_1d_down_series = pd.Series(trend_1d_down)
+    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
+    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
+    
+    # Align 1d trend to 4h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
+    
+    # 4h EMA crossovers
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -127,12 +80,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or
-            np.isnan(trend_1w_up_12h[i]) or np.isnan(trend_1w_down_12h[i]) or
+        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -142,27 +95,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below H3 OR 1w trend turns down
-            if (close[i] < H3_12h[i]) or trend_1w_down_12h[i]:
+            # Exit: EMA cross down OR 12h trend turns down OR 1d trend turns down
+            if (ema_21[i] < ema_50[i]) or trend_12h_down_aligned[i] or trend_1d_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above L3 OR 1w trend turns up
-            if (close[i] > L3_12h[i]) or trend_1w_up_12h[i]:
+            # Exit: EMA cross up OR 12h trend turns up OR 1d trend turns up
+            if (ema_21[i] > ema_50[i]) or trend_12h_up_aligned[i] or trend_1d_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: price breaks above H4 with volume + 1w uptrend
-            if (close[i] > H4_12h[i]) and volume_filter[i] and trend_1w_up_12h[i]:
+            # Long entry: EMA cross up + 12h uptrend + 1d uptrend + volume
+            if (ema_21[i] > ema_50[i]) and trend_12h_up_aligned[i] and trend_1d_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below L4 with volume + 1w downtrend
-            elif (close[i] < L4_12h[i]) and volume_filter[i] and trend_1w_down_12h[i]:
+            # Short entry: EMA cross down + 12h downtrend + 1d downtrend + volume
+            elif (ema_21[i] < ema_50[i]) and trend_12h_down_aligned[i] and trend_1d_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
