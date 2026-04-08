@@ -1,145 +1,148 @@
 #!/usr/bin/env python3
-# 6h_12h_ichimoku_cloud_trend_v1
-# Hypothesis: 6h Ichimoku cloud with TK cross and 12h cloud filter for trend following.
-# Long: price > 12h cloud AND Tenkan > Kijun (bullish TK cross)
-# Short: price < 12h cloud AND Tenkan < Kijun (bearish TK cross)
-# Exit: TK cross reverses or price touches opposite cloud boundary
-# Uses 6h primary timeframe with 12h HTF for cloud to reduce whipsaw.
-# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+# 4h_daily_camarilla_pivot_volume_regime_v2
+# Hypothesis: 4h Camarilla pivot levels from 1d + volume spike + 1d chop regime filter.
+# Long: price touches S3 level with volume > 2.0x average AND 1d chop < 61.8 (trending)
+# Short: price touches R3 level with volume > 2.0x average AND 1d chop < 61.8 (trending)
+# Exit: price moves to opposite H4/L4 level or chop > 61.8 (ranging)
+# Uses 4h primary timeframe with 1d HTF for pivot and regime filter.
+# Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_ichimoku_cloud_trend_v1"
-timeframe = "6h"
+name = "4h_daily_camarilla_pivot_volume_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = np.full(n, np.nan)
-    period9_low = np.full(n, np.nan)
-    for i in range(9, n):
-        period9_high[i] = np.max(high[i-9:i+1])
-        period9_low[i] = np.min(low[i-9:i+1])
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = np.full(n, np.nan)
-    period26_low = np.full(n, np.nan)
-    for i in range(26, n):
-        period26_high[i] = np.max(high[i-26:i+1])
-        period26_low[i] = np.min(low[i-26:i+1])
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = np.full(n, np.nan)
-    period52_low = np.full(n, np.nan)
-    for i in range(52, n):
-        period52_high[i] = np.max(high[i-52:i+1])
-        period52_low[i] = np.min(low[i-52:i+1])
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Get 12h data for cloud filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:
+    # Get 1d data for Camarilla pivots and chop regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Ichimoku cloud
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate Camarilla pivot levels on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (9-period)
-    tenkan_12h = np.full(len(df_12h), np.nan)
-    period9_high_12h = np.full(len(df_12h), np.nan)
-    period9_low_12h = np.full(len(df_12h), np.nan)
-    for i in range(9, len(df_12h)):
-        period9_high_12h[i] = np.max(high_12h[i-9:i+1])
-        period9_low_12h[i] = np.min(low_12h[i-9:i+1])
-    tenkan_12h = (period9_high_12h + period9_low_12h) / 2
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    camarilla_h6 = np.full(len(df_1d), np.nan)
+    camarilla_l6 = np.full(len(df_1d), np.nan)
     
-    # Kijun-sen (26-period)
-    kijun_12h = np.full(len(df_12h), np.nan)
-    period26_high_12h = np.full(len(df_12h), np.nan)
-    period26_low_12h = np.full(len(df_12h), np.nan)
-    for i in range(26, len(df_12h)):
-        period26_high_12h[i] = np.max(high_12h[i-26:i+1])
-        period26_low_12h[i] = np.min(low_12h[i-26:i+1])
-    kijun_12h = (period26_high_12h + period26_low_12h) / 2
+    for i in range(len(df_1d)):
+        if i == 0:
+            camarilla_r3[i] = np.nan
+            camarilla_s3[i] = np.nan
+            camarilla_h4[i] = np.nan
+            camarilla_l4[i] = np.nan
+            camarilla_h6[i] = np.nan
+            camarilla_l6[i] = np.nan
+            continue
+            
+        # Use previous day's data for today's levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        range_val = prev_high - prev_low
+        
+        camarilla_h4[i] = pivot + range_val * 1.1 / 2.0
+        camarilla_l4[i] = pivot - range_val * 1.1 / 2.0
+        camarilla_h6[i] = pivot + range_val * 1.1 / 4.0
+        camarilla_l6[i] = pivot - range_val * 1.1 / 4.0
+        camarilla_r3[i] = pivot + range_val * 1.1
+        camarilla_s3[i] = pivot - range_val * 1.1
     
-    # Senkou Span A
-    senkou_a_12h = (tenkan_12h + kijun_12h) / 2
+    # Calculate Chopiness Index on 1d data (14-period)
+    chop_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        atr_sum = 0
+        for j in range(i-13, i+1):
+            tr = max(high_1d[j] - low_1d[j],
+                     abs(high_1d[j] - close_1d[j-1]),
+                     abs(low_1d[j] - close_1d[j-1]))
+            atr_sum += tr
+        atr = atr_sum / 14
+        max_high = np.max(high_1d[i-13:i+1].values)
+        min_low = np.min(low_1d[i-13:i+1].values)
+        if max_high != min_low:
+            chop_1d[i] = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+        else:
+            chop_1d[i] = 50  # neutral when no range
     
-    # Senkou Span B (52-period)
-    senkou_b_12h = np.full(len(df_12h), np.nan)
-    period52_high_12h = np.full(len(df_12h), np.nan)
-    period52_low_12h = np.full(len(df_12h), np.nan)
-    for i in range(52, len(df_12h)):
-        period52_high_12h[i] = np.max(high_12h[i-52:i+1])
-        period52_low_12h[i] = np.min(low_12h[i-52:i+1])
-    senkou_b_12h = (period52_high_12h + period52_low_12h) / 2
+    # Align 1d data to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Align 12h cloud to 6h timeframe
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a_12h)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b_12h)
-    
-    # Determine cloud boundaries (max/min of Senkou A and B)
-    upper_cloud_12h = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    lower_cloud_12h = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Calculate volume ratio (current vs 20-period average)
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):
-        # Skip if any values are NaN
-        if np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(upper_cloud_12h[i]) or np.isnan(lower_cloud_12h[i]):
+    for i in range(50, n):
+        vol_r = vol_ratio[i]
+        ch = chop_aligned[i]
+        price = close[i]
+        
+        if np.isnan(vol_r) or np.isnan(ch):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        price = close[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        upper_cloud = upper_cloud_12h[i]
-        lower_cloud = lower_cloud_12h[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        h4 = camarilla_h4_aligned[i]
+        l4 = camarilla_l4_aligned[i]
+        
+        if np.isnan(r3) or np.isnan(s3) or np.isnan(h4) or np.isnan(l4):
+            if position != 0:
+                pass  # Hold position
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit if TK cross turns bearish or price drops below cloud
-            if tenkan_val < kijun_val or price < lower_cloud:
+            if price > h4 or ch > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if TK cross turns bullish or price rises above cloud
-            if tenkan_val > kijun_val or price > upper_cloud:
+            if price < l4 or ch > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long if price above cloud and bullish TK cross
-            if price > upper_cloud and tenkan_val > kijun_val:
-                position = 1
-                signals[i] = 0.25
-            # Enter short if price below cloud and bearish TK cross
-            elif price < lower_cloud and tenkan_val < kijun_val:
+            if price <= s3 and vol_r > 2.0 and ch < 61.8:
                 position = -1
                 signals[i] = -0.25
+            elif price >= r3 and vol_r > 2.0 and ch < 61.8:
+                position = 1
+                signals[i] = 0.25
     
     return signals
