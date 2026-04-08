@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1d_trend_volume
-# Hypothesis: Camarilla pivot levels from 1d combined with 1d EMA trend filter and volume confirmation.
-# Long when price breaks above R4 with uptrend (price > 1d EMA50) and volume > 1.5x average.
-# Short when price breaks below S4 with downtrend (price < 1d EMA50) and volume > 1.5x average.
-# Fade trades at R3/S3 when price rejects these levels with confluence.
-# Designed to capture strong breakouts and fade false moves in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (~12-37/year).
+# 1h_ema_cross_4h1d_trend_volume
+# Hypothesis: EMA crossovers on 1h combined with 4h and 1d trend filters and volume confirmation.
+# Long when fast EMA crosses above slow EMA on 1h, price above 4h EMA50 and 1d EMA200, and volume > 1.5x average.
+# Short when fast EMA crosses below slow EMA on 1h, price below 4h EMA50 and 1d EMA200, and volume > 1.5x average.
+# Exit when opposite EMA crossover occurs or trend filters fail.
+# Designed to capture strong trends with confirmation from higher timeframes and volume.
+# Target: 60-150 total trades over 4 years (~15-37/year) for 1h timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume"
-timeframe = "12h"
+name = "1h_ema_cross_4h1d_trend_volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,41 +26,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get 4h and 1d data for trend filters
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1h EMAs for crossover signal
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Camarilla levels from previous day
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    # Where C, H, L are from previous day
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day will have NaN due to roll, that's fine
-    
-    rang = prev_high - prev_low
-    r4 = prev_close + (rang * 1.1 / 2)
-    r3 = prev_close + (rang * 1.1 / 4)
-    s3 = prev_close - (rang * 1.1 / 4)
-    s4 = prev_close - (rang * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,13 +51,13 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -84,41 +66,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 OR trend turns against us
-            if (close[i] < s3_aligned[i]) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: EMA cross down OR trend filters fail
+            if (ema_fast[i] < ema_slow[i]) or (close[i] < ema_50_4h_aligned[i]) or (close[i] < ema_200_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 OR trend turns against us
-            if (close[i] > r3_aligned[i]) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: EMA cross up OR trend filters fail
+            if (ema_fast[i] > ema_slow[i]) or (close[i] > ema_50_4h_aligned[i]) or (close[i] > ema_200_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout entries: R4 breakout (long) and S4 breakdown (short)
-            if (close[i] > r4_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_ok:
+            # EMA crossover entries
+            if (ema_fast[i] > ema_slow[i]) and (close[i] > ema_50_4h_aligned[i]) and (close[i] > ema_200_1d_aligned[i]) and volume_ok:
                 position = 1
-                signals[i] = 0.25
-            elif (close[i] < s4_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_ok:
+                signals[i] = 0.20
+            elif (ema_fast[i] < ema_slow[i]) and (close[i] < ema_50_4h_aligned[i]) and (close[i] < ema_200_1d_aligned[i]) and volume_ok:
                 position = -1
-                signals[i] = -0.25
-            # Fade entries: Rejection at R3/S3 with trend confirmation
-            elif (close[i] < r3_aligned[i] and close[i] > r3_aligned[i] * 0.995) and \
-                 (close[i] > ema_50_1d_aligned[i]) and volume_ok:
-                # Fade at R3 in uptrend - short
-                position = -1
-                signals[i] = -0.25
-            elif (close[i] > s3_aligned[i] and close[i] < s3_aligned[i] * 1.005) and \
-                 (close[i] < ema_50_1d_aligned[i]) and volume_ok:
-                # Fade at S3 in downtrend - long
-                position = 1
-                signals[i] = 0.25
+                signals[i] = -0.20
     
     return signals
