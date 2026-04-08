@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-1h Bollinger Band Width Breakout with 4h Trend Filter
-Hypothesis: Low volatility contractions (BB width < 50th percentile) followed by breakouts in direction of 4h trend yield high-probability trades.
-Works in both bull and bear markets by using volatility regime + trend alignment. Targets 15-37 trades/year on 1h timeframe.
+6h Ichimoku Cloud with 1d Trend Filter and Volume Confirmation
+Hypothesis: Ichimoku TK cross signals filtered by 1d EMA trend and volume spikes capture
+trend continuations in both bull and bear markets, while avoiding false signals in ranging conditions.
+Targets 12-37 trades/year with moderate turnover to balance opportunity and fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_bb_width_breakout_4h_trend_v1"
-timeframe = "1h"
+name = "6h_ichimoku_cloud_1d_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,90 +25,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Bollinger Band Width percentile (50-period lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h trend filter: EMA(50)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # For signal generation, we use current price vs Senkou Span
+    
+    # Align Ichimoku components to avoid look-ahead
+    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, prices, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
+    
+    # Volume filter: current volume > 1.5x 24-period average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if required data is NaN
-        if (np.isnan(bb_width_percentile[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
+    for i in range(52, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        if not in_session[i]:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price touches middle band or volatility expands (width > 70th percentile)
-            if (close[i] <= bb_middle[i] or 
-                bb_width_percentile[i] > 70):
+            # Exit: price closes below Kumo (cloud) or TK cross turns bearish
+            if (close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i]) or \
+               (tenkan_aligned[i] < kijun_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches middle band or volatility expands
-            if (close[i] >= bb_middle[i] or 
-                bb_width_percentile[i] > 70):
+            # Exit: price closes above Kumo (cloud) or TK cross turns bullish
+            if (close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i]) or \
+               (tenkan_aligned[i] > kijun_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volatility contraction: BB width < 50th percentile (low volatility)
-            vol_contract = bb_width_percentile[i] < 50
+            # Trend filter: price vs 1d EMA50
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Trend direction
-            uptrend = close[i] > ema_50_4h_aligned[i]
-            downtrend = close[i] < ema_50_4h_aligned[i]
+            # TK Cross signals
+            tk_bullish = tenkan_aligned[i] > kijun_aligned[i]
+            tk_bearish = tenkan_aligned[i] < kijun_aligned[i]
             
-            # Breakout conditions
-            breakout_up = close[i] > bb_upper[i]
-            breakout_down = close[i] < bb_lower[i]
+            # Cloud twist (Senkou A > Senkou B = bullish cloud, A < B = bearish cloud)
+            cloud_bullish = senkou_a_aligned[i] > senkou_b_aligned[i]
+            cloud_bearish = senkou_a_aligned[i] < senkou_b_aligned[i]
             
-            # Long: upward breakout during low volatility + uptrend
-            if (breakout_up and 
-                vol_contract and 
-                uptrend):
+            # Long: TK bullish cross + price above cloud + uptrend + volume spike
+            if (tk_bullish and 
+                close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i] and
+                uptrend and 
+                vol_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: downward breakout during low volatility + downtrend
-            elif (breakout_down and 
-                  vol_contract and 
-                  downtrend):
+                signals[i] = 0.25
+            # Short: TK bearish cross + price below cloud + downtrend + volume spike
+            elif (tk_bearish and 
+                  close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i] and
+                  downtrend and 
+                  vol_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
