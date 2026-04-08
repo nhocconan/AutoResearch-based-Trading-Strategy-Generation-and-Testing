@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v1
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Long when price breaks above 20-bar high + price > 1d EMA50 + volume > 1.5x avg volume.
-# Short when price breaks below 20-bar low + price < 1d EMA50 + volume > 1.5x avg volume.
-# Exit on opposite Donchian breakout or volume failure.
-# Designed to capture trend continuations in both bull and bear markets with controlled trade frequency.
-# Target: 20-40 trades/year.
+# 4h_donchian_breakout_12h_trend_volume_v1
+# Hypothesis: 4h Donchian channel breakout with 12h trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high with 12h uptrend and volume > 1.5x average.
+# Short when price breaks below Donchian(20) low with 12h downtrend and volume > 1.5x average.
+# Uses volume filter to reduce false signals and trend filter to avoid counter-trend trades.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,35 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
+    # Donchian channel (20-period)
     lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
     for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+        donchian_high[i] = np.max(high[i - lookback + 1:i + 1])
+        donchian_low[i] = np.min(low[i - lookback + 1:i + 1])
     
     # Volume average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i - 19:i + 1])
     
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    close_daily = df_daily['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Daily EMA (50-period)
-    ema_period = 50
-    ema_daily = np.full_like(close_daily, np.nan)
-    for i in range(ema_period - 1, len(close_daily)):
+    # 12h EMA (34-period) for trend
+    ema_period = 34
+    ema_12h = np.full(len(close_12h), np.nan)
+    for i in range(ema_period - 1, len(close_12h)):
         if i == ema_period - 1:
-            ema_daily[i] = np.mean(close_daily[:ema_period])
+            ema_12h[i] = np.mean(close_12h[:ema_period])
         else:
-            ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Align daily EMA to 12h timeframe
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -64,7 +63,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(lookback, ema_period) + 5
+    start_idx = max(lookback, 19, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -73,44 +72,44 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Higher timeframe trend filter
-        uptrend_htf = close[i] > ema_daily_aligned[i]
-        downtrend_htf = close[i] < ema_daily_aligned[i]
+        # 12h trend filter
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit on bearish Donchian break or volume failure
-            if close[i] < lowest_low[i] or not volume_filter:
+            # Exit if price breaks below Donchian low or trend fails
+            if close[i] < donchian_low[i] or not uptrend_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on bullish Donchian break or volume failure
-            if close[i] > highest_high[i] or not volume_filter:
+            # Exit if price breaks above Donchian high or trend fails
+            if close[i] > donchian_high[i] or not downtrend_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: bullish Donchian break, volume confirmation, and daily uptrend
-            if (close[i] > highest_high[i] and 
+            # Long entry: break above Donchian high, volume confirmation, 12h uptrend
+            if (close[i] > donchian_high[i] and 
                 volume_filter and 
-                uptrend_htf):
+                uptrend_12h):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish Donchian break, volume confirmation, and daily downtrend
-            elif (close[i] < lowest_low[i] and 
+            # Short entry: break below Donchian low, volume confirmation, 12h downtrend
+            elif (close[i] < donchian_low[i] and 
                   volume_filter and 
-                  downtrend_htf):
+                  downtrend_12h):
                 position = -1
                 signals[i] = -0.25
     
