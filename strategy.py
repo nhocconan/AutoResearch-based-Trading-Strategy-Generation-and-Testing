@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 4h_donchian20_volatility_breakout_v1
+# 4h_donchian20_volatility_breakout_v2
 # Hypothesis: Breakouts from Donchian channels with volatility compression (ATR ratio) and volume confirmation.
 # Long when price breaks above Donchian(20) high, ATR ratio > 1.5 (expanding volatility), and volume > 1.5x average.
 # Short when price breaks below Donchian(20) low, ATR ratio > 1.5, and volume > 1.5x average.
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volatility_breakout_v1"
+name = "4h_donchian20_volatility_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
