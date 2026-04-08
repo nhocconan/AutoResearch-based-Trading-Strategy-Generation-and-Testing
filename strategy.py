@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v1
+# 4h_fractal_breakout_1d_trend_volume_v2
 # Hypothesis: Williams Fractal breakouts on 4h timeframe with 1d trend filter (ADX > 25) and volume confirmation (volume > 1.5x 20-period average) capture strong momentum moves. Works in bull/bear markets by requiring trend alignment and volume surge. Fractals provide objective support/resistance levels. Position size 0.25 manages risk. Target: 20-50 trades/year per symbol.
 
-name = "4h_fractal_breakout_1d_trend_volume_v1"
+name = "4h_fractal_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
