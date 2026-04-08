@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_1d_weekly_pivot_breakout_volume_v1
-Hypothesis: Use 6h price action with 1d/1w pivot levels and volume confirmation.
+12h_1d_weekly_pivot_breakout_volume_v2
+Hypothesis: Use 12h price action with weekly pivot levels and volume confirmation.
 Long when price breaks above weekly pivot resistance with bullish daily bias and volume.
 Short when price breaks below weekly pivot support with bearish daily bias and volume.
 Designed to capture institutional breakouts at key weekly levels with trend alignment.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years) by requiring strong breakouts at pivot levels.
+Target: 12-37 trades/year per symbol (48-148 total over 4 years) by requiring strong breakouts at pivot levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_weekly_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_weekly_pivot_breakout_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,9 +27,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for price action
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 2:
+    # Get 12h data for price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # Get 1d data for daily bias
@@ -57,7 +57,7 @@ def generate_signals(prices):
     r3 = high_1w + 2 * (pivot_point - low_1w)
     s3 = low_1w - 2 * (high_1w - pivot_point)
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
