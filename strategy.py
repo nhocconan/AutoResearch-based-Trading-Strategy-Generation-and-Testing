@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v3"
-timeframe = "12h"
+name = "6d_weekly_volatility_breakout_1d_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,52 +18,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for indicators
+    # Weekly data for volatility and trend
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Camarilla pivot levels (using previous day's data)
-    pivot_point = (high_1d + low_1d + close_1d) / 3.0
-    daily_range = high_1d - low_1d
+    # Weekly volatility breakout: Donchian(4) on weekly high/low
+    # Lookback period of 4 weeks (~1 month)
+    highest_high_4w = pd.Series(high_1w).rolling(window=4, min_periods=4).max().values
+    lowest_low_4w = pd.Series(low_1w).rolling(window=4, min_periods=4).min().values
     
-    # Camarilla levels (core levels only)
-    r3 = close_1d + daily_range * 1.1 / 4
-    r2 = close_1d + daily_range * 1.1 / 6
-    r1 = close_1d + daily_range * 1.1 / 12
-    s1 = close_1d - daily_range * 1.1 / 12
-    s2 = close_1d - daily_range * 1.1 / 6
-    s3 = close_1d - daily_range * 1.1 / 4
+    # Align weekly levels to 6h timeframe
+    highest_high_4w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_4w)
+    lowest_low_4w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_4w)
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 1d EMA(50) for trend filter
+    # Daily EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR for volatility filter (14-period)
-    tr1 = pd.Series(high).subtract(pd.Series(low)).abs()
-    tr2 = pd.Series(high).subtract(pd.Series(close).shift(1)).abs()
-    tr3 = pd.Series(low).subtract(pd.Series(close).shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Volatility filter: ATR > 20-period ATR mean (avoid choppy markets)
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr > atr_ma
-    
-    # Volume filter: current volume > 1.5x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Weekly ATR for volatility filter
+    tr1_w = pd.Series(high_1w).subtract(pd.Series(low_1w)).abs()
+    tr2_w = pd.Series(high_1w).subtract(pd.Series(close_1w).shift(1)).abs()
+    tr3_w = pd.Series(low_1w).subtract(pd.Series(close_1w).shift(1)).abs()
+    tr_w = pd.concat([tr1_w, tr2_w, tr3_w], axis=1).max(axis=1)
+    atr_w = tr_w.rolling(window=4, min_periods=4).mean().values
+    atr_ma_w = pd.Series(atr_w).rolling(window=8, min_periods=8).mean().values
+    vol_filter_w = atr_w > atr_ma_w  # Only trade when volatility is elevated
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -71,45 +56,42 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(vol_filter[i])):
+            np.isnan(highest_high_4w_aligned[i]) or 
+            np.isnan(lowest_low_4w_aligned[i]) or
+            np.isnan(vol_filter_w[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 or trend reverses
-            if close[i] < s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price closes below weekly low or trend reverses
+            if close[i] < lowest_low_4w_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 or trend reverses
-            if close[i] > r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price closes above weekly high or trend reverses
+            if close[i] > highest_high_4w_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter: price vs 1d EMA50
+            # Trend filter: price vs daily EMA50
             uptrend = close[i] > ema_50_1d_aligned[i]
             downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long: price breaks above R3 + uptrend + volume spike + vol filter
-            if (close[i] > r3_aligned[i] and 
+            # Long: price breaks above weekly high + uptrend + volatility filter
+            if (close[i] > highest_high_4w_aligned[i] and 
                 uptrend and 
-                vol_spike[i] and
-                vol_filter[i]):
+                vol_filter_w[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below S3 + downtrend + volume spike + vol filter
-            elif (close[i] < s3_aligned[i] and 
+            # Short: price breaks below weekly low + downtrend + volatility filter
+            elif (close[i] < lowest_low_4w_aligned[i] and 
                   downtrend and 
-                  vol_spike[i] and
-                  vol_filter[i]):
+                  vol_filter_w[i]):
                 position = -1
                 signals[i] = -0.25
     
