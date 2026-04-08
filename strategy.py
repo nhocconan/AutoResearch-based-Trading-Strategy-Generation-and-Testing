@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v2
-# Hypothesis: 4h timeframe trading using daily Williams Fractal breakouts with volume confirmation and 1d trend filter. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Daily trend filter ensures alignment with higher timeframe direction. Target: 19-50 trades/year per symbol (75-200 total over 4 years).
+# 4h_fractal_breakout_1d_trend_volume_v5
+# Hypothesis: 4h timeframe trading using daily Williams Fractal breakouts with volume confirmation and 1d trend filter. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Daily trend filter ensures alignment with higher timeframe direction. Tightened volume threshold (3.0x) and reduced position size (0.20) to limit trades to target range (19-50/year).
 
-name = "4h_fractal_breakout_1d_trend_volume_v2"
+name = "4h_fractal_breakout_1d_trend_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -72,8 +72,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 2.0x 20-period average (stricter for fewer trades)
-        vol_breakout = volume[i] > 2.0 * vol_ma[i]
+        # Volume breakout condition: current volume > 3.0x 20-period average (stricter for fewer trades)
+        vol_breakout = volume[i] > 3.0 * vol_ma[i]
         
         # Trend filter: price above/below daily EMA20
         uptrend = close[i] > ema20_val
@@ -85,7 +85,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit if price breaks above bearish fractal (resistance)
@@ -93,15 +93,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
             # Breakout long above bearish fractal (resistance) with volume confirmation and uptrend
             if not np.isnan(bearish_val) and high[i] >= bearish_val and close[i] > bearish_val and vol_breakout and uptrend:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.20
             # Breakout short below bullish fractal (support) with volume confirmation and downtrend
             elif not np.isnan(bullish_val) and low[i] <= bullish_val and close[i] < bullish_val and vol_breakout and downtrend:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
