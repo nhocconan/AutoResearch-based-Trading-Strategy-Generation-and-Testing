@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: Camarilla pivot levels from daily timeframe act as intraday support/resistance on 4h chart.
-# Long when price breaks above H3 with volume spike; short when breaks below L3 with volume spike.
-# Use choppiness regime filter to avoid false breakouts in ranging markets.
-# Designed to work in both bull (breakouts) and bear (mean reversion at extremes) markets.
-# Volume confirmation ensures institutional participation; chop filter avoids whipsaws.
+# 1d_1w_donchian_breakout_volume_chop_v1
+# Hypothesis: 1d Donchian channel breakout with weekly trend filter, volume confirmation, and chop regime avoidance.
+# Long: price breaks above Donchian(20) high AND weekly EMA(21) rising AND volume > 1.5x average AND chop < 61.8
+# Short: price breaks below Donchian(20) low AND weekly EMA(21) falling AND volume > 1.5x average AND chop < 61.8
+# Exit: opposite Donchian breakout or chop > 61.8 (range) or volume drops
+# Designed to capture strong trends in both bull and bear markets while avoiding false breakouts in choppy/ranging conditions.
+# Weekly EMA provides multi-timeframe trend direction, volume confirms institutional participation, chop filter avoids whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,99 +25,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Daily Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
+    
+    # Weekly EMA(21) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H3 = close + 1.1*(high-low)/2
-    # L3 = close - 1.1*(high-low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Weekly EMA slope (rising/falling)
+    ema_slope = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(ema_21_1w_aligned[i]) and not np.isnan(ema_21_1w_aligned[i-1]):
+            ema_slope[i] = ema_21_1w_aligned[i] - ema_21_1w_aligned[i-1]
     
-    # Align to 4h timeframe (completed daily bars only)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume spike detection (20-period volume average)
-    vol_ma = np.full(n, np.nan)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if vol_count >= 20:
-            vol_ma[i] = vol_sum / vol_count
-            vol_sum -= volume[i - 19]
-            vol_count -= 1
-    
-    volume_spike = np.zeros(n, dtype=bool)
+    # Average volume (20-period)
+    avg_volume = np.full(n, np.nan)
     for i in range(20, n):
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            volume_spike[i] = volume[i] > 2.0 * vol_ma[i]
+        avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Choppiness regime filter (14-period)
+    # Choppiness Index (14-period) - measures ranging vs trending
     chop = np.full(n, np.nan)
     for i in range(14, n):
-        highest_high = np.max(high[i-14:i+1])
-        lowest_low = np.min(low[i-14:i+1])
         atr_sum = 0.0
-        for j in range(i-14, i+1):
+        for j in range(i-13, i+1):
             tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
             atr_sum += tr
-        atr = atr_sum / 15
-        if atr > 0 and (highest_high - lowest_low) > 0:
+        if atr_sum > 0:
+            highest_high = np.max(high[i-13:i+1])
+            lowest_low = np.min(low[i-13:i+1])
             chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-        else:
-            chop[i] = 50.0
-    
-    # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
-    # We use CHOP < 50 to avoid strong trends where breakouts fail
-    chop_regime = np.zeros(n, dtype=bool)
-    for i in range(n):
-        if not np.isnan(chop[i]):
-            chop_regime[i] = chop[i] < 50.0  # Prefer trending to ranging for breakouts
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]):
+    for i in range(30, n):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_slope[i]) or np.isnan(avg_volume[i]) or np.isnan(chop[i]):
             if position != 0:
-                pass  # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        price = close[i]
+        vol_ratio = volume[i] / avg_volume[i] if avg_volume[i] > 0 else 0
+        
+        # Long conditions: breakout above Donchian high + weekly uptrend + volume spike + not choppy
+        long_breakout = price > donch_high[i]
+        long_trend = ema_slope[i] > 0  # Weekly EMA rising
+        long_volume = vol_ratio > 1.5  # Volume > 1.5x average
+        long_chop = chop[i] < 61.8  # Not in choppy regime (trending)
+        
+        # Short conditions: breakout below Donchian low + weekly downtrend + volume spike + not choppy
+        short_breakout = price < donch_low[i]
+        short_trend = ema_slope[i] < 0  # Weekly EMA falling
+        short_volume = vol_ratio > 1.5  # Volume > 1.5x average
+        short_chop = chop[i] < 61.8  # Not in choppy regime (trending)
+        
         if position == 1:  # Long position
-            # Exit: price drops below H3 or momentum fails
-            if close[i] < h3_aligned[i] or not chop_regime[i]:
+            # Exit: price breaks below Donchian low OR chop increases (range) OR volume drops significantly
+            if price < donch_low[i] or chop[i] > 61.8 or vol_ratio < 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above L3 or momentum fails
-            if close[i] > l3_aligned[i] or not chop_regime[i]:
+            # Exit: price breaks above Donchian high OR chop increases (range) OR volume drops significantly
+            if price > donch_high[i] or chop[i] > 61.8 or vol_ratio < 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H3 with volume spike in trending regime
-            if close[i] > h3_aligned[i] and volume_spike[i] and chop_regime[i]:
+            # Enter long: bullish breakout with confirmation
+            if long_breakout and long_trend and long_volume and long_chop:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L3 with volume spike in trending regime
-            elif close[i] < l3_aligned[i] and volume_spike[i] and chop_regime[i]:
+            # Enter short: bearish breakout with confirmation
+            elif short_breakout and short_trend and short_volume and short_chop:
                 position = -1
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
