@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_ema_trend_follow_v1
-# Hypothesis: 6-hour EMA trend following with 1-day EMA filter and volume confirmation.
-# Long when price > 20 EMA and 20 EMA > 50 EMA on 6h, with price > 20 EMA on 1d and volume > 1.5x average.
-# Short when price < 20 EMA and 20 EMA < 50 EMA on 6h, with price < 20 EMA on 1d and volume > 1.5x average.
-# Exit when trend reverses (20 EMA crosses 50 EMA) or volume drops below average.
-# Designed to capture strong trends while avoiding choppy markets, targeting 15-30 trades/year.
+# 1d_1w_keltner_squeeze_breakout_v1
+# Hypothesis: Daily Keltner channel breakout with weekly trend filter to capture strong trends while avoiding whipsaws.
+# Long when price breaks above upper Keltner band and weekly EMA21 > weekly EMA50.
+# Short when price breaks below lower Keltner band and weekly EMA21 < weekly EMA50.
+# Exit when price re-enters Keltner channel or weekly trend reverses.
+# Uses Keltner channels on daily for volatility-based breakouts and weekly EMA for trend filter.
+# Designed to generate ~10-20 trades/year to minimize fee decay while capturing major trends.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mfe_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ema_trend_follow_v1"
-timeframe = "6h"
+name = "1d_1w_keltner_squeeze_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,36 +23,60 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate EMAs on 6h data
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
+    # Calculate ATR for Keltner channels
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    for i in range(1, n):
+        if i < 14:
+            atr[i] = np.nan
+        else:
+            atr[i] = np.nanmean(tr[i-13:i+1])
     
-    # Calculate average volume for confirmation
-    vol_series = pd.Series(volume)
-    avg_volume = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Keltner channels (20-period EMA +/- 2*ATR)
+    ema20 = np.full(n, np.nan)
+    ema20_smooth = close.astype(float)
+    for i in range(n):
+        if i == 0:
+            ema20[i] = close[i]
+        else:
+            ema20[i] = 0.1 * close[i] + 0.9 * ema20[i-1]
     
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    upper_keltner = ema20 + 2 * atr
+    lower_keltner = ema20 - 2 * atr
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).values
+    close_1w = df_1w['close'].values
     
-    # Align 1d EMA to 6h timeframe
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Weekly EMA21 and EMA50 for trend filter
+    ema21_1w = np.full(len(close_1w), np.nan)
+    ema50_1w = np.full(len(close_1w), np.nan)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema21_1w[i] = close_1w[i]
+            ema50_1w[i] = close_1w[i]
+        else:
+            ema21_1w[i] = 0.09 * close_1w[i] + 0.91 * ema21_1w[i-1]
+            ema50_1w[i] = 0.04 * close_1w[i] + 0.96 * ema50_1w[i-1]
+    
+    # Align weekly EMAs to daily timeframe
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(ema_20_1d_aligned[i])):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -59,33 +84,40 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        vol = volume[i]
+        upper_keltner_val = upper_keltner[i]
+        lower_keltner_val = lower_keltner[i]
+        ema21_1w_val = ema21_1w_aligned[i]
+        ema50_1w_val = ema50_1w_aligned[i]
         
         if position == 1:  # Long
-            # Exit: trend reversal or low volume
-            if ema_20[i] < ema_50[i] or vol < avg_volume[i]:
+            # Exit: price re-enters Keltner channel or weekly trend reverses (EMA21 < EMA50)
+            if price <= upper_keltner_val and price >= lower_keltner_val:
+                position = 0
+                signals[i] = 0.0
+            elif ema21_1w_val < ema50_1w_val:  # Bearish trend reversal
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: trend reversal or low volume
-            if ema_20[i] > ema_50[i] or vol < avg_volume[i]:
+            # Exit: price re-enters Keltner channel or weekly trend reverses (EMA21 > EMA50)
+            if price <= upper_keltner_val and price >= lower_keltner_val:
+                position = 0
+                signals[i] = 0.0
+            elif ema21_1w_val > ema50_1w_val:  # Bullish trend reversal
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: EMA alignment with volume confirmation
-            # Bullish: price > EMA20 > EMA50 on 6h, price > EMA20 on 1d, volume > 1.5x average
-            if (price > ema_20[i] and ema_20[i] > ema_50[i] and 
-                price > ema_20_1d_aligned[i] and vol > 1.5 * avg_volume[i]):
+            # Entry conditions: Keltner breakout with weekly trend alignment
+            # Bullish: price breaks above upper Keltner and weekly EMA21 > EMA50
+            if price > upper_keltner_val and ema21_1w_val > ema50_1w_val:
                 position = 1
                 signals[i] = 0.25
-            # Bearish: price < EMA20 < EMA50 on 6h, price < EMA20 on 1d, volume > 1.5x average
-            elif (price < ema_20[i] and ema_20[i] < ema_50[i] and 
-                  price < ema_20_1d_aligned[i] and vol > 1.5 * avg_volume[i]):
+            # Bearish: price breaks below lower Keltner and weekly EMA21 < EMA50
+            elif price < lower_keltner_val and ema21_1w_val < ema50_1w_val:
                 position = -1
                 signals[i] = -0.25
     
