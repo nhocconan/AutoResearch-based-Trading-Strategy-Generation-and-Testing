@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d ADX trend filter and volume compression release
-Hypothesis: Price breaking above/below 12-hour Donchian channels during strong daily trends
-(captured by ADX > 25 on daily) with volume expansion (current > 1.5x 20-period avg) captures
-sustained moves while avoiding whipsaw. Using higher timeframe trend filter reduces trade
-frequency to target 12-37/year. Works in both bull and bear markets by requiring strong daily
-trend alignment. Uses 12h timeframe as required.
+4h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter
+Hypothesis: Price breaking above/below 4-hour Donchian channels during strong daily trends
+(captured by ADX > 25 on daily) with volume expansion (current > 1.5x 12-period avg on 12h)
+captures sustained moves while avoiding whipsaw. Using higher timeframe trend filter reduces
+trade frequency to target 20-50/year. Works in both bull and bear markets by requiring strong
+daily trend alignment. Uses 4h timeframe as required.
 """
 
-name = "12h_donchian_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_12h_vol_1d_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,6 +26,10 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get 12h data for volume average (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
     
     # Get 1d data for ADX (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
@@ -61,10 +65,10 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # 20-period volume average for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 12-period volume average for confirmation on 12h data
+    vol_avg_12 = pd.Series(volume_12h).rolling(window=12, min_periods=12).mean().values
     
-    # 20-period Donchian channels for breakout signals on 12h data
+    # 20-period Donchian channels for breakout signals on 4h data
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -77,19 +81,22 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(adx_1d[i]) or 
-            np.isnan(vol_avg_20[i]) or 
+            np.isnan(vol_avg_12[i]) or 
             np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d value for current 12h bar
+        # Get aligned 1d value for current 4h bar
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        
+        # Get aligned 12h value for current 4h bar
+        vol_avg_12_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12)[i]
         
         # Regime filter: only trade in strong trending markets on daily
         strong_trend_1d = adx_1d_aligned > 25
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current volume > 1.5x 12-period average on 12h
+        volume_confirm = volume[i] > 1.5 * vol_avg_12_aligned
         
         if position == 1:  # Long position
             # Exit: price closes below 20-period Donchian low
