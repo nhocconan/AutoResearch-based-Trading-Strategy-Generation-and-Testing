@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 12h_1w_1d_camarilla_pivot_v1
-# Hypothesis: 12-hour Camarilla pivot strategy with weekly trend filter and daily volume confirmation.
-# Long when price touches S3 with bullish weekly trend and above-average volume.
-# Short when price touches R3 with bearish weekly trend and above-average volume.
-# Exit when price crosses the pivot point (PP).
-# Uses weekly trend for direction, daily volume for confirmation, and Camarilla levels for precise entries.
-# Target: 12-37 trades/year to stay within optimal range for 12h timeframe.
+# 4h_1d_camarilla_pivot_v2
+# Hypothesis: In both bull and bear markets, price tends to revert to the mean around key intraday support/resistance levels.
+# Uses Camarilla pivot levels (based on prior day's OHLC) from 1d timeframe as dynamic support/resistance.
+# Enters long when price crosses above S1 with volume confirmation and low chop (range-bound market).
+# Enters short when price crosses below R1 with volume confirmation and low chop.
+# Exits when price reaches the opposite pivot level (R1 for longs, S1 for shorts) or when chop increases (trending regime).
+# Uses 1d for pivot levels and regime filter, 4h for entry timing to avoid overtrading.
+# Target: 20-40 trades/year to minimize fee drag while capturing mean reversion in range-bound markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,112 +26,164 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily volume average for confirmation
-    vol_ma = np.zeros(n)
-    vol_ma[:] = np.nan
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend
-    ema_1w_20 = np.zeros(len(close_1w))
-    ema_1w_20[:] = np.nan
-    if len(close_1w) >= 20:
-        ema_1w_20[19] = np.mean(close_1w[:20])
-        for i in range(20, len(close_1w)):
-            ema_1w_20[i] = close_1w[i] * 0.0952 + ema_1w_20[i-1] * 0.9048
-    ema_1w_20_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_20)
-    
-    # Get daily data for Camarilla pivot levels
+    # Get 1d data for Camarilla pivot levels and chop filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels for each day
+    # Based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # PP = (H + L + C) / 3
-    # S1 = C - (H - L) * 1.1 / 12
-    # S2 = C - (H - L) * 1.1 / 6
-    # S3 = C - (H - L) * 1.1 * 0.5
-    # R3 = C + (H - L) * 1.1 * 0.5
-    # R2 = C + (H - L) * 1.1 / 6
-    # R1 = C + (H - L) * 1.1 / 12
-    camarilla_pp = np.zeros(len(close_1d))
+    # Camarilla levels: 
+    # S1 = C - (H-L)*1.05/6
+    # S2 = C - (H-L)*1.05/4
+    # S3 = C - (H-L)*1.05/2
+    # R1 = C + (H-L)*1.05/6
+    # R2 = C + (H-L)*1.05/4
+    # R3 = C + (H-L)*1.05/2
+    # We'll use S1 and R1 for entries, S3 and R3 for exits
+    
+    # Calculate for each day
+    camarilla_s1 = np.zeros(len(close_1d))
+    camarilla_r1 = np.zeros(len(close_1d))
     camarilla_s3 = np.zeros(len(close_1d))
     camarilla_r3 = np.zeros(len(close_1d))
     
-    for i in range(len(close_1d)):
-        h = high_1d[i]
-        l = low_1d[i]
-        c = close_1d[i]
-        pp = (h + l + c) / 3.0
-        camarilla_pp[i] = pp
-        camarilla_s3[i] = c - (h - l) * 1.1 * 0.5
-        camarilla_r3[i] = c + (h - l) * 1.1 * 0.5
+    for i in range(1, len(close_1d)):  # Start from 1 since we need previous day
+        h = high_1d[i-1]
+        l = low_1d[i-1]
+        c = close_1d[i-1]
+        rang = h - l
+        
+        camarilla_s1[i] = c - (rang * 1.05 / 6)
+        camarilla_r1[i] = c + (rang * 1.05 / 6)
+        camarilla_s3[i] = c - (rang * 1.05 / 2)
+        camarilla_r3[i] = c + (rang * 1.05 / 2)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    # For the first day, we don't have previous day data, so set to NaN
+    camarilla_s1[0] = np.nan
+    camarilla_r1[0] = np.nan
+    camarilla_s3[0] = np.nan
+    camarilla_r3[0] = np.nan
+    
+    # Align Camarilla levels to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    
+    # Calculate Choppiness Index on 1d timeframe for regime filter
+    # CHOP > 61.8 = ranging (good for mean reversion)
+    # CHOP < 38.2 = trending (avoid)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Add first TR (for first period) as high-low since no previous close
+    tr = np.concatenate([[high_1d[0] - low_1d[0]], tr])
+    
+    # ATR(14) - smoothed TR
+    atr_period = 14
+    atr = np.zeros(len(tr))
+    atr[:atr_period] = np.nan
+    if len(tr) > atr_period:
+        atr[atr_period] = np.mean(tr[:atr_period+1])
+        for i in range(atr_period+1, len(tr)):
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # Sum of TRUE RANGE over period
+    sum_tr = np.zeros(len(tr))
+    for i in range(len(tr)):
+        if i < atr_period:
+            sum_tr[i] = np.nan
+        else:
+            sum_tr[i] = np.sum(tr[i-atr_period+1:i+1])
+    
+    # Choppiness Index
+    chop = np.zeros(len(tr))
+    for i in range(len(tr)):
+        if np.isnan(sum_tr[i]) or np.isnan(atr[i]) or atr[i] == 0:
+            chop[i] = np.nan
+        else:
+            chop[i] = 100 * np.log10(sum_tr[i] / (atr[i] * atr_period)) / np.log10(atr_period)
+    
+    # Align chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume confirmation: volume > 20-period average
+    vol_ma = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma[i] = np.nan
+        else:
+            vol_ma[i] = np.mean(volume[i-20+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
-        price = close[i]
-        vol_ma_val = vol_ma[i]
-        weekly_trend = ema_1w_20_aligned[i]
-        pp_level = camarilla_pp_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        
-        # Skip if any values are not ready
-        if (np.isnan(vol_ma_val) or np.isnan(weekly_trend) or 
-            np.isnan(pp_level) or np.isnan(s3_level) or np.isnan(r3_level)):
+    # Start from index 50 to ensure we have enough data for all indicators
+    for i in range(50, n):
+        # Skip if any key value is NaN
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
-                pass  # Hold current position
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 20-period average
-        volume_ok = volume[i] > vol_ma_val
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         
         if position == 1:  # Long position
-            # Exit: price crosses above pivot point (PP)
-            if price > pp_level:
+            # Exit conditions:
+            # 1. Price reaches R3 (target)
+            # 2. Chop drops below 40 (trending regime - avoid mean reversion in trend)
+            # 3. Volume drops significantly (loss of momentum)
+            if (close[i] >= r3_aligned[i] or 
+                chop_aligned[i] < 40 or 
+                vol_ratio < 0.5):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses below pivot point (PP)
-            if price < pp_level:
+            # Exit conditions:
+            # 1. Price reaches S3 (target)
+            # 2. Chop drops below 40 (trending regime - avoid mean reversion in trend)
+            # 3. Volume drops significantly (loss of momentum)
+            if (close[i] <= s3_aligned[i] or 
+                chop_aligned[i] < 40 or 
+                vol_ratio < 0.5):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
-        else:  # Flat - look for new entries
-            # Long entry: price at or below S3 with bullish weekly trend and volume confirmation
-            if (price <= s3_level and 
-                price > weekly_trend and  # Price above weekly EMA20 = bullish trend
-                volume_ok):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price at or above R3 with bearish weekly trend and volume confirmation
-            elif (price >= r3_level and 
-                  price < weekly_trend and  # Price below weekly EMA20 = bearish trend
-                  volume_ok):
-                position = -1
                 signals[i] = -0.25
+        else:  # Flat - look for entry
+            # Long entry: price crosses above S1 with volume confirmation in ranging market
+            # Short entry: price crosses below R1 with volume confirmation in ranging market
+            if (chop_aligned[i] > 61.8 and  # Ranging market
+                vol_ratio > 1.5):  # Volume confirmation
+                
+                # Long: price crosses above S1
+                if (close[i] > s1_aligned[i] and 
+                    close[i-1] <= s1_aligned[i-1]):
+                    position = 1
+                    signals[i] = 0.25
+                    
+                # Short: price crosses below R1
+                elif (close[i] < r1_aligned[i] and 
+                      close[i-1] >= r1_aligned[i-1]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
