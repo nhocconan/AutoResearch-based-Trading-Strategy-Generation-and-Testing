@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_rsi_pullback_v2
-# Hypothesis: Pullback to 1d EMA with RSI oversold/overbought conditions on 4h timeframe.
-# Uses 1d EMA as long-term trend filter and 4h RSI for mean-reversion entries.
-# Works in both bull and bear markets by trading pullbacks to the trend.
-# Reduced position size and tightened entry to reduce trade frequency and improve win rate.
-# Target: 15-25 trades/year (60-100 total over 4 years).
+# 6h_ichimoku_cloud_trend_v1
+# Hypothesis: Ichimoku Cloud (Tenkan-sen/Kijun-sen cross + Kumo twist) on 1d timeframe
+# provides high-probability trend direction for 60-minute entries. The cloud acts as
+# dynamic support/resistance and the TK cross signals momentum shifts. This combines
+# trend-following with institutional-grade support/resistance, working in both bull
+# and bear markets by aligning with the higher timeframe trend while using the
+# 6-hour timeframe for precise entry timing.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_1d_ema_rsi_pullback_v2"
-timeframe = "4h"
+name = "6h_ichimoku_cloud_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,66 +18,105 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # 1d EMA trend filter (50-period)
+    # Ichimoku components on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h RSI (14-period)
-    rsi_period = 14
-    rsi = np.full(n, np.nan)
-    if n >= rsi_period:
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (high_9 + low_9) / 2
     
-    # Start from sufficient lookback
-    start_idx = max(50, rsi_period) + 5
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou_span = df_1d['close'].values
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    chikou_aligned = align_htf_to_ltf(prices, df_1d, chikou_span)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    
+    # Kumo twist: Senkou A crossing Senkou B (trend change signal)
+    # We use the previous bar's values to avoid look-ahead
+    senkou_a_prev = np.roll(senkou_a_aligned, 1)
+    senkou_b_prev = np.roll(senkou_b_aligned, 1)
+    senkou_a_prev[0] = np.nan
+    senkou_b_prev[0] = np.nan
+    
+    # Bullish twist: Senkou A crosses above Senkou B
+    # Bearish twist: Senkou A crosses below Senkou B
+    kumo_twist_bull = (senkou_a_aligned > senkou_b_aligned) & (senkou_a_prev <= senkou_b_prev)
+    kumo_twist_bear = (senkou_a_aligned < senkou_b_aligned) & (senkou_a_prev >= senkou_b_prev)
+    
+    # Start from sufficient lookback (max of all Ichimoku periods)
+    start_idx = max(52, 26) + 1
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI overbought or price breaks below EMA
-            if rsi[i] > 70 or close[i] < ema_1d_aligned[i]:
+            # Exit: Price breaks below cloud bottom OR TK cross turns bearish
+            if close[i] < cloud_bottom[i] or (tenkan_aligned[i] < kijun_aligned[i] and 
+                                              tenkan_aligned[i-1] >= kijun_aligned[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI oversold or price breaks above EMA
-            if rsi[i] < 30 or close[i] > ema_1d_aligned[i]:
+            # Exit: Price breaks above cloud top OR TK cross turns bullish
+            if close[i] > cloud_top[i] or (tenkan_aligned[i] > kijun_aligned[i] and 
+                                           tenkan_aligned[i-1] <= kijun_aligned[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: pullback to EMA with RSI oversold
-            if close[i] >= ema_1d_aligned[i] and rsi[i] < 30:
+            # Long: Price above cloud AND bullish TK cross AND bullish Kumo twist
+            if (close[i] > cloud_top[i] and 
+                tenkan_aligned[i] > kijun_aligned[i] and 
+                kumo_twist_bull[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: pullback to EMA with RSI overbought
-            elif close[i] <= ema_1d_aligned[i] and rsi[i] > 70:
+                signals[i] = 0.25
+            # Short: Price below cloud AND bearish TK cross AND bearish Kumo twist
+            elif (close[i] < cloud_bottom[i] and 
+                  tenkan_aligned[i] < kijun_aligned[i] and 
+                  kumo_twist_bear[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
