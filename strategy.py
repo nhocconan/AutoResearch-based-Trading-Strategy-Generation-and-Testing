@@ -1,36 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_pivot_v8
-Hypothesis: 4-hour strategy using daily context with corrected Camarilla pivot levels.
-Long when price crosses above daily R1 with volume > 1.8x average and price > daily EMA200.
-Short when price crosses below daily S1 with volume > 1.8x average and price < daily EMA200.
-Exit when price crosses opposite daily support/resistance or volume drops below 1.5x average.
-Uses discrete position sizing (0.25) to reduce trade frequency. Target: 25-35 trades/year.
+1h_4h1d_camarilla_pivot_v1
+Hypothesis: Use daily Camarilla pivot (S1/R1) with 4h trend filter and 1h entry timing.
+Long when price crosses above daily R1, volume > 2x average, and price > 4h EMA200.
+Short when price crosses below daily S1, volume > 2x average, and price < 4h EMA200.
+Exit when price crosses opposite level or volume drops below 1.5x average.
+Uses discrete position sizing (0.20) to limit trades to ~15-35/year.
+Designed for 1h timeframe with 4h/1d higher timeframe context.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v8"
-timeframe = "4h"
+name = "1h_4h1d_camarilla_pivot_v1"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    if len(high) < 1:
-        return np.full(len(high), np.nan), np.full(len(high), np.nan)
-    
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    # Standard Camarilla multipliers
-    H3 = pivot + (range_val * 1.1 / 4)
-    L3 = pivot - (range_val * 1.1 / 4)
-    H4 = pivot + (range_val * 1.1 / 2)
-    L4 = pivot - (range_val * 1.1 / 2)
-    
-    return H3, L3, H4, L4
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -70,14 +55,18 @@ def generate_signals(prices):
     S1_1d = pivot_1d - (range_1d * 1.1 / 12)  # Daily S1
     R1_1d = pivot_1d + (range_1d * 1.1 / 12)  # Daily R1
     
-    # Calculate daily EMA for trend filter
-    ema_200_1d = calculate_ema(close_1d, 200)
+    # Calculate 4h EMA for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
+        return np.zeros(n)
     
-    # Align indicators to 4-hour timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    close_4h = df_4h['close'].values
+    ema_200_4h = calculate_ema(close_4h, 200)
+    
+    # Align indicators to 1h timeframe
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -89,9 +78,8 @@ def generate_signals(prices):
     
     for i in range(200, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(S1_1d_aligned[i]) or np.isnan(R1_1d_aligned[i]) or 
+            np.isnan(ema_200_4h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -100,10 +88,9 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        pivot = pivot_1d_aligned[i]
         S1 = S1_1d_aligned[i]
         R1 = R1_1d_aligned[i]
-        trend_up_1d = price > ema_200_1d_aligned[i]
+        trend_up_4h = price > ema_200_4h_aligned[i]
         
         if position == 1:  # Long
             # Exit: price crosses below daily S1 or volume drops below 1.5x average
@@ -111,7 +98,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short
             # Exit: price crosses above daily R1 or volume drops below 1.5x average
@@ -119,15 +106,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter long: price crosses above daily R1 with volume expansion and uptrend on daily
-            if price > R1 and vol_ratio > 1.8 and trend_up_1d:
+            # Enter long: price crosses above daily R1 with volume expansion and uptrend on 4h
+            if price > R1 and vol_ratio > 2.0 and trend_up_4h:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price crosses below daily S1 with volume expansion and downtrend on daily
-            elif price < S1 and vol_ratio > 1.8 and not trend_up_1d:
+                signals[i] = 0.20
+            # Enter short: price crosses below daily S1 with volume expansion and downtrend on 4h
+            elif price < S1 and vol_ratio > 2.0 and not trend_up_4h:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
