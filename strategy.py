@@ -1,115 +1,118 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_regime_v1
-# Hypothesis: 4h Donchian(20) breakouts with volume confirmation and 12h/1d regime filter.
-# Long: price breaks above Donchian(20) upper band with volume > 1.5x 20-period average AND 12h close > 12h EMA50 (bullish regime)
-# Short: price breaks below Donchian(20) lower band with volume > 1.5x 20-period average AND 12h close < 12h EMA50 (bearish regime)
-# Exit: price crosses Donchian(20) midline or ATR-based stoploss (2x ATR)
-# Uses 4h primary timeframe with 12h HTF for EMA regime filter.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# 1d_weekly_kama_rsi_regime_v1
+# Hypothesis: On 1d timeframe, use weekly HTF regime filter (EMA50) with KAMA trend and RSI mean reversion.
+# Long: price > KAMA(10) AND RSI(14) < 40 AND weekly close > weekly EMA50 (bullish regime)
+# Short: price < KAMA(10) AND RSI(14) > 60 AND weekly close < weekly EMA50 (bearish regime)
+# Exit: opposite signal or RSI crosses 50 (mean reversion)
+# Uses discrete sizing 0.25 to limit fee drag. Target 20-60 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_regime_v1"
-timeframe = "4h"
+name = "1d_weekly_kama_rsi_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    mid = np.full(n, np.nan)
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
-        mid[i] = (upper[i] + lower[i]) / 2.0
-    
-    # Calculate ATR(14) for stoploss
-    tr = np.zeros(n)
+    # Calculate KAMA(10, 2, 30)
+    # ER = |Close - Close[10]| / Sum(|Close - Close[1]|, 10)
+    change = np.abs(np.diff(close, n=10))  # |Close - Close[10]|
+    volatility = np.zeros(n)
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = np.full(n, np.nan)
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    volatility = np.where(np.arange(n) >= 10, volatility[9:] - np.concatenate([np.zeros(9), volatility[:-9]]), volatility)
+    er = np.zeros(n)
+    er[10:] = change[9:] / np.where(volatility[9:] > 0, volatility[9:], 1)
+    # Smooth constant
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.full(n, np.nan)
+    kama[9] = np.mean(close[:10])
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
     for i in range(14, n):
-        atr[i] = np.mean(tr[i-14:i])
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate volume ratio (current vs 20-period average)
-    vol_sma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_sma[i] = np.mean(volume[i-20:i])
-    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
-    
-    # Get 12h data for EMA regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for EMA regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h
-    ema_50_12h = np.full(len(df_12h), np.nan)
-    if len(df_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(df_12h)):
-            ema_50_12h[i] = (close_12h[i] * 2 / (50 + 1)) + (ema_50_12h[i-1] * (49 / (50 + 1)))
+    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on weekly
+    ema_50_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(df_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 / (50 + 1)) + (ema_50_1w[i-1] * (49 / (50 + 1)))
     
-    # Align 12h EMA to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align weekly EMA to daily timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    atr_stop = 0.0
     
     for i in range(50, n):
-        vol_r = vol_ratio[i]
         price = close[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        weekly_ema = ema_50_1w_aligned[i]
         
-        if np.isnan(vol_r) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(mid[i]) or np.isnan(atr[i]) or np.isnan(ema_50_12h_aligned[i]):
+        if np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(weekly_ema):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        regime_bullish = close[i] > ema_50_12h_aligned[i]
-        regime_bearish = close[i] < ema_50_12h_aligned[i]
+        regime_bullish = close[i] > weekly_ema
+        regime_bearish = close[i] < weekly_ema
         
         if position == 1:  # Long position
-            # Exit: price crosses midline OR stoploss hit (2x ATR below entry)
-            if price <= mid[i] or price <= entry_price - 2.0 * atr_stop:
+            # Exit: RSI crosses above 50 OR short signal
+            if rsi_val >= 50 or (price < kama_val and rsi_val > 60 and regime_bearish):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses midline OR stoploss hit (2x ATR above entry)
-            if price >= mid[i] or price >= entry_price + 2.0 * atr_stop:
+            # Exit: RSI crosses below 50 OR long signal
+            if rsi_val <= 50 or (price > kama_val and rsi_val < 40 and regime_bullish):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price breaks above upper band with volume AND bullish regime
-            if price > upper[i] and vol_r > 1.5 and regime_bullish:
+            # Long entry: price > KAMA AND RSI < 40 AND bullish weekly regime
+            if price > kama_val and rsi_val < 40 and regime_bullish:
                 position = 1
-                entry_price = price
-                atr_stop = atr[i]
                 signals[i] = 0.25
-            # Short entry: price breaks below lower band with volume AND bearish regime
-            elif price < lower[i] and vol_r > 1.5 and regime_bearish:
+            # Short entry: price < KAMA AND RSI > 60 AND bearish weekly regime
+            elif price < kama_val and rsi_val > 60 and regime_bearish:
                 position = -1
-                entry_price = price
-                atr_stop = atr[i]
                 signals[i] = -0.25
     
     return signals
