@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_weekly_donchian_breakout_volume_regime_v1
-# Hypothesis: Daily Donchian channel breakout with weekly trend filter and volume confirmation.
-# Long: Price breaks above 20-day Donchian high AND weekly close > weekly EMA50 AND volume > 1.5x 20-day avg volume
-# Short: Price breaks below 20-day Donchian low AND weekly close < weekly EMA50 AND volume > 1.5x 20-day avg volume
-# Exit: Opposite Donchian breakout or price crosses 10-day EMA in opposite direction
-# Uses 1d primary timeframe with 1w HTF for trend filter.
-# Target: 50-100 total trades over 4 years to minimize fee drag and avoid overtrading.
+# 12h_daily_camarilla_pivot_volume_regime_v1
+# Hypothesis: Use 1d Camarilla pivot levels (H3/L3) on 12h timeframe with volume confirmation and choppiness regime filter.
+# Long: Price breaks above H3 with volume > 1.5x average AND chop > 61.8 (trending regime)
+# Short: Price breaks below L3 with volume > 1.5x average AND chop > 61.8 (trending regime)
+# Exit: Opposite pivot break or chop < 38.2 (range regime) to avoid false breakouts
+# Uses 12h primary timeframe with 1d HTF for Camarilla levels and chop filter.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_breakout_volume_regime_v1"
-timeframe = "1d"
+name = "12h_daily_camarilla_pivot_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,53 +25,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-day Donchian channels with min_periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate average volume for confirmation (20-period SMA)
+    volume_s = pd.Series(volume)
+    avg_volume = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 10-day EMA for exit with min_periods
-    close_series = pd.Series(close)
-    ema10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Calculate 20-day average volume for confirmation with min_periods
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla pivot levels and choppiness filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA50 on 1w with min_periods
-    close_1w_s = pd.Series(close_1w)
-    ema50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (H + L + C) / 3
+    # H3 = Pivot + 1.1 * (H - L) / 2
+    # L3 = Pivot - 1.1 * (H - L) / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    h3_1d = pivot_1d + 1.1 * (high_1d - low_1d) / 2.0
+    l3_1d = pivot_1d - 1.1 * (high_1d - low_1d) / 2.0
+    
+    # Calculate Choppiness Index on 1d (14-period)
+    # CHOP = 100 * log10(sum(ATR1) / (n * ATRn)) / log10(n)
+    # Where ATR1 = true range, ATRn = n-period ATR
+    tr1 = np.maximum(high_1d - low_1d, 
+                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                np.abs(low_1d - np.roll(close_1d, 1))))
+    # Handle first bar
+    tr1[0] = high_1d[0] - low_1d[0]
+    
+    atr1 = tr1
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of ATR1 over 14 periods
+    sum_atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    
+    # Choppiness Index
+    chop_1d = 100 * np.log10(sum_atr1 / (14 * atr14)) / np.log10(14)
+    # Handle division by zero or invalid values
+    chop_1d = np.where((atr14 > 0) & (sum_atr1 > 0), chop_1d, 50.0)
+    
+    # Align 1d indicators to 12h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema10[i]) or np.isnan(vol_ma20[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(close[i]) or
-            np.isnan(volume[i])):
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+            signals[i] = 0.0
             continue
-        
-        # Volume confirmation: current volume > 1.5x 20-day average volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 1:  # Long position
             # Exit conditions:
-            # 1. Price breaks below 20-day Donchian low (opposite breakout)
-            # 2. Price crosses below 10-day EMA (trend weakening)
-            if low[i] < donchian_low[i] or close[i] < ema10[i]:
+            # 1. Price breaks below L3 (opposite pivot break)
+            # 2. Chop < 38.2 (range regime) - avoid false breakouts in ranging markets
+            if low[i] < l3_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -79,20 +94,24 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions:
-            # 1. Price breaks above 20-day Donchian high (opposite breakout)
-            # 2. Price crosses above 10-day EMA (trend weakening)
-            if high[i] > donchian_high[i] or close[i] > ema10[i]:
+            # 1. Price breaks above H3 (opposite pivot break)
+            # 2. Chop < 38.2 (range regime)
+            if high[i] > h3_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above 20-day Donchian high AND weekly close > weekly EMA50 AND volume confirmed
-            if high[i] > donchian_high[i] and close[i] > ema50_1w_aligned[i] and volume_confirmed:
+            # Long entry: Price breaks above H3 with volume confirmation AND chop > 61.8 (trending regime)
+            if (high[i] > h3_1d_aligned[i] and 
+                volume[i] > 1.5 * avg_volume[i] and 
+                chop_1d_aligned[i] > 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below 20-day Donchian low AND weekly close < weekly EMA50 AND volume confirmed
-            elif low[i] < donchian_low[i] and close[i] < ema50_1w_aligned[i] and volume_confirmed:
+            # Short entry: Price breaks below L3 with volume confirmation AND chop > 61.8 (trending regime)
+            elif (low[i] < l3_1d_aligned[i] and 
+                  volume[i] > 1.5 * avg_volume[i] and 
+                  chop_1d_aligned[i] > 61.8):
                 position = -1
                 signals[i] = -0.25
     
