@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v1
-# Hypothesis: 12h Donchian breakout (price breaks 20-period high/low) in direction of daily trend (price above/below daily EMA50) with volume confirmation (volume > 1.5x 20-period average).
-# Works in bull markets by capturing continuation breakouts and in bear markets by capturing breakdowns.
-# Volume filter ensures participation, trend filter avoids counter-trend trades.
-# Target: 15-30 trades/year with ~0.25 position size to minimize fee drag.
+# 4h_rsi_volume_trend_v1
+# Hypothesis: Combine RSI(14) oversold/overbought signals with volume confirmation and daily trend filter.
+# RSI < 30 for long, RSI > 70 for short, only when volume > 1.5x 20-period average.
+# Trend filter: price above/below daily EMA50 to avoid counter-trend trades.
+# Designed for 4h timeframe with ~20-40 trades/year to minimize fee drag.
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_rsi_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,17 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # RSI calculation (14-period)
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
+    
+    for i in range(rsi_period+1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:rsi_period+1] = 50  # neutral before sufficient data
+    
     # Volume moving average (20-period)
     vol_ma = np.zeros_like(volume)
     vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
     vol_ma[:19] = vol_ma[19]
-    
-    # Donchian channels (20-period)
-    high_max = np.full_like(high, np.nan)
-    low_min = np.full_like(low, np.nan)
-    for i in range(19, n):
-        high_max[i] = np.max(high[i-19:i+1])
-        low_min[i] = np.min(low[i-19:i+1])
     
     # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
@@ -48,7 +61,7 @@ def generate_signals(prices):
         for i in range(ema_period, len(close_daily)):
             ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Align daily EMA to 12h timeframe
+    # Align daily EMA to 4h timeframe
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -59,7 +72,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(20, ema_period) + 5
+    start_idx = max(rsi_period+1, 20, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -68,8 +81,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(vol_ma[i]) or volume[i] == 0 or 
-            np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or volume[i] == 0 or 
             np.isnan(ema_daily_aligned[i])):
             signals[i] = 0.0
             continue
@@ -77,36 +89,36 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
         # Higher timeframe trend filter: price above/below daily EMA
         uptrend_htf = close[i] > ema_daily_aligned[i]
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_max[i-1]  # Break above previous 20-period high
-        breakout_down = close[i] < low_min[i-1]  # Break below previous 20-period low
-        
         if position == 1:  # Long position
-            # Exit if trend reverses, volume fails, or price breaks below Donchian low
-            if not uptrend_htf or not volume_filter or close[i] < low_min[i]:
+            # Exit if RSI exits overbought, trend reverses, or volume fails
+            if rsi[i] > 70 or not uptrend_htf or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if trend reverses, volume fails, or price breaks above Donchian high
-            if not downtrend_htf or not volume_filter or close[i] > high_max[i]:
+            # Exit if RSI exits oversold, trend reverses, or volume fails
+            if rsi[i] < 30 or not downtrend_htf or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Donchian breakout up, volume breakout, and daily uptrend
-            if breakout_up and volume_filter and uptrend_htf:
+            # Long entry: RSI oversold, volume confirmation, and daily uptrend
+            if rsi_oversold and volume_filter and uptrend_htf:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Donchian breakout down, volume breakout, and daily downtrend
-            elif breakout_down and volume_filter and downtrend_htf:
+            # Short entry: RSI overbought, volume confirmation, and daily downtrend
+            elif rsi_overbought and volume_filter and downtrend_htf:
                 position = -1
                 signals[i] = -0.25
     
