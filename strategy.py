@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 4h_kama_macd_volatility_regime_v1
-# Hypothesis: 4h strategy combining Kaufman Adaptive Moving Average (KAMA) trend direction,
-# MACD histogram momentum, and volatility regime filter (ATR ratio) works in both bull and bear markets.
-# Long: KAMA upward (price > KAMA) + MACD histogram > 0 + ATR(7)/ATR(30) < 1.2 (low volatility)
-# Short: KAMA downward (price < KAMA) + MACD histogram < 0 + ATR(7)/ATR(30) < 1.2 (low volatility)
-# Exit: Opposite KAMA cross or volatility expansion (ATR ratio > 1.5)
-# Uses 4h primary timeframe with 1h HTF for volatility regime to avoid look-ahead.
-# Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag.
+# 1d_weekly_donchian_breakout_volume_regime_v1
+# Hypothesis: 1d strategies based on weekly Donchian channel breakouts with volume confirmation and chop regime filter work in both bull and bear markets.
+# Long: price breaks above weekly Donchian(20) high with volume > 1.5x 20-day average and chop < 61.8 (trending)
+# Short: price breaks below weekly Donchian(20) low with volume > 1.5x 20-day average and chop < 61.8 (trending)
+# Exit: price reverts to weekly Donchian midpoint or ATR-based stoploss (2.0x ATR)
+# Uses 1d primary timeframe with 1w HTF for Donchian calculation and chop filter.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_kama_macd_volatility_regime_v1"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,148 +25,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(30) and ATR(7) for volatility regime with min_periods
+    # Calculate ATR(14) for stoploss with min_periods
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr30 = np.full(n, np.nan)
-    atr7 = np.full(n, np.nan)
-    for i in range(30, n):
-        atr30[i] = np.mean(tr[i-30:i])
-    for i in range(7, n):
-        atr7[i] = np.mean(tr[i-7:i])
-    # ATR ratio: ATR(7)/ATR(30) - low when < 1.0, high when > 1.5
-    atr_ratio = np.full(n, np.nan)
-    for i in range(30, n):
-        if atr30[i] > 0:
-            atr_ratio[i] = atr7[i] / atr30[i]
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-14:i])
     
-    # Calculate KAMA(10) - smoothing constant based on efficiency ratio
-    # ER = |close - close[10]| / sum(|close - close[1]| over 10 periods)
-    # SC = [ER * (fastest - slowest) + slowest]^2 where fastest=2/(2+1), slowest=2/(30+1)
-    direction = np.abs(np.subtract(close[10:], close[:-10]))  # length n-10
-    volatility = np.zeros(n-1)
-    for i in range(1, n):
-        volatility[i] = abs(close[i] - close[i-1])
-    # Sum volatility over 10 periods
-    vol_sum = np.full(n, np.nan)
-    for i in range(10, n):
-        vol_sum[i] = np.sum(volatility[i-9:i+1])  # 10 periods
-    er = np.full(n, np.nan)
-    for i in range(10, n):
-        if vol_sum[i] > 0:
-            er[i] = direction[i-10] / vol_sum[i]
-        else:
-            er[i] = 0
-    fastest = 2.0 / (2 + 1)   # 0.6667
-    slowest = 2.0 / (30 + 1)  # 0.0645
-    sc = np.square(er * (fastest - slowest) + slowest)
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate volume ratio (current vs 20-period average) with min_periods
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Calculate MACD(12,26,9)
-    # EMA12 = close.ewm(span=12, adjust=False).mean()
-    # EMA26 = close.ewm(span=26, adjust=False).mean()
-    # MACD = EMA12 - EMA26
-    # Signal = MACD.ewm(span=9, adjust=False).mean()
-    # Histogram = MACD - Signal
-    ema12 = np.full(n, np.nan)
-    ema26 = np.full(n, np.nan)
-    macd = np.full(n, np.nan)
-    signal_line = np.full(n, np.nan)
-    histogram = np.full(n, np.nan)
-    
-    # Calculate EMAs
-    multiplier_12 = 2.0 / (12 + 1)
-    multiplier_26 = 2.0 / (26 + 1)
-    multiplier_9 = 2.0 / (9 + 1)
-    
-    ema12[11] = np.mean(close[:12])  # seed
-    ema26[25] = np.mean(close[:26])  # seed
-    for i in range(12, n):
-        ema12[i] = close[i] * multiplier_12 + ema12[i-1] * (1 - multiplier_12)
-    for i in range(26, n):
-        ema26[i] = close[i] * multiplier_26 + ema26[i-1] * (1 - multiplier_26)
-    
-    # Calculate MACD and signal
-    for i in range(26, n):
-        macd[i] = ema12[i] - ema26[i]
-    for i in range(35, n):  # 26+9=35
-        signal_line[i] = macd[i] * multiplier_9 + signal_line[i-1] * (1 - multiplier_9)
-    for i in range(35, n):
-        histogram[i] = macd[i] - signal_line[i]
-    
-    # Get 1h data for volatility regime confirmation (to avoid look-ahead)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 30:
+    # Get 1w data for Donchian channels and chop regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ATR(14) on 1h
-    tr_1h = np.zeros(len(df_1h))
-    for i in range(1, len(df_1h)):
-        tr_1h[i] = max(high_1h[i] - low_1h[i], abs(high_1h[i] - close_1h[i-1]), abs(low_1h[i] - close_1h[i-1]))
-    atr_1h = np.full(len(df_1h), np.nan)
-    for i in range(14, len(df_1h)):
-        atr_1h[i] = np.mean(tr_1h[i-14:i])
+    # Calculate weekly Donchian(20) channels
+    donchian_high = np.full(len(df_1w), np.nan)
+    donchian_low = np.full(len(df_1w), np.nan)
+    donchian_mid = np.full(len(df_1w), np.nan)
     
-    # Calculate 1h ATR ratio (ATR7/ATR30) for regime
-    atr7_1h = np.full(len(df_1h), np.nan)
-    atr30_1h = np.full(len(df_1h), np.nan)
-    for i in range(7, len(df_1h)):
-        atr7_1h[i] = np.mean(tr_1h[i-7:i])
-    for i in range(30, len(df_1h)):
-        atr30_1h[i] = np.mean(tr_1h[i-30:i])
-    atr_ratio_1h = np.full(len(df_1h), np.nan)
-    for i in range(30, len(df_1h)):
-        if atr30_1h[i] > 0:
-            atr_ratio_1h[i] = atr7_1h[i] / atr30_1h[i]
+    for i in range(20, len(df_1w)):
+        donchian_high[i] = np.max(high_1w[i-20:i])
+        donchian_low[i] = np.min(low_1w[i-20:i])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2.0
     
-    # Align 1h ATR ratio to 4h timeframe
-    atr_ratio_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_ratio_1h)
+    # Calculate weekly Chopiness Index(14) for regime filter
+    chop = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        # True range
+        tr1w = np.zeros(i+1)
+        for j in range(1, i+1):
+            tr1w[j] = max(high_1w[j] - low_1w[j], abs(high_1w[j] - close_1w[j-1]), abs(low_1w[j] - close_1w[j-1]))
+        atr1w = np.mean(tr1w[-14:])
+        # Sum of true ranges over 14 periods
+        sum_tr14 = np.sum(tr1w[-14:])
+        # Max high - min low over 14 periods
+        max_high = np.max(high_1w[i-13:i+1])
+        min_low = np.min(low_1w[i-13:i+1])
+        range_maxmin = max_high - min_low
+        if range_maxmin > 0:
+            chop[i] = 100 * np.log10(sum_tr14 / range_maxmin) / np.log10(14)
+        else:
+            chop[i] = 50.0  # neutral when no range
+    
+    # Align 1w indicators to 1d timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
     for i in range(50, n):
+        vol_r = vol_ratio[i]
+        price = close[i]
+        
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(histogram[i]) or np.isnan(atr_ratio[i]) or 
-            np.isnan(atr_ratio_1h_aligned[i])):
+        if np.isnan(vol_r) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(atr[i]):
             # Hold current position if any, otherwise flat
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
             continue
         
-        vol_regime = atr_ratio_1h_aligned[i] < 1.2  # Low volatility regime
-        vol_expansion = atr_ratio[i] > 1.5  # Volatility expansion for exit
+        # Regime filter: only trade when chop < 61.8 (trending market)
+        if chop_aligned[i] >= 61.8:
+            # In ranging market, exit or stay flat
+            if position == 1:
+                if price <= donchian_mid_aligned[i] or price <= entry_price - 2.0 * atr_stop:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                if price >= donchian_mid_aligned[i] or price >= entry_price + 2.0 * atr_stop:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit: KAMA cross down OR volatility expansion
-            if close[i] <= kama[i] or vol_expansion:
+            # Exit: price reverts to midpoint OR stoploss hit (2.0x ATR below entry)
+            if price <= donchian_mid_aligned[i] or price <= entry_price - 2.0 * atr_stop:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: KAMA cross up OR volatility expansion
-            if close[i] >= kama[i] or vol_expansion:
+            # Exit: price reverts to midpoint OR stoploss hit (2.0x ATR above entry)
+            if price >= donchian_mid_aligned[i] or price >= entry_price + 2.0 * atr_stop:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price > KAMA + MACD histogram > 0 + low volatility regime
-            if (close[i] > kama[i] and histogram[i] > 0 and vol_regime):
+            # Long entry: price breaks above weekly Donchian high with volume spike and trending regime
+            if price > donchian_high_aligned[i] and vol_r > 1.5:
                 position = 1
+                entry_price = price
+                atr_stop = atr[i]
                 signals[i] = 0.25
-            # Short entry: price < KAMA + MACD histogram < 0 + low volatility regime
-            elif (close[i] < kama[i] and histogram[i] < 0 and vol_regime):
+            # Short entry: price breaks below weekly Donchian low with volume spike and trending regime
+            elif price < donchian_low_aligned[i] and vol_r > 1.5:
                 position = -1
+                entry_price = price
+                atr_stop = atr[i]
                 signals[i] = -0.25
     
     return signals
