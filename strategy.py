@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# 1d_camarilla_pivot_weekly_trend_volume_v1
-# Hypothesis: Uses weekly trend filter and daily Camarilla pivot levels for mean-reversion entries.
-# Goes long when price rebounds from S3/S4 in weekly uptrend with volume confirmation.
-# Goes short when price rebounds from R3/R4 in weekly downtrend with volume confirmation.
-# Designed for 1d timeframe to reduce trade frequency and avoid fee drag. Target: 20-50 trades/year.
+# 4h_donchian_breakout_volume_trend_1d
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
+# Goes long when price breaks above Donchian(20) high in 1d uptrend with volume confirmation.
+# Goes short when price breaks below Donchian(20) low in 1d downtrend with volume confirmation.
+# Uses 4h timeframe to balance trade frequency and signal quality. Target: 20-40 trades/year.
+# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_pivot_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "4h_donchian_breakout_volume_trend_1d"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -24,64 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly trend filter: EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Daily data for Camarilla pivots
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels
-    hl_range = high_1d - low_1d
-    r4 = close_1d + 1.5 * hl_range
-    r3 = close_1d + 1.0 * hl_range
-    s3 = close_1d - 1.0 * hl_range
-    s4 = close_1d - 1.5 * hl_range
+    # 1d EMA50 trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align daily data to daily timeframe (no alignment needed, but using for consistency)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume confirmation on daily
+    # Volume confirmation (20-period average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50
+    start_idx = max(50, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(r4[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(s4[i]) or np.isnan(ema50_1w[i]) or np.isnan(avg_volume[i]):
+        # Skip if any required data is NaN
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Trend filter
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches S3 or trend changes
-            if close[i] <= s3_aligned[i] or not weekly_uptrend:
+            # Exit: price breaks below Donchian low or trend changes
+            if close[i] <= lowest_low[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R3 or trend changes
-            if close[i] >= r3_aligned[i] or not weekly_downtrend:
+            # Exit: price breaks above Donchian high or trend changes
+            if close[i] >= highest_high[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,12 +79,12 @@ def generate_signals(prices):
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
             if volume_ok:
-                # Long entry: price bounces from S4/S3 in uptrend
-                if weekly_uptrend and close[i] > s4_aligned[i] and close[i-1] <= s4_aligned[i-1]:
+                # Long entry: Donchian breakout above in uptrend
+                if daily_uptrend and close[i] >= highest_high[i] and close[i-1] < highest_high[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price bounces from R4/R3 in downtrend
-                elif weekly_downtrend and close[i] < r4_aligned[i] and close[i-1] >= r4_aligned[i-1]:
+                # Short entry: Donchian breakdown below in downtrend
+                elif daily_downtrend and close[i] <= lowest_low[i] and close[i-1] > lowest_low[i-1]:
                     position = -1
                     signals[i] = -0.25
     
