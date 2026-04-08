@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # 4h_12h_volume_crossover_v1
 # Hypothesis: 4-hour price momentum confirmed by 12-hour volume surge and moving average crossovers.
 # Long when 4h EMA(21) crosses above EMA(55) with 12h volume > 1.5x 20-period average.
@@ -31,12 +30,12 @@ def generate_signals(prices):
     
     # Get 12h volume data for confirmation
     df_12h = get_htf_data(prices, '12h')
-    volume_12h = df_12h['volume'].values
     
-    # Pre-compute 12h volume moving average and align
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
-    vol_current_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    # 12h volume moving average (20-period) for surge detection
+    vol_close_12h = df_12h['volume'].values
+    vol_ma_20_12h = pd.Series(vol_close_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    vol_current_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_close_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -45,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema21[i]) or np.isnan(ema55[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_current_aligned[i]):
+        if np.isnan(ema21[i]) or np.isnan(ema55[i]) or np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(vol_current_12h_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
@@ -53,7 +52,7 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition: current 12h volume > 1.5x 20-period average
-        vol_surge = vol_current_aligned[i] > 1.5 * vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else False
+        vol_surge = vol_current_12h_aligned[i] > 1.5 * vol_ma_20_12h_aligned[i] if vol_ma_20_12h_aligned[i] > 0 else False
         
         if position == 1:  # Long position
             # Exit: EMA(21) crosses below EMA(55)
