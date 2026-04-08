@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_volume_momentum_v1
-# Hypothesis: Combines price above/below 4h SMA50 with 1d trend direction (SMA50 slope) and volume confirmation.
-# Long when: price > SMA50, 1d SMA50 slope > 0, volume > 1.5x average volume.
-# Short when: price < SMA50, 1d SMA50 slope < 0, volume > 1.5x average volume.
-# Exit when momentum breaks (price crosses SMA50 opposite direction) or volume drops below average.
-# Uses 3 conditions max to avoid overtrading. Target: 20-40 trades/year.
+# 12h_price_channel_breakout_v1
+# Hypothesis: Uses 12h Donchian breakout with volume confirmation and weekly trend filter.
+# Long when price breaks above 20-period Donchian high + volume > 1.5x average + weekly close above 50-week SMA.
+# Short when price breaks below 20-period Donchian low + volume > 1.5x average + weekly close below 50-week SMA.
+# Exit when price crosses back through the middle of the Donchian channel.
+# Designed for low trade frequency (15-30/year) to avoid fee drag in ranging/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_momentum_v1"
-timeframe = "4h"
+name = "12h_price_channel_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,41 +24,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h SMA50 for momentum
-    sma_period = 50
-    close_series = pd.Series(close)
-    sma50 = close_series.rolling(window=sma_period, min_periods=sma_period).mean().values
+    # 12h Donchian channel (20-period)
+    donch_len = 20
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=donch_len, min_periods=donch_len).max().values
+    donch_low = low_series.rolling(window=donch_len, min_periods=donch_len).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
     # Volume filter: 1.5x 20-period average
-    vol_ma_period = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    vol_ma_len = 20
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=vol_ma_len, min_periods=vol_ma_len).mean().values
+    vol_surge = volume > (1.5 * vol_ma)
     
-    vol_surge = np.full(n, False)
-    for i in range(n):
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
-    
-    # Get 1d data for trend direction (SMA50 slope)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=sma_period, min_periods=sma_period).mean().values
-    # Calculate slope: positive if current SMA > SMA 3 periods ago
-    sma50_slope_1d = np.full(len(close_1d), np.nan)
-    for i in range(3, len(close_1d)):
-        if not np.isnan(sma50_1d[i]) and not np.isnan(sma50_1d[i-3]):
-            sma50_slope_1d[i] = sma50_1d[i] - sma50_1d[i-3]
-    sma50_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_slope_1d)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    weekly_bull = close_1w > sma50_1w
+    weekly_bear = close_1w < sma50_1w
+    weekly_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_bull)
+    weekly_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_bear)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(sma_period, vol_ma_period, 3) + 1
+    start_idx = max(donch_len, vol_ma_len, 50) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_slope_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_bull_aligned[i]) or 
+            np.isnan(weekly_bear_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -66,31 +64,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below SMA50 or volume drops below average
-            if close[i] < sma50[i] or volume[i] < vol_ma[i]:
+            # Exit: Price crosses below Donchian middle
+            if close[i] < donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above SMA50 or volume drops below average
-            if close[i] > sma50[i] or volume[i] < vol_ma[i]:
+            # Exit: Price crosses above Donchian middle
+            if close[i] > donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above SMA50, 1d SMA50 slope positive, volume surge
-            if (close[i] > sma50[i] and 
-                sma50_slope_1d_aligned[i] > 0 and 
-                vol_surge[i]):
+            # Long entry: Break above Donchian high + volume surge + weekly bullish
+            if (close[i] > donch_high[i] and 
+                vol_surge[i] and 
+                weekly_bull_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below SMA50, 1d SMA50 slope negative, volume surge
-            elif (close[i] < sma50[i] and 
-                  sma50_slope_1d_aligned[i] < 0 and 
-                  vol_surge[i]):
+            # Short entry: Break below Donchian low + volume surge + weekly bearish
+            elif (close[i] < donch_low[i] and 
+                  vol_surge[i] and 
+                  weekly_bear_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
