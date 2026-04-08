@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_pivot_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v7"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
     # Price data
@@ -29,31 +29,38 @@ def generate_signals(prices):
     r1_1d = 2 * pivot_1d - low_1d
     s1_1d = 2 * pivot_1d - high_1d
     
-    # Align pivot levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # 12h trend: 20-period EMA
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 4h trend: 34-period EMA
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: volume > 1.2x 20-period average
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.2)
+    vol_filter = volume > (vol_ma * 1.3)
+    
+    # Trend strength: ADX-like using EMA difference (simpler, fewer calculations)
+    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Strong trend when short EMA is significantly above/below long EMA
+    trend_strength = np.abs(ema_12 - ema_26) / (ema_12 + ema_26 + 1e-10)
+    strong_trend = trend_strength > 0.01  # At least 1% separation
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20[i]) or np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or 
-            np.isnan(s1_12h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34[i]) or np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or np.isnan(vol_filter[i]) or np.isnan(strong_trend[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price < S1 or trend fails
-            if close[i] < s1_12h[i] or close[i] < ema_20[i]:
+            if close[i] < s1_4h[i] or close[i] < ema_34[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -61,27 +68,29 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price > R1 or trend fails
-            if close[i] > r1_12h[i] or close[i] > ema_20[i]:
+            if close[i] > r1_4h[i] or close[i] > ema_34[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_20[i]
-            bearish = close[i] < ema_20[i]
+            bullish = close[i] > ema_34[i]
+            bearish = close[i] < ema_34[i]
             
-            # Long: price > R1 + bullish trend + volume
-            if (close[i] > r1_12h[i] and 
-                bullish and 
-                vol_filter[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: price < S1 + bearish trend + volume
-            elif (close[i] < s1_12h[i] and 
-                  bearish and 
-                  vol_filter[i]):
-                position = -1
-                signals[i] = -0.25
+            # Strong trend filter to avoid choppy markets
+            if strong_trend[i]:
+                # Long: price > R1 + bullish trend + volume
+                if (close[i] > r1_4h[i] and 
+                    bullish and 
+                    vol_filter[i]):
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price < S1 + bearish trend + volume
+                elif (close[i] < s1_4h[i] and 
+                      bearish and 
+                      vol_filter[i]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
