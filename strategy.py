@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-1h Momentum Pullback with 4h Trend Filter and Volume Confirmation
-Hypothesis: In trending markets (identified by 4h EMA), pullbacks to 1h EMA provide
-high-probability entries. Volume confirms institutional interest. Designed for
-15-35 trades/year to avoid fee drag in both bull and bear markets.
+4h Donchian Breakout with 1-day Trend Filter and Volume Confirmation v3
+Hypothesis: Donchian(20) breakouts capture momentum, while 1-day EMA trend filter
+avoids counter-trend trades and volume confirmation ensures institutional participation.
+Designed for ~20-30 trades/year to minimize fee drift in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_momentum_pullback_4h_trend_volume_v1"
-timeframe = "1h"
+name = "4h_donchian_breakout_1d_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,74 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # 1-day data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1h EMA for pullback entry
-    ema_20_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1-day EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 1.5)
     
-    # Session filter: 08-20 UTC (already datetime64)
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(ema_20_1h[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or
             np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Session check
-        hour = hours[i]
-        if not (8 <= hour <= 20):
-            signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below 1h EMA20 OR trend reverses
-            if (close[i] < ema_20_1h[i] or 
-                close[i] < ema_20_4h_aligned[i]):
+            # Exit: price closes below 20-period low OR trend reverses
+            if (close[i] < low_20[i] or 
+                close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 1h EMA20 OR trend reverses
-            if (close[i] > ema_20_1h[i] or 
-                close[i] > ema_20_4h_aligned[i]):
+            # Exit: price closes above 20-period high OR trend reverses
+            if (close[i] > high_20[i] or 
+                close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter: price vs 4h EMA20
-            uptrend = close[i] > ema_20_4h_aligned[i]
-            downtrend = close[i] < ema_20_4h_aligned[i]
+            # Trend filter: price vs 1-day EMA50
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long: price pulls back to 1h EMA20 in uptrend + volume spike
-            if (low[i] <= ema_20_1h[i] and 
-                close[i] > ema_20_1h[i] and  # confirmation bounce
+            # Long: price breaks above 20-period high + uptrend + volume spike
+            if (high[i] > high_20[i-1] and 
                 uptrend and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: price pulls back to 1h EMA20 in downtrend + volume spike
-            elif (high[i] >= ema_20_1h[i] and 
-                  close[i] < ema_20_1h[i] and  # confirmation rejection
+                signals[i] = 0.25
+            # Short: price breaks below 20-period low + downtrend + volume spike
+            elif (low[i] < low_20[i-1] and 
                   downtrend and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
