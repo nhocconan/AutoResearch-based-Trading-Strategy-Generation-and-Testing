@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""
-6h_1d_rsi_momentum_v1
-Hypothesis: Momentum strategy using RSI divergence and trend filters.
-- Primary: 6h RSI(14) with overbought/oversold levels (70/30) for mean reversion
-- Trend filter: 1d EMA(50) direction (bullish if close > EMA, bearish if close < EMA)
-- Momentum confirmation: 6h price > 6h EMA(20) for longs, < EMA(20) for shorts
-- Position sizing: 0.25 for long, -0.25 for short
-Target: 50-150 total trades over 4 years (12-37/year)
-Works in bull markets via trend-following longs, in bear via mean reversion shorts at resistance.
-"""
+# 1h_4h_1d_volume_breakout_v1
+# Hypothesis: 1h breakouts aligned with 4h/1d trend and volume confirmation.
+# - Trend filter: 4h EMA(20) direction (bullish if close > EMA, bearish if close < EMA)
+# - Higher timeframe filter: 1d EMA(50) to avoid counter-trend trades in strong trends
+# - Entry: 1h price breaks above/below 20-period high/low with volume > 1.5x 20-period average
+# - Exit: Opposite breakout or trend reversal
+# - Position sizing: 0.20 for long, -0.20 for short
+# - Session filter: 08-20 UTC to reduce noise trades
+# Target: 15-37 trades/year (60-150 total over 4 years)
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_rsi_momentum_v1"
-timeframe = "6h"
+name = "1h_4h_1d_volume_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +28,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # 4h EMA(20) for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_4h_up = close_4h > ema_20_4h
+    trend_4h_down = close_4h < ema_20_4h
+    
+    # Forward fill trend
+    trend_4h_up_series = pd.Series(trend_4h_up)
+    trend_4h_down_series = pd.Series(trend_4h_down)
+    trend_4h_up_ffilled = trend_4h_up_series.ffill().values
+    trend_4h_down_ffilled = trend_4h_down_series.ffill().values
+    
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up_ffilled)
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down_ffilled)
+    
+    # Get 1d data for higher timeframe filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -46,33 +66,33 @@ def generate_signals(prices):
     trend_1d_up_ffilled = trend_1d_up_series.ffill().values
     trend_1d_down_ffilled = trend_1d_down_series.ffill().values
     
-    # Align 1d trend to 6h
+    # Align 1d trend to 1h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
     
-    # 6h RSI(14) for momentum/mean reversion
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # 1h 20-period high/low for breakout
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h EMA(20) for momentum confirmation
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(session_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -81,28 +101,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI overbought OR trend turns down OR price breaks EMA20 down
-            if (rsi_values[i] > 70) or trend_1d_down_aligned[i] or (close[i] < ema_20[i]):
+            # Exit: price breaks below 20-period low OR 4h trend turns down OR 1d trend turns down
+            if (low[i] < low_20[i]) or trend_4h_down_aligned[i] or trend_1d_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Position size
+                signals[i] = 0.20  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: RSI oversold OR trend turns up OR price breaks EMA20 up
-            if (rsi_values[i] < 30) or trend_1d_up_aligned[i] or (close[i] > ema_20[i]):
+            # Exit: price breaks above 20-period high OR 4h trend turns up OR 1d trend turns up
+            if (high[i] > high_20[i]) or trend_4h_up_aligned[i] or trend_1d_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Position size
+                signals[i] = -0.20  # Position size
         else:  # Flat, look for entry
-            # Long entry: RSI oversold + uptrend + price above EMA20
-            if (rsi_values[i] < 30) and trend_1d_up_aligned[i] and (close[i] > ema_20[i]):
+            # Long entry: price breaks above 20-period high + 4h uptrend + 1d uptrend + volume + session
+            if (high[i] > high_20[i]) and trend_4h_up_aligned[i] and trend_1d_up_aligned[i] and volume_filter[i] and session_filter[i]:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: RSI overbought + downtrend + price below EMA20
-            elif (rsi_values[i] > 70) and trend_1d_down_aligned[i] and (close[i] < ema_20[i]):
+                signals[i] = 0.20
+            # Short entry: price breaks below 20-period low + 4h downtrend + 1d downtrend + volume + session
+            elif (low[i] < low_20[i]) and trend_4h_down_aligned[i] and trend_1d_down_aligned[i] and volume_filter[i] and session_filter[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
