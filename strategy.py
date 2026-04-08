@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_fractal_breakout_1d_trend_volume_v10"
-timeframe = "12h"
+name = "4h_fractal_breakout_1d_trend_volume_v10"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,12 +36,12 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])  # First value is NaN
     atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12-period high/low for fractal breakout
-    high_12 = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    low_12 = pd.Series(low).rolling(window=12, min_periods=12).min().values
+    # Calculate 4-period high/low for fractal breakout (on 4h timeframe)
+    high_4 = pd.Series(high).rolling(window=4, min_periods=4).max().values
+    low_4 = pd.Series(low).rolling(window=4, min_periods=4).min().values
     
-    # Calculate 12-period average volume for volume confirmation
-    avg_volume_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 4-period average volume for volume confirmation
+    avg_volume_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     # Calculate 50-period SMA of ATR for volatility normalization
     atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
@@ -50,18 +50,18 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(50, 12)  # EMA50 and 12-period lookback
+    start_idx = max(50, 4)  # EMA50 and 4-period lookback
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d[i]) or np.isnan(atr_1d[i]) or 
-            np.isnan(high_12[i]) or np.isnan(low_12[i]) or 
-            np.isnan(avg_volume_12[i]) or np.isnan(volume[i]) or
+            np.isnan(high_4[i]) or np.isnan(low_4[i]) or 
+            np.isnan(avg_volume_4[i]) or np.isnan(volume[i]) or
             np.isnan(atr_ma_50[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 12h bar
+        # Get aligned 1d values for current 4h bar
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
         atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)[i]
         atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)[i]
@@ -71,34 +71,34 @@ def generate_signals(prices):
         volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.7)  # Only trade when volatility is above 70% of average
         
         # Volume confirmation: current volume > 2.0x average volume (stricter)
-        volume_confirmation = volume[i] > (avg_volume_12[i] * 2.0)
+        volume_confirmation = volume[i] > (avg_volume_4[i] * 2.0)
         
         # Trend filter: price above/below 50 EMA on 1d
         uptrend = close[i] > ema_1d_aligned
         downtrend = close[i] < ema_1d_aligned
         
         if position == 1:  # Long position
-            # Exit: price breaks below 12-period low OR trend reversal
-            if close[i] < low_12[i] or not uptrend:
+            # Exit: price breaks below 4-period low OR trend reversal
+            if close[i] < low_4[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 12-period high OR trend reversal
-            if close[i] > high_12[i] or not downtrend:
+            # Exit: price breaks above 4-period high OR trend reversal
+            if close[i] > high_4[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above 12-period high + uptrend + volume confirmation + volatility filter
-            if close[i] > high_12[i] and uptrend and volume_confirmation and volatility_filter:
+            # Long: price breaks above 4-period high + uptrend + volume confirmation + volatility filter
+            if close[i] > high_4[i] and uptrend and volume_confirmation and volatility_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below 12-period low + downtrend + volume confirmation + volatility filter
-            elif close[i] < low_12[i] and downtrend and volume_confirmation and volatility_filter:
+            # Short: price breaks below 4-period low + downtrend + volume confirmation + volatility filter
+            elif close[i] < low_4[i] and downtrend and volume_confirmation and volatility_filter:
                 position = -1
                 signals[i] = -0.25
     
