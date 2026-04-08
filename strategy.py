@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_volatility_breakout_v4
-# Hypothesis: Volatility breakout strategy using ATR-based channels with improved filters.
-# Uses ATR(14) to set upper/lower bands around EMA(20). Enters on breakout with volume confirmation and trend filter.
-# Designed to work in both bull and bear markets by capturing volatility expansion phases.
-# Target: 20-30 trades/year for low fee drag.
+# 12h_camarilla_pivot_daily_trend_volume_v1
+# Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance in 12h timeframe.
+# Uses daily Camarilla levels (S3/S4 for shorts, R3/R4 for longs) with 1d trend filter and volume confirmation.
+# Works in bull/bear markets by trading mean reversion at extreme levels with trend alignment.
+# Target: 15-25 trades/year for low fee drag on 12h timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_v4"
-timeframe = "4h"
+name = "12h_camarilla_pivot_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +24,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter (1d EMA200) - load once before loop
+    # Daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA200 on daily data
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate daily Camarilla levels
+    # Camarilla: R4 = Close + 1.5*(High-Low), R3 = Close + 1.1*(High-Low)
+    #          S3 = Close - 1.1*(High-Low), S4 = Close - 1.5*(High-Low)
+    hl_range = high_1d - low_1d
+    r4 = close_1d + 1.5 * hl_range
+    r3 = close_1d + 1.1 * hl_range
+    s3 = close_1d - 1.1 * hl_range
+    s4 = close_1d - 1.5 * hl_range
     
-    # 4h indicators
-    # EMA20 for dynamic center line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align daily levels to 12h timeframe
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # ATR(14) for volatility bands
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Upper and lower bands (EMA20 ± 2*ATR)
-    upper_band = ema20 + 2.0 * atr
-    lower_band = ema20 - 2.0 * atr
+    # Daily trend filter (EMA50)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,7 +58,7 @@ def generate_signals(prices):
     start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
+        if np.isnan(r4_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
@@ -64,36 +66,35 @@ def generate_signals(prices):
             continue
         
         # Daily trend filter
-        daily_uptrend = close[i] > ema200_1d_aligned[i]
-        daily_downtrend = close[i] < ema200_1d_aligned[i]
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit conditions: close below EMA20 or volatility contraction
-            if close[i] < ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+            # Exit: price reaches R3 or trend changes
+            if close[i] >= r3_12h[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: close above EMA20 or volatility contraction
-            if close[i] > ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+            # Exit: price reaches S3 or trend changes
+            if close[i] <= s3_12h[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.3 * avg_volume[i]
+            volume_ok = volume[i] > 1.2 * avg_volume[i]
             
-            # Breakout conditions
             if volume_ok:
-                # Long breakout: price crosses above upper band in uptrend
-                if daily_uptrend and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
+                # Long entry: price crosses above S3 in uptrend (mean reversion from oversold)
+                if daily_uptrend and close[i] > s3_12h[i] and close[i-1] <= s3_12h[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakdown: price crosses below lower band in downtrend
-                elif daily_downtrend and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
+                # Short entry: price crosses below R3 in downtrend (mean reversion from overbought)
+                elif daily_downtrend and close[i] < r3_12h[i] and close[i-1] >= r3_12h[i-1]:
                     position = -1
                     signals[i] = -0.25
     
