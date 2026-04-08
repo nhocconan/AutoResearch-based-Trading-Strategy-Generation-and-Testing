@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Williams Fractal Breakout with 1d Trend and Volume Confirmation
+4h Williams Fractal Breakout with 1d Trend and Volume Confirmation v2
 Hypothesis: Williams Fractal breakouts aligned with 1d EMA trend and ADX > 25,
 confirmed by volume spikes, capture strong momentum moves with fewer trades
 than Donchian breaks. Works in bull/bear by requiring trend alignment.
 Targets 20-50 trades/year.
 """
-name = "4h_williams_fractal_breakout_1d_trend_volume_v1"
+name = "4h_williams_fractal_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -86,9 +86,9 @@ def generate_signals(prices):
     # Williams Fractals on 4h
     bearish_fractal, bullish_fractal = calculate_williams_fractals(high, low)
     
-    # Volume spike detector: current volume > 2.0 x 20-period average
+    # Volume spike detector: current volume > 2.5 x 20-period average (more selective)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_spike = volume > (2.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
