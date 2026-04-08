@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-# 12h_donchian20_daily_pivot_volume_v1
-# Hypothesis: Combines 12h Donchian(20) breakouts with daily pivot point levels and volume confirmation.
-# Long when: Price breaks above Donchian upper band, above daily R2 pivot level, and volume > 1.5x average.
-# Short when: Price breaks below Donchian lower band, below daily S2 pivot level, and volume > 1.5x average.
-# Exit when price crosses the daily pivot point (PP) level.
-# Uses pivot points as strong support/resistance levels, Donchian for breakout confirmation, volume for momentum validation.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# 4h_volume_momentum_v1
+# Hypothesis: Combines price above/below 4h SMA50 with 1d trend direction (SMA50 slope) and volume confirmation.
+# Long when: price > SMA50, 1d SMA50 slope > 0, volume > 1.5x average volume.
+# Short when: price < SMA50, 1d SMA50 slope < 0, volume > 1.5x average volume.
+# Exit when momentum breaks (price crosses SMA50 opposite direction) or volume drops below average.
+# Uses 3 conditions max to avoid overtrading. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_daily_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_volume_momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,10 +24,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian(20) channels
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # 4h SMA50 for momentum
+    sma_period = 50
+    close_series = pd.Series(close)
+    sma50 = close_series.rolling(window=sma_period, min_periods=sma_period).mean().values
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
@@ -41,33 +40,25 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get daily data for pivot points
+    # Get 1d data for trend direction (SMA50 slope)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate daily pivot points: PP = (H+L+C)/3, R2 = PP + (H-L), S2 = PP - (H-L)
-    pivot_pp = (high_1d + low_1d + close_1d) / 3.0
-    pivot_range = high_1d - low_1d
-    pivot_r2 = pivot_pp + pivot_range
-    pivot_s2 = pivot_pp - pivot_range
-    
-    # Align pivot levels to 12h timeframe
-    pivot_pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_pp)
-    pivot_r2_aligned = align_htf_to_ltf(prices, df_1d, pivot_r2)
-    pivot_s2_aligned = align_htf_to_ltf(prices, df_1d, pivot_s2)
+    sma50_1d = pd.Series(close_1d).rolling(window=sma_period, min_periods=sma_period).mean().values
+    # Calculate slope: positive if current SMA > SMA 3 periods ago
+    sma50_slope_1d = np.full(len(close_1d), np.nan)
+    for i in range(3, len(close_1d)):
+        if not np.isnan(sma50_1d[i]) and not np.isnan(sma50_1d[i-3]):
+            sma50_slope_1d[i] = sma50_1d[i] - sma50_1d[i-3]
+    sma50_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_slope_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donchian_period, vol_ma_period) + 1
+    start_idx = max(sma_period, vol_ma_period, 3) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(pivot_pp_aligned[i]) or 
-            np.isnan(pivot_r2_aligned[i]) or np.isnan(pivot_s2_aligned[i])):
+        if (np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_slope_1d_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -75,30 +66,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price crosses below daily pivot point
-            if close[i] < pivot_pp_aligned[i]:
+            # Exit: Price below SMA50 or volume drops below average
+            if close[i] < sma50[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above daily pivot point
-            if close[i] > pivot_pp_aligned[i]:
+            # Exit: Price above SMA50 or volume drops below average
+            if close[i] > sma50[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above Donchian upper band, above R2 pivot, volume surge
-            if (close[i] > highest_high[i] and 
-                close[i] > pivot_r2_aligned[i] and 
+            # Long entry: Price above SMA50, 1d SMA50 slope positive, volume surge
+            if (close[i] > sma50[i] and 
+                sma50_slope_1d_aligned[i] > 0 and 
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian lower band, below S2 pivot, volume surge
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < pivot_s2_aligned[i] and 
+            # Short entry: Price below SMA50, 1d SMA50 slope negative, volume surge
+            elif (close[i] < sma50[i] and 
+                  sma50_slope_1d_aligned[i] < 0 and 
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
