@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_kama_rsi_chop_filter"
-timeframe = "12h"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -18,127 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for regime filter (choppiness)
+    # 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # KAMA calculation for trend direction
-    def calculate_kama(price, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(price, n=period))
-        volatility = np.sum(np.abs(np.diff(price)), axis=0)
-        er = np.zeros_like(price)
-        er[period:] = change[period-1:] / volatility[period-1:]
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.full_like(price, np.nan)
-        kama[period] = price[period]
-        for i in range(period+1, len(price)):
-            if not np.isnan(sc[i]):
-                kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-            else:
-                kama[i] = kama[i-1]
-        return kama
+    # Calculate daily pivot points (previous day's values)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
+    # Align pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # RSI calculation
-    def calculate_rsi(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(price)
-        avg_loss = np.zeros_like(price)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(price)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # 4h trend: 34-period EMA (faster than 50 for better responsiveness)
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    rsi = calculate_rsi(close, period=14)
-    
-    # Choppiness Index for regime filter
-    def calculate_chop(high, low, close, period=14):
-        atr = np.zeros_like(close)
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr[1:] = tr
-        for i in range(period+1, len(close)):
-            if i == period+1:
-                atr[i] = np.mean(tr[1:i+1])
-            else:
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        highest_high = np.zeros_like(close)
-        lowest_low = np.zeros_like(close)
-        for i in range(period, len(close)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
-        
-        chop = np.full_like(close, 50.0)
-        for i in range(period, len(close)):
-            if highest_high[i] != lowest_low[i]:
-                chop[i] = 100 * np.log10(np.sum(atr[i-period+1:i+1]) / 
-                                          np.log10(highest_high[i] - lowest_low[i]) * 
-                                          (period / np.log10(period)))
-        return chop
-    
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Volume filter
-    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma[:10] = np.nan
-    vol_filter = volume > (vol_ma * 1.5)
+    # Volume filter: volume > 1.3x 20-period average (reduced from 1.5 to increase signal quality)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_12h[i]) or 
-            np.isnan(vol_filter[i])):
+    for i in range(34, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34[i]) or np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Choppiness regime: only trade when chop > 50 (ranging market)
-        if chop_12h[i] <= 50:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: RSI > 70 or KAMA turns down
-            if rsi[i] > 70 or close[i] < kama[i]:
+            # Exit: price < S1 or trend fails
+            if close[i] < s1_4h[i] or close[i] < ema_34[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 30 or KAMA turns up
-            if rsi[i] < 30 or close[i] > kama[i]:
+            # Exit: price > R1 or trend fails
+            if close[i] > r1_4h[i] or close[i] > ema_34[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: KAMA up + RSI < 30 (oversold) + volume
-            if (close[i] > kama[i] and 
-                rsi[i] < 30 and 
+            # Trend filter
+            bullish = close[i] > ema_34[i]
+            bearish = close[i] < ema_34[i]
+            
+            # Long: price > R1 + bullish trend + volume
+            if (close[i] > r1_4h[i] and 
+                bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: KAMA down + RSI > 70 (overbought) + volume
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 70 and 
+            # Short: price < S1 + bearish trend + volume
+            elif (close[i] < s1_4h[i] and 
+                  bearish and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
