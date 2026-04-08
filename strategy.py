@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 12h Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h timeframe capture breakout momentum.
-12h EMA(50) filter ensures alignment with higher timeframe trend.
-Volume > 1.5x 20-period average confirms breakout strength.
-Works in bull/bear by using trend filter to avoid counter-trend breakouts.
-Target: 20-50 trades/year on 4h timeframe.
+1h Range Breakout with 4h Trend and 1d Volume Filter
+Hypothesis: In ranging markets, breakouts from 1h consolidation zones (identified by low ATR)
+continue in the direction of the 4h trend. Volume confirmation on 1d filters false breakouts.
+Works in bull/bear by using 4h trend filter to avoid counter-trend breakouts.
+Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_range_breakout_4h_trend_1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -27,70 +26,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h OHLC for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # 4h trend: EMA(20) - EMA(50)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_4h = ema20_4h - ema50_4h
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
     
-    # Calculate Donchian channels for each 12h bar
-    # Donchian(20): Upper = max(high, 20), Lower = min(low, 20)
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # 1d volume filter: volume > 1.5x 20-day average
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_filter_1d = volume_1d > (vol_ma_1d * 1.5)
+    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
     
-    # Align Donchian levels to 4h timeframe (shifted by 1 for completed 12h bars only)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    # 1h ATR(14) for consolidation detection
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1h consolidation: ATR < 0.5 * 20-period ATR mean
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    consolidation = atr < (atr_ma * 0.5)
     
-    # Volume filter (>1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # 1h range: 20-period high/low
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(trend_4h_aligned[i]) or np.isnan(vol_filter_1d_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(atr_ma[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower OR trend turns bearish
-            if (close[i] <= donchian_lower_aligned[i] or 
-                close[i] <= ema_50_12h_aligned[i]):
+            # Exit: price closes below 20-period low OR trend turns bearish
+            if (close[i] <= low_20[i] or 
+                trend_4h_aligned[i] < 0):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper OR trend turns bullish
-            if (close[i] >= donchian_upper_aligned[i] or 
-                close[i] >= ema_50_12h_aligned[i]):
+            # Exit: price closes above 20-period high OR trend turns bullish
+            if (close[i] >= high_20[i] or 
+                trend_4h_aligned[i] > 0):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian upper with uptrend and volume
-            if (close[i] >= donchian_upper_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                vol_filter[i]):
+            # Long: breakout above 20-period high with bullish 4h trend and volume
+            if (close[i] > high_20[i] and 
+                trend_4h_aligned[i] > 0 and 
+                consolidation[i] and
+                vol_filter_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: price breaks below Donchian lower with downtrend and volume
-            elif (close[i] <= donchian_lower_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  vol_filter[i]):
+                signals[i] = 0.20
+            # Short: breakdown below 20-period low with bearish 4h trend and volume
+            elif (close[i] < low_20[i] and 
+                  trend_4h_aligned[i] < 0 and 
+                  consolidation[i] and
+                  vol_filter_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
