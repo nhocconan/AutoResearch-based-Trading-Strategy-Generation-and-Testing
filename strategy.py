@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# 1h_4h1d_donchian_volume_trend
-# Hypothesis: 1-hour trend-following strategy using 4h and 1d Donchian channels for direction and 1h volume breakouts for entry.
-# In bull markets: 4h Donchian upper break + 1d uptrend + 1h volume spike = long
-# In bear markets: 4h Donchian lower break + 1d downtrend + 1h volume spike = short
-# Uses Donchian channels (20-period) on 4h for trend, 1d EMA200 for higher timeframe bias, and volume confirmation on 1h.
-# Target: 15-30 trades/year (60-120 over 4 years) to avoid fee drag.
+# 12h_keltner_breakout_daily_trend_volume_v1
+# Hypothesis: 12h Keltner channel breakout with daily trend filter and volume confirmation. 
+# Uses EMA(20) as center line and ATR(10) for channel width (1.5x ATR). 
+# Enters long when price breaks above upper band in daily uptrend with volume surge.
+# Enters short when price breaks below lower band in daily downtrend with volume surge.
+# Exits when price crosses back below/above EMA(20) or volatility contracts.
+# Designed for low trade frequency (15-25/year) to minimize fee drag in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_donchian_volume_trend"
-timeframe = "1h"
+name = "12h_keltner_breakout_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,70 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period) - load once
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # 4h Donchian upper/lower
-    donch_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    
-    # 1d trend filter (EMA200) - load once
+    # Daily trend filter (EMA50) - load once before loop
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1h volume average (20-period)
+    # Calculate EMA50 on daily data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # 12h indicators
+    # EMA20 for center line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ATR(10) for channel width
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner channels (EMA20 ± 1.5*ATR)
+    upper_band = ema20 + 1.5 * atr
+    lower_band = ema20 - 1.5 * atr
+    
+    # Volume confirmation (20-period average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Need indicators warmed up
+    start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # 1d trend bias
-        bullish_bias = close[i] > ema200_1d_aligned[i]
-        bearish_bias = close[i] < ema200_1d_aligned[i]
-        
-        # Volume confirmation
-        volume_ok = volume[i] > 1.5 * avg_volume[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: close below 4h Donchian lower or trend reversal
-            if close[i] < donch_low_4h_aligned[i] or (bearish_bias and close[i] < ema200_1d_aligned[i]):
+            # Exit conditions: close below EMA20 or volatility contraction
+            if close[i] < ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: close above 4h Donchian upper or trend reversal
-            if close[i] > donch_high_4h_aligned[i] or (bullish_bias and close[i] > ema200_1d_aligned[i]):
+            # Exit conditions: close above EMA20 or volatility contraction
+            if close[i] > ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
+            # Volume confirmation
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            
+            # Breakout conditions
             if volume_ok:
-                # Long entry: break above 4h Donchian upper in bullish bias
-                if bullish_bias and close[i] > donch_high_4h_aligned[i] and close[i-1] <= donch_high_4h_aligned[i-1]:
+                # Long breakout: price crosses above upper band in uptrend
+                if daily_uptrend and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
                     position = 1
-                    signals[i] = 0.20
-                # Short entry: break below 4h Donchian lower in bearish bias
-                elif bearish_bias and close[i] < donch_low_4h_aligned[i] and close[i-1] >= donch_low_4h_aligned[i-1]:
+                    signals[i] = 0.25
+                # Short breakdown: price crosses below lower band in downtrend
+                elif daily_downtrend and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
