@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Weekly Trend + Volume Confirmation v2
-Hypothesis: Donchian(20) breakouts on 12h with weekly trend filter and volume
-confirmation capture strong momentum moves while avoiding false breakouts.
-Works in bull markets via breakouts and bear via breakdowns. Target: 12-37 trades/year.
+4h Donchian Breakout + 12h Trend + Volume Filter
+Hypothesis: Donchian(20) breakouts on 4h with 12h trend alignment (EMA21) and volume confirmation
+capture strong trends while avoiding false breakouts in chop. Works in bull (breakouts) and bear
+(breakdowns) by using symmetric long/short logic. Volume filter ensures commitment.
+Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_weekly_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,18 +26,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA(21) for trend filter
-    ema_21_w = df_1w['close'].ewm(span=21, adjust=False, min_periods=21).mean()
-    ema_21_12h = align_htf_to_ltf(prices, df_1w, ema_21_w.values)
+    # 12h EMA(21) for trend filter
+    ema_21_12h = df_12h['close'].ewm(span=21, adjust=False, min_periods=21).mean()
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h.values)
     
-    # 12h Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume filter (>1.5x 20-period average on 12h)
+    # 4h volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
@@ -45,14 +48,14 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_21_12h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_21_12h_aligned[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price closes below Donchian low or trend reverses
-            if close[i] <= low_20[i] or close[i] < ema_21_12h[i]:
+            if close[i] <= donchian_low[i] or close[i] < ema_21_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -60,21 +63,21 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price closes above Donchian high or trend reverses
-            if close[i] >= high_20[i] or close[i] > ema_21_12h[i]:
+            if close[i] >= donchian_high[i] or close[i] > ema_21_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Breakout long with trend alignment and volume
-            if (close[i] >= high_20[i] and 
-                close[i] > ema_21_12h[i] and 
+            if (close[i] >= donchian_high[i] and 
+                close[i] > ema_21_12h_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
             # Breakdown short with trend alignment and volume
-            elif (close[i] <= low_20[i] and 
-                  close[i] < ema_21_12h[i] and 
+            elif (close[i] <= donchian_low[i] and 
+                  close[i] < ema_21_12h_aligned[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
