@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_1w_pivot_breakout_volume_v1
-# Hypothesis: 6h Camarilla pivot breakouts with volume confirmation and 1d/1w trend filter.
+# 12h_1d_1w_pivot_breakout_volume_v2
+# Hypothesis: 12h Camarilla pivot breakouts with volume confirmation and 1d/1w trend filter.
 # Long: price breaks above R4 (1d) with volume > 2.0x 20-period average AND 1d close > 1w VWAP (bullish regime)
 # Short: price breaks below S4 (1d) with volume > 2.0x 20-period average AND 1d close < 1w VWAP (bearish regime)
 # Exit: price returns to 1d VWAP or opposite pivot level (R3/S3) with volume confirmation
-# Uses 6h primary timeframe with 1d HTF for pivot levels and 1w HTF for regime filter.
+# Uses 12h primary timeframe with 1d HTF for pivot levels and 1w HTF for regime filter.
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_pivot_breakout_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
@@ -84,14 +84,14 @@ def generate_signals(prices):
         else:
             vwap_1w[i] = (vwap_1w[i-1] * np.sum(volume_1w[:i]) + typical_price * volume_1w[i]) / (np.sum(volume_1w[:i]) + volume_1w[i])
     
-    # Align 1d indicators to 6h timeframe
+    # Align 1d indicators to 12h timeframe
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Align 1w VWAP to 6h timeframe
+    # Align 1w VWAP to 12h timeframe
     vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
