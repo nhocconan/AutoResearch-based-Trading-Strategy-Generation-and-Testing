@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 12h_donchian20_daily_pivot_volume_v2
-# Hypothesis: 12h Donchian(20) breakout with 1d pivot level confirmation and volume filter.
-# Long when price breaks above upper Donchian channel and near 1d pivot/resistance levels with volume surge.
-# Short when price breaks below lower Donchian channel and near 1d pivot/support levels with volume surge.
-# Uses pivot levels as dynamic support/resistance to filter breakouts, reducing false signals.
-# Volume surge confirms institutional interest. Target: 15-30 trades/year.
+# 4h_ema_breakout_volume_regime_v1
+# Hypothesis: Uses 4H EMA20 breakout with 12H EMA50 trend filter and volume surge for entries.
+# Long when: price > EMA20, 12H EMA50 slope up, volume > 1.5x avg.
+# Short when: price < EMA20, 12H EMA50 slope down, volume > 1.5x avg.
+# Exit when price crosses EMA20 opposite direction or volume drops below average.
+# Designed for low trade frequency (<40/year) to avoid fee drag, works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_daily_pivot_volume_v2"
-timeframe = "12h"
+name = "4h_ema_breakout_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,55 +24,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
-    donch_len = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(donch_len-1, n):
-        upper[i] = np.max(high[i-donch_len+1:i+1])
-        lower[i] = np.min(low[i-donch_len+1:i+1])
+    # 4H EMA20 for entry/exit
+    ema_period = 20
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    # Volume filter: 2.0x 20-period average (higher threshold for fewer trades)
-    vol_ma_period = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
-    vol_surge = np.full(n, False)
-    for i in range(n):
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_surge[i] = volume[i] > 2.0 * vol_ma[i]
+    # Volume filter: 1.5x 20-period EMA (more responsive than SMA)
+    vol_ema_period = 20
+    vol_ema = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ema = vol_series.ewm(span=vol_ema_period, adjust=False, min_periods=vol_ema_period).mean().values
     
-    # Get 1d data for pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_surge = volume > 1.5 * vol_ema
     
-    # Calculate classic pivot points: P = (H+L+C)/3
-    # Support 1 = 2*P - H, Resistance 1 = 2*P - L
-    pivot = np.full(len(close_1d), np.nan)
-    r1 = np.full(len(close_1d), np.nan)
-    s1 = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if not np.isnan(high_1d[i]) and not np.isnan(low_1d[i]) and not np.isnan(close_1d[i]):
-            pivot[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
-            r1[i] = 2 * pivot[i] - high_1d[i]
-            s1[i] = 2 * pivot[i] - low_1d[i]
-    
-    # Align pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Get 12H data for trend filter (EMA50 slope)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate slope: positive if current EMA > EMA 3 periods ago
+    ema50_slope_12h = np.full(len(close_12h), np.nan)
+    for i in range(3, len(close_12h)):
+        if not np.isnan(ema50_12h[i]) and not np.isnan(ema50_12h[i-3]):
+            ema50_slope_12h[i] = ema50_12h[i] - ema50_12h[i-3]
+    ema50_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_slope_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donch_len, vol_ma_period) + 1
+    start_idx = max(ema_period, vol_ema_period, 3) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(ema20[i]) or np.isnan(vol_ema[i]) or np.isnan(ema50_slope_12h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -80,34 +63,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below lower Donchian or volume drops below average
-            if close[i] < lower[i] or volume[i] < vol_ma[i]:
+            # Exit: Price below EMA20 or volume drops below average
+            if close[i] < ema20[i] or volume[i] < vol_ema[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above upper Donchian or volume drops below average
-            if close[i] > upper[i] or volume[i] < vol_ma[i]:
+            # Exit: Price above EMA20 or volume drops below average
+            if close[i] > ema20[i] or volume[i] < vol_ema[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above upper Donchian, near pivot/R1 support, volume surge
-            # Price must be within 1% of pivot or R1 to consider it a valid bounce level
-            near_pivot_or_r1 = (abs(close[i] - pivot_aligned[i]) / pivot_aligned[i] < 0.01 or 
-                               abs(close[i] - r1_aligned[i]) / r1_aligned[i] < 0.01)
-            if (close[i] > upper[i] and 
-                near_pivot_or_r1 and 
+            # Long entry: Price above EMA20, 12H EMA50 slope up, volume surge
+            if (close[i] > ema20[i] and 
+                ema50_slope_12h_aligned[i] > 0 and 
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below lower Donchian, near pivot/S1 resistance, volume surge
-            elif (close[i] < lower[i] and 
-                  (abs(close[i] - pivot_aligned[i]) / pivot_aligned[i] < 0.01 or 
-                   abs(close[i] - s1_aligned[i]) / s1_aligned[i] < 0.01) and 
+            # Short entry: Price below EMA20, 12H EMA50 slope down, volume surge
+            elif (close[i] < ema20[i] and 
+                  ema50_slope_12h_aligned[i] < 0 and 
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
