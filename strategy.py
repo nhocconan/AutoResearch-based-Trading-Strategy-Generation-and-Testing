@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_momentum_reversal_v1
-# Hypothesis: Mean reversion on 6h with 12h/1d trend filter captures pullbacks in trending markets. Uses RSI(6) on 6h for overbought/oversold, 12h EMA50 for trend direction, and 1d volume spike for confirmation. Designed to work in both bull and bear markets by trading pullbacks, not chasing momentum.
+# 4h_1d_donchian_breakout_volume_v2
+# Hypothesis: 4-hour Donchian breakout with daily trend filter and volume confirmation.
+# Uses daily EMA for trend filter to avoid counter-trend trades and volume to confirm breakout strength.
+# Target: 30-60 trades per year (120-240 total over 4 years) to balance opportunity and cost.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_momentum_reversal_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     # Price data
@@ -21,46 +23,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for volume confirmation
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 6h RSI(6)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/6, min_periods=6, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/6, min_periods=6, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate 4-hour Donchian(20)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate daily EMA20 for trend filter
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate 1d volume spike: volume > 2x average of last 20 days
+    # Daily volume average for confirmation (20-day average)
     vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > vol_ma_1d * 2.0
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # 4-hour volume > 1.5x daily average volume
+    vol_confirm = volume > (vol_avg_1d_aligned * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(rsi[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -69,27 +62,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 (mean reversion complete)
-            if rsi[i] > 50:
+            # Exit: price closes below 4h Donchian low
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (mean reversion complete)
-            if rsi[i] < 50:
+            # Exit: price closes above 4h Donchian high
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: RSI < 30 (oversold), above 12h EMA50 (uptrend), with volume spike
-            if rsi[i] < 30 and close[i] > ema50_12h_aligned[i] and vol_spike_1d_aligned[i] > 0.5:
+            # Long entry: price breaks above 4h Donchian high, above daily EMA20, with volume confirmation
+            if close[i] > donchian_high[i] and close[i] > ema20_1d_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI > 70 (overbought), below 12h EMA50 (downtrend), with volume spike
-            elif rsi[i] > 70 and close[i] < ema50_12h_aligned[i] and vol_spike_1d_aligned[i] > 0.5:
+            # Short entry: price breaks below 4h Donchian low, below daily EMA20, with volume confirmation
+            elif close[i] < donchian_low[i] and close[i] < ema20_1d_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
