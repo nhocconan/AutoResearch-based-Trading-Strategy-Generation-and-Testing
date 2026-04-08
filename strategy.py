@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1w_1d_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,42 +18,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Daily data for trend filter
+    # 1d data for trend filter and Donchian channels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Weekly Camarilla pivot levels (using previous week's data)
-    pivot_point_1w = (high_1w + low_1w + close_1w) / 3.0
-    daily_range_1w = high_1w - low_1w
-    
-    # Weekly Camarilla levels
-    r3_1w = close_1w + daily_range_1w * 1.1 / 4
-    r2_1w = close_1w + daily_range_1w * 1.1 / 6
-    r1_1w = close_1w + daily_range_1w * 1.1 / 12
-    s1_1w = close_1w - daily_range_1w * 1.1 / 12
-    s2_1w = close_1w - daily_range_1w * 1.1 / 6
-    s3_1w = close_1w - daily_range_1w * 1.1 / 4
-    
-    # Align Weekly Camarilla levels to 12h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_point_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    
-    # Daily EMA(50) for trend filter
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR for volatility filter (14-period)
+    # 1d Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # ATR for volatility filter and stoploss (14-period on 4h)
     tr1 = pd.Series(high).subtract(pd.Series(low)).abs()
     tr2 = pd.Series(high).subtract(pd.Series(close).shift(1)).abs()
     tr3 = pd.Series(low).subtract(pd.Series(close).shift(1)).abs()
@@ -74,24 +55,22 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
-            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
-            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
             np.isnan(vol_spike[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S2 or trend reverses
-            if close[i] < s2_1w_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price closes below 20-day low or trend reverses
+            if close[i] < low_20_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R2 or trend reverses
-            if close[i] > r2_1w_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price closes above 20-day high or trend reverses
+            if close[i] > high_20_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,15 +80,15 @@ def generate_signals(prices):
             uptrend = close[i] > ema_50_1d_aligned[i]
             downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long: price breaks above R2 + uptrend + volume spike + vol filter
-            if (close[i] > r2_1w_aligned[i] and 
+            # Long: price breaks above 20-day high + uptrend + volume spike + vol filter
+            if (close[i] > high_20_aligned[i] and 
                 uptrend and 
                 vol_spike[i] and
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below S2 + downtrend + volume spike + vol filter
-            elif (close[i] < s2_1w_aligned[i] and 
+            # Short: price breaks below 20-day low + downtrend + volume spike + vol filter
+            elif (close[i] < low_20_aligned[i] and 
                   downtrend and 
                   vol_spike[i] and
                   vol_filter[i]):
