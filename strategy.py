@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1w1d_camarilla_pivot_v1
-Hypothesis: 12-hour strategy using weekly and daily Camarilla pivot with volume confirmation and trend filter.
-Long when price breaks above weekly R1 and daily R1 with volume > 2x average and price > weekly EMA50.
-Short when price breaks below weekly S1 and daily S1 with volume > 2x average and price < weekly EMA50.
+1d_1w_camarilla_pivot_v1
+Hypothesis: Daily strategy using weekly Camarilla pivot with volume confirmation and trend filter.
+Long when price breaks above weekly R1 with volume > 2x average and price > weekly EMA200.
+Short when price breaks below weekly S1 with volume > 2x average and price < weekly EMA200.
 Exit when price crosses opposite weekly level OR volume falls below 1.5x average.
-Designed to work in both bull and bear markets by using higher timeframe confluence and volume filters to reduce false signals.
-Target: 12-37 trades/year (50-150 total over 4 years) to avoid overtrading.
+Target: 10-25 trades/year to avoid overtrading. Weekly timeframe reduces noise and improves trend reliability.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_pivot_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -31,7 +30,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,10 +38,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly and daily data for context
+    # Get weekly data for context
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 50 or len(df_1d) < 200:
+    if len(df_1w) < 200:
         return np.zeros(n)
     
     # Calculate weekly Pivot (using previous week's data)
@@ -56,26 +54,13 @@ def generate_signals(prices):
     S1_1w = pivot_1w - (range_1w * 1.1 / 12)  # Weekly S1
     R1_1w = pivot_1w + (range_1w * 1.1 / 12)  # Weekly R1
     
-    # Calculate daily Pivot (using previous day's data)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    # Daily support/resistance levels (Standard Camarilla S1/R1)
-    S1_1d = pivot_1d - (range_1d * 1.1 / 12)  # Daily S1
-    R1_1d = pivot_1d + (range_1d * 1.1 / 12)  # Daily R1
-    
     # Calculate weekly EMA for trend filter
-    ema_50_1w = calculate_ema(close_1w, 50)
+    ema_200_1w = calculate_ema(close_1w, 200)
     
-    # Align indicators to 12-hour timeframe
+    # Align indicators to daily timeframe
     S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
     R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -85,11 +70,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(300, n):  # Start after warmup
+    for i in range(200, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(S1_1w_aligned[i]) or np.isnan(R1_1w_aligned[i]) or 
-            np.isnan(S1_1d_aligned[i]) or np.isnan(R1_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -98,34 +82,32 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        S1_w = S1_1w_aligned[i]
-        R1_w = R1_1w_aligned[i]
-        S1_d = S1_1d_aligned[i]
-        R1_d = R1_1d_aligned[i]
-        trend_up_1w = price > ema_50_1w_aligned[i]
+        S1 = S1_1w_aligned[i]
+        R1 = R1_1w_aligned[i]
+        trend_up_1w = price > ema_200_1w_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below weekly S1 or daily S1 or volume drops below 1.5x average
-            if price < S1_w or price < S1_d or vol_ratio < 1.5:
+            # Exit: price crosses below weekly S1 or volume drops below 1.5x average
+            if price < S1 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above weekly R1 or daily R1 or volume drops below 1.5x average
-            if price > R1_w or price > R1_d or vol_ratio < 1.5:
+            # Exit: price crosses above weekly R1 or volume drops below 1.5x average
+            if price > R1 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above weekly R1 and daily R1 with volume expansion and uptrend on weekly
-            if price > R1_w and price > R1_d and vol_ratio > 2.0 and trend_up_1w:
+            # Enter long: price breaks above weekly R1 with volume expansion and uptrend on weekly
+            if price > R1 and vol_ratio > 2.5 and trend_up_1w:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below weekly S1 and daily S1 with volume expansion and downtrend on weekly
-            elif price < S1_w and price < S1_d and vol_ratio > 2.0 and not trend_up_1w:
+            # Enter short: price breaks below weekly S1 with volume expansion and downtrend on weekly
+            elif price < S1 and vol_ratio > 2.5 and not trend_up_1w:
                 position = -1
                 signals[i] = -0.25
     
