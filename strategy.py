@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Weekly Trend + Volume Confirmation v1
-Hypothesis: Price breaking above/below 20-period Donchian channels on 12h timeframe
-with weekly trend alignment (EMA50) and volume confirmation captures strong trends
-while avoiding whipsaws. Designed for 12h to limit trade frequency and reduce fee drag.
-Target: 12-37 trades/year per symbol.
+4h ATR Breakout + 12h Trend + Volume Confirmation v1
+Hypothesis: ATR-based breakouts from Donchian-like channels combined with 12h trend filter and volume confirmation work across bull/bear markets. The 4h timeframe targets 20-50 trades/year, avoiding excessive turnover while capturing significant moves. Volume ensures breakout validity, and 12h trend avoids counter-trend whipsaws.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "4h_atr_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,58 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA(50) for trend filter
-    ema_50 = df_1w['close'].ewm(span=50, adjust=False, min_periods=50).mean()
+    # 12h EMA(34) for trend filter
+    ema_34_12h = df_12h['close'].ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # 12h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h ATR(14) for volatility and breakout bands
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar TR
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter (>1.8x 30-period average on 12h)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (vol_ma * 1.8)
+    # 4h Donchian-like channels using ATR
+    upper_band = np.roll(close, 1) + (2.0 * atr)  # Previous close + 2*ATR
+    lower_band = np.roll(close, 1) - (2.0 * atr)  # Previous close - 2*ATR
     
-    # Align weekly EMA to 12h timeframe
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50.values)
+    # Volume filter (>1.3x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if close[i] <= low_20[i] or close[i] < ema_50_12h[i]:
+            # Exit: price closes below lower band or trend reverses
+            if close[i] <= lower_band[i] or close[i] < ema_34_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if close[i] >= high_20[i] or close[i] > ema_50_12h[i]:
+            # Exit: price closes above upper band or trend reverses
+            if close[i] >= upper_band[i] or close[i] > ema_34_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long breakout above Donchian high with trend alignment
-            if (close[i] >= high_20[i] and 
-                close[i] > ema_50_12h[i] and 
+            # Long breakout with trend alignment and volume
+            if (close[i] >= upper_band[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown below Donchian low with trend alignment
-            elif (close[i] <= low_20[i] and 
-                  close[i] < ema_50_12h[i] and 
+            # Short breakdown with trend alignment and volume
+            elif (close[i] <= lower_band[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
