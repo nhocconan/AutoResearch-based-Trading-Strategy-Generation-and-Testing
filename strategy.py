@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian Channel Breakout + 1d Trend + Volume Confirmation v1
-Hypothesis: Donchian(20) breakouts on 12h timeframe capture sustained moves while avoiding whipsaws. Filtered by 1d EMA trend and volume confirmation, this strategy targets 12-37 trades/year. The 12h timeframe balances responsiveness with low turnover, and volume validates breakout strength while 1d trend ensures alignment with higher-timeframe momentum, working in both bull and bear regimes by adapting to volatility regimes.
+4h Donchian Channel Breakout + 1d Trend + Volume Confirmation v1
+Hypothesis: Donchian breakouts capture sustained trends, filtered by 1d EMA trend and volume spikes to avoid false breakouts. Works in bull markets (trend continuation) and bear markets (mean reversion at extremes) by adapting to volatility regimes. Target: 25-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    
     # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
     ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h Donchian Channel (20-period)
+    # 4h Donchian Channel (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter (>1.5x 30-period average)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # Volume filter (>2.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
             np.isnan(low_20[i]) or np.isnan(vol_filter[i])):
@@ -49,7 +47,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower or trend reverses
+            # Exit: price closes below Donchian low or trend reverses
             if close[i] <= low_20[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -57,7 +55,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper or trend reverses
+            # Exit: price closes above Donchian high or trend reverses
             if close[i] >= high_20[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
