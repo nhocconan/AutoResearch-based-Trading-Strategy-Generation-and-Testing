@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 1d_bollinger_breakout_volume_regime_v1
-# Hypothesis: Bollinger Band breakout with volume confirmation and regime filter (ADX) on daily timeframe.
-# Captures volatility expansion in both bull and bear markets by trading breakouts during trending conditions.
-# Uses BB(20,2) for breakout signals, volume >1.5x average for confirmation, ADX(14)>25 for trend filter.
-# Target: 15-25 trades/year to minimize fee drag.
+# 6h_volatility_breakout_1d_trend
+# Hypothesis: Volatility breakout on 6h timeframe with 1d trend filter. Enters on breakout of ATR-based channels during high volatility periods when aligned with daily trend.
+# Designed to work in both bull and bear markets by capturing volatility expansion phases aligned with higher timeframe trend.
+# Target: 20-30 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_bollinger_breakout_volume_regime_v1"
-timeframe = "1d"
+name = "6h_volatility_breakout_1d_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter (weekly EMA50) - load once before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Daily trend filter (1d EMA200) - load once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on weekly data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate EMA200 on daily data
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Daily indicators
-    # Bollinger Bands (20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2.0 * std20
-    lower_band = sma20 - 2.0 * std20
+    # 6h indicators
+    # EMA20 for dynamic center line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    # ATR(14) for volatility bands
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Upper and lower bands (EMA20 ± 2*ATR)
+    upper_band = ema20 + 2.0 * atr
+    lower_band = ema20 - 2.0 * atr
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,44 +55,44 @@ def generate_signals(prices):
     start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(sma20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(adx[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema200_1d_aligned[i]
+        daily_downtrend = close[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to middle band or trend weakens
-            if close[i] < sma20[i] or adx[i] < 20:
+            # Exit conditions: close below EMA20 or volatility contraction
+            if close[i] < ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to middle band or trend weakens
-            if close[i] > sma20[i] or adx[i] < 20:
+            # Exit conditions: close above EMA20 or volatility contraction
+            if close[i] > ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            volume_ok = volume[i] > 1.3 * avg_volume[i]
             
-            # Breakout conditions with trend and weekly filter
-            if volume_ok and adx[i] > 25:
-                # Long breakout: price closes above upper band in uptrend
-                if weekly_uptrend and close[i] > upper_band[i]:
+            # Breakout conditions
+            if volume_ok:
+                # Long breakout: price crosses above upper band in uptrend
+                if daily_uptrend and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakdown: price closes below lower band in downtrend
-                elif weekly_downtrend and close[i] < lower_band[i]:
+                # Short breakdown: price crosses below lower band in downtrend
+                elif daily_downtrend and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
                     position = -1
                     signals[i] = -0.25
     
