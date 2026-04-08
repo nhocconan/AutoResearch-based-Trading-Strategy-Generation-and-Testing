@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_triple_barrier_v1
-Hypothesis: Use 12h price action with 1d trend filter and volume confirmation.
-- Long: Price breaks above 12h Donchian high(20) + 1d trend bullish (close > EMA50) + volume > 1.5x avg
-- Short: Price breaks below 12h Donchian low(20) + 1d trend bearish (close < EMA50) + volume > 1.5x avg
-- Exit: Opposite Donchian break or trend reversal
-- Position size: 0.25 to limit drawdown
-- Target: 20-40 trades/year to avoid overtrading
+4h_metalawrence_rsi_bands_v1
+Hypothesis: Use RSI(14) with dynamic Bollinger Bands (20,2) on RSI to identify extreme mean-reversion zones.
+Only trade in direction of 1d trend (price above/below EMA50). Enter when RSI touches upper/lower band and shows rejection.
+Exit on opposite RSI band touch or trend reversal.
+Designed for low trade frequency (<30/year) with clear entry/exit rules to avoid overtrading.
+Works in both bull/bear via trend filter and mean-reversion logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_triple_barrier_v1"
-timeframe = "12h"
+name = "4h_metalawrence_rsi_bands_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,39 +24,37 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands on RSI (20, 2)
+    rsi_series = pd.Series(rsi)
+    rsi_ma = rsi_series.rolling(window=20, min_periods=20).mean()
+    rsi_std = rsi_series.rolling(window=20, min_periods=20).std()
+    rsi_upper = rsi_ma + 2 * rsi_std
+    rsi_lower = rsi_ma - 2 * rsi_std
     
     # 1d trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # 1d trend direction
-    bullish_trend = close_1d > ema_50
-    bearish_trend = close_1d < ema_50
-    bullish_trend_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
-    bearish_trend_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
-    
-    # Volume filter: 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):  # Wait for BB warmup
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(rsi_upper[i]) or np.isnan(rsi_lower[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -65,31 +62,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long
-            # Exit: price breaks below Donchian low OR trend turns bearish
-            if low[i] < donchian_low[i] or bearish_trend_aligned[i] > 0.5:
+            # Exit: RSI touches upper band or trend turns bearish
+            if rsi[i] >= rsi_upper[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above Donchian high OR trend turns bullish
-            if high[i] > donchian_high[i] or bullish_trend_aligned[i] > 0.5:
+            # Exit: RSI touches lower band or trend turns bullish
+            if rsi[i] <= rsi_lower[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: break above Donchian high + bullish trend + volume
-            if (high[i] > donchian_high[i] and 
-                bullish_trend_aligned[i] > 0.5 and 
-                volume_filter[i]):
+            # Long: RSI touches lower band with rejection + bullish trend
+            if (rsi[i] <= rsi_lower[i] and 
+                close[i] > ema_50_aligned[i] and 
+                rsi[i] > rsi[i-1]):  # RSI rising off lower band
                 position = 1
                 signals[i] = 0.25
-            # Short: break below Donchian low + bearish trend + volume
-            elif (low[i] < donchian_low[i] and 
-                  bearish_trend_aligned[i] > 0.5 and 
-                  volume_filter[i]):
+            # Short: RSI touches upper band with rejection + bearish trend
+            elif (rsi[i] >= rsi_upper[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  rsi[i] < rsi[i-1]):  # RSI falling off upper band
                 position = -1
                 signals[i] = -0.25
     
