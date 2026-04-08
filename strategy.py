@@ -1,18 +1,20 @@
-# 4h_fractal_breakout_12h_trend_volume_v1
-# Hypothesis: Williams Fractal breakout on 4h with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above recent bearish fractal (resistance) in uptrend with volume.
-# Short when price breaks below recent bullish fractal (support) in downtrend with volume.
-# Williams fractals require 2-bar confirmation, so we use additional_delay_bars=2.
-# Timeframe: 4h, HTF: 12h for trend filter.
-# Target: 20-50 trades/year to minimize fee drag.
+#!/usr/bin/env python3
+"""
+1h_4h_1d_trend_follow_volume_v1
+Hypothesis: Use 4h and 1d trends to determine direction, 1h for entry timing with volume confirmation.
+Trades only in 08-20 UTC to avoid low-volume periods. Targets 15-37 trades/year.
+Uses 4h EMA(21) and 1d EMA(50) for trend, with volume > 1.5x 20-period average for entry.
+Long when price > both EMAs, short when price < both EMAs, with volume filter.
+Position size fixed at 0.20 to manage risk. Designed for both bull and bear markets via trend following.
+"""
 
-name = "4h_fractal_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_trend_follow_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,44 +27,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Fractals on 12h timeframe (more reliable than 1d for 4h strategy)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # Get 4h data for EMA(21) trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Calculate Williams fractals on 12h data
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_12h['high'].values,
-        df_12h['low'].values,
-    )
+    # Get 1d data for EMA(50) trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Align fractals to 4h timeframe with 2-bar confirmation delay
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_12h, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_12h, bullish_fractal, additional_delay_bars=2
-    )
+    # Calculate EMAs
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 12h EMA trend filter (50)
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align EMAs to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_period = 20
     vol_ma = np.full(n, np.nan)
     vol_ma[vol_period-1:] = pd.Series(volume).rolling(window=vol_period, min_periods=vol_period).mean()[vol_period-1:].values
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     # Start from sufficient lookback
-    start_idx = max(20, 50) + 5
+    start_idx = max(21, 50, vol_period) + 5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or volume[i] == 0):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -70,28 +76,28 @@ def generate_signals(prices):
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit if price breaks below bullish fractal (support) or trend fails
-            if close[i] < bullish_fractal_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Exit if price breaks below either EMA (trend failure)
+            if close[i] < ema_4h_aligned[i] or close[i] < ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above bearish fractal (resistance) or trend fails
-            if close[i] > bearish_fractal_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Exit if price breaks above either EMA (trend failure)
+            if close[i] > ema_4h_aligned[i] or close[i] > ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price breaks above bearish fractal (resistance) with uptrend and volume
-            if close[i] > bearish_fractal_aligned[i] and close[i] > ema_12h_aligned[i] and volume_filter:
+            # Long entry: price above both EMAs with volume
+            if close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i] and volume_filter:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below bullish fractal (support) with downtrend and volume
-            elif close[i] < bullish_fractal_aligned[i] and close[i] < ema_12h_aligned[i] and volume_filter:
+                signals[i] = 0.20
+            # Short entry: price below both EMAs with volume
+            elif close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i] and volume_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
