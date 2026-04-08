@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# [24931] 6h_1d_donchian_weekly_pivot_v1
-# Hypothesis: 6-hour Donchian(20) breakout with 1-day pivot direction filter and volume confirmation.
-# Long when price breaks above 20-period high with volume > 1.8x average and price > 1-day pivot point.
-# Short when price breaks below 20-period low with volume > 1.8x average and price < 1-day pivot point.
-# Exit when price reverts to 10-period moving average or volume drops below 1.3x average.
-# Uses weekly pivot from 1-day data for trend bias, effective in both trending and ranging markets.
+# [24932] 12h_1d_atr_breakout_v1
+# Hypothesis: 12-hour ATR breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above ATR(20) based upper band with volume > 1.5x average and close > 1-day EMA(50).
+# Short when price breaks below ATR(20) based lower band with volume > 1.5x average and close < 1-day EMA(50).
+# Exit when price crosses the 1-day EMA(50) or volatility drops (ATR ratio < 0.8).
+# Uses volatility-based breakouts which work in both trending and ranging markets by adapting to market conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_weekly_pivot_v1"
-timeframe = "6h"
+name = "12h_1d_atr_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,53 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for weekly pivot
+    # Get 1-day data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot from daily data (using previous week's data)
-    # Weekly pivot = (Prior week high + prior week low + prior week close) / 3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(50) on 1-day close
     close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema = pd.Series(close_1d).ewm(span=50, adjust=False).values
+        ema_50_1d[:] = ema
     
-    # Need at least 5 days for a week
-    weekly_pivot = np.full(len(close_1d), np.nan)
-    for i in range(4, len(close_1d)):
-        # Use previous 5 days (prior week)
-        week_high = np.max(high_1d[i-4:i+1])
-        week_low = np.min(low_1d[i-4:i+1])
-        week_close = close_1d[i]
-        weekly_pivot[i] = (week_high + week_low + week_close) / 3.0
+    # Calculate ATR(20) for volatility bands
+    atr_period = 20
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    if n >= atr_period:
+        atr_values = pd.Series(tr).ewm(span=atr_period, adjust=False).mean().values
+        atr[:] = atr_values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate 10-period moving average for exit
-    ma_10 = np.full(n, np.nan)
-    for i in range(10, n):
-        ma_10[i] = np.mean(close[i-10:i])
+    # Calculate ATR-based bands (2 * ATR)
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    if n >= atr_period:
+        upper_band[atr_period:] = close[atr_period:] + 2.0 * atr[atr_period:]
+        lower_band[atr_period:] = close[atr_period:] - 2.0 * atr[atr_period:]
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align weekly pivot to 6-hour timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align 1-day EMA to 12-hour timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or np.isnan(weekly_pivot_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -79,29 +77,30 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
+        ema_trend = ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price returns to 10-period MA or volume drops below 1.3x average
-            if price <= ma_10[i] or vol_ratio < 1.3:
+            # Exit: price crosses below EMA(50) or volatility drops significantly
+            if price < ema_trend or (atr[i] > 0 and atr[i] < 0.8 * atr[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price returns to 10-period MA or volume drops below 1.3x average
-            if price >= ma_10[i] or vol_ratio < 1.3:
+            # Exit: price crosses above EMA(50) or volatility drops significantly
+            if price > ema_trend or (atr[i] > 0 and atr[i] < 0.8 * atr[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and above weekly pivot
-            if price > donchian_high[i] and vol_ratio > 1.8 and price > weekly_pivot_aligned[i]:
+            # Enter long: price breaks above upper ATR band with volume expansion and above EMA(50)
+            if price > upper_band[i] and vol_ratio > 1.5 and price > ema_trend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and below weekly pivot
-            elif price < donchian_low[i] and vol_ratio > 1.8 and price < weekly_pivot_aligned[i]:
+            # Enter short: price breaks below lower ATR band with volume expansion and below EMA(50)
+            elif price < lower_band[i] and vol_ratio > 1.5 and price < ema_trend:
                 position = -1
                 signals[i] = -0.25
     
