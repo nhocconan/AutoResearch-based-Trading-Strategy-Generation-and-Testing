@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1h_4h1d_rsi_pullback_v1
-# Hypothesis: 1-hour RSI pullback strategy with 4-hour trend filter and 1-day volume confirmation.
-# Long: RSI(14) < 30 (oversold pullback) AND 4h EMA(21) up-trend AND 1-day volume > 1.5x 20-day average volume.
-# Short: RSI(14) > 70 (overbought bounce) AND 4h EMA(21) down-trend AND 1-day volume > 1.5x 20-day average volume.
-# Exit: RSI crosses back above 50 (long) or below 50 (short).
-# Designed to capture mean-reversion within the trend during both bull and bear markets with volume confirmation to avoid false signals.
-# Target: 15-37 trades/year (60-150 over 4 years) using strict entry conditions.
+# 12h_1d_camarilla_pivot_volume_v1
+# Hypothesis: 12-hour Camarilla pivot reversal with volume confirmation and 1-day ATR regime filter.
+# Long: price <= Camarilla L3 AND volume > 1.3x 20-period average volume AND daily ATR < 0.03 * price (low volatility regime).
+# Short: price >= Camarilla H3 AND volume > 1.3x 20-period average volume AND daily ATR < 0.03 * price.
+# Exit: price crosses Camarilla midpoint (H3/L3 average) or opposite H3/L3 touch with volume.
+# Designed to capture mean-reversion bounces at institutional pivot levels during low-volatility periods,
+# which works in both bull (buy dips) and bear (sell rallies) markets with strict entry criteria.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_rsi_pullback_v1"
-timeframe = "1h"
+name = "12h_1d_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,113 +25,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-hour RSI(14)
-    rsi = np.full(n, np.nan)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 12-hour Camarilla levels from previous bar's OHLC
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    camarilla_mid = np.full(n, np.nan)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    for i in range(1, n):
+        # Use previous bar's OHLC to calculate current bar's Camarilla levels
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        range_val = prev_high - prev_low
         
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
+        camarilla_h3[i] = prev_close + range_val * 1.1 / 4
+        camarilla_l3[i] = prev_close - range_val * 1.1 / 4
+        camarilla_mid[i] = (camarilla_h3[i] + camarilla_l3[i]) / 2
     
-    # 4-hour EMA(21) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
+    # 20-period average volume
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
-    close_4h = df_4h['close'].values
-    ema_4h = np.full(len(close_4h), np.nan)
-    
-    if len(close_4h) >= 21:
-        ema_4h[20] = np.mean(close_4h[:21])
-        for i in range(21, len(close_4h)):
-            ema_4h[i] = close_4h[i] * (2/22) + ema_4h[i-1] * (20/22)
-    
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1-day volume average (20-period) for volume confirmation
+    # 1-day ATR(14) for regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    avg_volume_1d = np.full(len(volume_1d), np.nan)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(20, len(volume_1d)):
-        avg_volume_1d[i] = np.mean(volume_1d[i-20:i])
+    # Calculate True Range and ATR
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+    tr = np.concatenate([[high_1d[0] - low_1d[0]], tr])
     
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    atr_1d = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        atr_1d[i] = np.mean(tr[i-14:i])
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if outside trading session
-        if not (8 <= hours[i] <= 20):
+    for i in range(20, n):
+        price = close[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        h3 = camarilla_h3[i]
+        l3 = camarilla_l3[i]
+        mid = camarilla_mid[i]
+        atr_1d_val = atr_1d_aligned[i]
+        
+        if np.isnan(h3) or np.isnan(l3) or np.isnan(mid) or np.isnan(avg_vol) or np.isnan(atr_1d_val):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        rsi_val = rsi[i]
-        ema_4h_val = ema_4h_aligned[i]
-        avg_vol_1d_val = avg_volume_1d_aligned[i]
-        vol_1d_idx = i // 24  # Approximate 1h to 1d index for volume check
-        
-        # Get current 1-day volume (approximate)
-        if vol_1d_idx < len(df_1d):
-            vol_1d = df_1d['volume'].iloc[vol_1d_idx] if hasattr(df_1d, 'iloc') else volume_1d[vol_1d_idx]
-        else:
-            vol_1d = 0
-        
-        if np.isnan(rsi_val) or np.isnan(ema_4h_val) or np.isnan(avg_vol_1d_val):
-            if position != 0:
-                pass  # Hold position
-            else:
-                signals[i] = 0.0
-            continue
-        
-        vol_surge = vol_1d > 1.5 * avg_vol_1d_val
+        vol_surge = vol > 1.3 * avg_vol
+        low_vol_regime = atr_1d_val < 0.03 * price  # ATR < 3% of price
         
         if position == 1:  # Long position
-            if rsi_val > 50:  # Exit when RSI crosses above 50
+            if price > mid or (price >= h3 and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if rsi_val < 50:  # Exit when RSI crosses below 50
+            if price < mid or (price <= l3 and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Long setup: RSI oversold + 4h uptrend + volume surge
-            if rsi_val < 30 and ema_4h_val > ema_4h_aligned[i-1] and vol_surge:
+            if price <= l3 and vol_surge and low_vol_regime:
                 position = 1
-                signals[i] = 0.20
-            # Short setup: RSI overbought + 4h downtrend + volume surge
-            elif rsi_val > 70 and ema_4h_val < ema_4h_aligned[i-1] and vol_surge:
+                signals[i] = 0.25
+            elif price >= h3 and vol_surge and low_vol_regime:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
