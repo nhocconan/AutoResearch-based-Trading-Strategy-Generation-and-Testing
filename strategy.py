@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Williams Fractal Breakout with 1d Trend and Volume Confirmation v2
+4h Williams Fractal Breakout with 1d Trend and Volume Confirmation v3
 Hypothesis: Williams Fractal breakouts aligned with 1d EMA trend and ADX > 25,
 confirmed by volume spikes, capture strong momentum moves with fewer trades
 than Donchian breaks. Works in bull/bear by requiring trend alignment.
-Targets 20-50 trades/year.
+Target: 20-50 trades/year. Uses more selective volume threshold (3.0x) and 
+requires both fractal and price confirmation to reduce false signals.
 """
-name = "4h_williams_fractal_breakout_1d_trend_volume_v2"
+name = "4h_williams_fractal_breakout_1d_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -86,9 +87,9 @@ def generate_signals(prices):
     # Williams Fractals on 4h
     bearish_fractal, bullish_fractal = calculate_williams_fractals(high, low)
     
-    # Volume spike detector: current volume > 2.5 x 20-period average (more selective)
+    # Volume spike detector: current volume > 3.0 x 20-period average (more selective)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma_20)
+    volume_spike = volume > (3.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -117,7 +118,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: trend breaks OR price closes below bullish fractal low
-            if not (ema_bullish and strong_trend_1d) or bullish_fractal[i]:
+            if not (ema_bullish and strong_trend_1d) or (bullish_fractal[i] and close[i] < low[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -125,17 +126,20 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: trend breaks OR price closes above bearish fractal high
-            if not (ema_bearish and strong_trend_1d) or bearish_fractal[i]:
+            if not (ema_bearish and strong_trend_1d) or (bearish_fractal[i] and close[i] > high[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Only trade with volume spike and both trend filters aligned
-            if volume_spike[i] and ema_bullish and strong_trend_1d and bearish_fractal[i]:
+            # Additional price confirmation: close must break fractal level
+            if (volume_spike[i] and ema_bullish and strong_trend_1d and 
+                bearish_fractal[i] and close[i] > high[i]):
                 position = 1
                 signals[i] = 0.25
-            elif volume_spike[i] and ema_bearish and strong_trend_1d and bullish_fractal[i]:
+            elif (volume_spike[i] and ema_bearish and strong_trend_1d and 
+                  bullish_fractal[i] and close[i] < low[i]):
                 position = -1
                 signals[i] = -0.25
     
