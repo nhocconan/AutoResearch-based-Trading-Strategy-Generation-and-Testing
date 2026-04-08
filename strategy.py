@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_volume_v1
-Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter.
-Works in bull markets via breakouts, in bear markets via short breakdowns.
-Volume confirms institutional participation, reducing false breakouts.
-Trend filter ensures we trade with higher timeframe momentum.
-Target: 20-40 trades/year to avoid overtrading.
+12h_donchian_breakout_volume_v1
+Hypothesis: 12h Donchian breakout with volume confirmation and 1w trend filter.
+Designed to capture institutional moves on higher timeframes with low trade frequency.
+Trades only with weekly momentum, reducing whipsaws in bear markets.
+Target: 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
+    # 12h Donchian channels (20-period)
     lookback = 20
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
@@ -40,17 +39,17 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # 1d trend filter (using close vs 50 EMA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w trend filter (using close vs 50 EMA)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50 = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        ema_50[i] = np.mean(close_1d[i-50:i])  # Simple MA for efficiency
+    close_1w = df_1w['close'].values
+    ema_50 = np.full(len(close_1w), np.nan)
+    for i in range(50, len(close_1w)):
+        ema_50[i] = np.mean(close_1w[i-50:i])  # Simple MA for efficiency
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
