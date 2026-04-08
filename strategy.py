@@ -1,22 +1,18 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-4h_12h_vwap_crossover_v1
-Hypothesis: VWAP crossovers on 4h timeframe with 12h trend filter and volume confirmation.
-Works in both bull and bear markets by capturing mean-reversion to VWAP during trends.
-- Long: 4h VWAP crosses above price AND 12h trend up AND volume > 1.5x average
-- Short: 4h VWAP crosses below price AND 12h trend down AND volume > 1.5x average
-- Exit: VWAP crossover in opposite direction
-Uses VWAP as dynamic support/resistance, reducing whipsaws in choppy markets.
-Target: 25-40 trades/year to minimize fee drag while capturing meaningful moves.
-"""
+# 1h_4h_1d_trend_follow_v2
+# Hypothesis: 1-hour trend following with 4-hour and 1-day filters to reduce false signals.
+# Long when: price > 4h EMA20, price > 1d EMA50, and 1h RSI > 50.
+# Short when: price < 4h EMA20, price < 1d EMA50, and 1h RSI < 50.
+# Exit when any condition fails.
+# Uses 4h/1d for trend direction and 1h for entry timing to avoid overtrading.
+# Target: 15-30 trades/year to minimize fee drag while capturing trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_vwap_crossover_v1"
-timeframe = "4h"
+name = "1h_4h_1d_trend_follow_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,98 +20,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate typical price and VWAP components
-    typical_price = (high + low + close) / 3.0
-    tp_volume = typical_price * volume
+    # Calculate 1h RSI
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Cumulative VWAP (reset each day)
-    cum_tp_volume = np.zeros(n)
-    cum_volume = np.zeros(n)
-    vwap = np.full(n, np.nan)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[14] = np.mean(gain[:14])
+    avg_loss[14] = np.mean(loss[:14])
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
     
-    # Reset cumulative values at daily boundaries
-    for i in range(n):
-        if i == 0 or prices['open_time'].iloc[i].date() != prices['open_time'].iloc[i-1].date():
-            cum_tp_volume[i] = tp_volume[i]
-            cum_volume[i] = volume[i]
-        else:
-            cum_tp_volume[i] = cum_tp_volume[i-1] + tp_volume[i]
-            cum_volume[i] = cum_volume[i-1] + volume[i]
-        
-        if cum_volume[i] > 0:
-            vwap[i] = cum_tp_volume[i] / cum_volume[i]
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate average volume for confirmation
-    vol_avg = np.zeros(n)
-    vol_avg[19] = np.mean(volume[:20])  # 20-period average
-    for i in range(20, n):
-        vol_avg[i] = (vol_avg[i-1] * 19 + volume[i]) / 20
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # Simple trend: price above/below 20-period SMA
-    sma_12h_20 = np.zeros(len(close_12h))
-    sma_12h_20[:] = np.nan
-    sma_12h_20[19] = np.mean(close_12h[:20])
-    for i in range(20, len(close_12h)):
-        sma_12h_20[i] = (sma_12h_20[i-1] * 19 + close_12h[i]) / 20
+    close_4h = df_4h['close'].values
+    ema_4h_20 = np.zeros(len(close_4h))
+    ema_4h_20[:] = np.nan
+    ema_4h_20[19] = np.mean(close_4h[:20])
+    for i in range(20, len(close_4h)):
+        ema_4h_20[i] = close_4h[i] * 0.0952 + ema_4h_20[i-1] * 0.9048
     
-    sma_12h_20_aligned = align_htf_to_ltf(prices, df_12h, sma_12h_20)
+    ema_4h_20_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_20)
+    
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_1d_50 = np.zeros(len(close_1d))
+    ema_1d_50[:] = np.nan
+    ema_1d_50[49] = np.mean(close_1d[:50])
+    for i in range(50, len(close_1d)):
+        ema_1d_50[i] = close_1d[i] * 0.0377 + ema_1d_50[i-1] * 0.9623
+    
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if np.isnan(vwap[i]) or np.isnan(sma_12h_20_aligned[i]) or np.isnan(vol_avg[i]):
+    for i in range(50, n):
+        price = close[i]
+        ema_4h = ema_4h_20_aligned[i]
+        ema_1d = ema_1d_50_aligned[i]
+        rsi_val = rsi[i]
+        
+        if np.isnan(ema_4h) or np.isnan(ema_1d) or np.isnan(rsi_val):
             if position != 0:
-                pass  # Hold position
+                pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        price = close[i]
-        vwap_val = vwap[i]
-        trend_12h = sma_12h_20_aligned[i]
-        vol_ratio = volume[i] / vol_avg[i] if vol_avg[i] > 0 else 0
-        
         if position == 1:  # Long
-            # Exit: price crosses below VWAP OR trend turns down
-            if price < vwap_val or close[i] < trend_12h:
+            # Exit: price below 4h EMA20 OR below 1d EMA50 OR RSI < 50
+            if price < ema_4h or price < ema_1d or rsi_val < 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short
-            # Exit: price crosses above VWAP OR trend turns up
-            if price > vwap_val or close[i] > trend_12h:
+            # Exit: price above 4h EMA20 OR above 1d EMA50 OR RSI > 50
+            if price > ema_4h or price > ema_1d or rsi_val > 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Entry conditions with volume confirmation
-            if vol_ratio > 1.5:  # Volume confirmation
-                # Long: price crosses above VWAP AND trend up
-                if price > vwap_val and close[i] > trend_12h:
-                    # Confirm crossover: previous bar was below VWAP
-                    if i > 0 and close[i-1] <= vwap[i-1]:
-                        position = 1
-                        signals[i] = 0.25
-                # Short: price crosses below VWAP AND trend down
-                elif price < vwap_val and close[i] < trend_12h:
-                    # Confirm crossover: previous bar was above VWAP
-                    if i > 0 and close[i-1] >= vwap[i-1]:
-                        position = -1
-                        signals[i] = -0.25
+            # Entry: price above both EMAs AND RSI > 50 (long)
+            # Entry: price below both EMAs AND RSI < 50 (short)
+            if price > ema_4h and price > ema_1d and rsi_val > 50:
+                position = 1
+                signals[i] = 0.20
+            elif price < ema_4h and price < ema_1d and rsi_val < 50:
+                position = -1
+                signals[i] = -0.20
     
     return signals
