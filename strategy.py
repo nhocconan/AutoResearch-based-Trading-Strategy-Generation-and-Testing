@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_momentum_confluence_v1
-# Hypothesis: Combines 4h momentum (price above/below SMA50) with 12h trend direction (SMA50 slope) and volume confirmation.
-# Long when: price > SMA50, 12h SMA50 slope > 0, volume > 1.5x average.
-# Short when: price < SMA50, 12h SMA50 slope < 0, volume > 1.5x average.
-# Exit when momentum breaks (price crosses SMA50 opposite direction) or volume drops below average.
-# Uses 3 conditions max to avoid overtrading. Target: 20-40 trades/year.
+# 12h_donchian_breakout_volume_v1
+# Hypothesis: Donchian(20) breakout on 12h with volume confirmation and 1d trend filter.
+# Long when: price breaks above 12h Donchian upper, 1d SMA50 rising, volume > 1.5x average.
+# Short when: price breaks below 12h Donchian lower, 1d SMA50 falling, volume > 1.5x average.
+# Exit when price returns to 12h Donchian midpoint or volume drops below average.
+# Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_momentum_confluence_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,10 +24,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h SMA50 for momentum
-    sma_period = 50
-    close_series = pd.Series(close)
-    sma50 = close_series.rolling(window=sma_period, min_periods=sma_period).mean().values
+    # 12h Donchian channels (20-period)
+    donch_len = 20
+    # Calculate upper and lower bands
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=donch_len, min_periods=donch_len).max().values
+    donch_low = low_series.rolling(window=donch_len, min_periods=donch_len).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
@@ -40,25 +44,26 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get 12h data for trend direction (SMA50 slope)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    sma50_12h = pd.Series(close_12h).rolling(window=sma_period, min_periods=sma_period).mean().values
-    # Calculate slope: positive if current SMA > SMA 3 periods ago
-    sma50_slope_12h = np.full(len(close_12h), np.nan)
-    for i in range(3, len(close_12h)):
-        if not np.isnan(sma50_12h[i]) and not np.isnan(sma50_12h[i-3]):
-            sma50_slope_12h[i] = sma50_12h[i] - sma50_12h[i-3]
-    sma50_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, sma50_slope_12h)
+    # Get 1d data for trend filter (SMA50 slope)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Calculate slope: positive if current SMA > SMA 2 periods ago
+    sma50_slope_1d = np.full(len(close_1d), np.nan)
+    for i in range(2, len(close_1d)):
+        if not np.isnan(sma50_1d[i]) and not np.isnan(sma50_1d[i-2]):
+            sma50_slope_1d[i] = sma50_1d[i] - sma50_1d[i-2]
+    sma50_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_slope_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(sma_period, vol_ma_period, 3) + 1
+    start_idx = max(donch_len, vol_ma_period, 2) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_slope_12h_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(sma50_slope_1d_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -66,30 +71,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below SMA50 or volume drops below average
-            if close[i] < sma50[i] or volume[i] < vol_ma[i]:
+            # Exit: Price below Donchian midpoint or volume drops below average
+            if close[i] < donch_mid[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above SMA50 or volume drops below average
-            if close[i] > sma50[i] or volume[i] < vol_ma[i]:
+            # Exit: Price above Donchian midpoint or volume drops below average
+            if close[i] > donch_mid[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above SMA50, 12h SMA50 slope positive, volume surge
-            if (close[i] > sma50[i] and 
-                sma50_slope_12h_aligned[i] > 0 and 
+            # Long entry: Price above Donchian upper, 1d SMA50 slope positive, volume surge
+            if (close[i] > donch_high[i] and 
+                sma50_slope_1d_aligned[i] > 0 and 
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below SMA50, 12h SMA50 slope negative, volume surge
-            elif (close[i] < sma50[i] and 
-                  sma50_slope_12h_aligned[i] < 0 and 
+            # Short entry: Price below Donchian lower, 1d SMA50 slope negative, volume surge
+            elif (close[i] < donch_low[i] and 
+                  sma50_slope_1d_aligned[i] < 0 and 
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
