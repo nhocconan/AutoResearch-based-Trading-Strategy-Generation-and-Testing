@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 4h_12h_donchian_volume_chop_v1
-# Hypothesis: 4h Donchian breakout with 12h volume confirmation and choppiness regime filter.
-# Long: price breaks above Donchian(20) high AND volume > 1.5x 20-period average AND CHOP(14) > 61.8 (ranging market)
-# Short: price breaks below Donchian(20) low AND volume > 1.5x 20-period average AND CHOP(14) > 61.8
-# Exit: opposite Donchian breakout or CHOP < 38.2 (trending market)
-# Designed to capture mean-reversion breaks in ranging markets while avoiding whipsaws in strong trends.
-# Works in both bull and bear markets by fading breakouts in ranging conditions (CHOP > 61.8).
+# 1h_4h1d_donchian_volume_trend_v1
+# Hypothesis: 1h trend following using 4h Donchian channels for direction and 1d volume filter for strength.
+# Long: price > 4h Donchian upper (20) AND 1d volume > 20-period average AND 1h momentum > 0 (session 08-20 UTC)
+# Short: price < 4h Donchian lower (20) AND 1d volume > 20-period average AND 1h momentum < 0 (session 08-20 UTC)
+# Exit: price crosses 4h Donchian midpoint OR volume drops below average OR momentum reverses.
+# Uses 4h for signal direction (low frequency), 1h only for entry timing within session.
+# Volume filter ensures trades occur during strong moves, reducing whipsaws in ranging markets.
+# Session filter (08-20 UTC) avoids low-liquidity periods.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "1h_4h1d_donchian_volume_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,105 +26,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
+    # Pre-compute session hours (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Volume average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # 1h momentum (3-period ROC)
+    momentum = np.full(n, np.nan)
+    for i in range(3, n):
+        momentum[i] = (close[i] - close[i-3]) / close[i-3]
     
-    # Choppiness Index (14-period) - requires HTF 12h for calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 4h Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # True Range for 12h
-    tr_12h = np.zeros(len(df_12h))
-    tr_12h[0] = df_12h['high'].values[0] - df_12h['low'].values[0]
-    for i in range(1, len(df_12h)):
-        tr_12h[i] = max(
-            df_12h['high'].values[i] - df_12h['low'].values[i],
-            abs(df_12h['high'].values[i] - df_12h['close'].values[i-1]),
-            abs(df_12h['low'].values[i] - df_12h['close'].values[i-1])
-        )
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # ATR (14-period) for 12h
-    atr_12h = np.zeros(len(df_12h))
-    atr_12h[:14] = np.nan
-    for i in range(14, len(df_12h)):
-        atr_12h[i] = np.mean(tr_12h[i-14:i])
+    donchian_high = np.full(len(high_4h), np.nan)
+    donchian_low = np.full(len(high_4h), np.nan)
+    donchian_mid = np.full(len(high_4h), np.nan)
     
-    # Sum of ATR over 14 periods
-    atr_sum_12h = np.zeros(len(df_12h))
-    atr_sum_12h[:14] = np.nan
-    for i in range(14, len(df_12h)):
-        atr_sum_12h[i] = np.sum(atr_12h[i-14:i])
+    for i in range(20, len(high_4h)):
+        donchian_high[i] = np.max(high_4h[i-20:i])
+        donchian_low[i] = np.min(low_4h[i-20:i])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
-    # Max high and min low over 14 periods for 12h
-    max_high_12h = np.zeros(len(df_12h))
-    max_high_12h[:14] = np.nan
-    min_low_12h = np.zeros(len(df_12h))
-    min_low_12h[:14] = np.nan
-    for i in range(14, len(df_12h)):
-        max_high_12h[i] = np.max(df_12h['high'].values[i-14:i])
-        min_low_12h[i] = np.min(df_12h['low'].values[i-14:i])
+    # Align 4h Donchian to 1h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
-    # Choppiness Index: 100 * log10( sum(ATR) / (max_high - min_low) ) / log10(14)
-    chop_12h = np.zeros(len(df_12h))
-    for i in range(14, len(df_12h)):
-        if max_high_12h[i] > min_low_12h[i] and atr_sum_12h[i] > 0:
-            chop_12h[i] = 100 * np.log10(atr_sum_12h[i] / (max_high_12h[i] - min_low_12h[i])) / np.log10(14)
-        else:
-            chop_12h[i] = 50  # neutral when undefined
+    # 1d volume average (20-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align chop to 4h timeframe
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if any required data is NaN
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]) or np.isnan(chop_12h_aligned[i]):
+    for i in range(50, n):
+        if not in_session[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        mom = momentum[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        mid = donchian_mid_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        vol_now = df_1d['volume'].values[-1] if len(df_1d) > 0 else 0  # Simplified: use current 1d volume
+        
+        # Get current 1d volume (simplified approach)
+        # Find the most recent completed 1d bar
+        if i >= 24:  # At least 24 1h bars = 1 day
+            idx_1d = i // 24
+            if idx_1d < len(df_1d):
+                vol_now = df_1d['volume'].values[idx_1d]
+            else:
+                vol_now = 0
+        else:
+            vol_now = 0
+        
+        if np.isnan(mom) or np.isnan(upper) or np.isnan(lower) or np.isnan(mid) or np.isnan(vol_ma):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        chop = chop_12h_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR market starts trending (CHOP < 38.2)
-            if close[i] < donch_low[i] or chop < 38.2:
+            if mom <= 0 or close[i] < mid or vol_now < vol_ma:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR market starts trending (CHOP < 38.2)
-            if close[i] > donch_high[i] or chop < 38.2:
+            if mom >= 0 or close[i] > mid or vol_now < vol_ma:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter long: price breaks above Donchian high AND volume confirmation AND ranging market (CHOP > 61.8)
-            if close[i] > donch_high[i] and vol_ratio > 1.5 and chop > 61.8:
+            if mom > 0 and close[i] > upper and vol_now > vol_ma:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below Donchian low AND volume confirmation AND ranging market (CHOP > 61.8)
-            elif close[i] < donch_low[i] and vol_ratio > 1.5 and chop > 61.8:
+                signals[i] = 0.20
+            elif mom < 0 and close[i] < lower and vol_now > vol_ma:
                 position = -1
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+                signals[i] = -0.20
     
     return signals
