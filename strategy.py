@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1d_1w_cci_breakout_volume_confirm_v1
-# Hypothesis: Daily CCI(20) breakouts confirmed by weekly volume surge and CCI trend filter.
-# Long when CCI crosses above +100 with weekly volume > 1.8x 20-period average and CCI > 0.
-# Short when CCI crosses below -100 with weekly volume > 1.8x 20-period average and CCI < 0.
-# Uses CCI to capture trend momentum and volume to avoid false breakouts.
-# Designed for 10-20 trades/year on 1d to minimize fee drag while capturing strong trends.
-# Works in bull markets via long breakouts and bear markets via short signals.
+# 6h_1d_cci_trend_reversal_v1
+# Hypothesis: 6-hour CCI trend reversal with 1-day trend filter and volume confirmation.
+# Long when CCI crosses above -100 with price above 1-day EMA50 and volume > 1.3x 20-period average.
+# Short when CCI crosses below +100 with price below 1-day EMA50 and volume > 1.3x 20-period average.
+# Uses CCI for mean reversion in trends, filtered by higher timeframe trend to avoid counter-trend trades.
+# Volume confirmation reduces false signals. Designed for 15-30 trades/year on 6h.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_cci_breakout_volume_confirm_v1"
-timeframe = "1d"
+name = "6h_1d_cci_trend_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,61 +24,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily CCI(20) calculation
-    tp = (high + low + close) / 3.0
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # CCI(20) calculation
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
+    # Handle division by zero or near-zero mad
+    cci = np.where(mad == 0, 0, cci)
     
-    # Get weekly data for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    volume_1w = df_1w['volume'].values
+    # Get 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly volume moving average (20-period) for surge detection
-    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
-    vol_current_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+    # Volume confirmation: 6h volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 20  # Ensure CCI is ready
+    start_idx = max(20, 50)  # CCI(20) and EMA50 need 20 and 50 periods
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(cci[i]) or np.isnan(sma_tp[i]) or np.isnan(mad[i]) or \
-           np.isnan(vol_ma_20_1w_aligned[i]) or np.isnan(vol_current_1w_aligned[i]):
+        if np.isnan(cci[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition: current weekly volume > 1.8x 20-period average
-        vol_surge = vol_current_1w_aligned[i] > 1.8 * vol_ma_20_1w_aligned[i] if vol_ma_20_1w_aligned[i] > 0 else False
+        # Volume surge condition
+        vol_surge = vol_ma_20[i] > 0 and volume[i] > 1.3 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero
-            if cci[i] < 0 and cci[i-1] >= 0:
+            # Exit: CCI crosses below +100 (overbought reversal) or trend breaks
+            if cci[i] < 100 and cci[i-1] >= 100:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] < ema50_1d_aligned[i]:  # Trend break
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero
-            if cci[i] > 0 and cci[i-1] <= 0:
+            # Exit: CCI crosses above -100 (oversold reversal) or trend breaks
+            if cci[i] > -100 and cci[i-1] <= -100:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] > ema50_1d_aligned[i]:  # Trend break
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI crosses above +100 with volume surge and CCI > 0
-            if cci[i] > 100 and cci[i-1] <= 100 and vol_surge and cci[i] > 0:
+            # Long entry: CCI crosses above -100 with uptrend and volume
+            if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema50_1d_aligned[i] and vol_surge:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI crosses below -100 with volume surge and CCI < 0
-            elif cci[i] < -100 and cci[i-1] >= -100 and vol_surge and cci[i] < 0:
+            # Short entry: CCI crosses below +100 with downtrend and volume
+            elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema50_1d_aligned[i] and vol_surge:
                 position = -1
                 signals[i] = -0.25
     
