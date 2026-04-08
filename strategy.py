@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_fractal_breakout_1d_trend_volume_v3"
+name = "12h_fractal_breakout_1d_trend_volume_v4"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,10 +25,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d EMA for trend filter (50-period)
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d ATR for volatility filter
+    # Calculate 1d ATR for volatility filter (14-period)
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -43,6 +43,9 @@ def generate_signals(prices):
     # Calculate 12-period average volume for volume confirmation
     avg_volume_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
+    # Calculate 50-period SMA of ATR for volatility normalization
+    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
@@ -53,18 +56,18 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d[i]) or np.isnan(atr_1d[i]) or 
             np.isnan(high_12[i]) or np.isnan(low_12[i]) or 
-            np.isnan(avg_volume_12[i]) or np.isnan(volume[i])):
+            np.isnan(avg_volume_12[i]) or np.isnan(volume[i]) or
+            np.isnan(atr_ma_50[i])):
             signals[i] = 0.0
             continue
         
         # Get aligned 1d values for current 12h bar
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
         atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)[i]
+        atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)[i]
         
         # Volatility filter: avoid extremely low volatility (choppy) conditions
         # Use 50-period SMA of ATR to normalize
-        atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-        atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)[i]
         volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.5)  # Only trade when volatility is above 50% of average
         
         # Volume confirmation: current volume > 1.5x average volume
