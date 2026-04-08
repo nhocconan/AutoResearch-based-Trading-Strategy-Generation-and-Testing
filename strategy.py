@@ -1,59 +1,21 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_Volume_Chop_v1
-# Hypothesis: Use 12h Camarilla pivot levels with 4h volume confirmation and 12h Choppiness index regime filter.
-# Long when price touches L3 with bullish 12h regime and volume spike, short when price touches H3 with bearish 12h regime and volume spike.
-# Works in bull/bear by fading extremes in ranging markets and avoiding trending regimes.
-# Target: 80-150 total trades over 4 years (20-38/year).
+# 1h_4h_1d_trend_follow_volume_v1
+# Hypothesis: Follow the 4h trend using EMA crossover and ADX strength, with 1d regime filter to avoid sideways markets.
+# Enter on 1h pullbacks in the direction of the 4h trend with volume confirmation. Works in bull/bear by aligning with higher timeframe trend.
+# Uses volume spike to confirm institutional participation and reduce false signals.
+# Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "4h_12h_Camarilla_Volume_Chop_v1"
-timeframe = "4h"
+name = "1h_4h_1d_trend_follow_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    h4 = pivot + (range_val * 1.1 / 2)
-    h3 = pivot + (range_val * 1.1 / 4)
-    l3 = pivot - (range_val * 1.1 / 4)
-    l4 = pivot - (range_val * 1.1 / 2)
-    return h3, l3
-
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index"""
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # First TR uses previous close, handle index 0
-    tr[0] = high[0] - low[0]
-    
-    atr = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < period:
-            atr[i] = np.mean(tr[max(0, i-period+1):i+1])
-        else:
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    # Sum of TR over period
-    tr_sum = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < period:
-            tr_sum[i] = np.sum(tr[max(0, i-period+1):i+1])
-        else:
-            tr_sum[i] = tr_sum[i-1] - tr[i-period] + tr[i]
-    
-    # Chop = 100 * log10(tr_sum / (atr * period)) / log10(period)
-    chop = 100 * np.log10(tr_sum / (atr * period)) / np.log10(period)
-    return chop
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -62,51 +24,136 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla and Chop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h trend: EMA crossover
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate EMA21 and EMA50 on 4h close
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    h3_12h, l3_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    # 4h trend direction: 1 if EMA21 > EMA50, -1 if EMA21 < EMA50
+    trend_4h = np.where(ema21_4h > ema50_4h, 1, -1)
     
-    # Calculate 12h Choppiness Index
-    chop_12h = calculate_chop(high_12h, low_12h, close_12h)
+    # 4h ADX for trend strength
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            elif plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                minus_dm[i] = 0
+            
+            tr[i] = max(
+                high[i] - low[i],
+                abs(high[i] - close[i-1]),
+                abs(low[i] - close[i-1])
+            )
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(high)
+        atr[period-1] = np.mean(tr[1:period]) if period < len(tr) else np.nan
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        
+        return adx
     
-    # Align 12h indicators to 4h
-    h3_12h_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
-    l3_12h_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    adx_4h = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values)
     
-    # 4h volume confirmation: volume > 1.5x 20-period average
+    # Align 4h indicators to 1h
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    
+    # 1d regime filter: avoid ranging markets
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    
+    # Market regime: 1 if trending (price > SMA50), -1 if ranging (price < SMA50)
+    regime_1d = np.where(close_1d > sma50_1d, 1, -1)
+    regime_1d_aligned = align_htf_to_ltf(prices, df_1d, regime_1d)
+    
+    # Volume spike detection on 1h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_ratio = volume / vol_ma
+    vol_spike = vol_ratio > 1.5  # 50% above average volume
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(20, 20) + 1  # Need enough data for indicators
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(h3_12h_aligned[i]) or np.isnan(l3_12h_aligned[i]) or 
-            np.isnan(chop_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trend_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]) or 
+            np.isnan(regime_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0
             continue
         
-        # Regime filter: Chop > 61.8 = ranging (good for mean reversion)
-        # Chop < 38.2 = trending (avoid)
-        if chop_12h_aligned[i] < 38.2:  # Trending regime - avoid
-            continue
+        # Only trade in session and with volume spike
+        if not (in_session[i] and vol_spike[i]):
+            if position != 0:
+                # Hold position until exit signal
+                pass
+            else:
+                signals[i] = 0.0
+                continue
         
-        # Long setup: price touches L3 with volume spike in ranging market
-        if low[i] <= l3_12h_aligned[i] and vol_spike[i]:
-            signals[i] = 0.25
-        
-        # Short setup: price touches H3 with volume spike in ranging market
-        elif high[i] >= h3_12h_aligned[i] and vol_spike[i]:
-            signals[i] = -0.25
+        if position == 1:  # Long position
+            # Exit: 4h trend turns bearish OR ADX weakens
+            if trend_4h_aligned[i] == -1 or adx_4h_aligned[i] < 20:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.20
+                
+        elif position == -1:  # Short position
+            # Exit: 4h trend turns bullish OR ADX weakens
+            if trend_4h_aligned[i] == 1 or adx_4h_aligned[i] < 20:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.20
+        else:  # Flat, look for entry
+            # Need strong trend (ADX > 25) and favorable regime
+            if adx_4h_aligned[i] > 25 and regime_1d_aligned[i] == trend_4h_aligned[i]:
+                # Long: 4h bullish trend + price above 4h EMA21 (pullback entry)
+                if trend_4h_aligned[i] == 1 and close[i] > ema21_4h[-1] if len(ema21_4h) > 0 else False:
+                    # Need to get the actual 4h EMA21 value at this point
+                    # Since we aligned, we can't directly access - find the corresponding 4h bar
+                    # Simplified: enter on pullback to EMA21 in direction of trend
+                    # We'll use price > EMA21 as approximate pullback end
+                    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+                    if not np.isnan(ema21_4h_aligned[i]) and close[i] > ema21_4h_aligned[i]:
+                        position = 1
+                        signals[i] = 0.20
+                # Short: 4h bearish trend + price below 4h EMA21
+                elif trend_4h_aligned[i] == -1 and close[i] < ema21_4h[-1] if len(ema21_4h) > 0 else False:
+                    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+                    if not np.isnan(ema21_4h_aligned[i]) and close[i] < ema21_4h_aligned[i]:
+                        position = -1
+                        signals[i] = -0.20
     
     return signals
