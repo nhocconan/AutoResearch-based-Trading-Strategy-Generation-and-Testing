@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_adx_volume_momentum_v1
-# Hypothesis: 6-hour ADX > 25 + volume > 1.5x 20-period average + price > 50-period SMA for long,
-# opposite for short. Uses 1-day trend filter: only take long if price > 1-day 200-period SMA,
-# only short if price < 1-day 200-period SMA. Designed to capture strong trends with volume
-# confirmation while avoiding counter-trend trades. Target: 20-40 trades/year.
+# 4h_1d_donchian_breakout_v1
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND price above 1-day EMA50 AND volume > 1.5x average volume.
+# Short when price breaks below 20-period low AND price below 1-day EMA50 AND volume > 1.5x average volume.
+# Exit when price crosses 1-day EMA50 or ATR-based stoploss is hit.
+# Uses volume confirmation to avoid false breakouts and EMA50 for trend filter.
+# Designed to generate ~20-40 trades/year to avoid fee decay while capturing strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_adx_volume_momentum_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,111 +25,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX components
-    period_adx = 14
-    # True Range
-    tr0 = high[1:] - low[1:]
-    tr1 = np.abs(high[1:] - close[:-1])
-    tr2 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr0, np.maximum(tr1, tr2))])
+    # Donchian channels (20-period)
+    period = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        highest_high[i] = np.max(high[i - period + 1:i + 1])
+        lowest_low[i] = np.min(low[i - period + 1:i + 1])
     
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Average volume (20-period)
+    avg_volume = np.full(n, np.nan)
+    vol_sum = 0.0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= period:
+            vol_sum -= volume[i - period]
+        if i >= period - 1:
+            avg_volume[i] = vol_sum / period
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # Skip index 0 (nan)
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr_smooth = smooth_wilder(tr, period_adx)
-    plus_dm_smooth = smooth_wilder(plus_dm, period_adx)
-    minus_dm_smooth = smooth_wilder(minus_dm, period_adx)
-    
-    # Directional Indicators
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.full_like(dx, np.nan)
-    if len(dx) >= period_adx:
-        adx[2*period_adx-2] = np.nanmean(dx[period_adx:2*period_adx-1])
-        for i in range(2*period_adx-1, len(dx)):
-            adx[i] = (adx[i-1] * (period_adx-1) + dx[i]) / period_adx
-    
-    # Volume average
-    vol_ma = np.full_like(volume, np.nan)
-    vol_period = 20
-    for i in range(vol_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_period+1:i+1])
-    
-    # Price SMA
-    sma_period = 50
-    sma = np.full_like(close, np.nan)
-    for i in range(sma_period-1, n):
-        sma[i] = np.mean(close[i-sma_period+1:i+1])
-    
-    # Get 1-day data for trend filter
+    # 1-day EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # 1-day 200-period SMA
-    sma_200_1d = np.full_like(close_1d, np.nan)
-    for i in range(199, len(close_1d)):
-        sma_200_1d[i] = np.mean(close_1d[i-199:i+1])
-    sma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    alpha = 2.0 / (50 + 1)
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema_50_1d[i] = close_1d[i]
+        else:
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
+    
+    # ATR (14-period) for stoploss
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.full(n, np.nan)
+    atr_sum = 0.0
+    for i in range(n):
+        atr_sum += tr[i]
+        if i >= 14:
+            atr_sum -= tr[i-14]
+        if i >= 13:
+            atr[i] = atr_sum / 14
+    
+    # Align 1d EMA50 and ATR to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(adx[i]) or np.isnan(sma[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(sma_200_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
+        price = close[i]
+        vol = volume[i]
+        highest = highest_high[i]
+        lowest = lowest_low[i]
+        ema_50 = ema_50_1d_aligned[i]
+        atr_val = atr_aligned[i]
+        
         if position == 1:  # Long
-            # Exit: ADX < 20 or volume < average or price < SMA or trend fails
-            if adx[i] < 20 or volume[i] < vol_ma[i] or close[i] < sma[i] or close[i] < sma_200_1d_aligned[i]:
+            # Exit: price crosses below 1-day EMA50 or ATR stoploss hit
+            if price < ema_50 or price < ema_50 - 2.0 * atr_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: ADX < 20 or volume < average or price > SMA or trend fails
-            if adx[i] < 20 or volume[i] < vol_ma[i] or close[i] > sma[i] or close[i] > sma_200_1d_aligned[i]:
+            # Exit: price crosses above 1-day EMA50 or ATR stoploss hit
+            if price > ema_50 or price > ema_50 + 2.0 * atr_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: Strong trend with volume confirmation
-            # Long: ADX > 25, volume > 1.5x average, price > SMA, and price > 1-day 200 SMA
-            if (adx[i] > 25 and volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > sma[i] and close[i] > sma_200_1d_aligned[i]):
+            # Entry conditions: Donchian breakout with trend filter and volume confirmation
+            vol_threshold = 1.5 * avg_volume[i]
+            # Bullish: price breaks above 20-period high AND price above 1-day EMA50 AND volume confirmation
+            if price > highest and price > ema_50 and vol > vol_threshold:
                 position = 1
                 signals[i] = 0.25
-            # Short: ADX > 25, volume > 1.5x average, price < SMA, and price < 1-day 200 SMA
-            elif (adx[i] > 25 and volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < sma[i] and close[i] < sma_200_1d_aligned[i]):
+            # Bearish: price breaks below 20-period low AND price below 1-day EMA50 AND volume confirmation
+            elif price < lowest and price < ema_50 and vol > vol_threshold:
                 position = -1
                 signals[i] = -0.25
     
