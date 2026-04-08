@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Fractal Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Williams fractal breakouts aligned with 1d EMA trend and ADX > 25, 
-confirmed by volume spikes, capture strong momentum moves. Works in bull/bear 
-by requiring trend alignment. Targets 20-50 trades/year.
+Daily KAMA + RSI + Chop Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise,
+providing smoother trend signals. Combined with RSI overbought/oversold levels
+and a chop filter (Choppiness Index > 61.8 = ranging), this strategy avoids
+whipsaws in sideways markets while capturing trends in both bull and bear regimes.
+Targets 10-25 trades/year on daily timeframe.
 """
-name = "4h_fractal_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "daily_kama_rsi_chop_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,57 +24,85 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filters - call ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter - call ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 20 EMA on 1d
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === KAMA calculation (10-period ER, 2/30 SC) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    abs_sum = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will fix properly
+    # Correct ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):
+        if i >= 10:
+            direction = np.abs(close[i] - close[i-10])
+            volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
     
-    # Calculate 50 EMA on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Smoothing constants
+    sc = (er * (2/30 - 2/10) + 2/10) ** 2  # FC = 2/10, SC = 2/30
     
-    # Calculate 14-period ADX for 1d
+    # KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # === RSI (14-period) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Choppiness Index (14-period) ===
     # True Range
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    dm_plus_1d = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                          np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus_1d = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                           np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus_1d = np.concatenate([[0], dm_plus_1d])
-    dm_minus_1d = np.concatenate([[0], dm_minus_1d])
+    # Sum of TR over 14 periods
+    tr_sum14 = np.convolve(tr, np.ones(14), 'same')  # approximate, will refine
+    # Better calculation
+    tr_sum14 = np.zeros(n)
+    for i in range(14, n):
+        tr_sum14[i] = np.sum(tr[i-13:i+1])
     
-    # Smoothed values
-    tr14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14_1d = pd.Series(dm_plus_1d).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14_1d = pd.Series(dm_minus_1d).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = np.zeros(n)
+    ll = np.zeros(n)
+    for i in range(14, n):
+        hh[i] = np.max(high[i-13:i+1])
+        ll[i] = np.min(low[i-13:i+1])
     
-    # Directional Indicators
-    di_plus_1d = 100 * dm_plus_14_1d / tr14_1d
-    di_minus_1d = 100 * dm_minus_14_1d / tr14_1d
+    # Chop = 100 * log10(sumTR14 / (HH - LL)) / log10(14)
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if hh[i] != ll[i]:
+            chop[i] = 100 * np.log10(tr_sum14[i] / (hh[i] - ll[i])) / np.log10(14)
+        else:
+            chop[i] = 100  # max choppy when range is zero
     
-    # DX and ADX
-    dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
-    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
+    # === Weekly trend filter (EMA 20 > EMA 50) ===
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = ema20_1w > ema50_1w
     
-    # Calculate Williams fractals on 1d
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
-    # Add 2-bar delay for fractal confirmation (needs 2 future candles to confirm)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Volume spike detector: current volume > 2.0 x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    # Align weekly data to daily
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -82,49 +112,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1d[i]) or np.isnan(ema50_1d[i]) or 
-            np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or
-            (i >= len(bearish_fractal_aligned) or np.isnan(bearish_fractal_aligned[i])) or
-            (i >= len(bullish_fractal_aligned) or np.isnan(bullish_fractal_aligned[i]))):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(weekly_uptrend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
-        ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)[i]
-        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        bull_fractal = bullish_fractal_aligned[i]
-        bear_fractal = bearish_fractal_aligned[i]
-        
-        # Trend filter: 1d EMA alignment (bullish: EMA20 > EMA50, bearish: EMA20 < EMA50)
-        ema_bullish = ema20_1d_aligned > ema50_1d_aligned
-        ema_bearish = ema20_1d_aligned < ema50_1d_aligned
-        
-        # Regime filter: only trade in strong trending markets on daily
-        strong_trend_1d = adx_1d_aligned > 25
+        weekly_up = weekly_uptrend_aligned[i] > 0.5
         
         if position == 1:  # Long position
-            # Exit: trend breaks OR bearish fractal appears
-            if not (ema_bullish and strong_trend_1d) or bear_fractal:
+            # Exit: KAMA turns down OR RSI overbought OR chop too low (trending)
+            if kama[i] < close[i] or rsi[i] > 70 or chop[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend breaks OR bullish fractal appears
-            if not (ema_bearish and strong_trend_1d) or bull_fractal:
+            # Exit: KAMA turns up OR RSI oversold OR chop too low
+            if kama[i] > close[i] or rsi[i] < 30 or chop[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade with volume spike and both trend filters aligned
-            if volume_spike[i] and ema_bullish and strong_trend_1d and bull_fractal:
-                position = 1
-                signals[i] = 0.25
-            elif volume_spike[i] and ema_bearish and strong_trend_1d and bear_fractal:
-                position = -1
-                signals[i] = -0.25
+            # Only enter in choppy markets (Chop > 61.8 = ranging)
+            if chop[i] > 61.8:
+                # Long: price above KAMA and RSI oversold
+                if close[i] > kama[i] and rsi[i] < 30 and weekly_up:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price below KAMA and RSI overbought
+                elif close[i] < kama[i] and rsi[i] > 70 and not weekly_up:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
