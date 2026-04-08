@@ -1,112 +1,109 @@
 #!/usr/bin/env python3
-# 12h_1d_donchian_breakout_v1
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day ATR volatility filter and volume confirmation.
-# Long when price breaks above 20-period high with volume > 1.5x average and ATR(14) > 0.5 * ATR(50) (avoid low volatility).
-# Short when price breaks below 20-period low with volume > 1.5x average and ATR(14) > 0.5 * ATR(50).
-# Exit when price crosses 50-period moving average.
-# Uses 1-day ATR for volatility regime filter to avoid choppy markets, effective in both trending and ranging markets.
+# [24955] 6h_1d_rsi_pullback_trend_v2
+# Hypothesis: 6-hour RSI pullback in trend direction from 1-day trend filter.
+# Long when RSI(14) < 30 (oversold) and price > 1-day EMA(50) (uptrend).
+# Short when RSI(14) > 70 (overbought) and price < 1-day EMA(50) (downtrend).
+# Exit when RSI returns to 50 (mean reversion) or opposite RSI extreme.
+# Uses 1-day EMA for trend bias to avoid counter-trend trades in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_rsi_pullback_trend_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1-day data for ATR calculation
+    # Get 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1-day EMA(50) for trend
     close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = close_1d[i] * (2/51) + ema_50_1d[i-1] * (49/51)
     
-    # Calculate 1-day ATR(14) and ATR(50)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    # Calculate RSI(14) on 6-hour data
+    rsi = np.full(n, np.nan)
+    if n >= 15:
+        # Calculate price changes
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Average gain and loss
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        # Initial average
+        avg_gain[14] = np.mean(gain[1:15])
+        avg_loss[14] = np.mean(loss[1:15])
+        
+        # Wilder's smoothing
+        for i in range(15, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        
+        # Calculate RSI
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        rsi[avg_loss == 0] = 100
+        rsi[:14] = np.nan
     
-    atr14 = np.full(len(close_1d), np.nan)
-    atr50 = np.full(len(close_1d), np.nan)
-    for i in range(14, len(tr)):
-        atr14[i] = np.mean(tr[i-13:i+1])
-    for i in range(50, len(tr)):
-        atr50[i] = np.mean(tr[i-49:i+1])
-    
-    # Align ATRs to 12-hour timeframe
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    atr50_aligned = align_htf_to_ltf(prices, df_1d, atr50)
-    
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate 50-period moving average for exit
-    ma_50 = np.full(n, np.nan)
-    for i in range(50, n):
-        ma_50[i] = np.mean(close[i-50:i])
-    
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align 1-day EMA(50) to 6-hour timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(15, n):  # Start after RSI warmup
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ma_50[i]) or np.isnan(vol_ma[i]) or np.isnan(atr14_aligned[i]) or np.isnan(atr50_aligned[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        atr_ratio = atr14_aligned[i] / atr50_aligned[i] if atr50_aligned[i] > 0 else 0
         price = close[i]
+        rsi_val = rsi[i]
+        ema_trend = ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below 50-period MA
-            if price < ma_50[i]:
+            # Exit: RSI returns to 50 or goes overbought (>70)
+            if rsi_val >= 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above 50-period MA
-            if price > ma_50[i]:
+            # Exit: RSI returns to 50 or goes oversold (<30)
+            if rsi_val <= 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and sufficient volatility
-            if price > donchian_high[i] and vol_ratio > 1.5 and atr_ratio > 0.5:
+            # Enter long: RSI oversold (<30) and price above 1-day EMA(50) (uptrend)
+            if rsi_val < 30 and price > ema_trend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and sufficient volatility
-            elif price < donchian_low[i] and vol_ratio > 1.5 and atr_ratio > 0.5:
+            # Enter short: RSI overbought (>70) and price below 1-day EMA(50) (downtrend)
+            elif rsi_val > 70 and price < ema_trend:
                 position = -1
                 signals[i] = -0.25
     
