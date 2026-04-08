@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1w1d_camarilla_pivot_v1
-Hypothesis: 4-hour strategy using weekly/daily context with Camarilla pivot levels.
+1d_1w_camarilla_pivot_v1
+Hypothesis: Daily strategy using weekly context with Camarilla pivot levels.
 Long when price crosses above weekly Pivot with volume > 2x average and price > daily EMA200 (bullish trend).
 Short when price crosses below weekly Pivot with volume > 2x average and price < daily EMA200 (bearish trend).
 Exit when price crosses opposite weekly support/resistance or volume drops below average.
-Uses discrete position sizing (0.25) to minimize churn. Target: 15-25 trades/year.
+Uses discrete position sizing (0.25) to minimize churn. Target: 10-20 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w1d_camarilla_pivot_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_camarilla(high, low, close):
@@ -43,7 +43,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -76,7 +76,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_200_1d = calculate_ema(close_1d, 200)
     
-    # Align indicators to 4-hour timeframe
+    # Align indicators to daily timeframe
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
     R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
@@ -90,7 +90,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(200, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(pivot_1w_aligned[i]) or np.isnan(S1_1w_aligned[i]) or 
             np.isnan(R1_1w_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
