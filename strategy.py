@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_volume_price_action_v1
-# Hypothesis: 6h volume-price action strategy with 1d trend filter.
-# Long when: price closes above 6h VWAP + volume > 1.5x 20-period average + price > 1d EMA200 (uptrend).
-# Short when: price closes below 6h VWAP + volume > 1.5x 20-period average + price < 1d EMA200 (downtrend).
-# Exit when price crosses back to 6h VWAP.
-# Designed to capture institutional volume-driven moves with trend alignment in both bull and bear markets.
+# 12h_donchian_breakout_1d_trend_volume
+# Hypothesis: Donchian(20) breakout on 12h combined with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with uptrend (price > 1d EMA100) and volume > 1.5x average.
+# Short when price breaks below Donchian lower band with downtrend (price < 1d EMA100) and volume > 1.5x average.
+# Exit when price crosses back to Donchian middle band (mean of upper/lower).
+# Designed to capture strong breakouts with trend alignment in both bull and bear markets.
 # Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_volume_price_action_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,21 +28,21 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate daily EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate daily EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Calculate 6h VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3
-    tpv = typical_price * volume
-    cum_tpv = np.nancumsum(tpv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.divide(cum_tpv, cum_vol, out=np.full_like(cum_tpv, np.nan), where=cum_vol!=0)
+    # Calculate Donchian channels on 12h data (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(vwap[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -65,16 +65,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below VWAP
-            if close[i] < vwap[i]:
+            # Exit: price crosses below Donchian middle band
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above VWAP
-            if close[i] > vwap[i]:
+            # Exit: price crosses above Donchian middle band
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -83,11 +83,11 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # VWAP cross entries with trend filter
-            if (close[i] > vwap[i]) and volume_ok and (close[i] > ema_200_1d_aligned[i]):
+            # Breakout entries: Donchian upper breakout (long) and lower breakdown (short)
+            if (close[i] > donchian_high[i]) and (close[i] > ema_100_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (close[i] < vwap[i]) and volume_ok and (close[i] < ema_200_1d_aligned[i]):
+            elif (close[i] < donchian_low[i]) and (close[i] < ema_100_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
