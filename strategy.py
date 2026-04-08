@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-# 4h_12h_1d_volume_breakout_v2
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter.
-# Long when price breaks above Donchian high + volume > 1.5x avg + 12h EMA50 up.
-# Short when price breaks below Donchian low + volume > 1.5x avg + 12h EMA50 down.
-# Exit when price returns to Donchian midpoint or trend fails.
-# Uses tighter volume threshold (2.0x) and higher Donchian period (25) to reduce trades.
-# Designed for 15-30 trades/year on 4h to avoid fee drag. Works in bull/bear via trend filter.
+# 4h_12h_1d_volume_breakout_v3
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation (1.8x) and 12h EMA50 trend filter.
+# Uses slightly relaxed volume threshold (1.8x vs 2.0x) to capture more moves while maintaining discipline.
+# Designed for 20-30 trades/year on 4h to avoid fee drag. Works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_volume_breakout_v2"
+name = "4h_12h_1d_volume_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,13 +22,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian(25) channels - increased period for fewer signals
+    # 4h Donchian(20) channels
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     donch_mid = np.full(n, np.nan)
-    for i in range(25, n):
-        donch_high[i] = np.max(high[i-25:i])
-        donch_low[i] = np.min(low[i-25:i])
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
         donch_mid[i] = (donch_high[i] + donch_low[i]) / 2
     
     # 12h EMA50 for trend filter
@@ -40,15 +37,15 @@ def generate_signals(prices):
     ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume average (25-period) for confirmation
+    # Volume average (20-period) for confirmation
     vol_avg = np.full(n, np.nan)
-    for i in range(25, n):
-        vol_avg[i] = np.mean(volume[i-25:i])
+    for i in range(20, n):
+        vol_avg[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(60, 25)  # Ensure indicators are ready
+    start_idx = max(60, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
@@ -61,8 +58,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter)
-        vol_confirmed = volume[i] > 2.0 * vol_avg[i]
+        # Volume confirmation: current volume > 1.8x average volume
+        vol_confirmed = volume[i] > 1.8 * vol_avg[i]
         
         if position == 1:  # Long position
             # Exit: price returns to Donchian midpoint or trend fails
