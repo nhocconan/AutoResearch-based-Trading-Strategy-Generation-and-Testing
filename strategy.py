@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ema_crossover_volume_filter_v1
-# Hypothesis: 6h EMA crossover (fast/slow) with volume confirmation and weekly trend filter.
-# Uses fast EMA crossing above/below slow EMA for entry, volume > 1.5x average for confirmation,
-# and weekly EMA trend filter to avoid counter-trend trades. Designed to capture trend
-# continuations in both bull and bear markets while avoiding reversals. Target: 20-40 trades/year.
+# 12h_donchian_breakout_1d_trend_volume_v1
+# Hypothesis: 12h Donchian breakout (20-period) with volume confirmation and daily trend filter.
+# Enters long on breakout above upper band in daily uptrend, short on breakdown below lower band in daily downtrend.
+# Volume filter (>1.5x average) reduces false signals. Targets 20-40 trades/year to minimize fee drag.
 
-name = "6h_ema_crossover_volume_filter_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,43 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA indicators
-    fast_period = 9
-    slow_period = 21
+    # Donchian channels (20-period)
+    period = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
     
-    # Fast EMA
-    ema_fast = np.zeros_like(close)
-    ema_fast[fast_period-1] = np.mean(close[:fast_period])
-    for i in range(fast_period, len(close)):
-        ema_fast[i] = (close[i] * 2 + ema_fast[i-1] * (fast_period - 1)) / (fast_period + 1)
-    
-    # Slow EMA
-    ema_slow = np.zeros_like(close)
-    ema_slow[slow_period-1] = np.mean(close[:slow_period])
-    for i in range(slow_period, len(close)):
-        ema_slow[i] = (close[i] * 2 + ema_slow[i-1] * (slow_period - 1)) / (slow_period + 1)
-    
-    # EMA crossover signals
-    ema_crossover = np.where(ema_fast > ema_slow, 1, -1)  # 1 for bullish, -1 for bearish
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     
     # Volume filter: 20-period average volume
-    vol_ma = np.zeros_like(volume)
-    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
-    vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    close_daily = df_daily['close'].values
     
-    # Weekly EMA (50-period) for higher timeframe trend
+    # Daily EMA (50-period) for higher timeframe trend
     ema_period = 50
-    ema_weekly = np.zeros_like(close_weekly)
-    ema_weekly[ema_period-1] = np.mean(close_weekly[:ema_period])
-    for i in range(ema_period, len(close_weekly)):
-        ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * (ema_period - 1)) / (ema_period + 1)
+    ema_daily = np.full_like(close_daily, np.nan)
+    for i in range(ema_period-1, len(close_daily)):
+        ema_daily[i] = np.mean(close_daily[i-ema_period+1:i+1])
     
-    # Align weekly EMA to 6h timeframe
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Align daily EMA to 12h timeframe
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -70,7 +58,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(fast_period, slow_period, ema_period) + 5
+    start_idx = max(period, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -79,42 +67,42 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
-            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Higher timeframe trend filter: price above/below weekly EMA
-        uptrend_htf = close[i] > ema_weekly_aligned[i]
-        downtrend_htf = close[i] < ema_weekly_aligned[i]
+        # Higher timeframe trend filter: price above/below daily EMA
+        uptrend_htf = close[i] > ema_daily_aligned[i]
+        downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if trend reverses or volume fails
-            if ema_crossover[i] == -1 or not volume_filter:
+            # Exit if price breaks below lower band or volume fails
+            if close[i] < lower[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if trend reverses or volume fails
-            if ema_crossover[i] == 1 or not volume_filter:
+            # Exit if price breaks above upper band or volume fails
+            if close[i] > upper[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: bullish EMA crossover, volume confirmation, and weekly uptrend
-            if (ema_crossover[i] == 1 and 
+            # Long entry: breakout above upper band, volume confirmation, and daily uptrend
+            if (close[i] > upper[i] and 
                 volume_filter and 
                 uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish EMA crossover, volume confirmation, and weekly downtrend
-            elif (ema_crossover[i] == -1 and 
+            # Short entry: breakdown below lower band, volume confirmation, and daily downtrend
+            elif (close[i] < lower[i] and 
                   volume_filter and 
                   downtrend_htf):
                 position = -1
