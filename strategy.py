@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
+# 4h_rsi_pullback_1d_trend_volume_v1
+# Hypothesis: RSI pullback in strong 1d trend with volume confirmation.
+# - Trend filter: 1d EMA(50) direction (bullish if close > EMA, bearish if close < EMA)
+# - Entry: RSI(14) pullback to 40-45 in uptrend or 55-60 in downtrend
+# - Volume confirmation: 4h volume > 1.3x 20-period average
+# - Exit: RSI reaches opposite extreme (60 in uptrend, 40 in downtrend)
+# - Position sizing: 0.25 for long, -0.25 for short
+# Target: 20-50 trades/year (80-200 total over 4 years)
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_rsi_pullback_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,53 +27,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend and Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
-    
-    # 12-period Donchian channels on 12h (20 periods for breakout)
-    donchian_period = 20
-    dc_high = pd.Series(high_12h).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    dc_low = pd.Series(low_12h).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema_50_12h
-    trend_12h_down = close_12h < ema_50_12h
+    # 1d EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema_50_1d
+    trend_1d_down = close_1d < ema_50_1d
     
     # Forward fill trend
-    trend_12h_up_series = pd.Series(trend_12h_up)
-    trend_12h_down_series = pd.Series(trend_12h_down)
-    trend_12h_up_ffilled = trend_12h_up_series.ffill().values
-    trend_12h_down_ffilled = trend_12h_down_series.ffill().values
+    trend_1d_up_series = pd.Series(trend_1d_up)
+    trend_1d_down_series = pd.Series(trend_1d_down)
+    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
+    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
     
-    # Align 12h indicators to 6h
-    dc_high_aligned = align_htf_to_ltf(prices, df_12h, dc_high)
-    dc_low_aligned = align_htf_to_ltf(prices, df_12h, dc_low)
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up_ffilled)
-    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down_ffilled)
+    # Align 1d trend to 4h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
     
-    # Volume confirmation: 6h volume > 1.5x 20-period average
+    # RSI(14) calculation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(dc_high_aligned[i]) or np.isnan(dc_low_aligned[i]) or
-            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -73,27 +80,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR trend turns down
-            if close[i] <= dc_low_aligned[i] or trend_12h_down_aligned[i]:
+            # Exit: RSI reaches 60 (overbought in uptrend)
+            if rsi[i] >= 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR trend turns up
-            if close[i] >= dc_high_aligned[i] or trend_12h_up_aligned[i]:
+            # Exit: RSI reaches 40 (oversold in downtrend)
+            if rsi[i] <= 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high + 12h uptrend + volume
-            if close[i] >= dc_high_aligned[i] and trend_12h_up_aligned[i] and volume_filter[i]:
+            # Long entry: RSI pullback to 40-45 in uptrend + volume
+            if (40 <= rsi[i] <= 45) and trend_1d_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian low + 12h downtrend + volume
-            elif close[i] <= dc_low_aligned[i] and trend_12h_down_aligned[i] and volume_filter[i]:
+            # Short entry: RSI pullback to 55-60 in downtrend + volume
+            elif (55 <= rsi[i] <= 60) and trend_1d_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
