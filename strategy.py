@@ -1,86 +1,77 @@
 #!/usr/bin/env python3
 """
-1d_1w_momentum_range_v1
-Hypothesis: Combine momentum and mean-reversion on daily timeframe with weekly trend filter.
-- Momentum: Buy when RSI(14) crosses above 30 from below in bullish weekly trend (price > weekly EMA(50))
-- Mean-reversion: Sell when RSI(14) crosses below 70 from above in bearish weekly trend (price < weekly EMA(50))
-- Range filter: Avoid trading when Bollinger Band Width percentile < 20% (low volatility squeeze)
-- Position sizing: 0.25 for long, -0.25 for short
-- Target: 15-30 trades/year (60-120 total over 4 years)
+6h_1d_cci_reversion_v1
+Hypothesis: Commodity Channel Index (CCI) mean reversion on 6h with 1d trend filter.
+- CCI(20) > +100 indicates overbought, < -100 oversold in ranging markets.
+- Trend filter: 1d EMA(50) - only take reversals against the daily trend.
+- Volume filter: 6h volume > 1.3x 20-period average to confirm reversal interest.
+- Works in both bull/bear markets by fading extremes only when higher timeframe trend is intact.
+- Target: 20-40 trades/year (80-160 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_momentum_range_v1"
-timeframe = "1d"
+name = "6h_1d_cci_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(50) for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema_50_1w
-    trend_1w_down = close_1w < ema_50_1w
+    # 1d EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema_50_1d
+    trend_1d_down = close_1d < ema_50_1d
     
     # Forward fill trend
-    trend_1w_up_series = pd.Series(trend_1w_up)
-    trend_1w_down_series = pd.Series(trend_1w_down)
-    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
-    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
+    trend_1d_up_series = pd.Series(trend_1d_up)
+    trend_1d_down_series = pd.Series(trend_1d_down)
+    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
+    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
     
-    # Align 1w trend to 1d
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
+    # Align 1d trend to 6h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 6h CCI(20) calculation
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    # Avoid division by zero
+    cci = np.where(mad_tp != 0, (typical_price - sma_tp) / (0.015 * mad_tp), 0.0)
     
-    # Bollinger Band Width for range filter
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    
-    # BBW percentile (252-day lookback for 1 year)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=252, min_periods=50).rank(pct=True) * 100
-    bb_width_percentile = bb_width_percentile.fillna(50).values
-    range_filter = bb_width_percentile >= 20  # Avoid low volatility squeeze
+    # Volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(range_filter[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(cci[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -89,33 +80,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses below 70 from above OR weekly trend turns down
-            if i > 0 and rsi[i-1] >= 70 and rsi[i] < 70:
-                position = 0
-                signals[i] = 0.0
-            elif trend_1w_down_aligned[i]:
+            # Exit: CCI returns above -50 OR trend changes
+            if (cci[i] > -50) or trend_1d_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 30 from below OR weekly trend turns up
-            if i > 0 and rsi[i-1] <= 30 and rsi[i] > 30:
-                position = 0
-                signals[i] = 0.0
-            elif trend_1w_up_aligned[i]:
+            # Exit: CCI returns below 50 OR trend changes
+            if (cci[i] < 50) or trend_1d_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: RSI crosses above 30 from below + weekly uptrend + range filter
-            if i > 0 and rsi[i-1] <= 30 and rsi[i] > 30 and trend_1w_up_aligned[i] and range_filter[i]:
+            # Long entry: CCI < -100 (oversold) + 1d uptrend + volume
+            if (cci[i] < -100) and trend_1d_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI crosses below 70 from above + weekly downtrend + range filter
-            elif i > 0 and rsi[i-1] >= 70 and rsi[i] < 70 and trend_1w_down_aligned[i] and range_filter[i]:
+            # Short entry: CCI > +100 (overbought) + 1d downtrend + volume
+            elif (cci[i] > 100) and trend_1d_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
