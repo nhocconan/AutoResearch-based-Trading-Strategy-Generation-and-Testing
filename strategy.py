@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_1d_trend_volume_v5
-# Hypothesis: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
-# Long when price breaks above 4h Donchian high (20), 1-day EMA50 > EMA200 (uptrend), and volume > 1.5x 20-period average.
-# Short when price breaks below 4h Donchian low (20), 1-day EMA50 < EMA200 (downtrend), and volume > 1.5x 20-period average.
-# Exit when price returns to 4h Donchian midline (average of 20-period high/low).
-# Designed for low trade frequency (~25-40/year) with strong edge in both bull and bear markets via trend alignment and volume filter.
+# 12h_1d_ema_rsi_volume_v1
+# Hypothesis: Use 1d EMA20 for trend direction, 1d RSI(14) for momentum, and volume surge on 12h for entry.
+# Long when: 12h close > 1d EMA20, 1d RSI > 50, and volume > 2x 20-period average.
+# Short when: 12h close < 1d EMA20, 1d RSI < 50, and volume > 2x 20-period average.
+# Exit when: 12h close crosses 1d EMA20 in opposite direction.
+# Uses 1d trend/momentum filter with 12h execution to avoid overtrading.
+# Target: 15-30 trades/year with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v5"
-timeframe = "4h"
+name = "12h_1d_ema_rsi_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,32 +25,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
-    
-    # 1-day EMA trend filter (EMA50 vs EMA200)
+    # 1d EMA20 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    ema_1d_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1d_20_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_20)
     
-    # Volume filter: 1.5x 20-period average
+    # 1d RSI(14) momentum filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    period = 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    for i in range(period+1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Volume filter: 2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(lookback, 200)  # Ensure all indicators are ready
+    start_idx = 50  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
+        if (np.isnan(ema_1d_20_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
@@ -58,33 +69,33 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition
-        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        vol_surge = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: Price returns to Donchian midline
-            if close[i] <= donchian_mid[i]:
+            # Exit: Price below 1d EMA20
+            if close[i] < ema_1d_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to Donchian midline
-            if close[i] >= donchian_mid[i]:
+            # Exit: Price above 1d EMA20
+            if close[i] > ema_1d_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above Donchian high, 1-day EMA50 > EMA200, volume surge
-            if (close[i] > highest_high[i] and 
-                ema_50_aligned[i] > ema_200_aligned[i] and 
+            # Long entry: Price above 1d EMA20, 1d RSI > 50, volume surge
+            if (close[i] > ema_1d_20_aligned[i] and 
+                rsi_1d_aligned[i] > 50 and 
                 vol_surge):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low, 1-day EMA50 < EMA200, volume surge
-            elif (close[i] < lowest_low[i] and 
-                  ema_50_aligned[i] < ema_200_aligned[i] and 
+            # Short entry: Price below 1d EMA20, 1d RSI < 50, volume surge
+            elif (close[i] < ema_1d_20_aligned[i] and 
+                  rsi_1d_aligned[i] < 50 and 
                   vol_surge):
                 position = -1
                 signals[i] = -0.25
