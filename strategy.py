@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-# daily_price_action_v1
-# Hypothesis: Price action strategy on daily timeframe using weekly trend filter.
-# Long when: daily close > weekly EMA200 and daily close breaks above daily Donchian upper (20)
-# Short when: daily close < weekly EMA200 and daily close breaks below daily Donchian lower (20)
-# Exit when: price crosses back below/above weekly EMA200 or daily Donchian middle
-# Uses weekly trend to filter direction and daily breakout for entry timing.
-# Target: 15-25 trades/year (~60-100 total over 4 years) to avoid fee drag.
+# 6h_parabolic_sar_volume_v1
+# Hypothesis: Parabolic SAR identifies trend direction on 6h timeframe. Volume confirmation filters false breakouts.
+# Works in bull/bear by following trend with trailing stop. Volume surge required for entry.
+# Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "daily_price_action_v1"
-timeframe = "1d"
+name = "6h_parabolic_sar_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,29 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
-    donch_len = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=donch_len, min_periods=donch_len).max().values
-    donch_low = low_series.rolling(window=donch_len, min_periods=donch_len).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Parabolic SAR parameters
+    af_start = 0.02
+    af_increment = 0.02
+    af_max = 0.2
     
-    # Weekly EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_len = 200
-    ema200_1w = pd.Series(close_1w).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Initialize arrays
+    psar = np.full(n, np.nan)
+    bull = np.full(n, True)  # True = bullish trend
+    af = np.full(n, af_start)
+    ep = np.full(n, np.nan)  # Extreme point
+    
+    # Set initial values
+    psar[0] = low[0]
+    ep[0] = high[0]
+    
+    # Calculate PSAR
+    for i in range(1, n):
+        if bull[i-1]:  # Was bullish
+            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+            # Check for reversal
+            if low[i] <= psar[i]:
+                bull[i] = False
+                psar[i] = ep[i-1]  # SAR becomes previous EP
+                ep[i] = low[i]
+                af[i] = af_start
+            else:
+                bull[i] = True
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        else:  # Was bearish
+            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+            # Check for reversal
+            if high[i] >= psar[i]:
+                bull[i] = True
+                psar[i] = ep[i-1]  # SAR becomes previous EP
+                ep[i] = high[i]
+                af[i] = af_start
+            else:
+                bull[i] = False
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+    
+    # Volume filter: 1.5x 20-period average
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donch_len, ema_len)
+    start_idx = 1  # Start from second bar
     
     for i in range(start_idx, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema200_1w_aligned[i]):
+        # Skip if any required data is not available
+        if np.isnan(psar[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 pass  # Hold position
             else:
@@ -55,27 +98,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Close below weekly EMA200 or below daily Donchian middle
-            if close[i] < ema200_1w_aligned[i] or close[i] < donch_mid[i]:
+            # Exit: Price below PSAR or volume drops below average
+            if close[i] <= psar[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Close above weekly EMA200 or above daily Donchian middle
-            if close[i] > ema200_1w_aligned[i] or close[i] > donch_mid[i]:
+            # Exit: Price above PSAR or volume drops below average
+            if close[i] >= psar[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Close above weekly EMA200 and breaks above daily Donchian upper
-            if close[i] > ema200_1w_aligned[i] and close[i] > donch_high[i]:
+            # Long entry: Price above PSAR, volume surge
+            if close[i] > psar[i] and vol_surge[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Close below weekly EMA200 and breaks below daily Donchian lower
-            elif close[i] < ema200_1w_aligned[i] and close[i] < donch_low[i]:
+            # Short entry: Price below PSAR, volume surge
+            elif close[i] < psar[i] and vol_surge[i]:
                 position = -1
                 signals[i] = -0.25
     
