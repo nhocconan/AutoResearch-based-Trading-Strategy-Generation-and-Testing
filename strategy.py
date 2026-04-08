@@ -1,15 +1,17 @@
-#!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v2
-# Hypothesis: Donchian(20) breakout on 12h with 1d EMA100 trend filter and volume > 1.5x average.
-# Uses tighter volume filter (2.0x) and requires breakout to close beyond band to reduce whipsaw.
-# Target: 50-150 total trades over 4 years (~12-37/year). Works in bull/bear via trend filter.
+# 4h_donchian_breakout_1d_trend_volume_v4
+# Hypothesis: Donchian(20) breakout on 4h combined with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with uptrend (price > 1d EMA100) and volume > 1.5x average.
+# Short when price breaks below Donchian lower band with downtrend (price < 1d EMA100) and volume > 1.5x average.
+# Exit when price crosses back to Donchian middle band (mean of upper/lower).
+# Designed to capture strong breakouts with trend alignment in both bull and bear markets.
+# Target: 100-250 total trades over 4 years (~25-62/year) to stay within the 400 trade hard limit.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +36,7 @@ def generate_signals(prices):
     ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
     ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Calculate Donchian channels on 12h data (20-period)
+    # Calculate Donchian channels on 4h data (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -62,7 +64,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian middle band
+            # Exit: price crosses below Donchian middle band
             if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
@@ -70,17 +72,17 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian middle band
+            # Exit: price crosses above Donchian middle band
             if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 2.0x average volume (tighter filter)
-            volume_ok = volume[i] > 2.0 * avg_volume[i]
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout entries: require close beyond Donchian band + trend alignment
+            # Breakout entries: Donchian upper breakout (long) and lower breakdown (short)
             if (close[i] > donchian_high[i]) and (close[i] > ema_100_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
