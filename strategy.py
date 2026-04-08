@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-1h Range Breakout with 4h Trend and 1d Volume Filter
-Hypothesis: In ranging markets, breakouts from 1h consolidation zones (identified by low ATR)
-continue in the direction of the 4h trend. Volume confirmation on 1d filters false breakouts.
-Works in bull/bear by using 4h trend filter to avoid counter-trend breakouts.
-Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years).
+6h 4-Hour Momentum with Weekly Trend Filter and Volume Confirmation
+Hypothesis: 4-hour momentum captures short-term swings while weekly EMA ensures alignment with long-term trend, reducing whipsaws in both bull and bear markets. Volume confirms conviction. Target: 15-30 trades/year on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_range_breakout_4h_trend_1d_volume_v1"
-timeframe = "1h"
+name = "6h_4h_momentum_weekly_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,78 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h trend: EMA(20) - EMA(50)
+    # 4h data for momentum
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_4h = ema20_4h - ema50_4h
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # 1d volume filter: volume > 1.5x 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_filter_1d = volume_1d > (vol_ma_1d * 1.5)
-    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 1h ATR(14) for consolidation detection
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h RSI(14) for momentum
+    delta = pd.Series(close_4h).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h_values = rsi_4h.values
     
-    # 1h consolidation: ATR < 0.5 * 20-period ATR mean
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    consolidation = atr < (atr_ma * 0.5)
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # 1h range: 20-period high/low
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume filter (>1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
+    
+    # Align 4h RSI and weekly EMA to 6h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_values)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(trend_4h_aligned[i]) or np.isnan(vol_filter_1d_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(atr_ma[i]) or
-            np.isnan(high_20[i]) or np.isnan(low_20[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 20-period low OR trend turns bearish
-            if (close[i] <= low_20[i] or 
-                trend_4h_aligned[i] < 0):
+            # Exit: RSI turns bearish OR trend turns bearish
+            if (rsi_4h_aligned[i] < 50 or 
+                close[i] <= ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 20-period high OR trend turns bullish
-            if (close[i] >= high_20[i] or 
-                trend_4h_aligned[i] > 0):
+            # Exit: RSI turns bullish OR trend turns bullish
+            if (rsi_4h_aligned[i] > 50 or 
+                close[i] >= ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: breakout above 20-period high with bullish 4h trend and volume
-            if (close[i] > high_20[i] and 
-                trend_4h_aligned[i] > 0 and 
-                consolidation[i] and
-                vol_filter_1d_aligned[i]):
+            # Long: RSI oversold with uptrend and volume
+            if (rsi_4h_aligned[i] < 30 and 
+                close[i] > ema_50_1w_aligned[i] and 
+                vol_filter[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: breakdown below 20-period low with bearish 4h trend and volume
-            elif (close[i] < low_20[i] and 
-                  trend_4h_aligned[i] < 0 and 
-                  consolidation[i] and
-                  vol_filter_1d_aligned[i]):
+                signals[i] = 0.25
+            # Short: RSI overbought with downtrend and volume
+            elif (rsi_4h_aligned[i] > 70 and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  vol_filter[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
