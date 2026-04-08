@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
 # Hypothesis: Price breaking above/below 4-hour Donchian channels during strong daily trends
 # (captured by ADX > 25 on daily) with volume confirmation captures sustained moves while
