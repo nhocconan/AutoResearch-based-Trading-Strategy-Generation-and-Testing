@@ -3,7 +3,9 @@
 4h Donchian Breakout with 1d Trend and Volume Confirmation
 Hypothesis: Price breaking above/below 20-period Donchian channel on 4h timeframe,
 filtered by 1d EMA trend direction and volume spikes, captures strong momentum moves
-while avoiding false breakouts in ranging markets. Targets 20-40 trades/year.
+while avoiding false breakouts in ranging markets. Works in bull via breakouts,
+in bear via short breakdowns. Volume and trend filters reduce false signals.
+Target: 20-40 trades/year.
 """
 
 import numpy as np
