@@ -1,82 +1,81 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_rsi_momentum_v1
-Hypothesis: Combine 1d RSI momentum (trend filter) with 4h RSI overbought/oversold 
-and 1h entry timing. In bull markets, 1d RSI > 50 indicates uptrend; in bear markets, 
-1d RSI < 50 indicates downtrend. Enter on 4h RSI extremes with 1h price action 
-confirmation. Volume filter reduces false signals. Target: 15-30 trades/year.
-Timeframe: 1h (primary), HTF: 4h (RSI), 1d (trend filter).
+6h_1w_1d_price_action_v1
+Hypothesis: Weekly pivot direction (from previous week) filters 60-minute breakouts.
+- Uses weekly open/close to determine bull/bear bias
+- Daily high/low as dynamic support/resistance
+- Enter on 6h breakout of daily levels in direction of weekly bias
+- Exit on opposite daily level touch or weekly bias reversal
+- Works in bull/bear via weekly filter; avoids counter-trend trades
+Target: 15-30 trades/year
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_rsi_momentum_v1"
-timeframe = "1h"
+name = "6h_1w_1d_price_action_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter (RSI > 50 = uptrend, < 50 = downtrend)
+    # Get weekly data for bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly bias: bullish if weekly close > open, bearish if close < open
+    weekly_bullish = df_1w['close'].values > df_1w['open'].values
+    weekly_bearish = df_1w['close'].values < df_1w['open'].values
+    
+    # Forward fill weekly bias to get current week's bias
+    weekly_bullish_series = pd.Series(weekly_bullish)
+    weekly_bearish_series = pd.Series(weekly_bearish)
+    weekly_bullish_ffilled = weekly_bullish_series.ffill().values
+    weekly_bearish_ffilled = weekly_bearish_series.ffill().values
+    
+    # Align weekly bias to 6h
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_ffilled)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish_ffilled)
+    
+    # Get daily data for support/resistance
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d RSI(14) for trend filter
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Daily high/low as support/resistance
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # Get 4h data for entry signal (RSI extremes)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Forward fill daily levels
+    daily_high_series = pd.Series(daily_high)
+    daily_low_series = pd.Series(daily_low)
+    daily_high_ffilled = daily_high_series.ffill().values
+    daily_low_ffilled = daily_low_series.ffill().values
     
-    # 4h RSI(14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Volume confirmation: volume > 1.3x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.3
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align daily levels to 6h
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high_ffilled)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low_ffilled)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -84,40 +83,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            if position != 0:
-                # Hold position outside session
-                pass
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: 4h RSI returns to neutral (50) or 1d trend changes
-            if rsi_4h_aligned[i] >= 50 or rsi_1d_aligned[i] < 50:
+            # Exit: price touches daily low (support) or weekly bias turns bearish
+            if low[i] <= daily_low_aligned[i] or weekly_bearish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: 4h RSI returns to neutral (50) or 1d trend changes
-            if rsi_4h_aligned[i] <= 50 or rsi_1d_aligned[i] > 50:
+            # Exit: price touches daily high (resistance) or weekly bias turns bullish
+            if high[i] >= daily_high_aligned[i] or weekly_bullish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: 4h RSI oversold (<30) + 1d uptrend (>50) + volume
-            if (rsi_4h_aligned[i] < 30 and rsi_1d_aligned[i] > 50 and 
-                vol_confirm[i]):
+            # Long entry: price breaks above daily high with weekly bullish bias
+            if high[i] > daily_high_aligned[i] and weekly_bullish_aligned[i]:
                 position = 1
-                signals[i] = 0.20
-            # Short entry: 4h RSI overbought (>70) + 1d downtrend (<50) + volume
-            elif (rsi_4h_aligned[i] > 70 and rsi_1d_aligned[i] < 50 and 
-                  vol_confirm[i]):
+                signals[i] = 0.25
+            # Short entry: price breaks below daily low with weekly bearish bias
+            elif low[i] < daily_low_aligned[i] and weekly_bearish_aligned[i]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
