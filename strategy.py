@@ -3,57 +3,49 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_ema_trend_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1-week data for EMA trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 1-day data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA21 on weekly close
+    close_1w = df_1w['close'].values
+    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Upper band: 20-day high
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-day low
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Align EMA to daily timeframe (wait for weekly bar to close)
+    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
     
-    # Align Donchian levels to 4h timeframe (wait for 1-day bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume confirmation on 4h: volume > 1.5x 20-period average
+    # Volume confirmation on daily: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_confirm = vol_ratio > 1.5
     
-    # Session filter: 08-20 UTC (avoid low-volume Asian session)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Trend filter: price above/below weekly EMA21
+    price_above_ema = close > ema_21_aligned
+    price_below_ema = close < ema_21_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = max(20, 20) + 1
+    start_idx = 21
     
     for i in range(start_idx, n):
-        # Skip if Donchian levels are not available
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]):
+        # Skip if EMA is not available
+        if np.isnan(ema_21_aligned[i]):
             if position != 0:
                 # Hold position until exit
                 pass
@@ -61,37 +53,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Only consider new signals during session with volume confirmation
-        if not (in_session[i] and vol_confirm[i]):
-            if position != 0:
-                # Hold existing position
-                pass
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below 1-day Donchian low (breakdown)
-            if close[i] < donchian_low_aligned[i]:
+            # Exit: price crosses below weekly EMA21
+            if price_below_ema[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 1-day Donchian high (breakout)
-            if close[i] > donchian_high_aligned[i]:
+            # Exit: price crosses above weekly EMA21
+            if price_above_ema[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 1-day Donchian high with volume
-            if close[i] > donchian_high_aligned[i]:
+            # Long entry: price above EMA with volume confirmation
+            if price_above_ema[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 1-day Donchian low with volume
-            elif close[i] < donchian_low_aligned[i]:
+            # Short entry: price below EMA with volume confirmation
+            elif price_below_ema[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
