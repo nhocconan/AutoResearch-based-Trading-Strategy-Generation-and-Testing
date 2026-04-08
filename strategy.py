@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# 4h_12h_pivot_volume_v1
-# Hypothesis: 4h price breaking above/below 12h pivot point resistance/support levels
-# (R1/S1) with volume confirmation creates high-probability breakout trades.
-# Uses 12h timeframe for pivot calculation (proper support/resistance levels) and
-# 4h for entry timing. Works in both bull/bear markets by trading breakouts in
-# direction of prevailing trend. Target: 20-40 trades/year.
+# 1h_4h_1d_ema_trend_with_volume
+# Hypothesis: Use 1d EMA for long-term trend direction, 4h EMA for medium-term trend confirmation,
+# and 1h for entry timing with volume confirmation. Trades only in direction of higher timeframe
+# trends to avoid whipsaw. Volume filter ensures momentum behind moves. Designed for 1h timeframe
+# to target 15-35 trades/year by requiring multi-timeframe alignment and volume confirmation.
+# Works in bull markets (trend following) and bear markets (counter-trend bounces when 1d trend
+# is weak but 4h/1d alignment occurs).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_pivot_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_ema_trend_with_volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,50 +25,40 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_prices = prices['open'].values
     
-    # Get 12h data for pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for medium-term trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot points from 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for long-term trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Pivot point = (H + L + C) / 3
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    # Resistance 1 = (2 * P) - L
-    r1 = (2 * pivot) - low_12h
-    # Support 1 = (2 * P) - H
-    s1 = (2 * pivot) - high_12h
-    # Resistance 2 = P + (H - L)
-    r2 = pivot + (high_12h - low_12h)
-    # Support 2 = P - (H - L)
-    s2 = pivot - (high_12h - low_12h)
+    # Calculate 4h EMA(21) for medium-term trend
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Align pivot levels to 4h timeframe
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    # Calculate 1d EMA(50) for long-term trend
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: volume > 1.5x average of last 12 periods (3 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    # Volume confirmation: volume > 1.8x average of last 24 periods (1 day)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > vol_ma * 1.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or \
-           np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -76,32 +67,32 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S1 or loses upward momentum
-            if close[i] < s1_12h_aligned[i]:
+            # Exit: price closes below 4h EMA or loses upward momentum
+            if close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.20  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R1 or loses downward momentum
-            if close[i] > r1_12h_aligned[i]:
+            # Exit: price closes above 4h EMA or loses downward momentum
+            if close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.20  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above R1 with volume
-            if (close[i] > r1_12h_aligned[i] and 
-                open_prices[i] <= r1_12h_aligned[i] and  # Ensure breakout happened this bar
+            # Long entry: price above both EMAs with volume confirmation
+            if (close[i] > ema_4h_aligned[i] and 
+                close[i] > ema_1d_aligned[i] and 
                 vol_confirm[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below S1 with volume
-            elif (close[i] < s1_12h_aligned[i] and 
-                  open_prices[i] >= s1_12h_aligned[i] and  # Ensure breakdown happened this bar
+                signals[i] = 0.20
+            # Short entry: price below both EMAs with volume confirmation
+            elif (close[i] < ema_4h_aligned[i] and 
+                  close[i] < ema_1d_aligned[i] and 
                   vol_confirm[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
