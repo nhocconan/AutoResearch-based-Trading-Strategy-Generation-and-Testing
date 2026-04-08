@@ -1,68 +1,72 @@
 #!/usr/bin/env python3
-# 6h_1d_1w_triple_timeframe_momentum_v1
-# Hypothesis: Combining 60-period EMA trend filter from 60-day (1d) timeframe with 
-# 6-hour momentum (close > open) and volume confirmation creates a robust trend-following
-# strategy that works in both bull and bear markets. The 60-day EMA captures the 
-# primary trend direction, while 6-hour momentum and volume filters ensure entries 
-# occur only during strong momentum bursts with institutional participation, 
-# reducing false signals and whipsaws.
+# 6h_1d_ichimoku_cloud_v1
+# Hypothesis: Ichimoku cloud from daily timeframe provides strong support/resistance levels that
+# work across market regimes. Price above/below cloud determines trend direction, while
+# TK cross provides entry signals with momentum confirmation. This combines trend-following
+# with mean-reversion tendencies at cloud boundaries, effective in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_triple_timeframe_momentum_v1"
+name = "6h_1d_ichimoku_cloud_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 70:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for trend filter (60-day EMA)
+    # Get daily data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate 60-day EMA for trend filter
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema60_1d = pd.Series(close_1d).ewm(span=60, min_periods=60, adjust=False).mean().values
-    ema60_1d_aligned = align_htf_to_ltf(prices, df_1d, ema60_1d)
     
-    # Get weekly data for additional trend confirmation (optional filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        # If weekly data not available, continue with daily only
-        ema30_1w_aligned = np.full(n, np.nan)
-    else:
-        close_1w = df_1w['close'].values
-        ema30_1w = pd.Series(close_1w).ewm(span=30, min_periods=30, adjust=False).mean().values
-        ema30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema30_1w)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Volume confirmation: volume > 1.3x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.3
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # 6-hour momentum: close > open (bullish candle)
-    bullish_momentum = close > prices['open'].values
-    bearish_momentum = close < prices['open'].values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup
-    start_idx = 70
+    # Start after warmup for Ichimoku calculations
+    start_idx = 60
     
     for i in range(start_idx, n):
-        # Skip if data not available
-        if np.isnan(ema60_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if Ichimoku data not available
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -70,41 +74,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Optional weekly trend filter (use if available)
-        weekly_filter_long = True
-        weekly_filter_short = True
-        if not np.isnan(ema30_1w_aligned[i]):
-            weekly_filter_long = close[i] > ema30_1w_aligned[i]
-            weekly_filter_short = close[i] < ema30_1w_aligned[i]
+        # Determine cloud boundaries and position relative to cloud
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > upper_cloud
+        price_below_cloud = close[i] < lower_cloud
+        
+        # TK Cross signals
+        tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below 60-day EMA or loses bullish momentum
-            if close[i] < ema60_1d_aligned[i] or not bullish_momentum[i]:
+            # Exit: price falls below cloud or TK cross turns bearish
+            if close[i] < lower_cloud or not tk_cross_bullish:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 60-day EMA or loses bearish momentum
-            if close[i] > ema60_1d_aligned[i] or not bearish_momentum[i]:
+            # Exit: price rises above cloud or TK cross turns bullish
+            if close[i] > upper_cloud or not tk_cross_bearish:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price above 60-day EMA, bullish momentum, volume confirmation
-            if (close[i] > ema60_1d_aligned[i] and 
-                bullish_momentum[i] and 
-                vol_confirm[i] and 
-                weekly_filter_long):
+            # Long entry: price above cloud AND bullish TK cross
+            if price_above_cloud and tk_cross_bullish:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price below 60-day EMA, bearish momentum, volume confirmation
-            elif (close[i] < ema60_1d_aligned[i] and 
-                  bearish_momentum[i] and 
-                  vol_confirm[i] and 
-                  weekly_filter_short):
+            # Short entry: price below cloud AND bearish TK cross
+            elif price_below_cloud and tk_cross_bearish:
                 position = -1
                 signals[i] = -0.25
     
