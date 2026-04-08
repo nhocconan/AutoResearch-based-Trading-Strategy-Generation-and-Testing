@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1h_fractal_breakout_1d_trend_volume_v3
+# 12h_fractal_breakout_1d_trend_volume_v4
 # Hypothesis: Use daily timeframe for trend (EMA20) and fractal structure (Williams Fractals with 2-bar confirmation), 
-# and 1h for entry timing with volume confirmation (>2x average) and RSI filter (40-60). 
-# Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.20.
-# Target: 15-30 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
+# and 12h for entry timing with volume confirmation (>2x average) and RSI filter (40-60). 
+# Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.25.
+# Target: 12-37 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
 # Works in bull/bear via trend filter and avoids chop with RSI range filter.
 
-name = "1h_fractal_breakout_1d_trend_volume_v3"
-timeframe = "1h"
+name = "12h_fractal_breakout_1d_trend_volume_v4"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -78,7 +78,7 @@ def generate_signals(prices):
     bearish_fractal_aligned = align_htf_to_ltf(prices, df_d, bearish_fractal, additional_delay_bars=2)
     bullish_fractal_aligned = align_htf_to_ltf(prices, df_d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 20-period average volume for 1h timeframe
+    # Calculate 20-period average volume for 12h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate RSI for momentum filter
@@ -100,7 +100,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned daily indicators for current 1h bar
+        # Get aligned daily indicators for current 12h bar
         ema20_val = align_htf_to_ltf(prices, df_d, ema20_d)[i]
         bearish_val = bearish_fractal_aligned[i]
         bullish_val = bullish_fractal_aligned[i]
@@ -129,7 +129,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit if price breaks above bearish fractal (resistance)
@@ -137,17 +137,17 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
             # Breakout long above bearish fractal (resistance) with volume confirmation, uptrend, and healthy RSI
             if (not np.isnan(bearish_val) and high[i] >= bearish_val and 
                 close[i] > bearish_val and vol_breakout and uptrend and rsi_healthy):
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             # Breakout short below bullish fractal (support) with volume confirmation, downtrend, and healthy RSI
             elif (not np.isnan(bullish_val) and low[i] <= bullish_val and 
                   close[i] < bullish_val and vol_breakout and downtrend and rsi_healthy):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
