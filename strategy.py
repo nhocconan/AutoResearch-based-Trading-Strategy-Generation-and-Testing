@@ -1,74 +1,20 @@
 #!/usr/bin/env python3
-# 6h_hull_rsi_divergence_1d_trend_volume_v1
-# Hypothesis: On 6h timeframe, use Hull Moving Average (HMA) crossovers with RSI divergence on 1d timeframe for signal confirmation.
-# Long when: 6H HMA(9) crosses above HMA(21), 1D RSI shows bullish divergence (price makes lower low but RSI makes higher low), and volume > 1.5x average.
-# Short when: 6H HMA(9) crosses below HMA(21), 1D RSI shows bearish divergence (price makes higher high but RSI makes lower high), and volume > 1.5x average.
-# Exit when opposite HMA crossover occurs or volume drops below average.
-# RSI divergence is calculated on daily timeframe to avoid noise and provide higher probability signals.
-# Works in both bull and bear markets: HMA catches trends, RSI divergence filters for exhaustion points, volume confirms conviction.
+# 12h_camarilla_pivot_1d_trend_volume_v2
+# Hypothesis: On 12h timeframe, use daily Camarilla pivot levels with trend filter and volume confirmation.
+# Long when price closes above H3 (bullish pivot) with volume > 1.5x average and daily trend up.
+# Short when price closes below L3 (bearish pivot) with volume > 1.5x average and daily trend down.
+# Exit on opposite pivot touch or when volume drops below average.
+# Daily trend defined by price above/below daily EMA20.
+# This strategy targets fewer trades (12-37/year) by using higher timeframe structure and tight entry conditions.
+# Works in both bull and bear markets via trend filter and pivot mean reversion in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_hull_rsi_divergence_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1d_trend_volume_v2"
+timeframe = "12h"
 leverage = 1.0
-
-def hull_moving_average(arr, period):
-    """Calculate Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half = int(period / 2)
-    sqrt = int(np.sqrt(period))
-    wma_half = pd.Series(arr).ewm(span=half, adjust=False).mean()
-    wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean()
-    return hma.values
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI"""
-    if len(prices) < period + 1:
-        return np.full_like(prices, np.nan)
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return np.concatenate([[np.nan], rsi.values])
-
-def find_divergence(price, indicator, lookback=5):
-    """
-    Find bullish/bearish divergence
-    Returns: 1 for bullish div, -1 for bearish div, 0 for none
-    """
-    if len(price) < lookback or len(indicator) < lookback:
-        return 0
-    
-    # Check for bullish divergence: price makes lower low, indicator makes higher low
-    price_low_idx = np.argmin(price[-lookback:])
-    indicator_low_idx = np.argmin(indicator[-lookback:])
-    
-    bullish_div = 0
-    if price_low_idx == lookback - 1 and indicator_low_idx != lookback - 1:
-        # Price made new low recently, indicator did not
-        if indicator[-1] > indicator[indicator_low_idx]:
-            bullish_div = 1
-    
-    # Check for bearish divergence: price makes higher high, indicator makes lower high
-    price_high_idx = np.argmax(price[-lookback:])
-    indicator_high_idx = np.argmax(indicator[-lookback:])
-    
-    bearish_div = 0
-    if price_high_idx == lookback - 1 and indicator_high_idx != lookback - 1:
-        # Price made new high recently, indicator did not
-        if indicator[-1] < indicator[indicator_high_idx]:
-            bearish_div = -1
-            
-    return bullish_div + bearish_div  # Will be 1, -1, or 0
 
 def generate_signals(prices):
     n = len(prices)
@@ -81,23 +27,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6H HMA for crossover signals
-    hma_fast = hull_moving_average(close, 9)
-    hma_slow = hull_moving_average(close, 21)
-    
-    # 1D data for RSI divergence
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Calculate pivot points from daily data (using previous day's OHLC)
+    # Get daily data
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate 1D RSI
-    daily_close = df_1d['close'].values
-    daily_rsi = calculate_rsi(daily_close, 14)
+    # Calculate daily Camarilla levels using previous day's data
+    # Camarilla formulas: H4 = C + (H-L)*1.1/2, H3 = C + (H-L)*1.1/4, etc.
+    # We use previous day's H, L, C to avoid look-ahead
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Align 1D RSI to 6H timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_rsi)
+    # Calculate pivot levels using previous day's data
+    camarilla_H4 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_H3 = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_H2 = daily_close + (daily_high - daily_low) * 1.1 / 6
+    camarilla_H1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    camarilla_L1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    camarilla_L2 = daily_close - (daily_high - daily_low) * 1.1 / 6
+    camarilla_L3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    camarilla_L4 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Volume confirmation: 20-period average on 6H
+    # Align daily pivot levels to 12h timeframe (with proper delay for daily bar close)
+    H4_12h = align_htf_to_ltf(prices, df_daily, camarilla_H4)
+    H3_12h = align_htf_to_ltf(prices, df_daily, camarilla_H3)
+    L3_12h = align_htf_to_ltf(prices, df_daily, camarilla_L3)
+    
+    # Daily trend filter: price above/below daily EMA20
+    daily_ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    daily_ema20_12h = align_htf_to_ltf(prices, df_daily, daily_ema20)
+    
+    # Volume confirmation: 20-period average on 12h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -108,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or np.isnan(daily_ema20_12h[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -117,16 +79,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: opposite HMA crossover or volume drops below average
-            if hma_fast[i] < hma_slow[i] or volume[i] < avg_volume[i]:
+            # Exit: price touches L3 (opposite pivot) or volume drops below average
+            if close[i] <= L3_12h[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: opposite HMA crossover or volume drops below average
-            if hma_fast[i] > hma_slow[i] or volume[i] < avg_volume[i]:
+            # Exit: price touches H3 (opposite pivot) or volume drops below average
+            if close[i] >= H3_12h[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -135,30 +97,17 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Check for RSI divergence on 1D timeframe (need to look back far enough)
-            if i >= 20:  # Need enough history for divergence check
-                # Get recent price and RSI values for divergence detection
-                lookback = 5
-                start_look = max(0, i - lookback)
-                price_window = close[start_look:i+1]
-                # For RSI, we need to get the aligned values
-                rsi_start = max(0, i - lookback)
-                rsi_window = rsi_1d_aligned[rsi_start:i+1]
-                
-                if len(price_window) >= lookback and len(rsi_window) >= lookback and not np.any(np.isnan(rsi_window)):
-                    divergence = find_divergence(price_window, rsi_window, lookback)
-                    
-                    # HMA crossover signals
-                    hma_cross_up = hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]
-                    hma_cross_down = hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]
-                    
-                    # Long entry: HMA bullish cross + bullish RSI divergence + volume
-                    if hma_cross_up and divergence == 1 and volume_ok:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short entry: HMA bearish cross + bearish RSI divergence + volume
-                    elif hma_cross_down and divergence == -1 and volume_ok:
-                        position = -1
-                        signals[i] = -0.25
+            # Daily trend filter
+            daily_uptrend = close[i] > daily_ema20_12h[i]
+            daily_downtrend = close[i] < daily_ema20_12h[i]
+            
+            # Long entry: price closes above H3 with volume and uptrend
+            if close[i] > H3_12h[i] and volume_ok and daily_uptrend:
+                position = 1
+                signals[i] = 0.25
+            # Short entry: price closes below L3 with volume and downtrend
+            elif close[i] < L3_12h[i] and volume_ok and daily_downtrend:
+                position = -1
+                signals[i] = -0.25
     
     return signals
