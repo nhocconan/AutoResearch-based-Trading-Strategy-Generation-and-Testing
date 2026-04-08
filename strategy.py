@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_donchian_20_1d_trend_volume_v1
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
-# Donchian channels provide clear breakout levels; EMA50 filters trend direction on 1d;
-# volume confirms institutional participation. Designed for low trade frequency (12-37/year)
-# to minimize fee drag while capturing trends in both bull and bear markets.
+# 4h_rsi_ema_crossover_1d_trend_volume_v1
+# Hypothesis: 4h RSI crossing above/below EMA(21) with 1d EMA(50) trend filter and volume confirmation.
+# RSI > EMA indicates bullish momentum; RSI < EMA indicates bearish momentum.
+# Volume confirms participation. Trend filter avoids counter-trend trades.
+# Target: 20-40 trades/year with position size 0.25 to minimize fee drag.
 
-name = "12h_donchian_20_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_rsi_ema_crossover_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,17 +19,33 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    period_donchian = 20
-    max_high = pd.Series(high).rolling(window=period_donchian, min_periods=period_donchian).max()
-    min_low = pd.Series(low).rolling(window=period_donchian, min_periods=period_donchian).min()
-    upper = max_high.values
-    lower = min_low.values
+    # RSI calculation
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices, prepend=prices[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(prices)
+        avg_loss = np.zeros_like(prices)
+        
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period+1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close, 14)
+    
+    # EMA(21) on RSI
+    rsi_ema = pd.Series(rsi).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # 1d EMA trend filter (50)
     df_1d = get_htf_data(prices, '1d')
@@ -39,20 +55,20 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume filter: volume > 1.5x 30-period average
-    vol_period = 30
+    # Volume filter: volume > 1.5x 20-period average
+    vol_period = 20
     vol_ma = np.full(n, np.nan)
     vol_ma[vol_period-1:] = pd.Series(volume).rolling(window=vol_period, min_periods=vol_period).mean()[vol_period-1:].values
     
     # Start from sufficient lookback
-    start_idx = max(period_donchian, vol_period) + 5
+    start_idx = max(21, vol_period) + 5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(rsi_ema[i]) or 
             np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
@@ -61,27 +77,27 @@ def generate_signals(prices):
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit if price breaks below lower band or trend fails
-            if close[i] < lower[i] or close[i] < ema_1d_aligned[i]:
+            # Exit if RSI crosses below EMA or trend fails
+            if rsi[i] < rsi_ema[i] or close[i] < ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above upper band or trend fails
-            if close[i] > upper[i] or close[i] > ema_1d_aligned[i]:
+            # Exit if RSI crosses above EMA or trend fails
+            if rsi[i] > rsi_ema[i] or close[i] > ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band with uptrend and volume
-            if close[i] > upper[i] and close[i] > ema_1d_aligned[i] and volume_filter:
+            # Long entry: RSI above EMA with uptrend and volume
+            if rsi[i] > rsi_ema[i] and close[i] > ema_1d_aligned[i] and volume_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower band with downtrend and volume
-            elif close[i] < lower[i] and close[i] < ema_1d_aligned[i] and volume_filter:
+            # Short entry: RSI below EMA with downtrend and volume
+            elif rsi[i] < rsi_ema[i] and close[i] < ema_1d_aligned[i] and volume_filter:
                 position = -1
                 signals[i] = -0.25
     
