@@ -1,35 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_rsi_divergence_volume_v1
-Hypothesis: Combine RSI divergence with multi-timeframe trend and volume confirmation on 4h timeframe.
-Long when: price makes lower low but RSI makes higher low (bullish divergence) on 1d, price > 4h EMA20, and volume > 1.5x average.
-Short when: price makes higher high but RSI makes lower high (bearish divergence) on 1d, price < 4h EMA20, and volume > 1.5x average.
-Uses 1w trend filter for long-term bias. Designed to capture reversals in both bull and bear markets.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+1d_1w_12h_atr_breakout_volume_v1
+Hypothesis: Use weekly ATR-based breakout on daily timeframe with volume confirmation and weekly trend bias.
+Works in bull markets by catching breakouts and in bear by avoiding false breakouts against trend.
+Target: 8-20 trades/year per symbol (32-80 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_rsi_divergence_volume_v1"
-timeframe = "4h"
+name = "1d_1w_12h_atr_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_rsi(prices, period=14):
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(prices)
-    avg_loss = np.zeros_like(prices)
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    for i in range(period + 1, len(prices)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,35 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI and divergence
+    # Get daily data for ATR and breakout calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
+    # Get weekly data for trend bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily RSI
+    # Get 12h data for additional volume filter (optional)
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate ATR(14) on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    rsi_1d = calculate_rsi(close_1d, 14)
     
-    # Calculate 4h EMA20 for trend filter
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Calculate 1w EMA20 for long-term trend
+    # ATR(14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Weekly EMA for trend bias
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align indicators to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ema_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), ema_20)  # self-align
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume confirmation: volume > 1.5x average of last 20 periods
+    # Breakout levels: ±1.5 * ATR from open
+    open_1d = df_1d['open'].values
+    upper_break = open_1d + 1.5 * atr
+    lower_break = open_1d - 1.5 * atr
+    
+    # Align breakout levels to daily timeframe (they're already daily, but ensure alignment)
+    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
+    
+    # Volume confirmation: volume > 1.3x average of last 20 days
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    vol_confirm = volume > vol_ma * 1.3
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -80,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_20_aligned[i]) or 
+        if (np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or 
             np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -90,42 +89,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below 4h EMA20 or bearish RSI divergence
-            if close[i] < ema_20_aligned[i]:
+            # Exit: price closes below open or weekly trend turns down
+            if close[i] < open_1d[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 4h EMA20 or bullish RSI divergence
-            if close[i] > ema_20_aligned[i]:
+            # Exit: price closes above open or weekly trend turns up
+            if close[i] > open_1d[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Need at least 2 points for divergence check
-            if i < 2:
-                signals[i] = 0.0
-                continue
-                
-            # Bullish divergence: price makes lower low but RSI makes higher low
-            price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
-            rsi_higher_low = rsi_1d_aligned[i] > rsi_1d_aligned[i-1] and rsi_1d_aligned[i-1] > rsi_1d_aligned[i-2]
-            bullish_div = price_lower_low and rsi_higher_low
-            
-            # Bearish divergence: price makes higher high but RSI makes lower high
-            price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
-            rsi_lower_high = rsi_1d_aligned[i] < rsi_1d_aligned[i-1] and rsi_1d_aligned[i-1] < rsi_1d_aligned[i-2]
-            bearish_div = price_higher_high and rsi_lower_high
-            
-            # Long entry: bullish divergence + price > 4h EMA20 + volume + weekly uptrend
-            if bullish_div and close[i] > ema_20_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
+            # Long entry: price breaks above upper band with volume and weekly bias up
+            if close[i] > upper_break_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish divergence + price < 4h EMA20 + volume + weekly downtrend
-            elif bearish_div and close[i] < ema_20_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
+            # Short entry: price breaks below lower band with volume and weekly bias down
+            elif close[i] < lower_break_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
