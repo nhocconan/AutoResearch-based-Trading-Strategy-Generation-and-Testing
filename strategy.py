@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-1-day Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-Hypothesis: Daily Donchian(20) breakouts capture momentum, while weekly EMA trend filter
-avoids counter-trend trades and volume confirmation ensures institutional participation.
-Designed for ~10-20 trades/year to minimize fee drift in both bull and bear markets.
+6h Camarilla Pivot from 1-day with Volume Confirmation
+Hypothesis: Camarilla pivot levels (R3/S3, R4/S4) from daily chart act as strong support/resistance.
+At 6h timeframe, we fade touches of R3/S3 (mean reversion) and break through R4/S4 (momentum).
+Volume confirmation filters false signals. Works in ranging markets (fade) and trending markets (breakout).
+Target: 15-25 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,66 +26,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 1-day data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla levels for each 1-day bar
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.0 * (high - low)
+    # S3 = close - 1.0 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    r4_1d = close_1d + 1.5 * (high_1d - low_1d)
+    r3_1d = close_1d + 1.0 * (high_1d - low_1d)
+    s3_1d = close_1d - 1.0 * (high_1d - low_1d)
+    s4_1d = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align to 6h timeframe (already shifted by 1 day in align function)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 20-period low OR trend reverses
-            if (close[i] < low_20[i] or 
-                close[i] < ema_50_1w_aligned[i]):
+            # Exit: price reaches S3 (support) or breaks below S4 with volume
+            if close[i] <= s3_6h[i] or (close[i] < s4_6h[i] and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 20-period high OR trend reverses
-            if (close[i] > high_20[i] or 
-                close[i] > ema_50_1w_aligned[i]):
+            # Exit: price reaches R3 (resistance) or breaks above R4 with volume
+            if close[i] >= r3_6h[i] or (close[i] > r4_6h[i] and vol_filter[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter: price vs weekly EMA50
-            uptrend = close[i] > ema_50_1w_aligned[i]
-            downtrend = close[i] < ema_50_1w_aligned[i]
-            
-            # Long: price breaks above 20-period high + uptrend + volume spike
-            if (high[i] > high_20[i-1] and 
-                uptrend and 
-                vol_spike[i]):
+            # Fade at R3/S3: price touches level and reverses
+            # Long: touch S3 with rejection (low touches S3 but close above)
+            if low[i] <= s3_6h[i] and close[i] > s3_6h[i] and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below 20-period low + downtrend + volume spike
-            elif (low[i] < low_20[i-1] and 
-                  downtrend and 
-                  vol_spike[i]):
+            # Short: touch R3 with rejection (high touches R3 but close below)
+            elif high[i] >= r3_6h[i] and close[i] < r3_6h[i] and vol_filter[i]:
+                position = -1
+                signals[i] = -0.25
+            # Breakout through R4/S4 with volume
+            # Long: break above R4
+            elif high[i] > r4_6h[i] and close[i] > r4_6h[i] and vol_filter[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short: break below S4
+            elif low[i] < s4_6h[i] and close[i] < s4_6h[i] and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
