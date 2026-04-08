@@ -1,49 +1,54 @@
-#!/usr/bin/env python3
-# 1d_market_regime_reversion_v1
-# Hypothesis: On daily timeframe, combine mean reversion in ranging markets with trend following in trending markets using Choppiness Index as regime filter.
-# In ranging markets (CHOP > 61.8): Buy near support (low + 0.3 * ATR), sell near resistance (high - 0.3 * ATR).
-# In trending markets (CHOP < 38.2): Follow trend using EMA(50) direction.
-# Avoids whipsaw in strong trends and captures reversals in ranges. Low trade frequency (~10-20/year) minimizes fee drag.
+# 12h_volatility_breakout_1d_trend_volume_v1
+# Hypothesis: Use 12h volatility breakout above 1d ATR-based channel with volume confirmation and trend filter.
+# Breakouts capture momentum in both bull and bear markets. Volume confirms institutional interest.
+# 1d trend filter ensures we trade with higher timeframe momentum. Target 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_market_regime_reversion_v1"
-timeframe = "1d"
+name = "12h_volatility_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter and ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily ATR(14) for volatility
-    tr1 = high - low
-    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d ATR(14) for volatility channel
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(np.concatenate([[high_1d[0]], high_1d[:-1]]) - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(np.concatenate([[low_1d[0]], low_1d[:-1]]) - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Choppiness Index (14)
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((atr * 14) / (max_high - min_low)) / np.log10(14)
+    # 12h Donchian channel (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -53,7 +58,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,59 +69,32 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit conditions
-            if chop[i] > 61.8:  # Ranging market - mean reversion exit
-                # Exit near resistance
-                resistance = high[i] - 0.3 * atr[i]
-                if close[i] >= resistance:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # Trending market - trend following exit
-                # Exit when trend changes
-                if close[i] < ema_50_1w_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
-        elif position == -1:  # Short position
-            # Exit conditions
-            if chop[i] > 61.8:  # Ranging market - mean reversion exit
-                # Exit near support
-                support = low[i] + 0.3 * atr[i]
-                if close[i] <= support:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-            else:  # Trending market - trend following exit
-                # Exit when trend changes
-                if close[i] > ema_50_1w_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-        else:  # Flat, look for entry
-            if chop[i] > 61.8:  # Ranging market - mean reversion entry
-                # Buy near support, sell near resistance
-                support = low[i] + 0.3 * atr[i]
-                resistance = high[i] - 0.3 * atr[i]
+            # Exit: price closes below 12h Donchian lower band OR trend turns bearish
+            if (close[i] < low_min_20[i]) or (close[i] < ema_50_1d_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
                 
-                if close[i] <= support:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] >= resistance:
-                    position = -1
-                    signals[i] = -0.25
-            else:  # Trending market - trend following entry
-                # Follow weekly EMA50 trend
-                if close[i] > ema_50_1w_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < ema_50_1w_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+        elif position == -1:  # Short position
+            # Exit: price closes above 12h Donchian upper band OR trend turns bullish
+            if (close[i] > high_max_20[i]) or (close[i] > ema_50_1d_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Long entry: price breaks above upper band + volume confirmation + bullish trend
+            if (close[i] > high_max_20[i] and 
+                volume[i] > vol_avg_20[i] * 1.5 and 
+                close[i] > ema_50_1d_aligned[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: price breaks below lower band + volume confirmation + bearish trend
+            elif (close[i] < low_min_20[i] and 
+                  volume[i] > vol_avg_20[i] * 1.5 and 
+                  close[i] < ema_50_1d_aligned[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
