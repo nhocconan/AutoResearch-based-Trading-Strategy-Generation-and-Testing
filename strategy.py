@@ -1,22 +1,46 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_vwap_pullback_v1
-Hypothesis: Use 4h VWAP trend for direction, 1d VWAP for value area, and 1h for entry timing.
-- Trend: Price above/below 4h VWAP (institutional fair value)
-- Value: Pullback to 1d VWAP (daily equilibrium)
-- Entry: Price crosses VWAP in direction of trend on 1h
-- Exit: Opposite VWAP cross or trend reversal
-- Session filter: 08-20 UTC to avoid low-volume periods
-- Target: 20-40 trades/year to stay within fee limits
+6h_ichimoku_cloud_v1
+Hypothesis: Use weekly Ichimoku cloud (from 1w) as trend filter and 6h Tenkan/Kijun cross for entry.
+- Only take long when price is above weekly cloud (bullish bias) and Tenkan crosses above Kijun on 6h
+- Only take short when price is below weekly cloud (bearish bias) and Tenkan crosses below Kijun on 6h
+- Exit on opposite Tenkan/Kijun cross or when price crosses back into weekly cloud
+- Ichimoku components calculated on weekly timeframe for trend, entries on 6h for timing
+- Designed to work in both bull and bear markets via cloud filter
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_vwap_pullback_v1"
-timeframe = "1h"
+name = "6h_ichimoku_cloud_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components: Tenkan, Kijun, Senkou Span A/B, Chikou"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou = close.copy()
+    
+    return tenkan, kijun, senkou_a, senkou_b, chikou
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,117 +50,78 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate typical price and VWAP components
-    typical_price = (high + low + close) / 3.0
-    tpv = typical_price * volume
-    
-    # 4h VWAP for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for Ichimoku (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
-    tpv_4h = typical_price_4h * volume_4h
+    # Calculate Ichimoku on weekly data
+    tenkan_w, kijun_w, senkou_a_w, senkou_b_w, chikou_w = calculate_ichimoku(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values
+    )
     
-    # Cumulative VWAP calculation for 4h
-    cum_tpv_4h = np.cumsum(tpv_4h)
-    cum_vol_4h = np.cumsum(volume_4h)
-    vwap_4h = np.divide(cum_tpv_4h, cum_vol_4h, out=np.full_like(cum_tpv_4h, np.nan), where=cum_vol_4h!=0)
+    # Calculate weekly cloud boundaries (Senkou Span A/B)
+    # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+    cloud_top_w = np.maximum(senkou_a_w, senkou_b_w)
+    cloud_bottom_w = np.minimum(senkou_a_w, senkou_b_w)
     
-    # Reset VWAP at each 4h bar start (simplified: use last value of each bar)
-    vwap_4h_reset = np.full(len(vwap_4h), np.nan)
-    for i in range(1, len(vwap_4h)):
-        if i % 1 == 0:  # Each 4h bar, reset cumulative
-            vwap_4h_reset[i] = vwap_4h[i]
-        else:
-            vwap_4h_reset[i] = vwap_4h_reset[i-1]
+    # Align weekly Ichimoku components to 6h timeframe
+    tenkan_w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_w)
+    kijun_w_aligned = align_htf_to_ltf(prices, df_1w, kijun_w)
+    cloud_top_w_aligned = align_htf_to_ltf(prices, df_1w, cloud_top_w)
+    cloud_bottom_w_aligned = align_htf_to_ltf(prices, df_1w, cloud_bottom_w)
     
-    # Actually, simpler: use typical price average for trend
-    # Trend: close vs 4h typical price average (more stable)
-    tp_4h = typical_price_4h
-    vwap_4h_trend = np.full(len(tp_4h), np.nan)
-    for i in range(len(tp_4h)):
-        start = max(0, i-19)  # 20-period average
-        vwap_4h_trend[i] = np.mean(tp_4h[start:i+1])
-    
-    # 1d VWAP for value area (daily equilibrium)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    tpv_1d = typical_price_1d * volume_1d
-    
-    # Daily VWAP (reset each day)
-    vwap_1d = np.full(len(typical_price_1d), np.nan)
-    for i in range(len(typical_price_1d)):
-        start = max(0, i)  # Daily reset - use only current day's data
-        if i == 0 or i > 0 and df_1d.index[i].date() != df_1d.index[i-1].date():
-            # New day, reset
-            cum_sum = tpv_1d[i]
-            vol_sum = volume_1d[i]
-        else:
-            cum_sum += tpv_1d[i]
-            vol_sum += volume_1d[i]
-        if vol_sum > 0:
-            vwap_1d[i] = cum_sum / vol_sum
-    
-    # Align to 1h
-    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h_trend)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Ichimoku on 6h data for entry signals
+    tenkan_6h, kijun_6h, _, _, _ = calculate_ichimoku(high, low, close)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(1, n):
-        # Skip if not in session or data not ready
-        if not in_session[i] or np.isnan(vwap_4h_aligned[i]) or np.isnan(vwap_1d_aligned[i]):
+        # Skip if data not ready
+        if (np.isnan(tenkan_w_aligned[i]) or np.isnan(kijun_w_aligned[i]) or
+            np.isnan(cloud_top_w_aligned[i]) or np.isnan(cloud_bottom_w_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i])):
             if position != 0:
-                # Hold position outside session
-                signals[i] = 0.20 if position == 1 else -0.20
+                pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
+        # Determine if price is above/below weekly cloud
+        price_above_cloud = close[i] > cloud_top_w_aligned[i]
+        price_below_cloud = close[i] < cloud_bottom_w_aligned[i]
+        
+        # Tenkan/Kijun cross signals on 6h
+        tk_cross_above = (tenkan_6h[i-1] <= kijun_6h[i-1]) and (tenkan_6h[i] > kijun_6h[i])
+        tk_cross_below = (tenkan_6h[i-1] >= kijun_6h[i-1]) and (tenkan_6h[i] < kijun_6h[i])
+        
         if position == 1:  # Long
-            # Exit: price crosses below 1d VWAP or 4h trend turns bearish
-            if close[i] < vwap_1d_aligned[i] or close[i] < vwap_4h_aligned[i]:
+            # Exit: Tenkan crosses below Kijun OR price drops below weekly cloud
+            if tk_cross_below or not price_above_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above 1d VWAP or 4h trend turns bullish
-            if close[i] > vwap_1d_aligned[i] or close[i] > vwap_4h_aligned[i]:
+            # Exit: Tenkan crosses above Kijun OR price rises above weekly cloud
+            if tk_cross_above or not price_below_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Long: 4h bullish (price > 4h VWAP) + pullback to 1d VWAP then close above
-            if (close[i] > vwap_4h_aligned[i] and  # 4h bullish trend
-                close[i-1] <= vwap_1d_aligned[i-1] and close[i] > vwap_1d_aligned[i]):  # pullback to 1d VWAP
+            # Long: Price above weekly cloud AND Tenkan crosses above Kijun
+            if price_above_cloud and tk_cross_above:
                 position = 1
-                signals[i] = 0.20
-            # Short: 4h bearish (price < 4h VWAP) + pullback to 1d VWAP then close below
-            elif (close[i] < vwap_4h_aligned[i] and  # 4h bearish trend
-                  close[i-1] >= vwap_1d_aligned[i-1] and close[i] < vwap_1d_aligned[i]):  # pullback to 1d VWAP
+                signals[i] = 0.25
+            # Short: Price below weekly cloud AND Tenkan crosses below Kijun
+            elif price_below_cloud and tk_cross_below:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
