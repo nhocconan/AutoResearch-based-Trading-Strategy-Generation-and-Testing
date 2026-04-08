@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# [24941] 4h_1d_rsi_pullback_trend_v1
-# Hypothesis: 4-hour RSI pullback in direction of 1-day trend. Long when RSI < 30 and price above 1-day EMA200; short when RSI > 70 and price below 1-day EMA200. Exit when RSI returns to neutral (40-60). Uses volume confirmation to avoid false signals. Designed to work in both bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend) markets with controlled trade frequency.
+# 12h_1d_ema_touch_volume_v1
+# Hypothesis: 12-hour price touching 21-period EMA with volume > 1.8x average and alignment with daily trend (price > daily EMA200).
+# Long when price touches EMA21 from below (low <= EMA21 < close) with volume confirmation and bullish daily trend.
+# Short when price touches EMA21 from above (high >= EMA21 > close) with volume confirmation and bearish daily trend.
+# Exit when price crosses EMA21 in opposite direction.
+# Uses EMA21 for dynamic support/resistance and daily EMA200 for trend filter to work in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_rsi_pullback_trend_v1"
-timeframe = "4h"
+name = "12h_1d_ema_touch_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,50 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
+    # Get 1-day data for daily EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 1-day EMA200 for trend
-    close_1d = df_1d['close'].values
-    ema200_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema200_1d[i] = (close_1d[i] * 2/201) + (ema200_1d[i-1] * (1 - 2/201))
+    # Calculate EMA21 for 12h timeframe
+    close_s = pd.Series(close)
+    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate RSI(14) on 4h
-    rsi = np.full(n, np.nan)
-    if n >= 15:
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
-        avg_gain[14] = np.mean(gain[:14])
-        avg_loss[14] = np.mean(loss[:14])
-        for i in range(15, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-            rs = avg_gain[i] / (avg_loss[i] + 1e-10)
-            rsi[i] = 100 - (100 / (1 + rs))
+    # Calculate daily EMA200
+    close_1d_s = pd.Series(df_1d['close'].values)
+    ema200_1d = close_1d_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align daily EMA200 to 12h timeframe
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1-day EMA200 to 4h
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(21, n):  # Start after EMA21 warmup
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema200_1d_aligned[i])):
+        if (np.isnan(ema21[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -72,31 +60,31 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        rsi_val = rsi[i]
-        ema200 = ema200_1d_aligned[i]
+        ema21_val = ema21[i]
+        daily_ema200 = ema200_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: RSI returns to neutral zone (40-60)
-            if rsi_val >= 40:
+            # Exit: price crosses below EMA21
+            if price < ema21_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: RSI returns to neutral zone (40-60)
-            if rsi_val <= 60:
+            # Exit: price crosses above EMA21
+            if price > ema21_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: RSI oversold (<30), price above 1-day EMA200 (uptrend), volume confirmation
-            if rsi_val < 30 and price > ema200 and vol_ratio > 1.5:
+            # Enter long: price touches EMA21 from below with volume expansion and bullish daily trend
+            if low[i] <= ema21_val < close[i] and vol_ratio > 1.8 and price > daily_ema200:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: RSI overbought (>70), price below 1-day EMA200 (downtrend), volume confirmation
-            elif rsi_val > 70 and price < ema200 and vol_ratio > 1.5:
+            # Enter short: price touches EMA21 from above with volume expansion and bearish daily trend
+            elif high[i] >= ema21_val > close[i] and vol_ratio > 1.8 and price < daily_ema200:
                 position = -1
                 signals[i] = -0.25
     
