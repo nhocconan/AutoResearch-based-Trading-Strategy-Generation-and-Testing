@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# 12h_keltner_breakout_daily_trend_volume_v1
-# Hypothesis: 12h Keltner channel breakout with daily trend filter and volume confirmation. 
-# Uses EMA(20) as center line and ATR(10) for channel width (1.5x ATR). 
-# Enters long when price breaks above upper band in daily uptrend with volume surge.
-# Enters short when price breaks below lower band in daily downtrend with volume surge.
-# Exits when price crosses back below/above EMA(20) or volatility contracts.
-# Designed for low trade frequency (15-25/year) to minimize fee drag in both bull and bear markets.
+# 4h_momentum_follow_v1
+# Hypothesis: Momentum-following strategy using EMA crossover with volume and momentum confirmation.
+# Uses EMA(21) and EMA(55) crossover for trend direction, confirmed by volume spike and ROC(10) momentum.
+# Designed to work in both bull and bear markets by filtering trades with volume and momentum.
+# Target: 20-30 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_keltner_breakout_daily_trend_volume_v1"
-timeframe = "12h"
+name = "4h_momentum_follow_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -26,39 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter (EMA50) - load once before loop
+    # Daily trend filter (1d EMA200) - load once before loop
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on daily data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate EMA200 on daily data
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 12h indicators
-    # EMA20 for center line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 4h indicators
+    # EMA21 and EMA55 for crossover
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # ATR(10) for channel width
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # ROC(10) for momentum
+    roc = np.zeros(n)
+    roc[10:] = (close[10:] - close[:-10]) / close[:-10] * 100
     
-    # Keltner channels (EMA20 ± 1.5*ATR)
-    upper_band = ema20 + 1.5 * atr
-    lower_band = ema20 - 1.5 * atr
-    
-    # Volume confirmation (20-period average)
+    # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need indicators warmed up
+    start_idx = 55  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(ema21[i]) or np.isnan(ema55[i]) or np.isnan(roc[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 pass
             else:
@@ -66,20 +58,20 @@ def generate_signals(prices):
             continue
         
         # Daily trend filter
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        daily_uptrend = close[i] > ema200_1d_aligned[i]
+        daily_downtrend = close[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit conditions: close below EMA20 or volatility contraction
-            if close[i] < ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+            # Exit: EMA21 crosses below EMA55 or momentum fails
+            if ema21[i] < ema55[i] or roc[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: close above EMA20 or volatility contraction
-            if close[i] > ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+            # Exit: EMA21 crosses above EMA55 or momentum fails
+            if ema21[i] > ema55[i] or roc[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -88,14 +80,14 @@ def generate_signals(prices):
             # Volume confirmation
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout conditions
+            # Entry conditions
             if volume_ok:
-                # Long breakout: price crosses above upper band in uptrend
-                if daily_uptrend and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
+                # Bullish crossover: EMA21 crosses above EMA55 in uptrend with positive momentum
+                if ema21[i] > ema55[i] and ema21[i-1] <= ema55[i-1] and daily_uptrend and roc[i] > 0:
                     position = 1
                     signals[i] = 0.25
-                # Short breakdown: price crosses below lower band in downtrend
-                elif daily_downtrend and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
+                # Bearish crossover: EMA21 crosses below EMA55 in downtrend with negative momentum
+                elif ema21[i] < ema55[i] and ema21[i-1] >= ema55[i-1] and daily_downtrend and roc[i] < 0:
                     position = -1
                     signals[i] = -0.25
     
