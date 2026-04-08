@@ -1,101 +1,77 @@
 #!/usr/bin/env python3
-# 12h_1d_ema_volume_squeeze_v1
-# Hypothesis: In low-volatility regimes (Bollinger Band width < 50th percentile), price breaking above/below 20-period EMA with volume > 1.5x 20-period average triggers mean-reversion trades.
-# Long when price crosses above EMA20 with volume surge in low volatility; short when price crosses below EMA20 with volume surge in low volatility.
-# Uses 1d EMA20 trend filter to avoid counter-trend trades. Designed for 12-37 trades/year on 12h timeframe.
-# Works in ranging markets via mean reversion and avoids trending markets via volatility regime filter.
+# 4h_rsi_pullback_12h_trend_v1
+# Hypothesis: On 4h timeframe, buy pullbacks in uptrend and sell rallies in downtrend using RSI(14) with 12h trend filter.
+# Long when RSI < 30 and price > 12h EMA(50). Short when RSI > 70 and price < 12h EMA(50).
+# Uses 12h EMA for trend filter to avoid counter-trend trades. Designed for 20-50 trades/year.
+# Works in bull markets via buying dips and bear markets via selling rallies.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_ema_volume_squeeze_v1"
-timeframe = "12h"
+name = "4h_rsi_pullback_12h_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 12h EMA(20) for entry signal
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 4h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 12h Bollinger Bands for volatility regime (20, 2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
-    bb_width = (upper - lower) / sma20  # Normalized width
-    
-    # 12h volume MA(20) for volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # 1d EMA(20) for trend filter
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Bollinger Band width percentile (lookback 50 periods) for regime filter
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure all indicators are ready
+    start_idx = 50  # Ensure EMA(50) is ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(bb_width_percentile[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema50_12h_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Low volatility regime: BB width below 50th percentile
-        low_volatility = bb_width_percentile[i] < 0.5
-        
-        # Volume surge condition
-        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
-        
         if position == 1:  # Long position
-            # Exit: price crosses below EMA20 or volatility increases
-            if close[i] < ema20[i] or not low_volatility:
+            # Exit: RSI > 70 or trend reverses (price < EMA)
+            if rsi[i] > 70 or close[i] < ema50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA20 or volatility increases
-            if close[i] > ema20[i] or not low_volatility:
+            # Exit: RSI < 30 or trend reverses (price > EMA)
+            if rsi[i] < 30 or close[i] > ema50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price crosses above EMA20 with volume surge in low volatility and uptrend (1d EMA)
-            if (close[i] > ema20[i] and close[i-1] <= ema20[i-1] and  # Cross above
-                vol_surge and low_volatility and close[i] > ema20_1d_aligned[i]):
+            # Long entry: RSI < 30 and price > EMA (pullback in uptrend)
+            if rsi[i] < 30 and close[i] > ema50_12h_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price crosses below EMA20 with volume surge in low volatility and downtrend (1d EMA)
-            elif (close[i] < ema20[i] and close[i-1] >= ema20[i-1] and  # Cross below
-                  vol_surge and low_volatility and close[i] < ema20_1d_aligned[i]):
+            # Short entry: RSI > 70 and price < EMA (rally in downtrend)
+            elif rsi[i] > 70 and close[i] < ema50_12h_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
