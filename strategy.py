@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_12h_trend_volume_v2
-# Hypothesis: Williams Fractal breakouts on 4h with 12h EMA trend filter and volume confirmation.
-# Uses 12h trend (slower than 1d) to reduce whipsaw in sideways markets while maintaining trend-following edge.
-# Target: 25-40 trades/year to stay well under fee drag limits.
+# 1h_4h_1d_trend_follow_volume_v1
+# Hypothesis: Trend-following strategy using 4h/1d EMAs for direction and 1h for entry timing with volume confirmation.
+# Designed for 1h timeframe to achieve 15-37 trades/year by using higher timeframe filters to reduce noise.
+# Works in bull/bear markets via trend filters and volume confirmation to avoid false breakouts.
 
-name = "4h_fractal_breakout_12h_trend_volume_v2"
-timeframe = "4h"
+name = "1h_4h_1d_trend_follow_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -23,65 +23,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Fractals on 4h
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high, low)
-    # Need 2 extra bars for confirmation (fractal forms at n-2, needs 2 more closes)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, prices, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, prices, bullish_fractal, additional_delay_bars=2)
-    
-    # 12h EMA trend filter (34-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # 4h EMA trend filter (21-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Volume filter: volume > 2.0x 30-period average (~5 days)
-    vol_period = 30
+    # 1d EMA trend filter (55-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 55:
+        return np.zeros(n)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume filter: volume > 1.5x 24-period average (1 day)
+    vol_period = 24
     vol_ma = np.full(n, np.nan)
     vol_ma[vol_period-1:] = pd.Series(volume).rolling(window=vol_period, min_periods=vol_period).mean()[vol_period-1:].values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # Pre-compute for efficiency
+    
     # Start from sufficient lookback
-    start_idx = max(5, vol_period) + 5  # fractal needs 5 bars, plus volume
+    start_idx = max(55, vol_period) + 5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)  # UTC 8-20
+        
         # Volume filter
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below bullish fractal or trend fails
-            if close[i] < bullish_fractal_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Exit: price closes below 4h EMA or 1d EMA
+            if close[i] < ema_4h_aligned[i] or close[i] < ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above bearish fractal or trend fails
-            if close[i] > bearish_fractal_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Exit: price closes above 4h EMA or 1d EMA
+            if close[i] > ema_4h_aligned[i] or close[i] > ema_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Only trade with volume confirmation
-            if volume_filter:
-                # Breakout long: price breaks above bullish fractal with uptrend
-                if close[i] > bullish_fractal_aligned[i] and close[i] > ema_12h_aligned[i]:
+            # Only trade during session with volume confirmation
+            if in_session and volume_filter:
+                # Entry long: price above both EMAs
+                if close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Breakout short: price breaks below bearish fractal with downtrend
-                elif close[i] < bearish_fractal_aligned[i] and close[i] < ema_12h_aligned[i]:
+                    signals[i] = 0.20
+                # Entry short: price below both EMAs
+                elif close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
