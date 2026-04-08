@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-1h Volume Spike + 4h Trend + 1d Momentum Filter
-Hypothesis: In 1h timeframe, volume spikes combined with 4h EMA trend alignment
-and 1d RSI momentum filter captures high-probability moves while avoiding false signals.
-Uses 4h for trend direction, 1d for momentum regime, 1h for precise entry timing.
-Target: 15-37 trades/year (60-150 total over 4 years) with volume spike filter reducing noise.
-Works in bull via long signals, in bear via short signals with trend/momentum alignment.
+6h Weekly Pivot Breakout with Volume Confirmation
+Hypothesis: Price breaking above/below weekly pivot levels on 6h timeframe,
+filtered by daily trend direction and volume spikes, captures strong momentum moves
+while avoiding false breakouts. Weekly pivots provide strong support/resistance levels
+that work in both bull (breakouts above weekly resistance) and bear (breakdowns below weekly support).
+Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_spike_4h_trend_1d_momentum_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -27,84 +27,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # 1d data for momentum filter
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # RSI(14) on 1d
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # 1h volume spike filter
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d data for weekly pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_pivot = df_1d['close'].values
+    
+    # Weekly pivot points (using prior week's data)
+    # Calculate weekly high/low/close from daily data
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(close_1d_pivot).rolling(window=5, min_periods=5).last().values
+    
+    # Pivot point calculation: (H + L + C) / 3
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Support and resistance levels
+    r1 = 2 * pivot_point - weekly_low
+    s1 = 2 * pivot_point - weekly_high
+    r2 = pivot_point + (weekly_high - weekly_low)
+    s2 = pivot_point - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot_point - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot_point)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # ATR for volatility filter (14-period)
+    tr1 = pd.Series(high).subtract(pd.Series(low)).abs()
+    tr2 = pd.Series(high).subtract(pd.Series(close).shift(1)).abs()
+    tr3 = pd.Series(low).subtract(pd.Series(close).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Volatility filter: ATR > 20-period ATR mean (avoid choppy markets)
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr > atr_ma
+    
+    # Volume filter: current volume > 1.8x 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or
-            np.isnan(vol_spike[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_filter[i]:
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: 4h trend turns bearish or 1d momentum weakens
-            if close[i] < ema_20_4h_aligned[i] or rsi_14_1d_aligned[i] < 50:
+            # Exit: price closes below S1 or trend reverses
+            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: 4h trend turns bullish or 1d momentum strengthens
-            if close[i] > ema_20_4h_aligned[i] or rsi_14_1d_aligned[i] > 50:
+            # Exit: price closes above R1 or trend reverses
+            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend alignment: price vs 4h EMA20
-            uptrend_4h = close[i] > ema_20_4h_aligned[i]
-            downtrend_4h = close[i] < ema_20_4h_aligned[i]
+            # Trend filter: price vs 1d EMA50
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Momentum filter: 1d RSI
-            bullish_momentum = rsi_14_1d_aligned[i] > 55
-            bearish_momentum = rsi_14_1d_aligned[i] < 45
-            
-            # Long: volume spike + 4h uptrend + 1d bullish momentum
-            if (vol_spike[i] and 
-                uptrend_4h and 
-                bullish_momentum):
+            # Long: price breaks above R1 + uptrend + volume spike + vol filter
+            if (close[i] > r1_aligned[i] and 
+                uptrend and 
+                vol_spike[i] and
+                vol_filter[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: volume spike + 4h downtrend + 1d bearish momentum
-            elif (vol_spike[i] and 
-                  downtrend_4h and 
-                  bearish_momentum):
+                signals[i] = 0.25
+            # Short: price breaks below S1 + downtrend + volume spike + vol filter
+            elif (close[i] < s1_aligned[i] and 
+                  downtrend and 
+                  vol_spike[i] and
+                  vol_filter[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
