@@ -1,12 +1,15 @@
-# 6h Donchian Breakout with 1d Trend and Volume Confirmation
-# Hypothesis: Donchian channel breakouts capture momentum bursts. Filtered by 1d EMA trend to avoid counter-trend trades and volume confirmation to avoid false signals. Works in bull/bear by aligning with higher timeframe trend. Targets 15-40 trades/year on 6h timeframe.
+#!/usr/bin/env python3
+"""
+12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong momentum. Filtered by 1d EMA(50) trend to avoid counter-trend trades and volume confirmation (>1.5x average) to avoid false signals. Works in bull/bear by aligning with higher timeframe trend. Targets 15-30 trades/year on 12h timeframe.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +28,7 @@ def generate_signals(prices):
     ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period)
+    # Donchian Channel (20-period high/low)
     period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
