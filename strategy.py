@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_pivot_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_elder_ray_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,68 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d data for Elder Ray and trend
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (previous week's values)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # Elder Ray components
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema_13
+    bear_power = low_1d - ema_13
     
-    # Align pivot levels to daily timeframe
-    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1d = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1d = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Trend: 50-period EMA on 1d close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly trend: 20-period EMA
-    ema_20w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20w_1d = align_htf_to_ltf(prices, df_1w, ema_20w)
-    
-    # Volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
+    
+    # Align 1d indicators to 6h timeframe
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20w_1d[i]) or np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or 
-            np.isnan(s1_1d[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
+            np.isnan(ema_50_6h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < S1 or trend fails
-            if close[i] < s1_1d[i] or close[i] < ema_20w_1d[i]:
+            # Exit: bear power turns positive (bulls losing control) or trend fails
+            if bear_power_6h[i] > 0 or close[i] < ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > R1 or trend fails
-            if close[i] > r1_1d[i] or close[i] > ema_20w_1d[i]:
+            # Exit: bull power turns negative (bears losing control) or trend fails
+            if bull_power_6h[i] < 0 or close[i] > ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_20w_1d[i]
-            bearish = close[i] < ema_20w_1d[i]
+            bullish = close[i] > ema_50_6h[i]
+            bearish = close[i] < ema_50_6h[i]
             
-            # Long: price > R1 + bullish trend + volume
-            if (close[i] > r1_1d[i] and 
+            # Long: bull power > 0 (bulls in control) + bear power < 0 (bears weak) + bullish trend + volume
+            if (bull_power_6h[i] > 0 and 
+                bear_power_6h[i] < 0 and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price < S1 + bearish trend + volume
-            elif (close[i] < s1_1d[i] and 
+            # Short: bear power < 0 (bears in control) + bull power < 0 (bulls weak) + bearish trend + volume
+            elif (bear_power_6h[i] < 0 and 
+                  bull_power_6h[i] < 0 and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
