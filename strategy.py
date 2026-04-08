@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v2
-# Hypothesis: Donchian(20) breakout on 12h combined with 1d EMA trend filter and volume confirmation.
+# 4h_donchian_breakout_1d_trend_volume
+# Hypothesis: Donchian(20) breakout on 4h combined with 1d EMA trend filter and volume confirmation.
 # Long when price breaks above Donchian upper band with uptrend (price > 1d EMA100) and volume > 1.5x average.
 # Short when price breaks below Donchian lower band with downtrend (price < 1d EMA100) and volume > 1.5x average.
 # Exit when price crosses back to Donchian middle band (mean of upper/lower).
 # Designed to capture strong breakouts with trend alignment in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (~12-37/year).
+# Target: 100-200 total trades over 4 years (~25-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +37,7 @@ def generate_signals(prices):
     ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
     ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Calculate Donchian channels on 12h data (20-period)
+    # Calculate Donchian channels on 4h data (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
