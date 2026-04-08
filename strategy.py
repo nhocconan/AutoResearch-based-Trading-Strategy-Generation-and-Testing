@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume
-# Hypothesis: 12h Donchian(20) breakout filtered by 1d EMA50 trend and volume spike.
-# Long when price breaks above upper Donchian band in uptrend (price > EMA50) with volume > 1.5x average.
-# Short when price breaks below lower Donchian band in downtrend (price < EMA50) with volume spike.
-# Uses tight entry conditions to target ~20-40 trades/year (~80-160 total over 4 years) to minimize fee drag.
+# 1h_volume_weighted_sma_crossover_4h_trend
+# Hypothesis: Use volume-weighted SMA (VWMA) crossovers on 1h for entries, filtered by 4h EMA trend.
+# VWMA gives more weight to price action with high volume, making crossovers more significant.
+# Only take longs when price > 4h EMA50 (uptrend), shorts when price < 4h EMA50 (downtrend).
+# Uses 10-period VWMA for responsiveness but with volume confirmation to reduce whipsaws.
+# Target: 15-37 trades/year (~60-150 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume"
-timeframe = "12h"
+name = "1h_volume_weighted_sma_crossover_4h_trend"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -24,33 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate average volume for volume spike filter (20-period SMA of volume)
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = vol_sma * 1.5
+    # Calculate VWMA (Volume Weighted Moving Average) - 10 period
+    # VWMA = sum(close * volume) / sum(volume)
+    vol_close = close * volume
+    vwma_numerator = pd.Series(vol_close).rolling(window=10, min_periods=10).sum().values
+    vwma_denominator = pd.Series(volume).rolling(window=10, min_periods=10).sum().values
+    vwma = np.where(vwma_denominator != 0, vwma_numerator / vwma_denominator, 0)
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Regular SMA for crossover confirmation - 10 period
+    sma = pd.Series(close).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike_threshold[i])):
+        if (np.isnan(vwma[i]) or np.isnan(sma[i]) or np.isnan(ema_50_4h_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -59,30 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below midpoint of Donchian channel OR trend turns against us
-            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
-            if (close[i] < midpoint) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: VWMA crosses below SMA OR trend turns against us
+            if (vwma[i] < sma[i]) or (close[i] < ema_50_4h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above midpoint of Donchian channel OR trend turns against us
-            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
-            if (close[i] > midpoint) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: VWMA crosses above SMA OR trend turns against us
+            if (vwma[i] > sma[i]) or (close[i] > ema_50_4h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper Donchian band with uptrend and volume spike
-            if (close[i] > highest_high[i]) and (close[i] > ema_50_1d_aligned[i]) and (volume[i] > volume_spike_threshold[i]):
+            # Long entry: VWMA crosses above SMA with uptrend
+            if (vwma[i] > sma[i]) and (vwma[i-1] <= sma[i-1]) and (close[i] > ema_50_4h_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below lower Donchian band with downtrend and volume spike
-            elif (close[i] < lowest_low[i]) and (close[i] < ema_50_1d_aligned[i]) and (volume[i] > volume_spike_threshold[i]):
+                signals[i] = 0.20
+            # Short entry: VWMA crosses below SMA with downtrend
+            elif (vwma[i] < sma[i]) and (vwma[i-1] >= sma[i-1]) and (close[i] < ema_50_4h_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
