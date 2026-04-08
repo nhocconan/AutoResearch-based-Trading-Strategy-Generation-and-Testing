@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_volume_breakout_v1
-# Hypothesis: 6h price breaks above/below weekly Camarilla pivot R4/S4 levels with volume > 2.0x average.
-# Long: close > weekly R4 and volume > 2.0x 20-period average
-# Short: close < weekly S4 and volume > 2.0x 20-period average
-# Exit: price returns to weekly pivot point (PP) or opposite extreme (R3/S3)
-# Uses 6h primary timeframe with 1w HTF for pivot levels to capture institutional breakouts.
+# 12h_daily_camarilla_pivot_volume_v1
+# Hypothesis: 12h Camarilla pivot levels from 1d HTF with volume confirmation.
+# Long: price breaks above H3 level with volume > 1.5x 20-period average
+# Short: price breaks below L3 level with volume > 1.5x 20-period average
+# Exit: price reverses to H4/L4 levels or opposite Camarilla level
+# Uses 12h primary timeframe with 1d HTF for pivot levels to reduce noise.
 # Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_volume_breakout_v1"
-timeframe = "6h"
+name = "12h_daily_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,39 +25,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Calculate 12h Donchian exit channels (10-period) for stop/reverse
+    highest_10 = np.full(n, np.nan)
+    lowest_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        highest_10[i] = np.max(high[i-10:i])
+        lowest_10[i] = np.min(low[i-10:i])
+    
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels on 1d data
+    # PP = (H + L + C) / 3
+    # R4 = PP + (H - L) * 1.1/2
+    # R3 = PP + (H - L) * 1.1/4
+    # R2 = PP + (H - L) * 1.1/6
+    # R1 = PP + (H - L) * 1.1/12
+    # S1 = PP - (H - L) * 1.1/12
+    # S2 = PP - (H - L) * 1.1/6
+    # S3 = PP - (H - L) * 1.1/4
+    # S4 = PP - (H - L) * 1.1/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    r4 = pivot + range_1d * 1.1 / 2.0
+    r3 = pivot + range_1d * 1.1 / 4.0
+    r2 = pivot + range_1d * 1.1 / 6.0
+    r1 = pivot + range_1d * 1.1 / 12.0
+    s1 = pivot - range_1d * 1.1 / 12.0
+    s2 = pivot - range_1d * 1.1 / 6.0
+    s3 = pivot - range_1d * 1.1 / 4.0
+    s4 = pivot - range_1d * 1.1 / 2.0
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
     # Calculate volume ratio (current vs 20-period average)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
     vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
-    
-    # Get 1w data for weekly Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    # Range = H - L
-    rng = high_1w - low_1w
-    
-    # Camarilla levels
-    r4 = pp + rng * 1.1 / 2.0
-    r3 = pp + rng * 1.1 / 4.0
-    s3 = pp - rng * 1.1 / 4.0
-    s4 = pp - rng * 1.1 / 2.0
-    
-    # Align weekly levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -65,21 +81,22 @@ def generate_signals(prices):
     for i in range(50, n):
         vol_r = vol_ratio[i]
         price = close[i]
+        r3 = r3_aligned[i]
+        r4 = r4_aligned[i]
+        s3 = s3_aligned[i]
+        s4 = s4_aligned[i]
         
-        if np.isnan(vol_r):
+        if np.isnan(vol_r) or np.isnan(r3) or np.isnan(r4) or np.isnan(s3) or np.isnan(s4):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        pp_val = pp_aligned[i]
-        r4_val = r4_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        s4_val = s4_aligned[i]
+        exit_high = highest_10[i]
+        exit_low = lowest_10[i]
         
-        if np.isnan(pp_val) or np.isnan(r4_val) or np.isnan(s4_val):
+        if np.isnan(exit_high) or np.isnan(exit_low):
             if position != 0:
                 pass  # Hold position
             else:
@@ -87,23 +104,23 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            if price < pp_val or price > r3_val:
+            if price < exit_low or price > r4:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if price > pp_val or price < s3_val:
+            if price > exit_high or price < s4:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if price > r4_val and vol_r > 2.0:
+            if price > r3 and vol_r > 1.5:
                 position = 1
                 signals[i] = 0.25
-            elif price < s4_val and vol_r > 2.0:
+            elif price < s3 and vol_r > 1.5:
                 position = -1
                 signals[i] = -0.25
     
