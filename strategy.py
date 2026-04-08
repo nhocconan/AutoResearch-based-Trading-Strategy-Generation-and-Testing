@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 4h_camarilla_pivot_12h_trend_volume_v1
-# Hypothesis: Camarilla pivot levels from 12h chart act as strong support/resistance levels.
-# Long when price retraces to S3 level with volume confirmation and 12h uptrend (close > open).
-# Short when price retraces to R3 level with volume confirmation and 12h downtrend (close < open).
-# Exit when price reaches opposite Camarilla level (S1/R1) or shows reversal at same level.
-# Uses 4h chart for entries to balance trade frequency and signal quality.
-# Designed to work in ranging markets (2025-2026 test) by trading mean reversion at strong levels.
-# Target: 20-40 trades/year to minimize fee decay while capturing reliable reversals.
+# 1h_volume_breakout_4h1d_trend_v1
+# Hypothesis: Breakout of 1h price range with volume confirmation, filtered by 4h and 1d trend.
+# Long when price breaks above 1h high with volume > 2x average and 4h/1d uptrend.
+# Short when price breaks below 1h low with volume > 2x average and 4h/1d downtrend.
+# Exit when price returns to 1h midpoint or opposite signal.
+# Designed to work in both bull and bear markets by capturing breakouts with trend confirmation.
+# Target: 20-40 trades/year to minimize fee decay while capturing strong directional moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_volume_breakout_4h1d_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,65 +25,57 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get 12h data for Camarilla pivots (calculate once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter (calculate once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 1:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h trend: close > open = uptrend, close < open = downtrend
+    open_4h = df_4h['open'].values
+    close_4h = df_4h['close'].values
+    trend_4h_up = close_4h > open_4h
+    trend_4h_down = close_4h < open_4h
     
-    # Camarilla calculations
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
+    # Align 4h trend to 1h chart
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    # Resistance levels
-    r1 = close_12h + (range_12h * 1.1 / 12)
-    r2 = close_12h + (range_12h * 1.1 / 6)
-    r3 = close_12h + (range_12h * 1.1 / 4)
-    r4 = close_12h + (range_12h * 1.1 / 2)
+    # Get 1d data for trend filter (calculate once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Support levels
-    s1 = close_12h - (range_12h * 1.1 / 12)
-    s2 = close_12h - (range_12h * 1.1 / 6)
-    s3 = close_12h - (range_12h * 1.1 / 4)
-    s4 = close_12h - (range_12h * 1.1 / 2)
+    # 1d trend: close > open = uptrend, close < open = downtrend
+    open_1d = df_1d['open'].values
+    close_1d = df_1d['close'].values
+    trend_1d_up = close_1d > open_1d
+    trend_1d_down = close_1d < open_1d
     
-    # Align Camarilla levels to 4h chart
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Align 1d trend to 1h chart
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Get 12h data for trend filter (calculate once before loop)
-    open_12h = df_12h['open'].values
-    close_12h = df_12h['close'].values
-    # 12h trend: close > open = uptrend, close < open = downtrend
-    twelve_h_uptrend = close_12h > open_12h
-    twelve_h_downtrend = close_12h < open_12h
+    # 1h range: calculate rolling high/low
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    midpoint = (highest_high + lowest_low) / 2
     
-    # Align 12h trend to 4h chart
-    twelve_h_uptrend_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_uptrend.astype(float))
-    twelve_h_downtrend_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_downtrend.astype(float))
-    
-    # Volume confirmation: 20-period average on 4h chart
+    # Volume: 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = lookback
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
-           np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(twelve_h_uptrend_aligned[i]) or np.isnan(twelve_h_downtrend_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(midpoint[i]) or \
+           np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or \
+           np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or \
            np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
@@ -94,33 +85,33 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches S1 (profit target) or shows rejection at S3
-            if close[i] <= s1_aligned[i] or \
-               (close[i] >= s3_aligned[i] and volume[i] > 1.5 * avg_volume[i] and twelve_h_downtrend_aligned[i]):
+            # Exit: price returns to 1h midpoint or opposite signal
+            if close[i] <= midpoint[i] or \
+               (close[i] >= lowest_low[i] and volume[i] > 2.0 * avg_volume[i] and trend_4h_down_aligned[i] and trend_1d_down_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R1 (profit target) or shows rejection at R3
-            if close[i] >= r1_aligned[i] or \
-               (close[i] <= r3_aligned[i] and volume[i] > 1.5 * avg_volume[i] and twelve_h_uptrend_aligned[i]):
+            # Exit: price returns to 1h midpoint or opposite signal
+            if close[i] >= midpoint[i] or \
+               (close[i] <= highest_high[i] and volume[i] > 2.0 * avg_volume[i] and trend_4h_up_aligned[i] and trend_1d_up_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volume confirmation: current volume > 2x average volume
+            volume_ok = volume[i] > 2.0 * avg_volume[i]
             
-            # Long entry: price retraces to S3 level with volume and 12h uptrend
-            if close[i] <= s3_aligned[i] and volume_ok and twelve_h_uptrend_aligned[i]:
+            # Long entry: price breaks above 1h high with volume and 4h/1d uptrend
+            if close[i] > highest_high[i] and volume_ok and trend_4h_up_aligned[i] and trend_1d_up_aligned[i]:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price retraces to R3 level with volume and 12h downtrend
-            elif close[i] >= r3_aligned[i] and volume_ok and twelve_h_downtrend_aligned[i]:
+                signals[i] = 0.20
+            # Short entry: price breaks below 1h low with volume and 4h/1d downtrend
+            elif close[i] < lowest_low[i] and volume_ok and trend_4h_down_aligned[i] and trend_1d_down_aligned[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
