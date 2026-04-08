@@ -1,59 +1,68 @@
 #!/usr/bin/env python3
 """
-12h_atr_breakout_v1
-Hypothesis: 12-hour ATR-based breakout with daily trend filter to capture trend continuation while avoiding whipsaw.
-- Long when price breaks above ATR-based upper band and daily trend is bullish
-- Short when price breaks below ATR-based lower band and daily trend is bearish
-- Exit on opposite breakout or trend reversal
-- Uses volatility-adjusted breakouts to adapt to changing market conditions
-- Target: 20-40 trades/year to stay within optimal range for 12h timeframe
+6h_1d_cci_reversal_v1
+Hypothesis: Use daily CCI overbought/oversold levels to identify mean reversion opportunities,
+filtered by 12h trend direction (using EMA cross) to avoid counter-trend trades.
+- Only trade when 12h EMA(21) > EMA(50) for longs, or < for shorts (trend filter)
+- Enter long when daily CCI(20) crosses below -100 (oversold) and price > 12h EMA(20)
+- Enter short when daily CCI(20) crosses above +100 (overbought) and price < 12h EMA(20)
+- Exit when CCI returns to neutral zone (-100 to 100) or trend filter fails
+- Target: 20-40 trades/year to avoid overtrading on 6h timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_atr_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_cci_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate ATR(14) for volatility-based bands
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate daily CCI(20) - using daily data from 6h prices
+    # We need to resample conceptually but will use price data directly with period adjustment
+    # For 6h data, 4 bars = 1 day, so we use 80 period for 20-day equivalent
+    period = 20
+    typical_price = (high + low + close) / 3
+    tp_ma = pd.Series(typical_price).rolling(window=period*4, min_periods=period*4).mean().values
+    tp_dev = pd.Series(abs(typical_price - tp_ma)).rolling(window=period*4, min_periods=period*4).mean().values
+    # Avoid division by zero
+    tp_dev = np.where(tp_dev == 0, 0.001, tp_dev)
+    cci = (typical_price - tp_ma) / (0.015 * tp_dev)
     
-    # Calculate upper and lower bands (ATR multiplier = 1.5)
-    ma = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_band = ma + 1.5 * atr
-    lower_band = ma - 1.5 * atr
-    
-    # Daily trend filter using EMA(50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_trend = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    close_12h = df_12h['close'].values
+    # EMA(21) and EMA(50) on 12h data
+    ema_21 = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 12h indicators to 6h timeframe
+    ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    
+    # Trend bullish when EMA21 > EMA50
+    bullish_trend = ema_21_aligned > ema_50_aligned
+    bearish_trend = ema_21_aligned < ema_50_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(1, n):
         # Skip if data not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(daily_trend[i]) or np.isnan(ma[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema_21_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -61,27 +70,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long
-            # Exit: price breaks below lower band or daily trend turns bearish
-            if close[i] < lower_band[i] or daily_close[i] < daily_ema50[i]:
+            # Exit: CCI returns above -100 or trend turns bearish
+            if cci[i] > -100 or bearish_trend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above upper band or daily trend turns bullish
-            if close[i] > upper_band[i] or daily_close[i] > daily_ema50[i]:
+            # Exit: CCI returns below +100 or trend turns bullish
+            if cci[i] < 100 or bullish_trend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: price breaks above upper band and daily trend is bullish
-            if close[i] > upper_band[i] and daily_close[i] > daily_ema50[i]:
+            # Long: bullish trend + CCI crosses below -100 (oversold)
+            if (bullish_trend[i] and 
+                cci[i-1] >= -100 and cci[i] < -100 and
+                close[i] > ema_21_aligned[i]):  # Additional filter: price above short-term EMA
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below lower band and daily trend is bearish
-            elif close[i] < lower_band[i] and daily_close[i] < daily_ema50[i]:
+            # Short: bearish trend + CCI crosses above +100 (overbought)
+            elif (bearish_trend[i] and 
+                  cci[i-1] <= 100 and cci[i] > 100 and
+                  close[i] < ema_21_aligned[i]):  # Additional filter: price below short-term EMA
                 position = -1
                 signals[i] = -0.25
     
