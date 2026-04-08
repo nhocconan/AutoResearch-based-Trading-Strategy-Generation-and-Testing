@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# 6h_1d_rsi_divergence_volume_v1
-# Hypothesis: 6h price RSI divergence with 1d trend filter and volume confirmation
-# - Bullish divergence: price makes lower low, RSI makes higher low → long when 1d trend up
-# - Bearish divergence: price makes higher high, RSI makes lower high → short when 1d trend down
-# - Volume confirmation filters false signals
-# Works in bull/bear markets by trading reversals against overextended moves
-# Target: 20-50 trades/year
+# 12h_1d_1w_ema_trend_volume_v1
+# Hypothesis: 12h price trading above/below 1d EMA200 with volume confirmation
+# captures medium-term trend following. In bull markets, price > EMA200; in bear
+# markets, price < EMA200. Volume filter ensures momentum behind moves.
+# Target: 20-40 trades/year (~80-160 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_rsi_divergence_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_ema_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -26,46 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI on 6h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 1d data for trend filter
+    # Get 1d data for EMA200 calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 1d EMA50 for trend direction
+    # Calculate EMA200 on 1d close
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume confirmation: volume > 1.3x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.3
+    # Align EMA200 to 12h timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    
+    # Volume confirmation: volume > 1.5x average of last 24 periods (12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Lookback period for divergence detection
-    lookback = 10
+    # Start after warmup
+    start_idx = 200
     
-    for i in range(lookback, n):
+    for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -74,52 +57,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) or trend turns down
-            if rsi[i] > 70 or close[i] < ema_50_aligned[i]:
+            # Exit: price closes below EMA200 or loses upward momentum
+            if close[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) or trend turns up
-            if rsi[i] < 30 or close[i] > ema_50_aligned[i]:
+            # Exit: price closes above EMA200 or loses downward momentum
+            if close[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
-        else:  # Flat, look for divergence
-            # Need enough lookback
-            if i < lookback:
-                signals[i] = 0.0
-                continue
-            
-            # Check for bullish divergence: price lower low, RSI higher low
-            price_low_idx = i - np.argmin(low[i-lookback:i+1])
-            rsi_low_idx = i - np.argmin(rsi[i-lookback:i+1])
-            
-            bullish_div = (low[price_low_idx] < low[i-lookback] and 
-                          rsi[rsi_low_idx] > rsi[i-lookback] and
-                          price_low_idx == rsi_low_idx)  # Same bar index
-            
-            # Check for bearish divergence: price higher high, RSI lower high
-            price_high_idx = i - np.argmax(high[i-lookback:i+1])
-            rsi_high_idx = i - np.argmax(rsi[i-lookback:i+1])
-            
-            bearish_div = (high[price_high_idx] > high[i-lookback] and 
-                          rsi[rsi_high_idx] < rsi[i-lookback] and
-                          price_high_idx == rsi_high_idx)  # Same bar index
-            
-            # Bullish entry: bullish divergence + 1d uptrend + volume
-            if (bullish_div and 
-                close[i] > ema_50_aligned[i] and  # 1d uptrend
-                vol_confirm[i]):
+        else:  # Flat, look for entry
+            # Long entry: price above EMA200 with volume
+            if (close[i] > ema_200_aligned[i] and vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Bearish entry: bearish divergence + 1d downtrend + volume
-            elif (bearish_div and 
-                  close[i] < ema_50_aligned[i] and  # 1d downtrend
-                  vol_confirm[i]):
+            # Short entry: price below EMA200 with volume
+            elif (close[i] < ema_200_aligned[i] and vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
     
