@@ -1,20 +1,39 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter
-Hypothesis: Price breaking above/below 4-hour Donchian channels during strong daily trends
-(captured by ADX > 25 on daily) with volume expansion (current > 1.5x 12-period avg on 12h)
-captures sustained moves while avoiding whipsaw. Using higher timeframe trend filter reduces
-trade frequency to target 20-50/year. Works in both bull and bear markets by requiring strong
-daily trend alignment. Uses 4h timeframe as required.
+4h Williams Alligator with 12h volume confirmation and 1d ADX trend filter
+Hypothesis: The Williams Alligator (Jaw, Teeth, Lips) identifies trends when lines are aligned and separated.
+Strong trends occur when Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish).
+Combined with 12h volume expansion (>1.5x average) and 1d ADX > 25 for trend strength,
+this captures sustained moves while avoiding whipsaw. Works in both bull and bear markets
+by requiring strong daily trend alignment. Uses 4h timeframe as required.
 """
 
-name = "4h_donchian_12h_vol_1d_adx_v1"
+name = "4h_williams_alligator_12h_vol_1d_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_alligator(close, jaw_period=13, teeth_period=8, lips_period=5,
+                        jaw_shift=8, teeth_shift=5, lips_shift=3):
+    """Calculate Williams Alligator lines: Jaw, Teeth, Lips"""
+    # Smoothed median price (typical price)
+    # Since we only have close, we'll use close as approximation
+    # In practice, Alligator uses (high+low+close)/3 but we adapt for available data
+    smoothed = pd.Series(close).rolling(window=2, min_periods=1).mean()
+    
+    jaw = pd.Series(smoothed).rolling(window=jaw_period, min_periods=jaw_period).mean()
+    jaw = jaw.shift(jaw_shift)  # Shift forward by jaw_shift
+    
+    teeth = pd.Series(smoothed).rolling(window=teeth_period, min_periods=teeth_period).mean()
+    teeth = teeth.shift(teeth_shift)  # Shift forward by teeth_shift
+    
+    lips = pd.Series(smoothed).rolling(window=lips_period, min_periods=lips_period).mean()
+    lips = lips.shift(lips_shift)  # Shift forward by lips_shift
+    
+    return jaw.values, teeth.values, lips.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,6 +55,9 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Williams Alligator on 4h close data
+    jaw, teeth, lips = calculate_alligator(close)
     
     # Calculate 14-period ADX for 1d data
     # True Range
@@ -68,21 +90,17 @@ def generate_signals(prices):
     # 12-period volume average for confirmation on 12h data
     vol_avg_12 = pd.Series(volume_12h).rolling(window=12, min_periods=12).mean().values
     
-    # 20-period Donchian channels for breakout signals on 4h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from sufficient lookback
-    start_idx = 40  # Need ADX and Donchian buffers
+    # Start from sufficient lookback (Alligator needs ~13+8 shifts)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(adx_1d[i]) or 
             np.isnan(vol_avg_12[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
             signals[i] = 0.0
             continue
         
@@ -99,16 +117,16 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_avg_12_aligned
         
         if position == 1:  # Long position
-            # Exit: price closes below 20-period Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit: Alligator lines converge (Lips crosses below Teeth) OR weak trend
+            if lips[i] < teeth[i] or not strong_trend_1d:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 20-period Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit: Alligator lines converge (Lips crosses above Teeth) OR weak trend
+            if lips[i] > teeth[i] or not strong_trend_1d:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,12 +134,12 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Only trade with volume confirmation and in strong trending markets on daily
             if volume_confirm and strong_trend_1d:
-                # Long entry: price breaks above Donchian high
-                if close[i] > donchian_high[i]:
+                # Bullish alignment: Lips > Teeth > Jaw
+                if lips[i] > teeth[i] and teeth[i] > jaw[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price breaks below Donchian low
-                elif close[i] < donchian_low[i]:
+                # Bearish alignment: Lips < Teeth < Jaw
+                elif lips[i] < teeth[i] and teeth[i] < jaw[i]:
                     position = -1
                     signals[i] = -0.25
     
