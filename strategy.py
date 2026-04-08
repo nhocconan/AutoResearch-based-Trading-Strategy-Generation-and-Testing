@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
 """
-4h_1d_donchian_volume_crossover_v1
-Hypothesis: Use daily Donchian channel (20) breakout with volume confirmation on 4h timeframe.
-- Long when price breaks above 4h Donchian high (20) with volume > 1.5x 20-period average
-- Short when price breaks below 4h Donchian low (20) with volume > 1.5x 20-period average
-- Use daily trend filter (price above/below daily EMA50) to avoid counter-trend trades
-- Designed for 4h timeframe with ~20-50 trades/year to minimize fee drag
-- Works in bull/bear via trend filter and volatility-based entry conditions
+4h_mtf_cci_trend_reversal_v1
+Hypothesis: Use Commodity Channel Index (CCI) on daily chart with trend filter from weekly chart.
+- Long when CCI crosses above -100 from below with price above weekly EMA20 (uptrend)
+- Short when CCI crosses below +100 from above with price below weekly EMA20 (downtrend)
+- Uses mean-reversion within trend context to avoid counter-trend trades
+- Designed for low trade frequency (20-50/year) with high win rate
+- Works in bull/bear via trend filter and mean-reversion logic
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_crossover_v1"
+name = "4h_mtf_cci_trend_reversal_v1"
 timeframe = "4h"
 leverage = 1.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel upper and lower bands"""
+def calculate_cci(high, low, close, period=20):
+    """Calculate Commodity Channel Index"""
     if len(high) < period:
-        return np.full(len(high), np.nan), np.full(len(high), np.nan)
+        return np.full(len(high), np.nan)
     
-    upper = np.full(len(high), np.nan)
-    lower = np.full(len(high), np.nan)
+    tp = (high + low + close) / 3.0
+    ma = np.full_like(tp, np.nan)
     
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    for i in range(period-1, len(tp)):
+        ma[i] = np.mean(tp[i-period+1:i+1])
     
-    return upper, lower
+    mad = np.full_like(tp, np.nan)
+    for i in range(period-1, len(tp)):
+        mad[i] = np.mean(np.abs(tp[i-period+1:i+1] - ma[i]))
+    
+    cci = np.full_like(tp, np.nan)
+    for i in range(period-1, len(tp)):
+        if mad[i] != 0:
+            cci[i] = (tp[i] - ma[i]) / (0.015 * mad[i])
+    
+    return cci
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -45,76 +53,78 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for CCI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA for trend filter
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate daily CCI
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = calculate_ema(close_1d, 50)
+    cci = calculate_cci(high_1d, low_1d, close_1d, 20)
     
-    # Calculate 4h Donchian channel (20 periods)
-    donchian_high, donchian_low = calculate_donchian(high, low, 20)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = calculate_ema(close_1w, 20)
     
-    # Volume confirmation: 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    
-    # Align daily EMA to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align indicators to 4h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(cci_aligned[i]) or np.isnan(ema_20_1w_aligned[i]):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        cci_val = cci_aligned[i]
+        ema_trend = ema_20_1w_aligned[i]
         price = close[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        trend_up = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price closes below Donchian low or volume drops significantly
-            if price < lower or vol_ratio < 0.8:
+            # Exit: CCI crosses below +100 (overbought) or trend changes
+            if cci_val < 100 or price < ema_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price closes above Donchian high or volume drops significantly
-            if price > upper or vol_ratio < 0.8:
+            # Exit: CCI crosses above -100 (oversold) or trend changes
+            if cci_val > -100 or price > ema_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and uptrend
-            if price > upper and vol_ratio > 1.5 and trend_up:
-                position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and downtrend
-            elif price < lower and vol_ratio > 1.5 and not trend_up:
-                position = -1
-                signals[i] = -0.25
+            # Enter long: CCI crosses above -100 from below with uptrend
+            if i > 50 and not np.isnan(cci_aligned[i-1]):
+                if cci_aligned[i-1] <= -100 and cci_val > -100 and price > ema_trend:
+                    position = 1
+                    signals[i] = 0.25
+            # Enter short: CCI crosses below +100 from above with downtrend
+            elif i > 50 and not np.isnan(cci_aligned[i-1]):
+                if cci_aligned[i-1] >= 100 and cci_val < 100 and price < ema_trend:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
