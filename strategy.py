@@ -1,16 +1,16 @@
-# 4h_1w_1d_volume_breakout_v2
-# Hypothesis: On 4h timeframe, price breaking above/below 1d high/low with volume expansion and weekly trend alignment captures breakout moves. Weekly trend filter avoids counter-trend breakouts in ranging markets. Volume confirmation filters false breakouts. Designed for both bull and bear markets.
-# Entry: Long when price > 1d high + volume > 1.5x 20-period average + weekly uptrend
-# Entry: Short when price < 1d low + volume > 1.5x 20-period average + weekly downtrend
-# Exit: Opposite 1d level touch or weekly trend reversal
-# Position sizing: 0.30 long, -0.30 short
-# Uses 4h primary timeframe as required.
+#!/usr/bin/env python3
+# 4h_cci_breakout_1d_trend_volume_v1
+# Hypothesis: On 4h timeframe, CCI(20) crossing above/below +100/-100 with volume expansion and 1d EMA50 trend alignment captures momentum moves. Trend filter avoids counter-trend entries in ranging markets. Volume confirmation filters false breakouts. Designed for both bull and bear markets.
+# Entry: Long when CCI > +100 + volume > 1.5x 20-period average + price > 1d EMA50
+# Entry: Short when CCI < -100 + volume > 1.5x 20-period average + price < 1d EMA50
+# Exit: CCI crosses back below +100 (long) or above -100 (short) or trend reversal
+# Position sizing: 0.25 long, -0.25 short
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w_1d_volume_breakout_v2"
+name = "4h_cci_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,37 +25,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily high/low
+    # Get 1d data for EMA50 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Align 1d EMA50 to 4h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1w EMA(20) for trend
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1w_up = close_1w > ema_20_1w
-    trend_1w_down = close_1w < ema_20_1w
-    
-    # Forward fill trend
-    trend_1w_up_series = pd.Series(trend_1w_up)
-    trend_1w_down_series = pd.Series(trend_1w_down)
-    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
-    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
-    
-    # Align 1d high/low and 1w trend to 4h
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
+    # CCI(20) calculation
+    typical_price = (high + low + close) / 3.0
+    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (typical_price - tp_ma) / (0.015 * tp_mad)
     
     # Volume filter: 4h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,13 +50,11 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
-            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -80,28 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price touches 1d low OR weekly trend turns down
-            if (close[i] <= low_1d_aligned[i]) or trend_1w_down_aligned[i]:
+            # Exit: CCI < +100 OR price below 1d EMA50
+            if (cci[i] < 100) or (close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30  # Position size
+                signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: Price touches 1d high OR weekly trend turns up
-            if (close[i] >= high_1d_aligned[i]) or trend_1w_up_aligned[i]:
+            # Exit: CCI > -100 OR price above 1d EMA50
+            if (cci[i] > -100) or (close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30  # Position size
+                signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: Price > 1d high + volume + weekly uptrend
-            if (close[i] > high_1d_aligned[i]) and volume_filter[i] and trend_1w_up_aligned[i]:
+            # Long entry: CCI > +100 + volume + price > 1d EMA50
+            if (cci[i] > 100) and volume_filter[i] and (close[i] > ema_50_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.30
-            # Short entry: Price < 1d low + volume + weekly downtrend
-            elif (close[i] < low_1d_aligned[i]) and volume_filter[i] and trend_1w_down_aligned[i]:
+                signals[i] = 0.25
+            # Short entry: CCI < -100 + volume + price < 1d EMA50
+            elif (cci[i] < -100) and volume_filter[i] and (close[i] < ema_50_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
