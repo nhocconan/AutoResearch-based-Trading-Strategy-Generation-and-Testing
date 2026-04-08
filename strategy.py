@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
 4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
