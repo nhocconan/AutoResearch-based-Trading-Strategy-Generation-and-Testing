@@ -1,130 +1,127 @@
 #!/usr/bin/env python3
-# 1h_4h_donchian_breakout_volume_regime_v1
-# Hypothesis: 1h strategies with 4h Donchian breakout + volume confirmation + chop regime filter work in both bull and bear markets.
-# Long: price breaks above 4h Donchian(20) high with volume > 1.5x 20-period average and CHOP(14) < 61.8 (trending)
-# Short: price breaks below 4h Donchian(20) low with volume > 1.5x 20-period average and CHOP(14) < 61.8 (trending)
-# Exit: price reverts to 4h Donchian midpoint or ATR-based stoploss (2.0x ATR)
-# Uses 1h primary timeframe with 4h HTF for Donchian channels and chop regime.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+# 6h_weekly_ichimoku_trend_follow_v1
+# Hypothesis: 6h trend following using weekly Ichimoku cloud as primary filter with 1d TK cross for entry timing works in both bull and bear markets.
+# Long: price above weekly cloud + 1d Tenkan crosses above Kijun
+# Short: price below weekly cloud + 1d Tenkan crosses below Kijun
+# Exit: opposite TK cross or price re-enters the cloud
+# Uses 6h primary timeframe with 1w HTF for cloud and 1d HTF for TK cross.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_donchian_breakout_volume_regime_v1"
-timeframe = "1h"
+name = "6h_weekly_ichimoku_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.mean(tr[i-14:i])
-    
-    # Calculate volume ratio (current vs 20-period average)
-    vol_sma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_sma[i] = np.mean(volume[i-20:i])
-    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
-    
-    # Get 4h data for Donchian channels and chop regime
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data for Ichimoku cloud (Senkou Span A/B)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:  # Need at least 52 weeks for proper calculation
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = np.full(len(df_4h), np.nan)
-    donchian_low = np.full(len(df_4h), np.nan)
-    donchian_mid = np.full(len(df_4h), np.nan)
+    # Calculate Ichimoku components on weekly data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9_1w = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    low_9_1w = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_1w = (high_9_1w + low_9_1w) / 2.0
     
-    for i in range(20, len(df_4h)):
-        donchian_high[i] = np.max(high_4h[i-20:i])
-        donchian_low[i] = np.min(low_4h[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2.0
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26_1w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    low_26_1w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_1w = (high_26_1w + low_26_1w) / 2.0
     
-    # Calculate 4h Chopiness Index (14-period) for regime filter
-    chop = np.full(len(df_4h), np.nan)
-    for i in range(14, len(df_4h)):
-        # True range sum
-        tr_sum = 0.0
-        for j in range(i-14, i):
-            tr_j = max(high_4h[j] - low_4h[j], abs(high_4h[j] - close_4h[j-1]), abs(low_4h[j] - close_4h[j-1]))
-            tr_sum += tr_j
-        # Donchian width (max high - min low over period)
-        max_high = np.max(high_4h[i-14:i])
-        min_low = np.min(low_4h[i-14:i])
-        donchian_width = max_high - min_low
-        if donchian_width > 0 and tr_sum > 0:
-            chop[i] = 100 * np.log10(tr_sum / donchian_width) / np.log10(14)
-        else:
-            chop[i] = 50.0  # neutral
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
+    senkou_a_1w = ((tenkan_1w + kijun_1w) / 2.0)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
+    high_52_1w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    low_52_1w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_b_1w = ((high_52_1w + low_52_1w) / 2.0)
     
-    # Align 4h indicators to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
-    chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
+    # Align weekly Ichimoku components to 6h timeframe (with proper look-ahead prevention)
+    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
+    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
+    senkou_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_a_1w)
+    senkou_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w)
+    
+    # Get 1d data for TK cross (Tenkan/Kijun cross)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Ichimoku components on daily data for TK cross
+    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (high_9_1d + low_9_1d) / 2.0
+    
+    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (high_26_1d + low_26_1d) / 2.0
+    
+    # Align daily TK cross to 6h timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    atr_stop = 0.0
     
-    for i in range(50, n):
-        vol_r = vol_ratio[i]
-        price = close[i]
-        chop_val = chop_aligned[i]
-        
-        if np.isnan(vol_r) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or np.isnan(chop_val) or np.isnan(atr[i]):
+    for i in range(100, n):
+        # Skip if any required values are NaN
+        if (np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or 
+            np.isnan(senkou_a_1w_aligned[i]) or np.isnan(senkou_b_1w_aligned[i]) or
+            np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        price = close[i]
+        
+        # Determine cloud boundaries (Senkou Span A/B)
+        upper_cloud = np.maximum(senkou_a_1w_aligned[i], senkou_b_1w_aligned[i])
+        lower_cloud = np.minimum(senkou_a_1w_aligned[i], senkou_b_1w_aligned[i])
+        
         if position == 1:  # Long position
-            # Exit: price reverts to midpoint OR stoploss hit (2.0x ATR below entry)
-            if price <= donchian_mid_aligned[i] or price <= entry_price - 2.0 * atr_stop:
+            # Exit: Tenkan crosses below Kijun OR price re-enters cloud (below upper cloud)
+            if tenkan_1d_aligned[i] < kijun_1d_aligned[i] or price < upper_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reverts to midpoint OR stoploss hit (2.0x ATR above entry)
-            if price >= donchian_mid_aligned[i] or price >= entry_price + 2.0 * atr_stop:
+            # Exit: Tenkan crosses above Kijun OR price re-enters cloud (above lower cloud)
+            if tenkan_1d_aligned[i] > kijun_1d_aligned[i] or price > lower_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Long entry: price breaks above Donchian high with volume spike and trending regime
-            if price >= donchian_high_aligned[i] and vol_r > 1.5 and chop_val < 61.8:
+            # Long entry: price above cloud AND Tenkan crosses above Kijun
+            if price > upper_cloud and tenkan_1d_aligned[i] > kijun_1d_aligned[i]:
                 position = 1
-                entry_price = price
-                atr_stop = atr[i]
-                signals[i] = 0.20
-            # Short entry: price breaks below Donchian low with volume spike and trending regime
-            elif price <= donchian_low_aligned[i] and vol_r > 1.5 and chop_val < 61.8:
+                signals[i] = 0.25
+            # Short entry: price below cloud AND Tenkan crosses below Kijun
+            elif price < lower_cloud and tenkan_1d_aligned[i] < kijun_1d_aligned[i]:
                 position = -1
-                entry_price = price
-                atr_stop = atr[i]
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
