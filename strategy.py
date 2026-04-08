@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,9 +36,9 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])  # First value is NaN
     atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 20-period Donchian channels (on 12h timeframe)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 40-period Donchian channels (on 4h timeframe)
+    high_40 = pd.Series(high).rolling(window=40, min_periods=40).max().values
+    low_40 = pd.Series(low).rolling(window=40, min_periods=40).min().values
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,18 +50,18 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(50, 20)  # EMA50 and 20-period lookback
+    start_idx = max(50, 40)  # EMA50 and 40-period lookback
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d[i]) or np.isnan(atr_1d[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(high_40[i]) or np.isnan(low_40[i]) or 
             np.isnan(avg_volume_20[i]) or np.isnan(volume[i]) or
             np.isnan(atr_ma_50[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 12h bar
+        # Get aligned 1d values for current 4h bar
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
         atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)[i]
         atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)[i]
@@ -69,36 +69,36 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility (choppy) conditions
         volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.8)
         
-        # Volume confirmation: current volume > 2.0x average volume (balanced)
-        volume_confirmation = volume[i] > (avg_volume_20[i] * 2.0)
+        # Volume confirmation: current volume > 1.8x average volume
+        volume_confirmation = volume[i] > (avg_volume_20[i] * 1.8)
         
         # Trend filter: price above/below 50 EMA on 1d
         uptrend = close[i] > ema_1d_aligned
         downtrend = close[i] < ema_1d_aligned
         
         if position == 1:  # Long position
-            # Exit: price breaks below 20-period low OR trend reversal
-            if close[i] < low_20[i] or not uptrend:
+            # Exit: price breaks below 40-period low OR trend reversal
+            if close[i] < low_40[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 20-period high OR trend reversal
-            if close[i] > high_20[i] or not downtrend:
+            # Exit: price breaks above 40-period high OR trend reversal
+            if close[i] > high_40[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:  # Flat, look for entry
-            # Long: price breaks above 20-period high + uptrend + volume confirmation + volatility filter
-            if close[i] > high_20[i] and uptrend and volume_confirmation and volatility_filter:
+            # Long: price breaks above 40-period high + uptrend + volume confirmation + volatility filter
+            if close[i] > high_40[i] and uptrend and volume_confirmation and volatility_filter:
                 position = 1
-                signals[i] = 0.25
-            # Short: price breaks below 20-period low + downtrend + volume confirmation + volatility filter
-            elif close[i] < low_20[i] and downtrend and volume_confirmation and volatility_filter:
+                signals[i] = 0.28
+            # Short: price breaks below 40-period low + downtrend + volume confirmation + volatility filter
+            elif close[i] < low_40[i] and downtrend and volume_confirmation and volatility_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
