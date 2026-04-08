@@ -84,8 +84,8 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema20_1d[i]) or np.isnan(ema50_1d[i]) or 
             np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(bearish_fractal_aligned[i]) if i < len(bearish_fractal_aligned) else True or
-            np.isnan(bullish_fractal_aligned[i]) if i < len(bullish_fractal_aligned) else True):
+            (i >= len(bearish_fractal_aligned) or np.isnan(bearish_fractal_aligned[i])) or
+            (i >= len(bullish_fractal_aligned) or np.isnan(bullish_fractal_aligned[i]))):
             signals[i] = 0.0
             continue
         
