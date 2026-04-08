@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_rsi_volume_trend_v1
-# Hypothesis: Combine RSI(14) oversold/overbought signals with volume confirmation and daily trend filter.
-# RSI < 30 for long, RSI > 70 for short, only when volume > 1.5x 20-period average.
-# Trend filter: price above/below daily EMA50 to avoid counter-trend trades.
-# Designed for 4h timeframe with ~20-40 trades/year to minimize fee drag.
+# 4h_pullback_breakout_1d_trend_volume_v1
+# Hypothesis: 4h breakout of 20-period high/low with volume > 1.5x 20-period average, in direction of daily trend (price above/below daily EMA50).
+# Pullback entries: wait for pullback to 20-period EMA after breakout to avoid chasing.
+# Works in bull markets by capturing continuation breakouts and in bear markets by capturing breakdowns.
+# Volume filter ensures participation, trend filter avoids counter-trend trades, pullback reduces false breakouts.
+# Target: 20-40 trades/year with ~0.25 position size to minimize fee drag.
 
-name = "4h_rsi_volume_trend_v1"
+name = "4h_pullback_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,30 +25,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI calculation (14-period)
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 20-period high/low for breakout
+    high_20 = np.full_like(high, np.nan)
+    low_20 = np.full_like(low, np.nan)
+    for i in range(19, n):
+        high_20[i] = np.max(high[i-19:i+1])
+        low_20[i] = np.min(low[i-19:i+1])
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-    
-    for i in range(rsi_period+1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:rsi_period+1] = 50  # neutral before sufficient data
+    # 20-period EMA for pullback entries
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume moving average (20-period)
-    vol_ma = np.zeros_like(volume)
-    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
-    vol_ma[:19] = vol_ma[19]
+    vol_ma = np.full_like(volume, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ma[19:] = vol_series.rolling(window=20, min_periods=20).mean().values[:n-19]
     
     # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
@@ -55,11 +47,8 @@ def generate_signals(prices):
     
     # Daily EMA (50-period) for trend filter
     ema_period = 50
-    ema_daily = np.zeros_like(close_daily)
-    if len(close_daily) >= ema_period:
-        ema_daily[ema_period-1] = np.mean(close_daily[:ema_period])
-        for i in range(ema_period, len(close_daily)):
-            ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
+    ema_daily = np.full_like(close_daily, np.nan)
+    ema_daily[ema_period-1:] = pd.Series(close_daily).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values[ema_period-1:]
     
     # Align daily EMA to 4h timeframe
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
@@ -70,18 +59,24 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    breakout_high = False  # Track if we've had a recent bullish breakout
+    breakout_low = False   # Track if we've had a recent bearish breakout
     
     # Start from sufficient lookback
-    start_idx = max(rsi_period+1, 20, ema_period) + 5
+    start_idx = max(20, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
         if not in_session[i]:
             signals[i] = 0.0
+            # Reset breakout flags when out of session
+            breakout_high = False
+            breakout_low = False
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or volume[i] == 0 or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_20[i]) or np.isnan(vol_ma[i]) or volume[i] == 0 or 
             np.isnan(ema_daily_aligned[i])):
             signals[i] = 0.0
             continue
@@ -89,37 +84,43 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
         # Higher timeframe trend filter: price above/below daily EMA
         uptrend_htf = close[i] > ema_daily_aligned[i]
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if RSI exits overbought, trend reverses, or volume fails
-            if rsi[i] > 70 or not uptrend_htf or not volume_filter:
+            # Exit if trend reverses or volume fails or price drops below EMA20
+            if not uptrend_htf or not volume_filter or close[i] < ema_20[i]:
                 position = 0
                 signals[i] = 0.0
+                breakout_high = False  # Reset breakout flag on exit
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if RSI exits oversold, trend reverses, or volume fails
-            if rsi[i] < 30 or not downtrend_htf or not volume_filter:
+            # Exit if trend reverses or volume fails or price rises above EMA20
+            if not downtrend_htf or not volume_filter or close[i] > ema_20[i]:
                 position = 0
                 signals[i] = 0.0
+                breakout_low = False  # Reset breakout flag on exit
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: RSI oversold, volume confirmation, and daily uptrend
-            if rsi_oversold and volume_filter and uptrend_htf:
+            # Check for breakout conditions
+            bullish_breakout = (close[i] > high_20[i-1]) and volume_filter and uptrend_htf
+            bearish_breakout = (close[i] < low_20[i-1]) and volume_filter and downtrend_htf
+            
+            # Long entry: bullish breakout OR pullback to EMA20 after bullish breakout
+            if bullish_breakout or (breakout_high and close[i] >= ema_20[i] and close[i] > low[i-1]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI overbought, volume confirmation, and daily downtrend
-            elif rsi_overbought and volume_filter and downtrend_htf:
+                breakout_high = True  # Set breakout flag on entry
+                breakout_low = False  # Reset opposite flag
+            # Short entry: bearish breakout OR pullback to EMA20 after bearish breakout
+            elif bearish_breakout or (breakout_low and close[i] <= ema_20[i] and close[i] < high[i-1]):
                 position = -1
                 signals[i] = -0.25
+                breakout_low = True  # Set breakout flag on entry
+                breakout_high = False  # Reset opposite flag
     
     return signals
