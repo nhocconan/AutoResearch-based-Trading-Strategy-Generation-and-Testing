@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# 12h_rsi_extreme_trend_volume_v1
-# Hypothesis: On 12h timeframe, use extreme RSI levels combined with daily trend and volume confirmation.
-# Long when RSI < 20 (deep oversold) with daily trend up (price > daily EMA50) and volume > 1.5x average.
-# Short when RSI > 80 (deep overbought) with daily trend down (price < daily EMA50) and volume > 1.5x average.
-# Exit when RSI returns to neutral range (40-60) or volume drops below average.
-# This strategy targets rare but high-probability mean-reversion setups in both bull and bear markets.
-# Extreme RSI readings indicate exhaustion, and trend filter ensures we trade with higher timeframe momentum.
-# Volume confirmation avoids false signals in low-liquidity periods.
-# Expected trade frequency: 15-25 per year (60-100 total over 4 years) to minimize fee drag.
+# 4h_rsi_volume_momentum_v1
+# Hypothesis: On 4h timeframe, combine RSI momentum with volume confirmation and 1d trend filter.
+# Long when RSI crosses above 50 with volume > 1.5x average and 1d trend up (price > EMA50).
+# Short when RSI crosses below 50 with volume > 1.5x average and 1d trend down (price < EMA50).
+# Exit when RSI returns to neutral zone (40-60) or volume drops below average.
+# Uses 1d EMA50 for trend filter to avoid whipsaws in ranging markets.
+# Designed for ~25-40 trades/year to minimize fee drag while capturing momentum moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_rsi_extreme_trend_volume_v1"
-timeframe = "12h"
+name = "4h_rsi_volume_momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,47 +26,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI on 12h data
-    delta = np.diff(close)
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.zeros_like(close)
-    rs[14:] = avg_gain[13:] / (avg_loss[13:] + 1e-10)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    daily_close = df_daily['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_12h = align_htf_to_ltf(prices, df_daily, daily_ema50)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 20-period average on 12h
+    # Volume confirmation: 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after RSI warmup
-    start_idx = 30
+    # Start after warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(rsi[i]) or np.isnan(daily_ema50_12h[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -77,7 +64,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral range (40-60) or volume drops below average
+            # Exit: RSI returns to neutral (40-60) or volume drops below average
             if rsi[i] >= 40 and rsi[i] <= 60 or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
@@ -85,7 +72,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral range (40-60) or volume drops below average
+            # Exit: RSI returns to neutral (40-60) or volume drops below average
             if rsi[i] >= 40 and rsi[i] <= 60 or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
@@ -95,16 +82,16 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Daily trend filter
-            daily_uptrend = close[i] > daily_ema50_12h[i]
-            daily_downtrend = close[i] < daily_ema50_12h[i]
+            # 1d trend filter
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long entry: RSI < 20 (deep oversold) with volume and uptrend
-            if rsi[i] < 20 and volume_ok and daily_uptrend:
+            # Long entry: RSI crosses above 50 with volume and uptrend
+            if rsi[i] > 50 and rsi[i-1] <= 50 and volume_ok and uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI > 80 (deep overbought) with volume and downtrend
-            elif rsi[i] > 80 and volume_ok and daily_downtrend:
+            # Short entry: RSI crosses below 50 with volume and downtrend
+            elif rsi[i] < 50 and rsi[i-1] >= 50 and volume_ok and downtrend:
                 position = -1
                 signals[i] = -0.25
     
