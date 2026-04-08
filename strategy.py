@@ -1,100 +1,92 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_momentum_v2
-# Hypothesis: Uses weekly pivot points as support/resistance levels with momentum confirmation.
-# Enters long when price breaks above weekly R1 with bullish momentum (close > open), short when breaks below weekly S1 with bearish momentum (close < open).
-# Uses 1d timeframe for pivot calculation and 6h for entry timing to avoid overtrading.
-# Designed for low trade frequency (~20-50/year) to minimize fee drift and capture institutional levels.
+# 12h_alligator_trend_volume_v1
+# Hypothesis: Uses 12-hour Williams Alligator (SMAs with smoothing) to identify trends, with volume confirmation for entry.
+# Long when price > Alligator Jaw (13-period SMA shifted 8 bars) and Teeth > Lips (bullish alignment), short when opposite.
+# Includes volume filter (>1.5x 20-period average) to avoid false breakouts. Designed for low trade frequency (~15-30/year)
+# to minimize fee drag while capturing major trends in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_momentum_v2"
-timeframe = "6h"
+name = "12h_alligator_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation
+    # 1-day data for Alligator (Williams Alligator uses SMAs)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using previous week's OHLC)
-    # We'll use the last 5 days to approximate weekly OHLC
-    # In practice, we'd use actual weekly data, but for simplicity we use daily
-    # and calculate pivots based on prior day's range (common approximation)
-    prev_high = df_1d['high'].shift(1).values  # Previous day's high
-    prev_low = df_1d['low'].shift(1).values    # Previous day's low
-    prev_close = df_1d['close'].shift(1).values # Previous day's close
+    # Williams Alligator: Jaw (13 SMA, 8 shift), Teeth (8 SMA, 5 shift), Lips (5 SMA, 3 shift)
+    jaw_raw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_raw = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_raw = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Classic pivot point calculation
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
+    # Align to 12h timeframe
+    jaw = align_htf_to_ltf(prices, df_1d, jaw_raw)
+    teeth = align_htf_to_ltf(prices, df_1d, teeth_raw)
+    lips = align_htf_to_ltf(prices, df_1d, lips_raw)
     
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Volume confirmation (20-period average)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 1
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Momentum confirmation: bullish if close > open, bearish if close < open
-        bullish_momentum = close[i] > open_price[i]
-        bearish_momentum = close[i] < open_price[i]
+        # Trend conditions
+        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
+        price_above_jaw = close[i] > jaw[i]
+        price_below_jaw = close[i] < jaw[i]
         
-        # Breakout conditions
-        breakout_r1 = close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]
-        breakdown_s1 = close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]
+        # Volume confirmation
+        volume_ok = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: break below pivot or momentum shifts
-            if close[i] < pivot_aligned[i] or not bullish_momentum:
+            # Exit: bearish alignment or price below jaw
+            if bearish_alignment or price_below_jaw:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: break above pivot or momentum shifts
-            if close[i] > pivot_aligned[i] or not bearish_momentum:
+            # Exit: bullish alignment or price above jaw
+            if bullish_alignment or price_above_jaw:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: break above R1 with bullish momentum
-            if breakout_r1 and bullish_momentum:
-                position = 1
-                signals[i] = 0.25
-            # Short entry: break below S1 with bearish momentum
-            elif breakdown_s1 and bearish_momentum:
-                position = -1
-                signals[i] = -0.25
+            if volume_ok:
+                # Long entry: bullish alignment and price above jaw
+                if bullish_alignment and price_above_jaw:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: bearish alignment and price below jaw
+                elif bearish_alignment and price_below_jaw:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
