@@ -1,136 +1,100 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_pivot_volume_reversal_v1
-Hypothesis: Mean reversion at weekly Camarilla pivot levels with volume confirmation.
-- Long when price touches S1 support with volume spike in downtrend (weekly)
-- Short when price touches R1 resistance with volume spike in uptrend (weekly)
-- Uses weekly trend filter to avoid counter-trend trades
-- Designed for low trade frequency (10-20/year) to minimize fee drag
-- Works in bear via mean reversion at extreme levels, avoids whipsaw via trend filter
+12h_1d1w_rsi_momentum_v1
+Hypothesis: RSI momentum with trend filter on 12h chart for low-frequency trading.
+- Long when RSI(14) crosses above 50 on 12h + price above 1d EMA(50) + volume above average
+- Short when RSI(14) crosses below 50 on 12h + price below 1d EMA(50) + volume above average
+- Uses 1w trend filter to avoid counter-trend trades in extreme conditions
+- Designed for low trade frequency (15-25/year) to minimize fee drag
+- Works in bull/bear via trend filter and momentum confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_reversal_v1"
-timeframe = "1d"
+name = "12h_1d1w_rsi_momentum_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_rma(series, period):
-    """Calculate Wilder's RMA (same as EMA with alpha=1/period)"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=float)
-    result = np.full_like(series, np.nan, dtype=float)
-    alpha = 1.0 / period
-    result[period-1] = np.mean(series[:period])
-    for i in range(period, len(series)):
-        result[i] = alpha * series[i] + (1 - alpha) * result[i-1]
-    return result
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate ATR using Wilder's smoothing"""
-    if len(high) < period:
-        return np.full_like(high, np.nan, dtype=float)
+def calculate_rsi(close, period=14):
+    """Calculate RSI using Wilder's smoothing"""
+    if len(close) < period + 1:
+        return np.full_like(close, np.nan, dtype=float)
     
-    tr = np.zeros(len(high))
-    tr[0] = high[0] - low[0]
-    for i in range(1, len(high)):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    atr = np.full_like(high, np.nan, dtype=float)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(high)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    pivot = (high + low + close) / 3.0
-    range_ = high - low
+    avg_gain = np.full_like(close, np.nan, dtype=float)
+    avg_loss = np.full_like(close, np.nan, dtype=float)
     
-    # Camarilla levels
-    r4 = close + range_ * 1.500
-    r3 = close + range_ * 1.250
-    r2 = close + range_ * 1.166
-    r1 = close + range_ * 1.083
-    s1 = close - range_ * 1.083
-    s2 = close - range_ * 1.166
-    s3 = close - range_ * 1.250
-    s4 = close - range_ * 1.500
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
     
-    return r1, r2, r3, r4, s1, s2, s3, s4
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (using previous day's HLC)
-    # We need to shift by 1 to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA (50-period) for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        alpha = 2.0 / (50 + 1)
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Initialize Camarilla arrays
-    r1 = np.full(len(close_1d), np.nan)
-    r2 = np.full(len(close_1d), np.nan)
-    r3 = np.full(len(close_1d), np.nan)
-    r4 = np.full(len(close_1d), np.nan)
-    s1 = np.full(len(close_1d), np.nan)
-    s2 = np.full(len(close_1d), np.nan)
-    s3 = np.full(len(close_1d), np.nan)
-    s4 = np.full(len(close_1d), np.nan)
-    
-    # Calculate for each day using previous day's data
-    for i in range(1, len(close_1d)):
-        r1[i], r2[i], r3[i], r4[i], s1[i], s2[i], s3[i], s4[i] = calculate_camarilla(
-            high_1d[i-1], low_1d[i-1], close_1d[i-1]
-        )
-    
-    # Calculate 1w EMA (20-period) for trend filter
+    # Calculate 1w EMA (50-period) for trend filter
     close_1w = df_1w['close'].values
-    ema_20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        alpha = 2.0 / (20 + 1)
-        ema_20_1w[19] = np.mean(close_1w[:20])
-        for i in range(20, len(close_1w)):
-            ema_20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_20_1w[i-1]
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        alpha = 2.0 / (50 + 1)
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
     
-    # Calculate 1d volume moving average (20-period)
+    # Calculate RSI (14-period) on 12h
+    rsi = calculate_rsi(close, 14)
+    
+    # Volume confirmation: 20-period average on 12h
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align indicators to 1d timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align indicators to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -139,30 +103,37 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        trend_up = price > ema_20_1w_aligned[i]
+        ema_1d = ema_50_1d_aligned[i]
+        ema_1w = ema_50_1w_aligned[i]
+        rsi_now = rsi[i]
+        rsi_prev = rsi[i-1]
+        
+        # Determine trend alignment (both 1d and 1w agree)
+        bullish_trend = price > ema_1d and ema_1d > ema_1w
+        bearish_trend = price < ema_1d and ema_1d < ema_1w
         
         if position == 1:  # Long
-            # Exit: price reaches S2 or volume drops
-            if price >= s2_aligned[i] or vol_ratio < 0.8:
+            # Exit: RSI crosses below 50 or trend breaks down
+            if rsi_now < 50 and rsi_prev >= 50 or not bullish_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price reaches R2 or volume drops
-            if price <= r2_aligned[i] or vol_ratio < 0.8:
+            # Exit: RSI crosses above 50 or trend breaks down
+            if rsi_now > 50 and rsi_prev <= 50 or not bearish_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches S1 with volume spike in downtrend (weekly)
-            if abs(price - s1_aligned[i]) < 0.001 * price and vol_ratio > 2.0 and not trend_up:
+            # Enter long: RSI crosses above 50 with volume and bullish trend
+            if rsi_now > 50 and rsi_prev <= 50 and vol_ratio > 1.3 and bullish_trend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches R1 with volume spike in uptrend (weekly)
-            elif abs(price - r1_aligned[i]) < 0.001 * price and vol_ratio > 2.0 and trend_up:
+            # Enter short: RSI crosses below 50 with volume and bearish trend
+            elif rsi_now < 50 and rsi_prev >= 50 and vol_ratio > 1.3 and bearish_trend:
                 position = -1
                 signals[i] = -0.25
     
