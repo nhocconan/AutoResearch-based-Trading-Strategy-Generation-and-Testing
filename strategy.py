@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v1
-# Hypothesis: Uses 12h Donchian breakout (20-period) with 1d trend filter (price > SMA50) and volume confirmation (volume > 1.5x 20-period average).
-# Works in bull via breakout continuation and bear via short breakdowns. Volume ensures breakout validity, trend filter avoids counter-trend trades.
-# Designed for 15-30 trades/year on 12h to avoid fee drag.
+# 4h_donchian_breakout_12h_trend_vol_v2
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian upper, price > 12h EMA50, and volume > 1.5x 20-period MA.
+# Short when price breaks below Donchian lower, price < 12h EMA50, and volume > 1.5x 20-period MA.
+# Exit when price crosses back inside Donchian channel or EMA condition fails.
+# Designed for 20-40 trades/year to avoid fee drag. Works in bull/bear via trend-following with strong filters.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,85 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Donchian Channel (20-period)
+    donchian_len = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(donchian_len - 1, n):
+        upper[i] = np.max(high[i - donchian_len + 1:i + 1])
+        lower[i] = np.min(low[i - donchian_len + 1:i + 1])
     
-    # Calculate 12-period SMA for volume average
-    volume_sma = np.zeros(n)
-    volume_sum = 0.0
-    for i in range(n):
-        volume_sum += volume[i]
-        if i >= 20:
-            volume_sum -= volume[i-20]
-        if i < 19:
-            volume_sma[i] = np.nan
-        else:
-            volume_sma[i] = volume_sum / 20.0
+    # 12-hour EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Donchian channels (20-period) on 12h
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
-    for i in range(n):
-        if i < 19:
-            continue
-        start_idx = max(0, i-19)
-        high_max[i] = np.max(high[start_idx:i+1])
-        low_min[i] = np.min(low[start_idx:i+1])
-    
-    # 1-day SMA50 trend filter
-    sma50_1d = np.full(len(close_1d), np.nan)
-    sma_sum = 0.0
-    for i in range(len(close_1d)):
-        sma_sum += close_1d[i]
-        if i >= 49:
-            sma_sum -= close_1d[i-49]
-        if i < 49:
-            sma50_1d[i] = np.nan
-        else:
-            sma50_1d[i] = sma_sum / 50.0
-    
-    # Align 1d SMA50 to 12h
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Volume confirmation: current volume > 1.5x 20-period MA
+    vol_ma = np.full(n, np.nan)
+    vol_len = 20
+    for i in range(vol_len - 1, n):
+        vol_ma[i] = np.mean(volume[i - vol_len + 1:i + 1])
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 49  # Ensure SMA50 is ready
+    start_idx = max(donchian_len, vol_len, 50)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
-        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(sma50_1d_aligned[i]) or np.isnan(volume_sma[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * volume_sma[i]
+        # Trend and volume filters
+        price_above_ema = close[i] > ema50_12h_aligned[i]
+        price_below_ema = close[i] < ema50_12h_aligned[i]
+        vol_confirm = vol_ratio[i] > 1.5
         
         if position == 1:  # Long position
-            # Exit: price closes below lower Donchian or trend fails
-            if close[i] < low_min[i] or close[i] <= sma50_1d_aligned[i]:
+            # Exit: price crosses back inside Donchian or EMA condition fails
+            if close[i] < upper[i] or not price_above_ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper Donchian or trend fails
-            if close[i] > high_max[i] or close[i] >= sma50_1d_aligned[i]:
+            # Exit: price crosses back inside Donchian or EMA condition fails
+            if close[i] > lower[i] or not price_below_ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper Donchian with volume and uptrend
-            if close[i] > high_max[i] and vol_confirm and close[i] > sma50_1d_aligned[i]:
+            # Long entry: price breaks above Donchian upper, above EMA, with volume confirmation
+            if close[i] > upper[i] and price_above_ema and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower Donchian with volume and downtrend
-            elif close[i] < low_min[i] and vol_confirm and close[i] < sma50_1d_aligned[i]:
+            # Short entry: price breaks below Donchian lower, below EMA, with volume confirmation
+            elif close[i] < lower[i] and price_below_ema and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
