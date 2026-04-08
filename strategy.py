@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_camarilla_pivot_1d_trend_volume_v1
-# Hypothesis: On 4h timeframe, use Camarilla pivot levels from 1d combined with 1d trend filter and volume confirmation.
+# 12h_camarilla_pivot_1d_trend_volume_v1
+# Hypothesis: On 12h timeframe, use Camarilla pivot levels from 1d combined with 1d trend filter and volume confirmation.
 # Long when price closes above Camarilla resistance level R3 with volume > 1.5x average and 1d uptrend.
 # Short when price closes below Camarilla support level S3 with volume > 1.5x average and 1d downtrend.
 # Exit when price returns to Camarilla pivot point or volume drops below average.
-# This strategy targets 20-40 trades/year by using 4h timeframe with strict pivot-based entries.
+# This strategy targets 10-30 trades/year by using 12h timeframe with strict pivot-based entries.
 # Works in both bull and bear markets via trend filter and volatility-based structure.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,16 +41,16 @@ def generate_signals(prices):
     r3 = pivot + (range_hl * 1.1)
     s3 = pivot - (range_hl * 1.1)
     
-    # Align to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_daily, pivot)
-    r3_4h = align_htf_to_ltf(prices, df_daily, r3)
-    s3_4h = align_htf_to_ltf(prices, df_daily, s3)
+    # Align to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_daily, pivot)
+    r3_12h = align_htf_to_ltf(prices, df_daily, r3)
+    s3_12h = align_htf_to_ltf(prices, df_daily, s3)
     
     # Calculate 1d trend filter: EMA20
     daily_ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    daily_ema20_4h = align_htf_to_ltf(prices, df_daily, daily_ema20)
+    daily_ema20_12h = align_htf_to_ltf(prices, df_daily, daily_ema20)
     
-    # Volume confirmation: 20-period average on 4h
+    # Volume confirmation: 20-period average on 12h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -61,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(pivot_4h[i]) or np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or \
-           np.isnan(daily_ema20_4h[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(pivot_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or \
+           np.isnan(daily_ema20_12h[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -72,7 +72,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: price returns to pivot point or volume drops below average
-            if close[i] <= pivot_4h[i] or volume[i] < avg_volume[i]:
+            if close[i] <= pivot_12h[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,7 +80,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price returns to pivot point or volume drops below average
-            if close[i] >= pivot_4h[i] or volume[i] < avg_volume[i]:
+            if close[i] >= pivot_12h[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,15 +90,15 @@ def generate_signals(prices):
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
             # Daily trend filter
-            daily_uptrend = close[i] > daily_ema20_4h[i]
-            daily_downtrend = close[i] < daily_ema20_4h[i]
+            daily_uptrend = close[i] > daily_ema20_12h[i]
+            daily_downtrend = close[i] < daily_ema20_12h[i]
             
             # Long entry: price closes above R3 with volume and uptrend
-            if close[i] > r3_4h[i] and volume_ok and daily_uptrend:
+            if close[i] > r3_12h[i] and volume_ok and daily_uptrend:
                 position = 1
                 signals[i] = 0.25
             # Short entry: price closes below S3 with volume and downtrend
-            elif close[i] < s3_4h[i] and volume_ok and daily_downtrend:
+            elif close[i] < s3_12h[i] and volume_ok and daily_downtrend:
                 position = -1
                 signals[i] = -0.25
     
