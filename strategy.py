@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_12h_trend_volume_v1
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Trades only in direction of 12h trend to avoid counter-trend whipsaws. Volume spike (>2x 20-bar avg) ensures
-# momentum confirmation. Designed for low trade frequency (20-40/year) to minimize fee drag.
-# Works in bull/bear by following 12h trend; avoids reversals via trend filter.
+# 1d_kama_rsi_chop_v1
+# Hypothesis: On daily timeframe, capture trend continuation using KAMA direction filtered by RSI extremes and Choppiness index regime.
+# KAMA adapts to market noise, reducing false signals. RSI >60 or <40 ensures momentum alignment. Chop >61.8 avoids strong trends where mean reversion fails.
+# Works in bull/bear by following trend direction (KAMA) with momentum filter. Low trade frequency (~10-20/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,26 +21,55 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 12h EMA50 to 4h
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Daily KAMA (adaptive moving average)
+    # Efficiency Ratio = |change over 10 periods| / sum of absolute changes over 10 periods
+    change = np.abs(np.diff(close, n=10, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # Proper ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):
+        if i >= 10:
+            direction = abs(close[i] - close[i-10])
+            volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            er[i] = direction / volatility if volatility > 0 else 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: 4h volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Choppiness Index (14)
+    atr = np.zeros(n)
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((atr * 14) / (max_high - min_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -51,8 +79,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -61,29 +89,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price < 20-period low OR trend turns bearish (price < 12h EMA50)
-            if (close[i] < low_20[i]) or (close[i] < ema_50_12h_aligned[i]):
+            # Exit: KAMA turns down OR RSI < 40 (loss of momentum) OR Chop < 38.2 (strong trend - consider trend following instead)
+            if (kama[i] < kama[i-1]) or (rsi[i] < 40) or (chop[i] < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > 20-period high OR trend turns bullish (price > 12h EMA50)
-            if (close[i] > high_20[i]) or (close[i] > ema_50_12h_aligned[i]):
+            # Exit: KAMA turns up OR RSI > 60 (loss of momentum) OR Chop < 38.2
+            if (kama[i] > kama[i-1]) or (rsi[i] > 60) or (chop[i] < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Require volume spike
-            if volume_spike[i]:
-                # Long entry: price > 20-period high AND price > 12h EMA50 (bullish alignment)
-                if (close[i] > high_20[i]) and (close[i] > ema_50_12h_aligned[i]):
+            # Require Chop > 61.8 (ranging market) for mean reversion logic
+            if chop[i] > 61.8:
+                # Long entry: KAMA turning up AND RSI > 50 (bullish momentum)
+                if (kama[i] > kama[i-1]) and (rsi[i] > 50):
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < 20-period low AND price < 12h EMA50 (bearish alignment)
-                elif (close[i] < low_20[i]) and (close[i] < ema_50_12h_aligned[i]):
+                # Short entry: KAMA turning down AND RSI < 50 (bearish momentum)
+                elif (kama[i] < kama[i-1]) and (rsi[i] < 50):
                     position = -1
                     signals[i] = -0.25
     
