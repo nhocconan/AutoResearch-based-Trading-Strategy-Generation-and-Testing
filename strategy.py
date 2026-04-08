@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_rsi_divergence_weekly_trend_v1
-# Hypothesis: Use weekly trend filter (EMA200) with RSI(14) divergence on 12h timeframe to capture reversals in both bull and bear markets.
-# Long when weekly EMA200 uptrend and RSI makes higher low while price makes lower low (bullish divergence).
-# Short when weekly EMA200 downtrend and RSI makes lower high while price makes higher high (bearish divergence).
-# Exit on opposite divergence signal or when price crosses weekly EMA50.
-# Uses divergence to catch reversals with low frequency to minimize fee drag.
-# Target: 15-25 trades/year to stay within limits while capturing major reversals.
+# 1d_donchian_breakout_1w_trend_v1
+# Hypothesis: Use weekly Donchian channel breakout with daily trend filter.
+# Long when price breaks above 1-week Donchian high with bullish daily trend (price > 50-day EMA).
+# Short when price breaks below 1-week Donchian low with bearish daily trend (price < 50-day EMA).
+# Exit when price crosses opposite Donchian boundary or trend reverses.
+# Uses weekly structure to capture major trends while reducing trade frequency.
+# Target: 15-25 trades/year to minimize fee decay while capturing trend moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_rsi_divergence_weekly_trend_v1"
-timeframe = "12h"
+name = "1d_donchian_breakout_1w_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +25,27 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for Donchian channel calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate weekly Donchian channel (20-week period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Align weekly EMAs to 12h timeframe
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 20-period rolling max/min for Donchian bands
+    high_roll = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # RSI(14) on 12h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1w, high_roll)
+    donchian_low = align_htf_to_ltf(prices, df_1w, low_roll)
+    
+    # Daily trend filter: 50-period EMA
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    uptrend = close > ema50
+    downtrend = close < ema50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -56,7 +55,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(ema200_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema50[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -65,53 +65,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: bearish divergence or price crosses below weekly EMA50
-            bearish_div = False
-            if i >= 3:
-                # Check for bearish divergence: price higher high, RSI lower high
-                if high[i] > high[i-1] and high[i-1] > high[i-2] and rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]:
-                    bearish_div = True
-            if bearish_div or close[i] < ema50_1w_aligned[i]:
+            # Exit: price crosses below weekly Donchian low or trend turns bearish
+            if close[i] < donchian_low[i] or downtrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish divergence or price crosses above weekly EMA50
-            bullish_div = False
-            if i >= 3:
-                # Check for bullish divergence: price lower low, RSI higher low
-                if low[i] < low[i-1] and low[i-1] < low[i-2] and rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]:
-                    bullish_div = True
-            if bullish_div or close[i] > ema50_1w_aligned[i]:
+            # Exit: price crosses above weekly Donchian high or trend turns bullish
+            if close[i] > donchian_high[i] or uptrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Check for bullish divergence: price lower low, RSI higher low
-            bullish_div = False
-            if i >= 3:
-                if low[i] < low[i-1] and low[i-1] < low[i-2] and rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]:
-                    bullish_div = True
-            
-            # Check for bearish divergence: price higher high, RSI lower high
-            bearish_div = False
-            if i >= 3:
-                if high[i] > high[i-1] and high[i-1] > high[i-2] and rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]:
-                    bearish_div = True
-            
-            # Weekly trend filter
-            uptrend = close[i] > ema200_1w_aligned[i]
-            downtrend = close[i] < ema200_1w_aligned[i]
-            
-            # Long entry: weekly uptrend and bullish divergence
-            if bullish_div and uptrend:
+            # Long entry: price breaks above weekly Donchian high with bullish trend
+            if close[i] > donchian_high[i] and uptrend[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: weekly downtrend and bearish divergence
-            elif bearish_div and downtrend:
+            # Short entry: price breaks below weekly Donchian low with bearish trend
+            elif close[i] < donchian_low[i] and downtrend[i]:
                 position = -1
                 signals[i] = -0.25
     
