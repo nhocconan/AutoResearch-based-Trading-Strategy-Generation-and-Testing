@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
-# 4h_cci_breakout_1d_trend_volume_v2
-# Hypothesis: CCI(20) breakout with volume confirmation and 1-day EMA50 trend filter captures strong momentum moves while avoiding counter-trend trades. Reduced position size and stricter entry to lower trade frequency and avoid overtrading. Designed for both bull and bear markets by following the higher timeframe trend.
+#/usr/bin/env python3
+# 1d_1w_kama_rsi_v1
+# Hypothesis: KAMA(14) on daily captures adaptive trend while RSI(14) on weekly filters extremes. Long when KAMA trending up and weekly RSI < 70; short when KAMA trending down and weekly RSI > 30. Designed to avoid whipsaws in ranging markets and catch trends in both bull and bear regimes. Low-frequency signals target 7-25 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,70 +17,70 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # KAMA on daily (ER=10, fast=2, slow=30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros_like(change)
+    er[volatility != 0] = change[volatility != 0] / volatility[volatility != 0]
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Weekly RSI(14) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA50 to 4h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # CCI(20) calculation
-    typical_price = (high + low + close) / 3.0
-    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (typical_price - tp_ma) / (0.015 * tp_mad)
-    
-    # Volume filter: 4h volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if np.isnan(kama[i]) or np.isnan(rsi_1w_aligned[i]):
             if position != 0:
-                # Hold position until exit conditions met
                 pass
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI < +100 OR price below 1d EMA50
-            if (cci[i] < 100) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: KAMA turns down OR weekly RSI > 70 (overbought)
+            if (kama[i] < kama[i-1]) or (rsi_1w_aligned[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Reduced position size
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI > -100 OR price above 1d EMA50
-            if (cci[i] > -100) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: KAMA turns up OR weekly RSI < 30 (oversold)
+            if (kama[i] > kama[i-1]) or (rsi_1w_aligned[i] < 30):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Reduced position size
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI > +100 + volume + price > 1d EMA50
-            if (cci[i] > 100) and volume_filter[i] and (close[i] > ema_50_1d_aligned[i]):
+            # Long entry: KAMA trending up AND weekly RSI not overbought
+            if (kama[i] > kama[i-1]) and (rsi_1w_aligned[i] < 70):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: CCI < -100 + volume + price < 1d EMA50
-            elif (cci[i] < -100) and volume_filter[i] and (close[i] < ema_50_1d_aligned[i]):
+                signals[i] = 0.25
+            # Short entry: KAMA trending down AND weekly RSI not oversold
+            elif (kama[i] < kama[i-1]) and (rsi_1w_aligned[i] > 30):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
