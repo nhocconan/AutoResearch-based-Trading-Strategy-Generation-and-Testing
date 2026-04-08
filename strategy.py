@@ -1,14 +1,10 @@
-# ANALYST: Starting analysis of experiment #23052
-# Hypothesis: Combine 12h trend (EMA21) with 1d Williams fractal breakouts and volume confirmation.
-# Williams fractals identify key support/resistance levels. Breakouts in direction of 12h trend with volume
-# capture institutional moves. Works in bull/bear via trend filter. Target: 15-30 trades/year.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_fractal_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_12h_1d_fractal_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -65,12 +61,12 @@ def generate_signals(prices):
     bearish_ffilled = bearish_series.ffill().values
     bullish_ffilled = bullish_series.ffill().values
     
-    # Align to 12h with 2-bar delay for fractal confirmation (needs 2 future 1d bars)
+    # Align to 4h with 2-bar delay for fractal confirmation (needs 2 future 1d bars)
     bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_ffilled, additional_delay_bars=2)
     bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_ffilled, additional_delay_bars=2)
     
-    # Volume confirmation: volume > 1.5x average of last 12 periods (12*12h = 6 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation: volume > 1.5x average of last 24 periods (24*4h = 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
