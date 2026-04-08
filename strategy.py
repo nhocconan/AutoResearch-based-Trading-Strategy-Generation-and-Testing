@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_cci_trend_volume_v1
-# Hypothesis: CCI(20) on 12h with 1d EMA trend filter and volume confirmation captures trend reversals in both bull/bear markets.
-# Uses CCI to identify overbought/oversold conditions, EMA for trend direction, and volume to filter false signals.
-# 6h timeframe reduces trade frequency vs lower TFs while maintaining responsiveness.
+# 4h_1d_camarilla_pivot_volume_v2
+# Hypothesis: Use daily Camarilla pivot levels as support/resistance zones on 4h chart. Enter long when price touches/approaches L3 level with bullish momentum and volume confirmation, short at H3 level with bearish momentum. Uses 1d EMA200 as trend filter to avoid countertrend trades. Designed for fewer, high-quality trades in both bull and bear markets by focusing on institutional pivot levels with volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_cci_trend_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,41 +21,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for CCI calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate CCI(20) on 12h typical price
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    tp_12h = (high_12h + low_12h + close_12h) / 3.0
-    
-    # CCI components
-    tp_ma = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
-    tp_mad = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp_12h - tp_ma) / (0.015 * tp_mad)
-    # Handle division by zero
-    cci = np.where(tp_mad == 0, 0, cci)
-    
-    # Align CCI to 6h timeframe
-    cci_aligned = align_htf_to_ltf(prices, df_12h, cci)
-    
-    # Calculate EMA50 on 1d close
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    # Align to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: 6h volume > 1.3x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla formulas: range = high - low
+    # H4 = close + range * 1.1/2
+    # H3 = close + range * 1.1/4
+    # H2 = close + range * 1.1/6
+    # H1 = close + range * 1.1/12
+    # L1 = close - range * 1.1/12
+    # L2 = close - range * 1.1/6
+    # L3 = close - range * 1.1/4
+    # L4 = close - range * 1.1/2
+    daily_range = high_1d - low_1d
+    camarilla_h3 = close_1d + daily_range * 1.1 / 4
+    camarilla_l3 = close_1d - daily_range * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Trend filter: 1d EMA200
+    ema200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Volume confirmation: current volume > 1.3x average of last 10 periods
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     vol_confirm = volume > vol_ma * 1.3
+    
+    # Momentum confirmation: price change over 3 periods
+    price_change = (close - np.roll(close, 3)) / np.roll(close, 3)
+    mom_confirm_long = price_change > 0
+    mom_confirm_short = price_change < 0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -67,7 +69,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(cci_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(price_change[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -76,27 +80,35 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI crosses below +100 (overbought) OR price below EMA
-            if cci_aligned[i] < 100 or close[i] < ema50_1d_aligned[i]:
+            # Exit: price crosses below L3 level or breaks below EMA200
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above -100 (oversold) OR price above EMA
-            if cci_aligned[i] > -100 or close[i] > ema50_1d_aligned[i]:
+            # Exit: price crosses above H3 level or breaks above EMA200
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: CCI crosses above -100 from below, price above EMA, with volume confirmation
-            if cci_aligned[i] > -100 and cci_aligned[i-1] <= -100 and close[i] > ema50_1d_aligned[i] and vol_confirm[i]:
+            # Tolerance for level touch: 0.1% of price level
+            h3_tolerance = camarilla_h3_aligned[i] * 0.001
+            l3_tolerance = camarilla_l3_aligned[i] * 0.001
+            
+            # Long entry: price near L3 level, above EMA200, with bullish momentum and volume
+            if (abs(close[i] - camarilla_l3_aligned[i]) <= l3_tolerance and 
+                close[i] > ema200_1d_aligned[i] and 
+                mom_confirm_long[i] and vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI crosses below +100 from above, price below EMA, with volume confirmation
-            elif cci_aligned[i] < 100 and cci_aligned[i-1] >= 100 and close[i] < ema50_1d_aligned[i] and vol_confirm[i]:
+            # Short entry: price near H3 level, below EMA200, with bearish momentum and volume
+            elif (abs(close[i] - camarilla_h3_aligned[i]) <= h3_tolerance and 
+                  close[i] < ema200_1d_aligned[i] and 
+                  mom_confirm_short[i] and vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
     
