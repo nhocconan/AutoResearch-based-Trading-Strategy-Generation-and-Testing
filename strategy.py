@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_crossover_volume_v2
-# Hypothesis: Trade EMA20/50 crossovers on daily timeframe with volume confirmation on 4h.
-# Uses tighter entry conditions (volume > 2x 20-period average) and reduced position size (0.20)
-# to limit trades to 20-50/year. Works in bull markets (trend following) and bear markets
-# (counter-trend reversals at extremes). Target: 20-50 trades/year on 4h timeframe.
+# 1d_1w_pivot_reversal
+# Hypothesis: Trade reversals at weekly pivot levels with daily price confirmation.
+# Uses weekly Camarilla pivot levels (S3/S4 for long, R3/R4 for short) as key support/resistance.
+# Enter on daily close beyond pivot with volume confirmation, exit on opposite pivot touch.
+# Works in both bull and bear markets by fading extremes at institutional levels.
+# Target: 10-25 trades/year on daily timeframe with strict pivot-based entries.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_crossover_volume_v2"
-timeframe = "4h"
+name = "1d_1w_pivot_reversal"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,68 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA for trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align daily EMA to 4h timeframe
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    # Camarilla levels: R4 = close + ((high-low)*1.1/2), R3 = close + ((high-low)*1.1/4)
+    # S3 = close - ((high-low)*1.1/4), S4 = close - ((high-low)*1.1/2)
+    range_1w = high_1w - low_1w
+    r4 = close_1w + (range_1w * 1.1 / 2)
+    r3 = close_1w + (range_1w * 1.1 / 4)
+    s3 = close_1w - (range_1w * 1.1 / 4)
+    s4 = close_1w - (range_1w * 1.1 / 2)
     
-    # ATR for volatility and stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly pivot levels to daily timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Volume confirmation: 4h volume > 2x 20-period average (tighter)
+    # Daily volume confirmation: volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Ensure EMA50 and ATR are ready
+    start_idx = 20  # Ensure volume MA is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20_aligned[i]) or np.isnan(ema50_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition (tighter: 2x average)
-        vol_surge = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        # Volume surge condition
+        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: EMA cross down OR stoploss hit
-            if ema20_aligned[i] < ema50_aligned[i] or close[i] < ema20_aligned[i] - 2.5 * atr[i]:
+            # Exit: Touch R3 or R4 (take profit) or stop below S4
+            if close[i] >= r3_aligned[i] or close[i] <= s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA cross up OR stoploss hit
-            if ema20_aligned[i] > ema50_aligned[i] or close[i] > ema20_aligned[i] + 2.5 * atr[i]:
+            # Exit: Touch S3 or S4 (take profit) or stop above R4
+            if close[i] <= s3_aligned[i] or close[i] >= r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA cross up with volume surge
-            if ema20_aligned[i] > ema50_aligned[i] and vol_surge:
+            # Long entry: Close above S4 with volume surge (bounce from deep support)
+            if close[i] > s4_aligned[i] and vol_surge:
                 position = 1
-                signals[i] = 0.20
-            # Short entry: EMA cross down with volume surge
-            elif ema20_aligned[i] < ema50_aligned[i] and vol_surge:
+                signals[i] = 0.25
+            # Short entry: Close below R4 with volume surge (rejection at resistance)
+            elif close[i] < r4_aligned[i] and vol_surge:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
