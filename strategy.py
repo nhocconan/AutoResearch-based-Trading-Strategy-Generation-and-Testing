@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_price_channel_1d_volume_v1
-# Hypothesis: Breakout above/below 20-period price channel on 12h with volume confirmation and 1-day trend filter captures trend continuation. Works in bull/bear by following higher timeframe trend. Target: 15-25 trades/year per symbol.
+# 6h_weekly_pivot_trend_follow_v1
+# Hypothesis: Use weekly pivot points (from 1w data) to determine long-term trend direction, then take 6-hour breakouts in the direction of the weekly trend with volume confirmation. Weekly pivots provide robust support/resistance that work in both bull and bear markets. Breakouts in the direction of the weekly trend capture momentum while avoiding counter-trend trades. Volume confirmation ensures breakouts are genuine. Target: 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_price_channel_1d_volume_v1"
-timeframe = "12h"
+name = "6h_weekly_pivot_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,22 +21,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H, R2 = P+(H-L), S2 = P-(H-L)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 1d EMA50 to 12h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
     
-    # Price channel on 12h: 20-period high/low
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Trend determination: price above pivot = uptrend, below = downtrend
+    weekly_trend = np.where(close_1w > pivot, 1, -1)  # 1=uptrend, -1=downtrend
     
-    # Volume filter: 12h volume > 1.5x 20-period average
+    # Align weekly data to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    
+    # 6h Donchian breakout (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Volume filter: 6h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -44,12 +59,13 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = max(lookback, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(weekly_trend_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -58,27 +74,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price < 20-period low OR price < 1d EMA50
-            if (close[i] < low_min[i]) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: price < weekly pivot OR price < 6h low (breakdown)
+            if (close[i] < pivot_aligned[i]) or (close[i] < lowest_low[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > 20-period high OR price > 1d EMA50
-            if (close[i] > high_max[i]) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: price > weekly pivot OR price > 6h high (breakout)
+            if (close[i] > pivot_aligned[i]) or (close[i] > highest_high[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price > 20-period high + volume + price > 1d EMA50
-            if (close[i] > high_max[i]) and volume_filter[i] and (close[i] > ema_50_1d_aligned[i]):
+            # Long entry: price > 6h high (breakout) + weekly uptrend + volume
+            if (close[i] > highest_high[i]) and (weekly_trend_aligned[i] == 1) and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price < 20-period low + volume + price < 1d EMA50
-            elif (close[i] < low_min[i]) and volume_filter[i] and (close[i] < ema_50_1d_aligned[i]):
+            # Short entry: price < 6h low (breakdown) + weekly downtrend + volume
+            elif (close[i] < lowest_low[i]) and (weekly_trend_aligned[i] == -1) and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
