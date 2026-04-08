@@ -1,22 +1,22 @@
-# 4h_12h_volume_crossover_v1
-# Hypothesis: 4-hour price momentum confirmed by 12-hour volume surge and moving average crossovers.
-# Long when 4h EMA(21) crosses above EMA(55) with 12h volume > 1.5x 20-period average.
-# Short when 4h EMA(21) crosses below EMA(55) with 12h volume > 1.5x 20-period average.
-# Uses volume confirmation to avoid false breakouts and reduce whipsaw.
-# Designed for 20-40 trades/year on 4h to minimize fee drag while capturing trending moves.
-# Works in bull markets via momentum captures and bear markets via short signals.
+#!/usr/bin/env python3
+# 1d_1w_volatility_breakout_v1
+# Hypothesis: Daily volatility breakout above 1-week high/low with volume confirmation and volatility filter.
+# Long when daily close > 1-week high with volume > 1.5x 20-day average and ATR(14) > median ATR(100).
+# Short when daily close < 1-week low with volume > 1.5x 20-day average and ATR(14) > median ATR(100).
+# Designed for 10-30 trades/year on daily timeframe to minimize fee decay while capturing volatility expansion.
+# Works in bull markets via upside breakouts and bear markets via downside breakdowns.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_volume_crossover_v1"
-timeframe = "4h"
+name = "1d_1w_volatility_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,58 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h EMA(21) and EMA(55) for crossover signals
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Get 12h volume data for confirmation
-    df_12h = get_htf_data(prices, '12h')
+    # Median ATR(100) for volatility regime filter
+    atr100 = pd.Series(tr).ewm(span=100, adjust=False, min_periods=100).mean().values
+    median_atr100 = pd.Series(atr100).rolling(window=100, min_periods=100).median().values
     
-    # 12h volume moving average (20-period) for surge detection
-    vol_close_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(vol_close_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
-    vol_current_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_close_12h)
+    # Volatility filter: current ATR > median ATR
+    vol_filter = atr14 > median_atr100
+    
+    # Volume confirmation: 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1-week high/low data
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Align 1-week high/low to daily timeframe
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 55  # Ensure EMA(55) is ready
+    start_idx = 100  # Ensure ATR(100) and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema21[i]) or np.isnan(ema55[i]) or np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(vol_current_12h_aligned[i]):
+        if np.isnan(vol_ma_20[i]) or np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]) or np.isnan(vol_filter[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition: current 12h volume > 1.5x 20-period average
-        vol_surge = vol_current_12h_aligned[i] > 1.5 * vol_ma_20_12h_aligned[i] if vol_ma_20_12h_aligned[i] > 0 else False
+        # Volume surge condition
+        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: EMA(21) crosses below EMA(55)
-            if ema21[i] < ema55[i]:
+            # Exit: close below 1-week low
+            if close[i] < low_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA(21) crosses above EMA(55)
-            if ema21[i] > ema55[i]:
+            # Exit: close above 1-week high
+            if close[i] > high_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA(21) crosses above EMA(55) with volume surge
-            if ema21[i] > ema55[i] and ema21[i-1] <= ema55[i-1] and vol_surge:
+            # Long entry: close above 1-week high with volume surge and volatility filter
+            if close[i] > high_1w_aligned[i] and vol_surge and vol_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: EMA(21) crosses below EMA(55) with volume surge
-            elif ema21[i] < ema55[i] and ema21[i-1] >= ema55[i-1] and vol_surge:
+            # Short entry: close below 1-week low with volume surge and volatility filter
+            elif close[i] < low_1w_aligned[i] and vol_surge and vol_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
