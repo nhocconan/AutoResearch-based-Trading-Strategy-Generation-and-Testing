@@ -1,41 +1,20 @@
 #!/usr/bin/env python3
 """
-6h Linear Regression Channel + 1w Trend Filter + Volume Confirmation
-Hypothesis: Price reverting to linear regression trend with volume confirmation captures mean-reversion in trending markets. Uses weekly trend to filter direction and avoid counter-trend trades. Works in both bull/bear by trading mean reversion within the dominant trend.
+12h Donchian(20) breakout with 1d trend filter and volume confirmation
+Hypothesis: Price breaking Donchian channels in direction of 1d EMA(50) trend with volume spike (current > 2x 20-period avg) captures momentum. 1d trend filter reduces whipsaws, volume confirms institutional interest. Target: 15-30 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_linreg_channel_1w_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def _linreg_channel(arr, window):
-    """Linear regression channel: returns upper, lower, midline"""
-    n = len(arr)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    midline = np.full(n, np.nan)
-    
-    for i in range(window - 1, n):
-        y = arr[i - window + 1:i + 1]
-        x = np.arange(window)
-        if np.any(np.isnan(y)):
-            continue
-        slope, intercept = np.polyfit(x, y, 1)
-        y_end = slope * (window - 1) + intercept
-        y_start = intercept
-        midline[i] = (y_start + y_end) / 2
-        dev = np.std(y - (slope * x + intercept))
-        upper[i] = midline[i] + dev * 1.5
-        lower[i] = midline[i] - dev * 1.5
-    return upper, lower, midline
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -44,61 +23,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Linear regression channel (60 periods ~ 15 days on 6h)
-    lr_upper, lr_lower, lr_mid = _linreg_channel(close, 60)
-    
-    # Volume filter: current volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Volume filter: current volume > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(lr_mid[i]) or 
-            np.isnan(lr_upper[i]) or 
-            np.isnan(lr_lower[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches midline OR trend turns bearish
-            if (close[i] >= lr_mid[i] or 
-                close[i] <= ema_20_1w_aligned[i]):
+            # Exit: trend turns bearish OR price breaks below Donchian(10) low
+            donchian_low = np.min(low[max(0, i-10):i+1])
+            if (close[i] <= ema_50_1d_aligned[i] or 
+                close[i] <= donchian_low):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches midline OR trend turns bullish
-            if (close[i] <= lr_mid[i] or 
-                close[i] >= ema_20_1w_aligned[i]):
+            # Exit: trend turns bullish OR price breaks above Donchian(10) high
+            donchian_high = np.max(high[max(0, i-10):i+1])
+            if (close[i] >= ema_50_1d_aligned[i] or 
+                close[i] >= donchian_high):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price touches lower channel + uptrend + volume spike
-            if (close[i] <= lr_lower[i] and
-                close[i] >= ema_20_1w_aligned[i] and
+            # Donchian(20) channels
+            donchian_high = np.max(high[max(0, i-20):i])
+            donchian_low = np.min(low[max(0, i-20):i])
+            
+            # Long: price breaks above Donchian(20) high + volume spike + uptrend
+            if (close[i] > donchian_high and
+                close[i] > ema_50_1d_aligned[i] and
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches upper channel + downtrend + volume spike
-            elif (close[i] >= lr_upper[i] and
-                  close[i] <= ema_20_1w_aligned[i] and
+            # Short: price breaks below Donchian(20) low + volume spike + downtrend
+            elif (close[i] < donchian_low and
+                  close[i] < ema_50_1d_aligned[i] and
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
