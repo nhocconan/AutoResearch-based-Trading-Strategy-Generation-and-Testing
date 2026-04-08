@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-# 6d_donchian_weekly_pivot_volume_v1
-# Hypothesis: 6-hour Donchian(20) breakouts filtered by weekly pivot direction and volume confirmation.
-# In bull markets: Buy breakouts above weekly pivot resistance with volume.
-# In bear markets: Sell breakouts below weekly pivot support with volume.
-# Weekly pivot provides institutional reference points; volume confirms participation.
-# Target: 15-30 trades/year via tight Donchian breakout + pivot + volume confluence.
+# 4h_vwap_reversion_1d_trend_volume_v1
+# Hypothesis: Mean reversion to VWAP on 4h timeframe, filtered by 1d trend (EMA50) and volume confirmation.
+# In bull markets, buy pullbacks to VWAP in uptrend; in bear markets, sell rallies to VWAP in downtrend.
+# Volume filter ensures institutional participation, reducing false signals.
+# Target: 20-40 trades/year via VWAP reversion + 1d trend filter + volume confirmation.
 
-name = "6d_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_vwap_reversion_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,41 +23,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donchian_len = 20
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
+    # VWAP calculation (cumulative)
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.zeros_like(vwap_num), where=vwap_den!=0)
     
-    for i in range(donchian_len - 1, n):
-        upper[i] = np.max(high[i - donchian_len + 1:i + 1])
-        lower[i] = np.min(low[i - donchian_len + 1:i + 1])
+    # Price deviation from VWAP (as percentage)
+    vwap_deviation = (close - vwap) / vwap * 100
     
-    # Weekly pivot points (using weekly OHLC)
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # RSI for momentum confirmation (14-period)
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Standard pivot: P = (H + L + C)/3
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    # Resistance levels: R1 = 2*P - L, R2 = P + (H - L)
-    r1 = 2 * pivot - weekly_low
-    r2 = pivot + (weekly_high - weekly_low)
-    # Support levels: S1 = 2*P - H, S2 = P - (H - L)
-    s1 = 2 * pivot - weekly_high
-    s2 = pivot - (weekly_high - weekly_low)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
+    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    for i in range(rsi_period, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume filter: 20-period average volume
     vol_ma = np.zeros_like(volume)
     vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
     vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
+    
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    close_daily = df_daily['close'].values
+    
+    # Daily EMA (50-period) for higher timeframe trend
+    ema_period = 50
+    ema_daily = np.zeros_like(close_daily)
+    ema_daily[ema_period-1] = np.mean(close_daily[:ema_period])
+    for i in range(ema_period, len(close_daily)):
+        ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
+    
+    # Align daily EMA to 4h timeframe
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -69,7 +77,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(donchian_len, 20) + 5
+    start_idx = max(20, rsi_period, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -78,42 +86,47 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(vwap[i]) or np.isnan(vwap_deviation[i]) or 
+            np.isnan(rsi[i]) or np.isnan(ema_daily_aligned[i]) or 
+            np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
+        # Higher timeframe trend filter: price above/below daily EMA
+        uptrend_htf = close[i] > ema_daily_aligned[i]
+        downtrend_htf = close[i] < ema_daily_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit if price breaks below weekly S1 or Donchian lower
-            if close[i] < s1_aligned[i] or close[i] < lower[i]:
+            # Exit if price returns to VWAP or momentum fails
+            if vwap_deviation[i] >= 0 or rsi[i] < 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above weekly R1 or Donchian upper
-            if close[i] > r1_aligned[i] or close[i] > upper[i]:
+            # Exit if price returns to VWAP or momentum fails
+            if vwap_deviation[i] <= 0 or rsi[i] > 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Donchian breakout above upper with volume and above weekly pivot
-            if (close[i] > upper[i] and 
-                close[i] > pivot_aligned[i] and 
-                volume_filter):
+            # Long entry: price below VWAP, RSI momentum, volume, and HTF uptrend
+            if (vwap_deviation[i] < -1.0 and  # Price below VWAP by at least 1%
+                rsi[i] > 30 and rsi[i] < 50 and  # Not oversold, but bullish momentum
+                volume_filter and 
+                uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Donchian breakdown below lower with volume and below weekly pivot
-            elif (close[i] < lower[i] and 
-                  close[i] < pivot_aligned[i] and 
-                  volume_filter):
+            # Short entry: price above VWAP, RSI momentum, volume, and HTF downtrend
+            elif (vwap_deviation[i] > 1.0 and   # Price above VWAP by at least 1%
+                  rsi[i] > 50 and rsi[i] < 70 and  # Not overbought, but bearish momentum
+                  volume_filter and 
+                  downtrend_htf):
                 position = -1
                 signals[i] = -0.25
     
