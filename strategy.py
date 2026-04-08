@@ -1,47 +1,33 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_pivot_v1
-Hypothesis: Daily strategy using weekly Camarilla pivot with volume confirmation and RSI filter.
-Long when price breaks above weekly R2 with volume > 1.5x average and RSI < 70.
-Short when price breaks below weekly S2 with volume > 1.5x average and RSI > 30.
-Exit when price crosses opposite weekly level.
-Target: 10-25 trades/year per symbol to minimize fee drag while capturing meaningful moves.
-Works in both bull (breakouts) and bear (breakdowns) markets.
+12h_1d_camarilla_pivot_v2
+Hypothesis: 12-hour strategy using daily Camarilla pivot with volume confirmation.
+Long when price breaks above daily R3 with volume > 2x average and price > daily EMA50.
+Short when price breaks below daily S3 with volume > 2x average and price < daily EMA50.
+Exit when price crosses opposite daily level OR volume falls below 1.5x average.
+Uses daily pivots for stronger signal quality in both bull and bear markets.
+Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_pivot_v2"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper handling"""
-    if len(close) < period + 1:
+def calculate_ema(close, period):
+    """Calculate EMA with proper handling"""
+    if len(close) < period:
         return np.full_like(close, np.nan, dtype=float)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = np.full_like(close, 100.0, dtype=float)
-    rsi = np.where(avg_loss != 0, 100 - (100 / (1 + rs)), 100)
-    rsi[avg_loss == 0] = 100
-    rsi[avg_gain == 0] = 0
-    return rsi
+    ema = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
@@ -53,41 +39,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Pivot (using previous weekly bar's data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Pivot (using previous daily bar's data)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    # Weekly support/resistance levels (Camarilla S2/R2)
-    S2_1w = pivot_1w - (range_1w * 1.1 / 6)  # weekly S2
-    R2_1w = pivot_1w + (range_1w * 1.1 / 6)  # weekly R2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    # Daily support/resistance levels (Camarilla S3/R3)
+    S3_1d = pivot_1d - (range_1d * 1.1 / 4)  # Daily S3
+    R3_1d = pivot_1d + (range_1d * 1.1 / 4)  # Daily R3
     
-    # Align indicators to daily timeframe
-    S2_1w_aligned = align_htf_to_ltf(prices, df_1w, S2_1w)
-    R2_1w_aligned = align_htf_to_ltf(prices, df_1w, R2_1w)
+    # Calculate daily EMA for trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    
+    # Align indicators to 12-hour timeframe
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # RSI filter
-    rsi = calculate_rsi(close, 14)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(S2_1w_aligned[i]) or np.isnan(R2_1w_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(rsi[i])):
+        if (np.isnan(S3_1d_aligned[i]) or np.isnan(R3_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -96,31 +83,32 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        S2 = S2_1w_aligned[i]
-        R2 = R2_1w_aligned[i]
+        S3 = S3_1d_aligned[i]
+        R3 = R3_1d_aligned[i]
+        trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below weekly S2
-            if price < S2:
+            # Exit: price crosses below daily S3 or volume drops below 1.5x average
+            if price < S3 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above weekly R2
-            if price > R2:
+            # Exit: price crosses above daily R3 or volume drops below 1.5x average
+            if price > R3 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above weekly R2 with volume expansion and RSI not overbought
-            if price > R2 and vol_ratio > 1.5 and rsi[i] < 70:
+            # Enter long: price breaks above daily R3 with volume expansion and uptrend on daily
+            if price > R3 and vol_ratio > 2.0 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below weekly S2 with volume expansion and RSI not oversold
-            elif price < S2 and vol_ratio > 1.5 and rsi[i] > 30:
+            # Enter short: price breaks below daily S3 with volume expansion and downtrend on daily
+            elif price < S3 and vol_ratio > 2.0 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
