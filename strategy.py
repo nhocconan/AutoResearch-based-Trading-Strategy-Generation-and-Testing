@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_camarilla_weekly_pivot_v1
-Hypothesis: Combines daily Camarilla pivot levels with weekly pivot direction for 6h timeframe.
-- Long when price breaks above R3 with weekly pivot bullish and volume confirmation
-- Short when price breaks below S3 with weekly pivot bearish and volume confirmation
-- Uses Camarilla levels from daily timeframe and weekly pivot for trend filter
-- Targets 15-30 trades/year to avoid fee drag while capturing meaningful breakouts
+4h_rsi_pullback_volume_v1
+Hypothesis: RSI pullbacks with volume confirmation on 4h timeframe. Works in bull and bear markets by trading pullbacks to the mean during trends.
+- Long when RSI < 30, price above 20-period EMA, and volume > 1.5x average
+- Short when RSI > 70, price below 20-period EMA, and volume > 1.5x average
+- Uses 12h EMA trend filter to avoid counter-trend trades
+- Targets ~25 trades/year to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_weekly_pivot_v1"
-timeframe = "6h"
+name = "4h_rsi_pullback_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,67 +26,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: 1.5x 24-period average (4 days of 6h bars)
-    vol_ma_period = 24
+    # RSI calculation
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(prices, np.nan)
+        avg_loss = np.full_like(prices, np.nan)
+        
+        # Initial average
+        if len(gain) >= period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+        
+        # Wilder's smoothing
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close, 14)
+    
+    # 20-period EMA for dynamic support/resistance
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     vol_surge = np.full(n, False)
     for i in range(n):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla multipliers
-    R3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
-    S3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
-    R4 = close_1d + 1.1 * (high_1d - low_1d) * 1.5 / 2
-    S4 = close_1d - 1.1 * (high_1d - low_1d) * 1.5 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Get weekly data for pivot direction (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly pivot point: (H+L+C)/3
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3
-    
-    # Weekly trend: bullish if close > pivot, bearish if close < pivot
-    weekly_bullish = close_1w > weekly_pivot
-    weekly_bearish = close_1w < weekly_pivot
-    
-    # Align weekly trend to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    close_12h = df_12h['close'].values
+    ema_12h_series = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean()
+    ema_12h = ema_12h_series.values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(vol_ma_period, 1) + 1
+    start_idx = max(20, 19) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vol_ma[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_12h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -94,31 +91,33 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price drops below R3 or weekly turns bearish
-            if close[i] < r3_aligned[i] or weekly_bearish_aligned[i] > 0.5:
+            # Exit: RSI > 50 or price below EMA20
+            if rsi[i] > 50 or close[i] < ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price rises above S3 or weekly turns bullish
-            if close[i] > s3_aligned[i] or weekly_bullish_aligned[i] > 0.5:
+            # Exit: RSI < 50 or price above EMA20
+            if rsi[i] < 50 or close[i] > ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above R3, weekly bullish, volume surge
-            if (close[i] > r3_aligned[i] and 
-                weekly_bullish_aligned[i] > 0.5 and 
-                vol_surge[i]):
+            # Long entry: RSI < 30, price above EMA20, volume surge, 12h trend bullish
+            if (rsi[i] < 30 and 
+                close[i] > ema_20[i] and 
+                vol_surge[i] and 
+                close[i] > ema_12h_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below S3, weekly bearish, volume surge
-            elif (close[i] < s3_aligned[i] and 
-                  weekly_bearish_aligned[i] > 0.5 and 
-                  vol_surge[i]):
+            # Short entry: RSI > 70, price below EMA20, volume surge, 12h trend bearish
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_20[i] and 
+                  vol_surge[i] and 
+                  close[i] < ema_12h_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
