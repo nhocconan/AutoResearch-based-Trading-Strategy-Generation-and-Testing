@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 6h_donchian_weekly_pivot_volume_v1
-# Hypothesis: 6h Donchian breakout with weekly pivot direction and volume confirmation.
-# Long when price breaks above Donchian(20) high AND weekly pivot > prior week pivot (uptrust) AND volume > 1.5x average.
-# Short when price breaks below Donchian(20) low AND weekly pivot < prior week pivot (downtrend) AND volume > 1.5x average.
-# Uses weekly pivot to capture multi-week trend, Donchian for breakout, volume to avoid fakeouts.
-# Targets 15-30 trades/year by requiring confluence of three filters. Works in bull/bear by following weekly trend.
+# 1d_cci_trend_filter_volume_v1
+# Hypothesis: Daily CCI (20) with trend filter and volume confirmation.
+# Long: CCI crosses above -100 in uptrend (price > 200-day SMA) with volume > 1.5x average.
+# Short: CCI crosses below +100 in downtrend (price < 200-day SMA) with volume > 1.5x average.
+# Uses weekly trend filter to avoid counter-trend trades. Targets 15-25 trades/year.
+# Works in bull markets by catching pullbacks in uptrends and in bear markets by
+# catching bounces in downtrends. Volume filter reduces false signals.
 
-name = "6h_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "1d_cci_trend_filter_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,98 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # CCI calculation (20-period)
+    cci_period = 20
+    typical_price = (high + low + close) / 3.0
+    tp_mean = np.zeros_like(typical_price)
+    tp_mean[cci_period-1:] = np.convolve(typical_price, np.ones(cci_period)/cci_period, mode='valid')
+    tp_mean[:cci_period-1] = tp_mean[cci_period-1]
     
-    for i in range(lookback-1, n):
-        donchian_high[i] = np.max(high[i-lookback+1:i+1])
-        donchian_low[i] = np.min(low[i-lookback+1:i+1])
+    tp_std = np.zeros_like(typical_price)
+    for i in range(cci_period-1, len(typical_price)):
+        tp_std[i] = np.std(typical_price[i-cci_period+1:i+1])
+    tp_std[:cci_period-1] = tp_std[cci_period-1]
     
-    # Breakout signals
-    breakout_up = close > donchian_high  # price above prior 20-period high
-    breakout_down = close < donchian_low  # price below prior 20-period low
+    # Avoid division by zero
+    tp_std[tp_std == 0] = 1e-10
     
-    # Volume filter: 20-period average volume
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_ma[:19] = vol_ma[19] if not np.isnan(vol_ma[19]) else 0
+    cci = (typical_price - tp_mean) / (0.015 * tp_std)
     
-    volume_filter = volume > 1.5 * vol_ma
-    
-    # Get weekly data for trend filter (pivot trend)
+    # Weekly trend filter
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points: (H + L + C) / 3
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
     close_weekly = df_weekly['close'].values
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
     
-    # Weekly pivot trend: current pivot > prior week pivot = uptrend
-    pivot_trend_up = np.zeros(len(pivot_weekly), dtype=bool)
-    pivot_trend_down = np.zeros(len(pivot_weekly), dtype=bool)
-    for i in range(1, len(pivot_weekly)):
-        pivot_trend_up[i] = pivot_weekly[i] > pivot_weekly[i-1]
-        pivot_trend_down[i] = pivot_weekly[i] < pivot_weekly[i-1]
+    # Weekly SMA (50-period) for trend filter
+    sma_period = 50
+    sma_weekly = np.zeros_like(close_weekly)
+    sma_weekly[sma_period-1:] = np.convolve(close_weekly, np.ones(sma_period)/sma_period, mode='valid')
+    sma_weekly[:sma_period-1] = sma_weekly[sma_period-1]
     
-    # Align weekly pivot trend to 6h timeframe
-    pivot_trend_up_aligned = align_htf_to_ltf(prices, df_weekly, pivot_trend_up)
-    pivot_trend_down_aligned = align_htf_to_ltf(prices, df_weekly, pivot_trend_down)
+    # Align weekly SMA to daily timeframe
+    sma_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_weekly)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume filter: 20-day average volume
+    vol_ma = np.zeros_like(volume)
+    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
+    vol_ma[:19] = vol_ma[19]
+    
+    # Pre-compute signals
+    cci_cross_up = (cci > -100) & (np.roll(cci, 1) <= -100)  # Cross above -100
+    cci_cross_down = (cci < 100) & (np.roll(cci, 1) >= 100)  # Cross below +100
+    
+    # Trend filters
+    uptrend = close > sma_weekly_aligned
+    downtrend = close < sma_weekly_aligned
+    
+    # Volume confirmation
+    volume_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(lookback, 20) + 5
+    start_idx = max(cci_period, sma_period) + 5
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or volume[i] == 0 or
-            np.isnan(pivot_trend_up_aligned[i]) or np.isnan(pivot_trend_down_aligned[i])):
+        if (np.isnan(cci[i]) or np.isnan(sma_weekly_aligned[i]) or 
+            np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit if breakout fails or trend reverses
-            if not breakout_up[i] or not pivot_trend_up_aligned[i]:
+            # Exit if CCI crosses below +100 or trend fails
+            if cci[i] < 100 or not uptrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if breakout fails or trend reverses
-            if not breakout_down[i] or not pivot_trend_down_aligned[i]:
+            # Exit if CCI crosses above -100 or trend fails
+            if cci[i] > -100 or not downtrend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: bullish breakout, volume confirmation, and weekly uptrend
-            if (breakout_up[i] and 
-                volume_filter[i] and 
-                pivot_trend_up_aligned[i]):
+            # Long entry: CCI crosses above -100, volume confirmation, and uptrend
+            if cci_cross_up[i] and volume_filter[i] and uptrend[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish breakout, volume confirmation, and weekly downtrend
-            elif (breakout_down[i] and 
-                  volume_filter[i] and 
-                  pivot_trend_down_aligned[i]):
+            # Short entry: CCI crosses below +100, volume confirmation, and downtrend
+            elif cci_cross_down[i] and volume_filter[i] and downtrend[i]:
                 position = -1
                 signals[i] = -0.25
     
