@@ -1,89 +1,64 @@
 #!/usr/bin/env python3
-# 12h_kama_rsi_chop
-# Hypothesis: KAMA trend direction on 12h filtered by RSI momentum and Choppiness regime filter from 1d.
-# Long when KAMA is rising (trending up), RSI < 40 (pullback in uptrend), and 1d Choppiness > 61.8 (range-bound market).
-# Short when KAMA is falling (trending down), RSI > 60 (pullback in downtrend), and 1d Choppiness > 61.8.
-# Uses mean-reversion within higher timeframe trend, optimized for choppy markets like 2025. Target: 15-30 trades/year (~60-120 total over 4 years).
+# 4h_rsi_ema_crossover_1d_trend_volume_v3
+# Hypothesis: RSI(14) EMA(21) crossover on 4h filtered by 1d EMA50 trend and volume confirmation (1.5x avg).
+# Long when RSI crosses above EMA with uptrend (price > 1d EMA50) and volume > 1.5x average.
+# Short when RSI crosses below EMA with downtrend (price < 1d EMA50) and volume > 1.5x average.
+# Uses momentum confirmation with trend filter to reduce whipsaw. Target: 25-40 trades/year (~100-160 total).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_kama_rsi_chop"
-timeframe = "12h"
+name = "4h_rsi_ema_crossover_1d_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for regime filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h KAMA (trend filter)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[30] = close[30]  # seed
-    for i in range(31, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate 12h RSI (momentum filter)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi])  # align with close
+    rsi = rsi.fillna(0).values
     
-    # Calculate 1d Choppiness Index (regime filter)
-    atr = np.zeros_like(close_1d)
-    tr1 = np.abs(np.subtract(high_1d[1:], low_1d[1:]))
-    tr2 = np.abs(np.subtract(high_1d[1:], close_1d[:-1]))
-    tr3 = np.abs(np.subtract(low_1d[1:], close_1d[:-1]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align indices
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA(21) of RSI
+    rsi_ema = pd.Series(rsi).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = np.zeros_like(close_1d)
-    mask = (max_high - min_low) != 0
-    chop[mask] = 100 * np.log10(np.sum(tr[-14:], axis=1) / np.log(10) / 14) / np.log10(max_high[mask] - min_low[mask])
-    chop = np.concatenate([np.full(14, np.nan), chop])  # align with close_1d
-    
-    # Align 1d indicators to 12h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate average volume for confirmation (20-period)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(rsi_ema[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -92,30 +67,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: KAMA turns down OR RSI > 50 (exit pullback)
-            if (kama[i] < kama[i-1]) or (rsi[i] > 50):
+            # Exit: RSI crosses below EMA OR trend turns against us
+            if (rsi[i] < rsi_ema[i]) or (close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: KAMA turns up OR RSI < 50 (exit pullback)
-            if (kama[i] > kama[i-1]) or (rsi[i] < 50):
+            # Exit: RSI crosses above EMA OR trend turns against us
+            if (rsi[i] > rsi_ema[i]) or (close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Chop filter: market must be choppy (range-bound) for mean reversion
-            chop_ok = chop_aligned[i] > 61.8
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: KAMA rising (uptrend), RSI < 40 (oversold pullback), choppy market
-            if (kama[i] > kama[i-1]) and (rsi[i] < 40) and chop_ok:
+            # Long entry: RSI crosses above EMA with uptrend and volume confirmation
+            if (rsi[i] > rsi_ema[i]) and (rsi[i-1] <= rsi_ema[i-1]) and (close[i] > ema_50_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: KAMA falling (downtrend), RSI > 60 (overbought pullback), choppy market
-            elif (kama[i] < kama[i-1]) and (rsi[i] > 60) and chop_ok:
+            # Short entry: RSI crosses below EMA with downtrend and volume confirmation
+            elif (rsi[i] < rsi_ema[i]) and (rsi[i-1] >= rsi_ema[i-1]) and (close[i] < ema_50_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
