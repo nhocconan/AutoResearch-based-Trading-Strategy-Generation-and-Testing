@@ -1,21 +1,16 @@
 # Strategy: adx_kama_rsi_volume_30m_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.125 | Return=+47.5% | DD=-25.5%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.374 | +4.9% | -20.4% | 154 |
-| ETHUSDT | -0.316 | +2.4% | -26.9% | 58 |
-| SOLUSDT | 1.066 | +135.3% | -29.2% | 18 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.533 | -1.0% | -22.8% | 172 | DISCARD |
+| ETHUSDT | -0.303 | +3.0% | -26.5% | 58 | DISCARD |
+| SOLUSDT | 0.928 | +116.8% | -29.2% | 24 | KEEP |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.509 | -6.2% | -10.5% | 90 |
-| ETHUSDT | -0.841 | -4.1% | -17.2% | 70 |
-| SOLUSDT | -1.422 | -16.2% | -21.8% | 137 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| SOLUSDT | -0.664 | -3.6% | -15.2% | 28 | DISCARD |
 
 ## Code
 ```python
@@ -490,4 +485,4 @@ def calculate_hma(close, period=21):
 ```
 
 ## Last Updated
-2026-03-21 19:15
+2026-04-07 04:13

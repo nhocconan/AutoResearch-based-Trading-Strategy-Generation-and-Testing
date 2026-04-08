@@ -1,21 +1,15 @@
 # Strategy: kama_supertrend_rsi_volfilter_1h_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.135 | Return=+54.6% | DD=-19.9%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.595 | +2.0% | -14.3% | 43 |
-| ETHUSDT | -0.199 | +9.7% | -16.2% | 68 |
-| SOLUSDT | 1.200 | +152.1% | -29.0% | 2 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.578 | +2.5% | -14.1% | 43 | DISCARD |
+| ETHUSDT | -0.182 | +10.5% | -16.2% | 68 | DISCARD |
+| SOLUSDT | 1.201 | +152.1% | -29.0% | 2 | DISCARD |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.843 | -8.3% | -10.9% | 68 |
-| ETHUSDT | -0.055 | +4.7% | -8.4% | 63 |
-| SOLUSDT | -0.866 | -6.0% | -11.9% | 53 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -434,4 +428,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 18:52
+2026-04-07 04:13

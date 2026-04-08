@@ -1,21 +1,17 @@
 # Strategy: kama_stochrsi_adx_pullback_1h_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.318 | Return=+59.0% | DD=-19.5%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.186 | +14.7% | -12.6% | 36 |
-| ETHUSDT | -0.008 | +19.0% | -17.0% | 48 |
-| SOLUSDT | 1.148 | +143.4% | -29.0% | 12 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.173 | +15.1% | -12.5% | 36 | DISCARD |
+| ETHUSDT | 0.003 | +19.5% | -16.9% | 48 | KEEP |
+| SOLUSDT | 1.149 | +143.7% | -29.0% | 12 | KEEP |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.931 | -10.4% | -11.0% | 55 |
-| ETHUSDT | -2.411 | -20.9% | -23.7% | 47 |
-| SOLUSDT | -0.712 | -4.4% | -14.4% | 50 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | -2.438 | -22.5% | -23.9% | 45 | DISCARD |
+| SOLUSDT | -0.800 | -4.8% | -11.8% | 10 | DISCARD |
 
 ## Code
 ```python
@@ -527,4 +523,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 18:56
+2026-04-07 04:13

@@ -24,6 +24,7 @@ if _env_file.exists():
         os.environ.setdefault(key.strip(), value.strip())
 
 from llm_client import LLMClient
+from research_rules import MAX_ALLOWED_DRAWDOWN_PCT, TRAIN_MIN_TRADES
 
 DB_FILE = Path("results.db")
 PROGRAM_MD = Path("program.md")
@@ -114,11 +115,11 @@ def summarize_recent_failures(rows: list[sqlite3.Row]) -> dict[str, int]:
         thresh = OVERTRADE_THRESH.get(tf, 500)
         if trades > thresh:
             buckets["overtrading"] += 1
-        elif trades < 50:
+        elif trades < TRAIN_MIN_TRADES:
             buckets["too_few_trades"] += 1
         elif sharpe <= 0:
             buckets["negative_sharpe"] += 1
-        elif max_dd <= -50:
+        elif max_dd <= MAX_ALLOWED_DRAWDOWN_PCT:
             buckets["deep_drawdown"] += 1
         else:
             buckets["other"] += 1

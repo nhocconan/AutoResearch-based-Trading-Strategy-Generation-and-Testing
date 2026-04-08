@@ -1,21 +1,18 @@
 # Strategy: bb_regime_supertrend_rsi_ensemble_1h_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.563 | Return=+125.3% | DD=-30.5%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | 0.061 | +22.0% | -23.0% | 72 |
-| ETHUSDT | 0.294 | +40.2% | -25.7% | 32 |
-| SOLUSDT | 1.333 | +313.8% | -42.8% | 6 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.076 | +22.9% | -22.8% | 72 | KEEP |
+| ETHUSDT | 0.299 | +40.6% | -25.7% | 32 | KEEP |
+| SOLUSDT | 1.334 | +314.0% | -42.9% | 6 | KEEP |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.045 | -6.5% | -14.8% | 62 |
-| ETHUSDT | -0.389 | -2.8% | -17.0% | 66 |
-| SOLUSDT | -0.514 | -7.3% | -21.7% | 67 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.939 | -4.8% | -12.7% | 1 | DISCARD |
+| ETHUSDT | -0.158 | +1.6% | -17.0% | 52 | DISCARD |
+| SOLUSDT | -0.451 | -5.1% | -19.8% | 26 | DISCARD |
 
 ## Code
 ```python
@@ -439,4 +436,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 19:11
+2026-04-07 04:13

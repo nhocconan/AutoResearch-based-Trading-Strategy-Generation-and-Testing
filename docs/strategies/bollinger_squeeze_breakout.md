@@ -1,14 +1,15 @@
 # Strategy: bollinger_squeeze_breakout
 
-## Status
-ACTIVE - Sharpe=-1.221 | Return=+1.3% | DD=-8.4%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.906 | -1.9% | -6.9% | 78 |
-| ETHUSDT | -0.744 | +10.1% | -5.5% | 97 |
-| SOLUSDT | -1.011 | -4.3% | -12.8% | 186 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -1.751 | -0.1% | -6.0% | 78 | DISCARD |
+| ETHUSDT | -0.573 | +12.6% | -5.3% | 97 | DISCARD |
+| SOLUSDT | -0.836 | -0.3% | -10.2% | 186 | DISCARD |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -513,4 +514,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-20 19:56
+2026-04-07 04:13

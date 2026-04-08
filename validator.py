@@ -26,8 +26,11 @@ REQUIRED_FIELDS = ["name", "timeframe", "leverage", "generate_signals"]
 VALID_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "6h", "12h", "1d", "1w"]  # 1m excluded: too noisy
 MAX_LEVERAGE = 5.0
 
+_FILE_VALIDATION_CACHE: dict[tuple[str, int, int], "ValidationResult"] = {}
+
 LOOK_AHEAD_PATTERNS = [
     (r"\.shift\s*\(\s*-\s*\d+", "Negative .shift(-n) detected — reads future bars (look-ahead bias)"),
+    (r"np\.roll\s*\([^,\n]+,\s*-\s*\d+", "Negative np.roll(..., -n) detected — shifts future values into the past"),
     (r"prices\.iloc\s*\[(?:[^]]*?)i\s*\+", "Future index prices.iloc[i+...] detected (look-ahead bias)"),
     (r"prices\s*\[\s*i\s*\+", "Future index prices[i+...] detected (look-ahead bias)"),
     (r"\.rolling\s*\([^)]*min_periods\s*=\s*0", "rolling(min_periods=0) may include incomplete windows"),
@@ -77,6 +80,29 @@ RUNTIME_ERROR_PATTERNS = [
      "TypeError: prices.index / N divides datetime64 — use integer loop variable instead"),
     (r"['\"]open_time['\"]\s*\]\s*/[^/=]",
      "TypeError: open_time / N divides datetime64 — use integer index instead"),
+]
+
+EXECUTION_MODEL_PATTERNS = [
+    (
+        r"entry_price\s*=\s*close\s*\[\s*i\s*\]",
+        "Execution-model violation: entry_price = close[i] simulates fills inside the strategy. "
+        "The engine fills at t+1 open.",
+    ),
+    (
+        r"if\s+low\s*\[\s*i\s*\]\s*[<>]=?\s*stop_level",
+        "Execution-model violation: intrabar low[i] stop simulation detected. "
+        "Do not simulate stop fills inside generate_signals(); emit target positions only.",
+    ),
+    (
+        r"if\s+high\s*\[\s*i\s*\]\s*[<>]=?\s*stop_level",
+        "Execution-model violation: intrabar high[i] stop simulation detected. "
+        "Do not simulate stop fills inside generate_signals(); emit target positions only.",
+    ),
+    (
+        r"stop_level\s*=",
+        "Execution-model violation: manual stop_level management detected inside strategy code. "
+        "Use close-based target-position logic or extend the engine instead.",
+    ),
 ]
 
 
@@ -151,7 +177,13 @@ def validate_strategy(code: str) -> ValidationResult:
             result.errors.append(msg)
             result.valid = False
 
-    # --- 3e. Undefined bare variables that cause NameError at runtime ---
+    # --- 3e. Engine/execution-model violations ---
+    for pattern, msg in EXECUTION_MODEL_PATTERNS:
+        if re.search(pattern, code):
+            result.errors.append(msg)
+            result.valid = False
+
+    # --- 3f. Undefined bare variables that cause NameError at runtime ---
     _check_undefined_bare_names(code, result)
 
     # --- 4. AST: extract metadata values ---
@@ -278,12 +310,29 @@ def _check_undefined_bare_names(code: str, result: ValidationResult):
 def validate_file(path: str) -> ValidationResult:
     """Validate a strategy file."""
     try:
-        code = Path(path).read_text()
-        return validate_strategy(code)
+        path_obj = Path(path)
+        stat = path_obj.stat()
+        cache_key = (str(path_obj.resolve()), stat.st_mtime_ns, stat.st_size)
+        cached = _FILE_VALIDATION_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        code = path_obj.read_text()
+        result = validate_strategy(code)
+        _FILE_VALIDATION_CACHE.clear()
+        _FILE_VALIDATION_CACHE[cache_key] = result
+        return result
     except FileNotFoundError:
         r = ValidationResult(valid=False)
         r.errors.append(f"File not found: {path}")
         return r
+
+
+def summarize_validation_errors(result: ValidationResult, limit: int = 5) -> str:
+    """Compact one-line error summary for CLI/logging."""
+    if result.valid or not result.errors:
+        return "ok"
+    return "; ".join(result.errors[:limit])
 
 
 def _extract_constant(node) -> object:

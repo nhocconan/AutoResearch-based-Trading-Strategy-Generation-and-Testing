@@ -1,21 +1,16 @@
 # Strategy: keltner_squeeze_breakout_4h_trend_1h_v1
 
-## Status
-ACTIVE - Sharpe=0.168 | Return=+50.0% | DD=-18.1%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.270 | +13.5% | -10.7% | 28 |
-| ETHUSDT | -0.276 | +9.3% | -14.7% | 69 |
-| SOLUSDT | 1.051 | +127.2% | -29.0% | 7 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.260 | +13.7% | -10.6% | 28 | DISCARD |
+| ETHUSDT | -0.259 | +9.9% | -14.3% | 69 | DISCARD |
+| SOLUSDT | 1.052 | +127.4% | -29.0% | 7 | KEEP |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -2.154 | -4.5% | -6.6% | 56 |
-| ETHUSDT | -1.845 | -9.0% | -9.6% | 53 |
-| SOLUSDT | -1.026 | -4.2% | -10.0% | 42 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| SOLUSDT | -1.049 | -7.4% | -13.7% | 8 | DISCARD |
 
 ## Code
 ```python
@@ -469,4 +464,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 18:47
+2026-04-07 04:13

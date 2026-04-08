@@ -53,14 +53,15 @@ def generate_signals(prices):
     teeth = smma(close, 8)  # Red line
     lips = smma(close, 5)   # Green line
     
-    # Shift forward as per Alligator definition
-    jaw = np.roll(jaw, -8)
-    teeth = np.roll(teeth, -5)
-    lips = np.roll(lips, -3)
-    # NaN out the shifted values at the end
-    jaw[-8:] = np.nan
-    teeth[-5:] = np.nan
-    lips[-3:] = np.nan
+    # Bill Williams plots the Alligator forward for visualization.
+    # For causal trading logic we must instead use the value that would be
+    # visible on bar i, which is the older SMMA value shifted into bar i.
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
     # === 6h Indicators: Elder Ray (Bull/Bear Power) ===
     # Bull Power = High - EMA13

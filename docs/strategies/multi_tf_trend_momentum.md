@@ -1,14 +1,15 @@
 # Strategy: multi_tf_trend_momentum
 
-## Status
-ACTIVE - Sharpe=0.291 | Return=+520.7% | DD=-76.9%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.682 | -92.7% | -93.4% | 4270 |
-| ETHUSDT | 0.369 | +15.6% | -76.2% | 5006 |
-| SOLUSDT | 1.187 | +1639.1% | -61.0% | 6425 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.269 | -77.3% | -83.7% | 4270 | DISCARD |
+| ETHUSDT | 0.739 | +265.1% | -64.1% | 5006 | DISCARD |
+| SOLUSDT | 1.464 | +4618.7% | -57.9% | 6425 | DISCARD |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -451,4 +452,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-20 20:07
+2026-04-07 04:42

@@ -1,21 +1,16 @@
 # Strategy: kama_supertrend_momentum_1h_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.492 | Return=+145.5% | DD=-34.0%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.061 | +14.0% | -24.0% | 71 |
-| ETHUSDT | 0.303 | +43.4% | -27.1% | 64 |
-| SOLUSDT | 1.234 | +379.1% | -50.8% | 5 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.044 | +15.1% | -23.4% | 71 | DISCARD |
+| ETHUSDT | 0.313 | +44.5% | -27.1% | 64 | KEEP |
+| SOLUSDT | 1.234 | +379.4% | -50.8% | 5 | DISCARD |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.385 | -11.4% | -14.4% | 118 |
-| ETHUSDT | -0.827 | -11.8% | -21.0% | 88 |
-| SOLUSDT | -0.345 | -4.6% | -20.1% | 66 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | -0.495 | -6.2% | -20.9% | 65 | DISCARD |
 
 ## Code
 ```python
@@ -425,4 +420,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 19:01
+2026-04-07 04:13

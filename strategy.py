@@ -1,176 +1,122 @@
 #!/usr/bin/env python3
-"""
-Experiment #275: 6h Ichimoku Cloud + 1d Weekly Trend Filter + Volume Spike
-HYPOTHESIS: Ichimoku TK cross (Tenkan/Kijun) signals aligned with 1d weekly trend (price above/below weekly Kumo) capture high-probability trend continuation. Volume confirmation (>2.0x average) filters false signals. Works in bull via cloud breakouts, bear via cloud rejections. Target: 75-150 total trades over 4 years (19-38/year). Uses discrete sizing (0.25) to minimize fee drag.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_275_6h_ichimoku_1d_weekly_trend_vol_v1"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
+# Uses 20-period Donchian channels from 1d data for trend direction and breakout levels.
+# Filters by 1d ADX > 25 for trend strength and volume > 1.3x 20-period average.
+# In trending markets (ADX>25): breakout continuation at Donchian breakout levels.
+# In ranging markets (ADX<=25): no trades to avoid whipsaw.
+# Designed to capture strong trends while avoiding choppy markets.
+# Target: 20-40 trades/year via Donchian + trend + volume confluence.
+
+name = "4h_donchian_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
-    high = prices["high"].values.astype(np.float64)
-    low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
-    n = len(close)
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
     
-    # === HTF: 1d data for weekly Ichimoku (Call ONCE before loop) ===
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get 1d data for Donchian channels and ADX (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Ichimoku components on 1d data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = df_1d['high'].rolling(window=9, min_periods=9).max()
-    period9_low = df_1d['low'].rolling(window=9, min_periods=9).min()
-    tenkan_sen = (period9_high + period9_low) / 2.0
+    # Calculate 20-period Donchian channels on 1d data
+    # Upper channel = highest high over 20 periods
+    # Lower channel = lowest low over 20 periods
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = df_1d['high'].rolling(window=26, min_periods=26).max()
-    period26_low = df_1d['low'].rolling(window=26, min_periods=26).min()
-    kijun_sen = (period26_high + period26_low) / 2.0
+    # Calculate 14-period ADX for trend strength on 1d data
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0).shift(26)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods ahead
-    period52_high = df_1d['high'].rolling(window=52, min_periods=52).max()
-    period52_low = df_1d['low'].rolling(window=52, min_periods=52).min()
-    senkou_span_b = ((period52_high + period52_low) / 2.0).shift(52)
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Chikou Span (Lagging Span): Close shifted -22 periods (not used for trend filter)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # === 6h Indicators: Ichimoku TK Cross ===
-    # Tenkan-sen (6h): (9-period high + 9-period low)/2
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max()
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan_6h = (period9_high_6h + period9_low_6h) / 2.0
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Kijun-sen (6h): (26-period high + 26-period low)/2
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max()
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun_6h = (period26_high_6h + period26_low_6h) / 2.0
-    
-    # === 6h Indicators: ATR(14) for stoploss ===
-    tr_6h = np.zeros(n)
-    tr_6h[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.zeros(n)
-    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0
-    
-    # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    position = 0  # 1=long, -1=short, 0=flat
     
-    # Position tracking state variables
-    in_position = False
-    position_side = 0
-    entry_price = 0.0
-    bars_since_entry = 0
+    # Start from sufficient lookback
+    start_idx = 60  # Need 20 for Donchian + 14 for ADX + buffer
     
-    warmup = 100  # Enough for Ichimoku calculations (52-period + 26 shift)
-    
-    for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(span_a_aligned[i]) or np.isnan(span_b_aligned[i])):
+    for i in range(start_idx, n):
+        # Skip if any required data is NaN
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        # Get aligned 1d values for current 4h bar
+        high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)[i]
+        low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)[i]
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # Regime filter: only trade in trending markets
+        trending = adx_aligned > 25
         
-        # --- 6h Ichimoku TK Cross ---
-        tk_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
-        tk_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirm = volume[i] > 1.3 * vol_avg_20[i]
         
-        # --- 1d Weekly Trend Filter: Price relative to Kumo (Cloud) ---
-        # Bullish trend: price above both Senkou Span A and B
-        # Bearish trend: price below both Senkou Span A and B
-        bullish_trend = price > span_a_aligned[i] and price > span_b_aligned[i]
-        bearish_trend = price < span_a_aligned[i] and price < span_b_aligned[i]
-        
-        # --- Exit Logic (ATR-based stoploss) ---
-        if in_position:
-            bars_since_entry += 1
-            
-            if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
-                if low[i] < stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on TK cross down with volume if bearish trend
-                if tk_cross_down and volume_spike and bearish_trend:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
-                if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on TK cross up with volume if bullish trend
-                if tk_cross_up and volume_spike and bullish_trend:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            
-            if bars_since_entry < 2:
-                signals[i] = position_side * SIZE
-                continue
-            
-            signals[i] = position_side * SIZE
-            continue
-        
-        # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike + TK cross + trend alignment
-        if volume_spike:
-            # Long: TK cross up AND bullish trend (price above cloud)
-            if tk_cross_up and bullish_trend:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: TK cross down AND bearish trend (price below cloud)
-            elif tk_cross_down and bearish_trend:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
+        if position == 1:  # Long position
+            # Exit conditions: close below lower Donchian channel
+            if close[i] < low_20_aligned:
+                position = 0
                 signals[i] = 0.0
-        else:
-            signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit conditions: close above upper Donchian channel
+            if close[i] > high_20_aligned:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Only trade with volume confirmation and in trending markets
+            if volume_confirm and trending:
+                # Breakout entry: long on break above upper channel, short on break below lower channel
+                if close[i] > high_20_aligned:  # Bullish breakout
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < low_20_aligned:  # Bearish breakout
+                    position = -1
+                    signals[i] = -0.25
     
     return signals

@@ -1,14 +1,15 @@
 # Strategy: multi_tf_trend_volume
 
-## Status
-ACTIVE - Sharpe=0.000 | Return=-97.3% | DD=-98.3%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | 0.000 | -97.1% | -97.7% | 6371 |
-| ETHUSDT | 0.000 | -97.1% | -99.0% | 6788 |
-| SOLUSDT | 0.000 | -97.6% | -98.2% | 7742 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.461 | -87.3% | -92.4% | 6371 | DISCARD |
+| ETHUSDT | -0.227 | -85.8% | -96.4% | 6788 | DISCARD |
+| SOLUSDT | -0.027 | -87.1% | -92.5% | 7742 | DISCARD |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -280,4 +281,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-20 19:42
+2026-04-07 04:42

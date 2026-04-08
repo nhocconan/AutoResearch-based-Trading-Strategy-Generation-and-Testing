@@ -15,9 +15,12 @@ from pathlib import Path
 
 from backtest import run_strategy_backtest
 from evaluate import compute_metrics, metrics_to_tsv_row
+from research_rules import test_symbol_pass, train_symbol_pass
 from results_db import upsert_results, delete_strategy, metrics_to_db_dict
+from validator import validate_file
 
 STRATEGIES_DIR = Path("strategies")
+DOCS_DIR = Path("docs/strategies")
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
@@ -36,9 +39,7 @@ def revalidate_strategy(strategy_path: str, symbols: list, commit: str) -> list[
     rows = []
     strategy_name = Path(strategy_path).stem
 
-    # Train first — early stop if first symbol fails
-    train_rows = []
-    train_pass = True
+    train_passed_symbols = []
     for symbol in symbols:
         try:
             result = run_strategy_backtest(strategy_path=strategy_path, symbol=symbol, period="train")
@@ -46,43 +47,37 @@ def revalidate_strategy(strategy_path: str, symbols: list, commit: str) -> list[
             sharpe = m["sharpe_ratio"]
             trades = m["num_trades"]
             dd = m["max_drawdown_pct"]
-            status = "keep" if sharpe > 0 and trades >= 5 and dd > -50 else "discard"
-            train_rows.append(metrics_to_db_dict(m, strategy_name, symbol, commit, status, f"revalidated {strategy_name}", "train"))
+            status = "keep" if train_symbol_pass(m) else "discard"
+            rows.append(metrics_to_db_dict(m, strategy_name, symbol, commit, status, f"revalidated {strategy_name}", "train"))
             print(f"  {symbol:8s} train Sharpe={sharpe:7.3f} Return={m['total_return_pct']:+10.1f}% DD={dd:7.1f}% Trades={trades:5d} [{status}]")
-            if sharpe <= 0 or trades < 5:
-                print(f"  → EARLY STOP train: {symbol} failed (Sharpe={sharpe:.3f} trades={trades})")
-                train_pass = False
-                break
+            if status == "keep":
+                train_passed_symbols.append(symbol)
+            else:
+                print(f"  {symbol:8s} test  SKIP: train failed")
         except Exception as e:
             print(f"  {symbol:8s} train ERROR: {e}")
-            train_pass = False
-            break
 
-    rows.extend(train_rows)
-
-    # Only run test if ALL train symbols passed
-    if not train_pass:
-        print(f"  → SKIP test (train failed)")
-        return rows
-
-    for symbol in symbols:
+    for symbol in train_passed_symbols:
         try:
             result = run_strategy_backtest(strategy_path=strategy_path, symbol=symbol, period="test")
             m = compute_metrics(result)
             sharpe = m["sharpe_ratio"]
             trades = m["num_trades"]
             dd = m["max_drawdown_pct"]
-            status = "keep" if sharpe > 0 and trades >= 3 and dd > -50 else "discard"
+            status = "keep" if test_symbol_pass(m) else "discard"
             rows.append(metrics_to_db_dict(m, strategy_name, symbol, commit, status, f"revalidated {strategy_name}", "test"))
             print(f"  {symbol:8s} test  Sharpe={sharpe:7.3f} Return={m['total_return_pct']:+10.1f}% DD={dd:7.1f}% Trades={trades:5d} [{status}]")
-            if sharpe <= 0 or trades < 3:
-                print(f"  → EARLY STOP test: {symbol} failed")
-                break
         except Exception as e:
             print(f"  {symbol:8s} test  ERROR: {e}")
-            break
 
     return rows
+
+
+def purge_invalid_strategy(strategy_name: str) -> None:
+    delete_strategy(strategy_name)
+    doc_path = DOCS_DIR / f"{strategy_name}.md"
+    if doc_path.exists():
+        doc_path.unlink()
 
 
 def main():
@@ -106,19 +101,33 @@ def main():
     print(f"{'=' * 70}")
 
     all_rows = []
+    refreshed_strategies = set()
     for path in paths:
         if not path.exists():
             print(f"\nSkipping {path} (not found)")
             continue
         print(f"\n{path.stem}:")
-        if args.strategy:
-            # Single strategy: remove old rows then insert fresh ones
-            delete_strategy(path.stem)
+        validation = validate_file(str(path))
+        if not validation.valid:
+            purge_invalid_strategy(path.stem)
+            print("  INVALID: purged stored rows/docs and skipped backtest")
+            for error in validation.errors[:5]:
+                print(f"    - {error}")
+            continue
+
+        # Remove old rows before inserting fresh ones so invalid/stale rows cannot survive.
+        delete_strategy(path.stem)
         rows = revalidate_strategy(str(path), SYMBOLS, commit)
         all_rows.extend(rows)
+        if rows:
+            refreshed_strategies.add(path.stem)
 
     # Write to SQLite (upsert replaces existing rows for full rebuild)
     upsert_results(all_rows)
+    if refreshed_strategies:
+        from verification_remediation import refresh_strategy_doc
+        for strategy_name in sorted(refreshed_strategies):
+            refresh_strategy_doc(strategy_name)
     print(f"\n{'=' * 70}")
     print(f"Upserted {len(all_rows)} rows into results.db")
 

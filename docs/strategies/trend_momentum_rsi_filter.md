@@ -1,14 +1,15 @@
 # Strategy: trend_momentum_rsi_filter
 
-## Status
-ACTIVE - Sharpe=-0.990 | Return=-81.9% | DD=-96.1%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -2.620 | -99.8% | -99.8% | 4889 |
-| ETHUSDT | -0.595 | -91.6% | -96.4% | 4889 |
-| SOLUSDT | 0.245 | -54.2% | -91.9% | 5291 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -1.612 | -98.3% | -98.4% | 4889 | DISCARD |
+| ETHUSDT | 0.224 | -15.2% | -80.3% | 4889 | DISCARD |
+| SOLUSDT | 0.815 | +333.2% | -73.5% | 5291 | DISCARD |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -403,4 +404,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-20 19:53
+2026-04-07 04:43

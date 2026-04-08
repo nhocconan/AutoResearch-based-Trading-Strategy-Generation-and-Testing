@@ -27,12 +27,76 @@ from llm_client import LLMClient, LLMTimeoutError
 from evaluate import compute_metrics
 from backtest import run_strategy_backtest
 from prepare import load_config
-from results_db import append_results, query_best_kept_sharpe  # noqa: F401
+from research_rules import (
+    MAX_ALLOWED_DRAWDOWN_PCT,
+    TEST_MIN_SHARPE,
+    TEST_MIN_TRADES,
+    TRAIN_MIN_SHARPE,
+    TRAIN_MIN_TRADES,
+    test_symbol_pass,
+    train_symbol_pass,
+)
+from results_db import append_results, query_best_kept_sharpe, query_last_experiment_num  # noqa: F401
+from validator import validate_strategy as shared_validate_strategy, summarize_validation_errors
 
 
 STRATEGY_FILE = Path("strategy.py")
 STRATEGIES_DIR = Path("strategies")
 DOCS_DIR = Path("docs/strategies")
+STATE_FILE = Path("logs/agent_research_state.json")
+SELF_IMPROVEMENT_SCRIPT = Path("auto_concept_research.sh")
+SELF_IMPROVEMENT_SUCCESS_STAMP = Path("logs/auto_concept_research.last_success")
+SELF_IMPROVEMENT_INPUTS = [
+    Path("docs/latest_strategy_discovery.md"),
+    Path("docs/auto_research_review.md"),
+    SELF_IMPROVEMENT_SUCCESS_STAMP,
+]
+SELF_IMPROVEMENT_STALE_AFTER_S = 12 * 3600
+SELF_IMPROVEMENT_RETRY_AFTER_S = 30 * 60
+_last_self_improvement_trigger_at = 0.0
+
+
+def load_research_state() -> dict:
+    """Load persisted loop state so restarts resume from the right experiment number."""
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(STATE_FILE.read_text())
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_research_state(
+    *,
+    status: str,
+    current_experiment_num: int,
+    next_experiment_num: int,
+    last_completed_experiment_num: int,
+    last_strategy_name: str = "",
+) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "current_experiment_num": int(current_experiment_num),
+        "next_experiment_num": int(next_experiment_num),
+        "last_completed_experiment_num": int(last_completed_experiment_num),
+        "last_strategy_name": last_strategy_name,
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    STATE_FILE.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def resolve_start_experiment_num(state: dict) -> int:
+    """Choose the next experiment number using both DB history and local state."""
+    db_next = query_last_experiment_num() + 1
+    state_next = int(state.get("next_experiment_num") or 1)
+    current_running = int(state.get("current_experiment_num") or 0)
+    if state.get("status") == "running" and current_running > 0:
+        return max(db_next, current_running)
+    return max(db_next, state_next, 1)
 
 
 def read_file(path: str) -> str:
@@ -41,6 +105,37 @@ def read_file(path: str) -> str:
 
 def write_strategy(code: str):
     STRATEGY_FILE.write_text(code)
+
+
+def maybe_trigger_self_improvement_cycle() -> None:
+    """Keep the concept-discovery loop alive even if cron misses a run."""
+    global _last_self_improvement_trigger_at
+
+    now = time.time()
+    if now - _last_self_improvement_trigger_at < SELF_IMPROVEMENT_RETRY_AFTER_S:
+        return
+
+    due = False
+    for path in SELF_IMPROVEMENT_INPUTS:
+        if not path.exists() or now - path.stat().st_mtime > SELF_IMPROVEMENT_STALE_AFTER_S:
+            due = True
+            break
+    if not due or not SELF_IMPROVEMENT_SCRIPT.exists():
+        return
+
+    _last_self_improvement_trigger_at = now
+    try:
+        with open("auto_concept_research.log", "a", encoding="utf-8") as log_fh:
+            subprocess.Popen(
+                ["bash", str(SELF_IMPROVEMENT_SCRIPT)],
+                cwd=str(Path(__file__).resolve().parent),
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        print("  [SELF-IMPROVE] stale concept inputs detected — triggered auto_concept_research.sh")
+    except Exception as exc:
+        print(f"  [SELF-IMPROVE] trigger failed: {exc}")
 
 
 # Timeout scales with timeframe — lower TF = more bars = more time needed
@@ -94,7 +189,7 @@ _timeout_log = Path("timeout_log.txt")
 
 def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "train",
                      early_discard: bool = True) -> list[dict]:
-    """Run backtest on all symbols. Early exit if first symbol Sharpe < 0 or 0 trades."""
+    """Run backtest on all symbols. Early exit on train if the symbol cannot pass hard rules."""
     from multiprocessing import Process, Queue
 
     timeout_s = _get_timeout(strategy_path)
@@ -124,12 +219,12 @@ def run_backtest_all(symbols: list[str], strategy_path: str, period: str = "trai
             raise RuntimeError(data)
         results.append(data)
 
-        # Early discard: if this symbol has Sharpe < 0 or 0 trades, skip the rest
+        # Early discard uses the same hard rules as research_rules.py.
         if early_discard:
-            sharpe = data.get("sharpe_ratio", 0)
-            trades = data.get("num_trades", 0)
-            dd = data.get("max_drawdown_pct", 0)
-            if sharpe < 0 or trades < 5 or dd < -50:
+            if period == "train" and not train_symbol_pass(data):
+                sharpe = data.get("sharpe_ratio", 0)
+                trades = data.get("num_trades", 0)
+                dd = data.get("max_drawdown_pct", 0)
                 raise EarlyDiscardError(
                     f"{symbol} Sharpe={sharpe:.3f} trades={trades} DD={dd:.1f}% — skip remaining",
                     partial_results=results
@@ -193,11 +288,10 @@ CRITICAL RULES:
 4. Start with #!/usr/bin/env python3
 
 HARD LIMITS (auto-reject if violated):
-- EACH symbol must have Sharpe > 0 AND trades >= 50 TOTAL over 4 years on train
-  ⚠️ "50 trades" = 50 TOTAL over 4 years = 12.5/year. This is the MINIMUM for statistical validity.
-  Target: 75-300 total trades over 4 years (19-75/year). Anything over 600 total is overtrading.
-- EACH symbol must have Sharpe > 0 AND trades >= 10 on test (15 months = ~8/year minimum)
-- Max drawdown > -50% per symbol
+- EACH symbol must have Sharpe > {TRAIN_MIN_SHARPE:g} AND trades >= {TRAIN_MIN_TRADES} on train
+- Each symbol runs test ONLY if its own train passes
+- EACH symbol must have Sharpe > {TEST_MIN_SHARPE:g} AND trades >= {TEST_MIN_TRADES} on test
+- Max drawdown must stay above {MAX_ALLOWED_DRAWDOWN_PCT:g}% per symbol on both train and test
 - 0 trades = ALWAYS discard (Sharpe=0.000 is NOT positive)
 
 ##################################################################
@@ -274,7 +368,9 @@ BTC/ETH SPECIFIC (these coins ALWAYS fail simple trend strategies):
   low + price<SMA200 → short. Only short in bear.
 
 RISK MANAGEMENT (MANDATORY):
-- Every position MUST have stoploss: signal → 0 when price moves > 2-3*ATR
+- Every position MUST have risk control, but it must respect engine semantics.
+- Use close-based exits / target-position changes only.
+- DO NOT simulate fills with entry_price=close[i], low[i] < stop_level, or high[i] > stop_level.
 - Fewer trades = less fee drag.
 
 TRADE FREQUENCY LIMITS (CRITICAL — #1 reason lower TF fails):
@@ -290,6 +386,8 @@ COST MODEL (engine-enforced):
 - Funding rate every 8h on open positions
 - Signal at bar t → fill at bar t+1 open
 - EVERY signal change triggers a trade and costs 0.10% round trip!
+- generate_signals() must emit target positions only. It must NOT emulate order fills,
+  trade PnL, stop hit ordering, or intrabar SL/TP execution.
 
 ##################################################################
 # CRITICAL: POSITION SIZING IS THE #1 FACTOR CONTROLLING DRAWDOWN
@@ -305,8 +403,9 @@ RULES FOR SIGNAL VALUES:
 - Typical range: 0.20 to 0.35
 - Use DISCRETE levels (0.0, ±0.20, ±0.35) to avoid churning costs
 - Each signal change costs 0.10% fees on the CHANGE amount
-- STOPLOSS: set signal=0 when price moves 2*ATR(14) against position
-- TAKE PROFIT: reduce signal to half at 2R profit, trail stop
+- If you need a stop, implement it as a bar-close rule using only data available
+  by the close of bar i. Do NOT use current-bar high/low to assume stop execution.
+- Do NOT track synthetic entry_price from close[i]; the engine enters at next open.
 
 CURRENT BEST FROM 16,000+ EXPERIMENTS: test Sharpe ~1.47-1.79 on single symbols.
 Top performers: 4h Donchian+volume, Camarilla pivot+chop, CRSI+regime.
@@ -325,6 +424,7 @@ STRATEGY KNOWLEDGE:
 - MULTI-TF: 4h trend + 1h entries (proven to 2x Sharpe)
 - REGIME: Bollinger BW percentile detection
 - RISK: ATR trailing stop = signal→0 when price < highest - 3*ATR
+- Execution discipline: no intrabar stop/target simulation inside generate_signals()
 
 MULTI-TIMEFRAME — USE mtf_data.py HELPER (mandatory for all MTF strategies):
 NEVER resample data yourself! NEVER use pd.date_range()!
@@ -375,7 +475,8 @@ def load_recent_history_from_db(n: int = 20) -> list[dict]:
                 SELECT strategy,
                        AVG(sharpe) as avg_sharpe,
                        AVG(trades) as avg_trades,
-                       MAX(CASE WHEN status='keep' THEN 1 ELSE 0 END) as kept
+                       MAX(CASE WHEN status='keep' THEN 1 ELSE 0 END) as kept,
+                       MAX(description) as description
                 FROM results WHERE period='train'
                   AND strategy IN (
                     SELECT strategy FROM (
@@ -392,10 +493,13 @@ def load_recent_history_from_db(n: int = 20) -> list[dict]:
             avg_sharpe = float(r[1] or 0)
             avg_trades = float(r[2] or 0)
             kept = bool(r[3])
+            description = r[4] or ""
             status = "keep" if kept else "discard"
             # Extract TF from strategy name
             tf_match = _re.search(r'mtf_(\w+?)_', strategy_name)
             tf = tf_match.group(1) if tf_match else ""
+            exp_match = _re.search(r'\bexp#(\d+)\b', description)
+            exp_num = int(exp_match.group(1)) if exp_match else (n - i)
             # Diagnose failure reason
             fail_reason = ""
             if not kept:
@@ -403,14 +507,14 @@ def load_recent_history_from_db(n: int = 20) -> list[dict]:
                 thresh = overtrade_thresh.get(tf, 500)
                 if avg_trades > thresh:
                     fail_reason = f"overtrading({avg_trades:.0f}tr)"
-                elif avg_trades < 50:
+                elif avg_trades < TRAIN_MIN_TRADES:
                     fail_reason = f"too_few_trades({avg_trades:.0f}tr)"
                 elif avg_sharpe < -1.0:
                     fail_reason = "very_neg_sharpe"
                 else:
                     fail_reason = "neg_sharpe"
             history.append({
-                "num": n - i,
+                "num": exp_num,
                 "name": strategy_name,
                 "status": status,
                 "avg_sharpe": avg_sharpe,
@@ -590,8 +694,10 @@ REMEMBER: call get_htf_data() ONCE before loop, use aligned arrays inside."""
 RULES:
 - Train: 2021-2024 | Primary TF: 4h/6h/12h/1d preferred | HTF ref: up to 1w
 - Signal bar t → fill bar t+1 | Costs: 0.10% ROUND TRIP (0.05%/side)
-- REJECT if: DD < -50% | total train trades < 50 | Sharpe ≤ 0
-- REJECT if: test trades < 10 (15 months — too few to be statistically meaningful)
+- HARD PASS RULES come from research_rules.py:
+  train requires Sharpe > {TRAIN_MIN_SHARPE:g}, trades >= {TRAIN_MIN_TRADES}, DD > {MAX_ALLOWED_DRAWDOWN_PCT:g}% per symbol
+  test requires Sharpe > {TEST_MIN_SHARPE:g}, trades >= {TEST_MIN_TRADES}, DD > {MAX_ALLOWED_DRAWDOWN_PCT:g}% per symbol
+- If a symbol fails train, its test is skipped. Symbols are independent.
 
 #############################################################
 # POSITION SIZING AND TRADE COUNT — THE TWO MOST CRITICAL FACTORS
@@ -599,8 +705,9 @@ RULES:
 - Signal value = position size. MAX 0.40 magnitude. Normal: 0.20-0.30.
 - BTC crashed 77% in 2022. signal=0.30 → you lose 23%. Manageable.
 - USE DISCRETE levels (0.0, ±0.20, ±0.30) — every signal change costs 0.10%!
-- TRADE COUNT: 50 minimum TOTAL over 4 years = 12.5/year. Target: 75-250 total.
-  Fewer than 50 total = statistically unreliable. More than 400 = overtrading.
+- HARD MIN PASS: {TRAIN_MIN_TRADES} train trades per symbol, {TEST_MIN_TRADES} test trades per symbol.
+- PREFERRED target for stable slower-TF strategies: roughly 20-150 total train trades depending on timeframe.
+- More than 400 total 4h-equivalent trades usually means overtrading and fee drag.
 - USE leverage=1.0 (no leverage).
 {db_summary}
 CURRENT strategy.py:
@@ -638,71 +745,11 @@ def extract_code(response: str) -> str:
 
 
 def validate_strategy(code: str) -> tuple[bool, str]:
-    """Basic validation before running backtest."""
-    required = ["name", "timeframe", "leverage", "def generate_signals"]
-    for req in required:
-        if req not in code:
-            return False, f"Missing required: {req}"
-
-    # Reject 1m timeframe
-    if re.search(r'timeframe\s*=\s*["\']1m["\']', code):
-        return False, "1m timeframe not allowed (too noisy/risky)"
-
-    # CRITICAL: Reject synthetic date_range for MTF resampling
-    # This causes alignment bugs and subtle look-ahead on gappy data (SOLUSDT)
-    if re.search(r"pd\.date_range\s*\(\s*start\s*=\s*['\"]2021", code):
-        return False, "FORBIDDEN: pd.date_range('2021-...') creates fake timestamps. Use prices['open_time'] as index for resampling."
-    if re.search(r"date_range\s*\(\s*start\s*=\s*['\"]202", code):
-        return False, "FORBIDDEN: synthetic date_range for resampling. Use actual open_time column."
-
-    # Check for obvious look-ahead patterns
-    bad_patterns = [
-        (r"\.shift\s*\(\s*-[1-9]", "negative shift"),
-        (r"prices\.iloc\[i\+", "future indexing"),
-        (r"prices\[i\+", "future indexing"),
-    ]
-    for pattern, desc in bad_patterns:
-        if re.search(pattern, code):
-            return False, f"Look-ahead: {desc}"
-
-    # CRITICAL: Block manual positional MTF resampling (i // N pattern)
-    # This creates look-ahead because it reads unclosed HTF bars
-    if re.search(r'//\s*bars_per_', code) or re.search(r'i\s*//\s*\d+\s*\]', code):
-        if 'get_htf_data' not in code and 'mtf_data' not in code:
-            return False, "Manual MTF resampling (i//N) detected. Use mtf_data.get_htf_data() instead."
-
-    # Block .resample() without mtf_data
-    if re.search(r'\.resample\s*\(', code):
-        if 'get_htf_data' not in code and 'mtf_data' not in code:
-            return False, "Manual .resample() detected. Use mtf_data.get_htf_data() instead."
-
-    # PERFORMANCE + CORRECTNESS: Block get_htf_data inside loops (AST-based)
-    try:
-        import ast as _ast
-        tree = _ast.parse(code)
-        for node in _ast.walk(tree):
-            if isinstance(node, (_ast.For, _ast.While)):
-                for child in _ast.walk(node):
-                    if isinstance(child, _ast.Call):
-                        func = child.func
-                        fname = ""
-                        if isinstance(func, _ast.Name):
-                            fname = func.id
-                        elif isinstance(func, _ast.Attribute):
-                            fname = func.attr
-                        if fname in ('get_htf_data', 'load_klines', 'read_parquet'):
-                            return False, f"{fname}() inside loop! Call ONCE before loop, use aligned arrays inside."
-    except SyntaxError:
-        pass
-
-    # Also catch i//N MTF pattern via regex (simpler, catches idx_4h = i // 16)
-    for line in code.split('\n'):
-        s = line.strip()
-        if re.search(r'i\s*//\s*\d+\s*[,\]]', s) or re.search(r'idx.*=.*i\s*//\s*\d+', s):
-            if 'period' not in s and 'half' not in s and 'sqrt' not in s:
-                return False, f"Manual MTF index (i//N) detected: {s[:60]}. Use align_htf_to_ltf() instead."
-
-    return True, "ok"
+    """Shared repo-wide validator wrapper used by the autoresearch loop."""
+    result = shared_validate_strategy(code)
+    if result.valid:
+        return True, "ok"
+    return False, summarize_validation_errors(result)
 
 
 def main():
@@ -726,6 +773,8 @@ def main():
 
     # program.md is re-read each experiment so live edits take effect immediately
     system_prompt = build_system_prompt()
+    state = load_research_state()
+    start_experiment_num = resolve_start_experiment_num(state)
 
     best_strategy_code = STRATEGY_FILE.read_text()
 
@@ -747,6 +796,10 @@ def main():
         overtrading = sum(1 for h in history if h.get("fail_reason") == "overtrading")
         if overtrading > 0:
             print(f"  ⚠️  {overtrading}/{len(history)} recent experiments failed due to OVERTRADING")
+    if start_experiment_num > 1:
+        print(f"  Resuming experiment counter at #{start_experiment_num:03d}")
+        if state.get("status") == "running":
+            print(f"  Previous run stopped during experiment #{start_experiment_num:03d}; retrying that slot")
 
     print("=" * 60)
     print("AUTONOMOUS RESEARCH LOOP STARTED")
@@ -754,7 +807,13 @@ def main():
     print("=" * 60)
     print()
 
-    for experiment_num in range(1, args.max + 1):
+    for experiment_num in range(start_experiment_num, start_experiment_num + args.max):
+        save_research_state(
+            status="running",
+            current_experiment_num=experiment_num,
+            next_experiment_num=experiment_num,
+            last_completed_experiment_num=max(experiment_num - 1, 0),
+        )
         health = maybe_run_daily_healthcheck()
         if not health.get("skipped"):
             overall = "OK" if health["overall_ok"] else "DEGRADED"
@@ -775,6 +834,7 @@ def main():
         print(f"\n{'─' * 60}")
         print(f"[{datetime.now():%H:%M:%S}] EXPERIMENT #{experiment_num:03d}")
         print(f"{'─' * 60}")
+        maybe_trigger_self_improvement_cycle()
 
         # --- Step 1: Generate new strategy ---
         print("  [1/4] Generating strategy with LLM...")
@@ -793,6 +853,12 @@ def main():
             new_code = extract_code(response)
         except LLMTimeoutError as e:
             print(f"  [TIMEOUT] LLM call timed out ({e}). Retrying in 10s...")
+            save_research_state(
+                status="idle",
+                current_experiment_num=experiment_num,
+                next_experiment_num=experiment_num + 1,
+                last_completed_experiment_num=experiment_num,
+            )
             time.sleep(10)
             continue
         except Exception as e:
@@ -806,6 +872,12 @@ def main():
             else:
                 print(f"  LLM error: {e}")
                 time.sleep(5)
+            save_research_state(
+                status="idle",
+                current_experiment_num=experiment_num,
+                next_experiment_num=experiment_num + 1,
+                last_completed_experiment_num=experiment_num,
+            )
             continue
 
         # --- Step 2: Validate ---
@@ -816,6 +888,13 @@ def main():
                 "num": experiment_num, "name": "invalid", "status": "crash",
                 "avg_sharpe": -999, "avg_return": 0, "description": reason,
             })
+            save_research_state(
+                status="idle",
+                current_experiment_num=experiment_num,
+                next_experiment_num=experiment_num + 1,
+                last_completed_experiment_num=experiment_num,
+                last_strategy_name="invalid",
+            )
             continue
 
         # Extract strategy name for display
@@ -849,7 +928,7 @@ def main():
                 dd = m["max_drawdown_pct"]
                 print(f"    {symbol} train: Sharpe={sharpe:+.3f} Ret={m['total_return_pct']:+.1f}% DD={dd:.1f}% T={trades}")
 
-                train_pass = sharpe > 0.3 and trades >= 50 and dd > -50
+                train_pass = train_symbol_pass(m)
                 sym_status = "keep" if train_pass else "discard"
                 append_results(train_result, sym_status, description, period="train")
                 all_train_results.extend(train_result)
@@ -866,7 +945,7 @@ def main():
                     t_trades = mt["num_trades"]
                     print(f"    {symbol} test:  Sharpe={t_sharpe:+.3f} Ret={mt['total_return_pct']:+.1f}% T={t_trades}")
 
-                    test_pass = t_sharpe > 0 and t_trades >= 10
+                    test_pass = test_symbol_pass(mt)
                     t_status = "keep" if test_pass else "discard"
                     append_results(test_result, t_status, description, period="test")
                     all_test_results.extend(test_result)
@@ -901,12 +980,15 @@ def main():
                 _prices = load_klines(symbols[0], _mod.timeframe)
                 _signals_full = _mod.generate_signals(_prices)
                 _la_ok = True
-                for _cp in [1000, 2000, len(_prices) // 2]:
-                    if _cp >= len(_prices): continue
+                _checkpoints = sorted({500, 1000, 2000, 5000, len(_prices) // 4, len(_prices) // 2})
+                for _cp in _checkpoints:
+                    if _cp >= len(_prices) or _cp <= 64:
+                        continue
                     _sig_p = _mod.generate_signals(_prices.iloc[:_cp].reset_index(drop=True))
-                    if abs(float(_sig_p[-1]) - float(_signals_full[_cp - 1])) > 0.01:
+                    _diff = _np.where(_np.abs(_sig_p - _signals_full[:_cp]) > 1e-9)[0]
+                    if len(_diff):
                         _la_ok = False
-                        print(f"  [LOOKAHEAD FAIL] at checkpoint {_cp}")
+                        print(f"  [LOOKAHEAD FAIL] checkpoint {_cp} first_mismatch={int(_diff[0])} last_mismatch={int(_diff[-1])}")
                         break
                 if not _la_ok:
                     print(f"  [SKIP] Look-ahead FAIL — discarding all")
@@ -943,13 +1025,13 @@ def main():
             thresh = overtrade_thresh.get(strategy_tf, 500)
             if avg_trades > thresh:
                 fail_reason = f"overtrading({avg_trades:.0f}tr>>{thresh}max)"
-            elif avg_trades < 50:
-                fail_reason = f"too_few_trades({avg_trades:.0f}tr<<50min)"
+            elif avg_trades < TRAIN_MIN_TRADES:
+                fail_reason = f"too_few_trades({avg_trades:.0f}tr<<{TRAIN_MIN_TRADES}min)"
             elif avg_sharpe < -1.0:
                 fail_reason = "very_neg_sharpe"
             elif avg_sharpe < 0:
                 fail_reason = "neg_sharpe"
-            elif all(r["sharpe_ratio"] <= 0 or r["num_trades"] < 50 for r in bt_results
+            elif all(not train_symbol_pass(r) for r in bt_results
                      if r["symbol"] in ("BTCUSDT", "ETHUSDT")):
                 fail_reason = "btc_eth_fail_sol_only"
 
@@ -1007,6 +1089,14 @@ def main():
         if experiment_num % 10 == 0:
             kept = sum(1 for h in history if h["status"] == "keep")
             print(f"\n  ── Summary: {experiment_num} experiments, {kept} kept, best Sharpe={best_sharpe:.3f} ──")
+
+        save_research_state(
+            status="idle",
+            current_experiment_num=experiment_num,
+            next_experiment_num=experiment_num + 1,
+            last_completed_experiment_num=experiment_num,
+            last_strategy_name=strategy_name,
+        )
 
     print("\nResearch loop complete.")
 

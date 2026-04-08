@@ -14,10 +14,14 @@ test, and improve trading strategies for BTC/ETH/SOL USDT-M perpetual futures.
 
 ## Critical Constraints
 
+Threshold source: `research_rules.py` is the single source of truth for pass/fail thresholds.
+
 ### No Look-Ahead Bias
 - Signal at bar `t` → fill at bar `t+1` open price (engine-enforced)
 - `generate_signals()` at index i may ONLY use data[:i+1]
 - NEVER `.shift(-n)`, NEVER future index access
+- NEVER simulate fills inside `generate_signals()` with `entry_price = close[i]`
+  or intrabar checks like `low[i] < stop_level` / `high[i] > stop_level`
 
 ### Cost Model (engine-enforced)
 - Taker fee: 0.04%/side + Slippage: 0.01%/side = 0.10% round trip
@@ -36,7 +40,7 @@ test, and improve trading strategies for BTC/ETH/SOL USDT-M perpetual futures.
    For EACH symbol:
      a. Train backtest → Sharpe > 0, trades ≥ 5, DD > -50%?
      b. Train FAIL → skip test for THIS symbol, move to next
-     c. Train PASS → Test backtest → Sharpe > 0, trades ≥ 3?
+     c. Train PASS → Test backtest → Sharpe > 0, trades ≥ 3, DD > -50%?
      d. Test PASS → this symbol KEPT
 4. Prefix look-ahead test (if any symbol kept)
 5. Strategy KEPT if ≥1 symbol passes both train AND test
@@ -85,13 +89,20 @@ ALL timeframes are real Binance data. Explore all equally.
 | 12h  | 50-150               | 12-37       | 200            |
 | 1d   | 30-100               | 7-25        | 150            |
 
-"50 trades minimum" = 50 TOTAL over 4 years = 12.5/year. NOT 50/year.
-Fewer than 50 total = statistically unreliable Sharpe — will be rejected.
+These are preferred trade-count targets, not the hard pass/fail gate.
+Hard pass/fail remains `research_rules.py`: train trades ≥ 5, test trades ≥ 3, DD > -50%, Sharpe > 0 per symbol.
 If your strategy has >400 4h trades: entry is too loose → add MORE filters.
 
 ### MTF Rules (see STRATEGY_RULES.md)
 - MUST use `mtf_data.get_htf_data()` — call ONCE before loop
 - NEVER `i // N`, NEVER `.resample()`, NEVER `pd.date_range()`
+- HTF values must be aligned only after the HTF candle has closed
+
+### Execution Rules
+- `generate_signals()` emits target positions only. It is not an execution engine.
+- If you need a stop/exit, express it as a bar-close rule and let the backtest
+  engine fill at the next bar open.
+- Do NOT model intrabar SL/TP ordering inside the strategy.
 
 ## ⛔ STOP PURSUING — EXHAUSTED / LOW-YIELD COMBINATIONS (DATA-DRIVEN as of 2026-03)
 
@@ -152,7 +163,7 @@ Top strategies share these traits:
    - If you've tested the same indicator combo 2+ times and it failed, the concept is wrong. Change it.
 2. **Implement** — Write complete `strategy.py`. Clean, readable, vectorized numpy/pandas.
 3. **Execute** — Backtest runs automatically on BTCUSDT/ETHUSDT/SOLUSDT train data.
-4. **Evaluate** — If Sharpe improved AND DD > -50%: KEEP. Otherwise: DISCARD and revert.
+4. **Evaluate** — Follow the exact per-symbol train -> gated test flow above. KEEP only if at least one symbol passes both periods under `research_rules.py`.
 5. **Iterate** — Review what worked/failed. Try a DIFFERENT approach, not the same thing with tweaked params.
 
 ## STRATEGY KNOWLEDGE BASE
@@ -730,6 +741,270 @@ Every strategy in this phase MUST have a strict daily/4h regime gate:
 44. Multi-TF: 1d cloud → 12h TK cross → 4h entry
 
 ## RECENTLY DISCOVERED CONCEPTS
+### Batch discovered 2026-04-08 00:03
+
+**1. Funding Rate Contrarian with 4H Price Structure Filter** *(4h timeframe)*
+- Core idea: Extreme funding rates signal crowded positioning; combine with lower-high/lower-low price structure for high-probability reversals in bear markets.
+- Formula: `funding_zscore = (funding_rate - rolling_mean_168) / rolling_std_168`; `extreme_long = funding_zscore > 2.0 AND funding_rate > 0.05%`; `extreme_short = funding_zscore < -2.0 AND funding_rate < -0.03%`
+- Entry: Short when `extreme_long` AND price forms lower high on 4H; Long when `extreme_short` AND price forms higher low on 4H. Require 4H close confirmation.
+- Exit: ATR-based stop (2.0 × ATR_14) OR funding rate normalizes (z-score between -0.5 and 0.5)
+- Why it might work in 2025 bear market: Bear markets feature short squeezes and long liquidations; funding extremes reliably mark inflection points where overleveraged positions get flushed.
+- Priority: HIGH — Fresh from web digest, leverages external data source (funding), aligns with 4H winning timeframe pattern from results.db
+
+---
+
+**2. Vortex Indicator Crossover with Volume Surge Confirmation** *(4h timeframe)*
+- Core idea: Vortex Indicator captures true trend momentum by summing directional movement; volume surge confirms institutional participation.
+- Formula: `VIP = sum(abs(high - low_prev), 14) / sum(ATR_1, 14)` for positive vortex; `VIN = sum(abs(low - high_prev), 14) / sum(ATR_1, 14)` for negative vortex; `volume_surge = volume > 1.8 × rolling_mean_20`
+- Entry: Long when `VIP > VIN` AND `VIP_cross_over` AND `volume_surge`; Short when `VIN > VIP` AND `VIN_cross_over` AND `volume_surge`. Require both VIP/VIN crossover AND volume threshold.
+- Exit: Vortex crossover reversal OR 2.5 × ATR_14 trailing stop
+- Why it might work in 2025 bear market: Volume surge filters false breakouts common in ranging markets; Vortex excels at identifying genuine trend initiation vs noise.
+- Priority: HIGH — Novel indicator not in covered list, volume confirmation matches winning strategy patterns
+
+---
+
+**3. Taker Buy/Sell Imbalance Reversal with Price Divergence** *(4h timeframe)*
+- Core idea: Taker buy/sell volume ratio reveals aggressive order flow; divergence between imbalance and price signals smart money accumulation/distribution.
+- Formula: `taker_buy_ratio = taker_buy_volume / (taker_buy_volume + taker_sell_volume)`; `imbalance_zscore = (taker_buy_ratio - rolling_mean_50) / rolling_std_50`; `price_momentum = (close - close_20) / close_20`
+- Entry: Long when `imbalance_zscore > 1.5` AND `price_momentum < -0.03` (accumulation: buying pressure but price dropping); Short when `imbalance_zscore < -1.5` AND `price_momentum > 0.03` (distribution: selling pressure but price rising). Hold 8-24 bars.
+- Exit: Imbalance z-score returns to ±0.5 band OR 3.0 × ATR_14 stop loss
+- Why it might work in 2025 bear market: Bear markets feature institutional accumulation at support; taker imbalance reveals hidden demand before price confirms.
+- Priority: HIGH — Pure microstructure signal, novel approach not covered, uses available OHLCV data
+
+---
+
+**4. Schaff Trend Cycle (STC) with 12H Trend Filter** *(4h entry, 12h filter)*
+- Core idea: STC applies stochastic oscillator to MACD, producing faster cycle signals; 12H trend filter prevents counter-trend entries in strong moves.
+- Formula: `MACD = EMA_23 - EMA_50`; `STC_K = 100 × (MACD - MACD_min_10) / (MACD_max_10 - MACD_min_10)`; `STC_D = EMA(STC_K, 3)`; `trend_12h = EMA_50_12h > EMA_200_12h`
+- Entry: Long when `STC_D < 20` AND `STC_D rising` AND `trend_12h = true`; Short when `STC_D > 80` AND `STC_D falling` AND `trend_12h = false`. Require STC to cross above 25 (long) or below 75 (short) for confirmation.
+- Exit: STC crosses 50 (neutral) OR 2.0 × ATR_14 stop
+- Why it might work in 2025 bear market: STC's cycle detection catches short-term reversals within larger bear trends; 12H filter prevents fighting strong downtrends.
+- Priority: MEDIUM — Novel indicator combination, MTF approach matches winning 4h+12h patterns
+
+---
+
+**5. Elder Ray Bear Power Exhaustion with ATR Regime** *(4h timeframe)*
+- Core idea: Elder Ray's Bear Power measures selling pressure; extreme negative values in low-volatility regime signal exhaustion reversals.
+- Formula: `Bear_Power = Low - EMA_13`; `Bull_Power = High - EMA_13`; `ATR_ratio = ATR_14 / ATR_50`; `low_vol_regime = ATR_ratio < 0.8`; `exhaustion = Bear_Power < -2.5 × ATR_14`
+- Entry: Long when `exhaustion` AND `low_vol_regime` AND `Bear_Power rising from extreme` (current Bear_Power > Bear_Power_prev_3); Short when `Bull_Power > 2.5 × ATR_14` AND `Bull_Power falling` in high-vol regime (`ATR_ratio > 1.2`).
+- Exit: Bear Power returns above -0.5 × ATR_14 OR EMA_13 crossover
+- Why it might work in 2025 bear market: Bear markets exhibit selling exhaustion at support; Bear Power extremes identify capitulation points where reversals emerge.
+- Priority: MEDIUM — Novel Elder Ray application, ATR regime filter matches volatility-aware winning strategies
+
+---
+
+**6. Williams Alligator with Fractal Breakout Entry** *(6h timeframe)*
+- Core idea: Alligator's three smoothed MAs detect trend sleep/wake cycles; fractal breakouts provide precise entry triggers during awakening phases.
+- Formula: `Jaw = SMMA(High + Low)/2, 13, 8` (blue); `Teeth = SMMA(High + Low)/2, 8, 5` (red); `Lips = SMMA(High + Low)/2, 5, 3` (green); `Fractal_High = max(High_2, High_1, High_0, High_-1, High_-2)`; `Fractal_Low = min(Low_2, Low_1, Low_0, Low_-1, Low_-2)`
+- Entry: Long when `Lips > Teeth > Jaw` (awakening) AND `close > Fractal_High_prev_3`; Short when `Lips < Teeth < Jaw` (awakening) AND `close < Fractal_Low_prev_3`. Require Alligator mouth opening (|Teeth - Jaw| > 0.3 × ATR_14).
+- Exit: Alligator lines cross (trend end) OR close crosses back inside fractal range
+- Why it might work in 2025 bear market: Alligator excels at catching trend initiation after ranging periods; 2025's range-bound conditions produce frequent "sleep" phases ideal for breakout entries.
+- Priority: MEDIUM — Novel for crypto, 6h timeframe matches kept strategy distribution, fractal entry adds precision
+
+### Batch discovered 2026-04-07 12:01
+
+**1. Funding Rate Extreme Reversal with EMA Trend Filter** *(6h timeframe)*
+- Core idea: Extreme positive funding rates indicate crowded long positions; contrarian short when funding exceeds threshold in downtrend.
+- Formula: `funding_ma = EMA(funding_rate, 24)`, `funding_zscore = (funding_rate - funding_ma) / STD(funding_rate, 24)`, `trend = EMA(close, 50) < EMA(close, 200)`
+- Entry: `funding_zscore > 2.5 AND trend AND close < EMA(close, 50)` → SHORT
+- Exit: `funding_zscore < -0.5 OR close > EMA(close, 50)` OR `ATR(14) * 2.5 stop`
+- Why it might work in 2025 bear market: Funding extremes persist longer in bear markets; crowded longs get flushed repeatedly during range-bound downtrends.
+- Priority: HIGH — Directly from web digest; funding data is native to perps; no overlap with existing strategies.
+
+**2. Taker Buy/Sell Imbalance Momentum Divergence** *(4h timeframe)*
+- Core idea: Track aggressive buyer/seller pressure via taker volume; divergence between price and taker imbalance signals exhaustion.
+- Formula: `taker_ratio = taker_buy_volume / (taker_buy_volume + taker_sell_volume)`, `taker_ratio_ma = EMA(taker_ratio, 20)`, `price_roc = ROC(close, 14)`
+- Entry: `taker_ratio_ma < 0.35 AND price_roc > 0 AND RSI(14) > 60` → SHORT (divergence: price up but sellers aggressive)
+- Exit: `taker_ratio_ma > 0.55 OR RSI(14) < 40` OR `close > entry + 2*ATR(14)`
+- Why it might work in 2025 bear market: Bear rallies are often low-conviction; aggressive selling into strength identifies weak rallies for short entries.
+- Priority: HIGH — Pure microstructure signal unavailable in most strategies; taker volume is native Binance data.
+
+**3. Schaff Trend Cycle (STC) Cross with Volatility Regime Filter** *(6h timeframe)*
+- Core idea: STC improves on MACD by applying stochastic oscillator to MACD line; faster signals in choppy markets.
+- Formula: `macd = EMA(close, 23) - EMA(close, 50)`, `stoch_macd = (macd - LLV(macd, 10)) / (HHV(macd, 10) - LLV(macd, 10)) * 100`, `stc = EMA(stoch_macd, 3)`, `vol_ratio = ATR(14) / ATR(50)`
+- Entry: `stc crosses below 75 AND vol_ratio > 1.2` → SHORT (overbought in high-vol regime)
+- Exit: `stc crosses above 25 OR stc > 90` OR `close < entry - 2.5*ATR(14)`
+- Why it might work in 2025 bear market: STC reacts faster than MACD; volatility filter ensures entries only in active regimes where mean reversion works.
+- Priority: MEDIUM — Novel indicator not in existing strategies; matches 6h timeframe success pattern.
+
+**4. Williams Alligator Jaw-Teeth-Lips Alignment with Fractal Entry** *(12h timeframe)*
+- Core idea: Alligator's three SMAs (Jaw=13, Teeth=8, Lips=5, all shifted forward) identify trend; fractals mark swing points for entry.
+- Formula: `jaw = SMA(close, 13).shift(8)`, `teeth = SMA(close, 8).shift(5)`, `lips = SMA(close, 5).shift(3)`, `bearish_align = jaw > teeth > lips`, `fractal_high = high[2] == MAX(high[5:0])`
+- Entry: `bearish_align AND close < jaw AND fractal_high` → SHORT on next candle
+- Exit: `lips crosses above teeth` OR `close > entry + 2*ATR(14)` OR `after 12 bars`
+- Why it might work in 2025 bear market: Alligator stays aligned during extended downtrends; fractal entries catch swing highs within the trend.
+- Priority: MEDIUM — Trend-following approach; 12h timeframe matches best performers; fractal logic adds precision.
+
+**5. Hurst Exponent Regime-Switching Mean Reversion** *(4h timeframe)*
+- Core idea: Hurst exponent (H) quantifies trend persistence; H < 0.5 = mean-reverting regime, H > 0.5 = trending. Apply mean-reversion only when H signals chop.
+- Formula: `hurst = calculate_hurst(close, 100)` via rescaled range method, `regime = "mean_revert" if hurst < 0.45 else "trend"`, `z = (close - SMA(close, 20)) / STD(close, 20)`
+- Entry: `regime == "mean_revert" AND z > 2.0 AND volume > SMA(volume, 20) * 1.3` → SHORT
+- Exit: `z < -0.5 OR regime == "trend"` OR `close > entry + 1.5*ATR(14)`
+- Why it might work in 2025 bear market: Bear markets alternate between trending dumps and choppy accumulation; regime detection prevents mean-reversion entries during strong trends.
+- Priority: HIGH — Novel regime approach; matches "regime detection" theme from web digest; adapts to market state.
+
+**6. VWAP Deviation Band Fade with Volume Delta Confirmation** *(6h timeframe)*
+- Core idea: Calculate rolling VWAP with standard deviation bands; fade moves to upper band when volume delta confirms exhaustion.
+- Formula: `vwap = SUM(close*volume, 24) / SUM(volume, 24)`, `vwap_std = STD(close, 24)`, `upper_band = vwap + 2*vwap_std`, `vol_delta = volume - SMA(volume, 20)`, `delta_confirm = vol_delta < -SMA(volume, 20) * 0.3`
+- Entry: `close > upper_band AND delta_confirm AND close < EMA(close, 50)` → SHORT
+- Exit: `close < vwap OR close > entry + 2*ATR(14)` OR `after 8 bars`
+- Why it might work in 2025 bear market: VWAP acts as institutional anchor; fades off upper bands catch overextensions in bear market relief rallies.
+- Priority: MEDIUM — VWAP-based but novel deviation approach; volume delta adds microstructure confirmation.
+
+### Batch discovered 2026-04-07 04:37
+
+**1. Funding Rate Extreme Contrarian** *(4h timeframe, daily filter)*
+- Core idea: Extreme funding rates indicate crowded positioning; fade extremes when price confirms with volume divergence.
+- Formula: `funding_zscore = (funding_rate - rolling_mean(funding_rate, 168)) / rolling_std(funding_rate, 168)` (168 periods = 7 days on 4h)
+- Entry: Long when `funding_zscore < -2.0` AND `close > daily_SMA(50)` AND `volume > 1.5 * SMA(volume, 20)`; Short when `funding_zscore > 2.0` AND `close < daily_SMA(50)` AND `volume > 1.5 * SMA(volume, 20)`
+- Exit: `funding_zscore` returns to within ±0.5, OR `ATR(14)` trailing stop from entry price (2.5 × ATR), OR after 48 bars
+- Why it might work in 2025 bear market: Funding extremes spike during panic selling—crowded shorts get squeezed, crowded longs get liquidated, creating predictable reversal points
+- Priority: HIGH — Web digest emphasizes funding rates 4×; directly addresses perp futures microstructure; MTF approach matches top winners
+
+---
+
+**2. Schaff Trend Cycle with Volume Momentum Filter** *(6h timeframe)*
+- Core idea: STC combines MACD trend with Stochastic oscillator to identify cycle bottoms/tops; filter with volume momentum to avoid low-conviction signals.
+- Formula: `macd = EMA(close, 23) - EMA(close, 50)`, `stoch_macd = 100 × (macd - lowest(macd, 10)) / (highest(macd, 10) - lowest(macd, 10))`, `STC = EMA(EMA(stoch_macd, 3), 3)`, `volume_momentum = ROC(volume, 10)`
+- Entry: Long when `STC < 25` AND `STC[1] < STC` AND `volume_momentum > 0` AND `close > SMA(close, 200)` on daily; Short when `STC > 75` AND `STC[1] > STC` AND `volume_momentum > 0` AND `close < SMA(close, 200)` on daily
+- Exit: STC crosses 50, OR `ATR(14) × 3` stop, OR after 24 bars
+- Why it might work in 2025 bear market: STC identifies oversold bounces in downtrends without whipsawing like raw RSI; volume filter prevents catching falling knives
+- Priority: HIGH — Novel indicator not in covered strategies; cycle-based approach suits range-bound bear markets; 6h TF matches winners
+
+---
+
+**3. Vortex Indicator MTF Trend-Follow** *(12h entry, daily trend filter)*
+- Core idea: Vortex Indicator quantifies true trend strength by comparing intrabar range overlap; use MTF confirmation to filter noise.
+- Formula: `VM_plus = |High - Low[-1]|`, `VM_minus = |Low - High[-1]|`, `TR = max(High-Low, |High-Close[-1]|, |Low-Close[-1]|)`, `VIP = SMA(VM_plus, 14) / SMA(TR, 14)`, `VIM = SMA(VM_minus, 14) / SMA(TR, 14)`
+- Entry: Long when `VIP > VIM` AND `VIP[1] < VIM[1]` AND `close > daily_EMA(100)` AND `ADX(14) > 20`; Short when `VIM > VIP` AND `VIM[1] < VIP[1]` AND `close < daily_EMA(100)` AND `ADX(14) > 20`
+- Exit: Vortex crossover in opposite direction, OR `close < EMA(50)` for longs / `close > EMA(50)` for shorts, OR `ATR(14) × 4` trailing stop
+- Why it might work in 2025 bear market: Vortex explicitly measures bearish momentum (VIM > VIP) which dominates bear markets; ADX filter prevents entries during low-volatility chop
+- Priority: HIGH — 12h TF matches top winner `12h_donchian20_volume_adx_v14`; Vortex is novel; ADX filter proven in existing strategies
+
+---
+
+**4. Elder Ray Bear Power Reversal** *(4h timeframe, weekly regime filter)*
+- Core idea: Elder Ray separates bull/bear power from price; in bear markets, extreme negative bear power signals exhaustion reversals.
+- Formula: `EMA13 = EMA(close, 13)`, `Bear_Power = Low - EMA13`, `Bull_Power = High - EMA13`, `bear_power_z = (Bear_Power - SMA(Bear_Power, 50)) / std(Bear_Power, 50)`
+- Entry: Long when `bear_power_z < -2.5` (extreme bearish exhaustion) AND `close > weekly_SMA(20)` AND `Bear_Power[1] < Bear_Power` (improving); Short when `bear_power_z > 2.0` AND `close < weekly_SMA(20)` AND `volume > SMA(volume, 20)`
+- Exit: Bear Power returns above -1.0 z-score, OR `close > EMA13` for longs, OR `ATR(14) × 2.5` stop
+- Why it might work in 2025 bear market: Bear Power extremes identify capitulation bottoms where mean reversion is profitable; weekly filter keeps trades aligned with macro trend
+- Priority: MEDIUM — Novel indicator combination; 4h TF proven; but mean reversion in bear markets requires strict risk management
+
+---
+
+**5. Hurst Exponent Regime-Switching Donchian** *(6h timeframe)*
+- Core idea: Hurst Exponent quantifies whether price series is trending (H > 0.55), mean-reverting (H < 0.45), or random; apply Donchian breakout in trending regime, RSI mean-reversion in mean-reverting regime.
+- Formula: `Hurst = calculate_hurst(close, 100)` using rescaled range analysis; `hurst_smooth = EMA(Hurst, 10)`; Donchian channel: `Upper = highest(high, 20)`, `Lower = lowest(low, 20)`
+- Entry: If `hurst_smooth > 0.55`: Long on `close > Upper[1]`, Short on `close < Lower[1]`; If `hurst_smooth < 0.45`: Long on `RSI(14) < 30`, Short on `RSI(14) > 70`; Both require `volume > SMA(volume, 20)`
+- Exit: Regime switch (hurst crosses 0.5), OR `ATR(14) × 3` stop for trend-following, OR RSI returns to 50 for mean-reversion
+- Why it might work in 2025 bear market: Bear markets alternate between trending crashes and range-bound consolidation; regime-switching adapts strategy to current conditions
+- Priority: HIGH — Regime detection appears in winners (`regime_detection_v1`); Donchian proven (`donchian20`); Hurst is novel quantitative approach; 6h TF matches winners
+
+---
+
+**6. Volume-Weighted RSI Divergence with Heikin-Ashi Trend** *(4h entry, daily HA trend)*
+- Core idea: VWRSI weights RSI by volume, giving more importance to high-volume price moves; Heikin-Ashi smooths trend direction; combine to catch divergences with conviction.
+- Formula: `typical_price = (High + Low + Close) / 3`, `volume_weight = volume / SMA(volume, 14)`, `vw_gain = sum(typical_price - typical_price[-1] when price up × volume_weight, 14)`, `vw_loss = sum(typical_price[-1] - typical_price when price down × volume_weight, 14)`, `VWRSI = 100 - 100 / (1 + vw_gain / vw_loss)`; Heikin-Ashi: `HA_close = (O+H+L+C)/4`, `HA_open = (HA_open[-1] + HA_close[-1])/2`
+- Entry: Long when `VWRSI < 30` AND `VWRSI[1] < VWRSI` AND `HA_close > HA_open` on daily AND `close > daily_SMA(100)`; Short when `VWRSI > 70` AND `VWRSI[1] > VWRSI` AND `HA_close < HA_open` on daily AND `close < daily_SMA(100)`
+- Exit: VWRSI crosses 50, OR HA trend reversal on daily, OR `ATR(14) × 3` trailing stop
+- Why it might work in 2025 bear market: Volume-weighting prioritizes institutional moves over retail noise; Heikin-Ashi filters out bear market chop; divergence catches oversold bounces
+- Priority: MEDIUM — Novel VWRSI not covered; HA confirmation adds robustness; but divergence strategies require precise timing in trending bear markets
+
+### Batch discovered 2026-04-07 04:26
+
+**1. Funding Rate Extreme Contrarian with ATR Volatility Filter** *(6h/12h)*
+- Core idea: Funding rate extremes signal crowded positions that revert violently in perpetual futures.
+- Formula: `funding_ema = EMA(funding_rate, 8)`, `atr_ratio = ATR(14) / SMA(ATR(14), 50)`, `trend = close > EMA(close, 50)`
+- Entry: Long when `funding_ema < -0.04%` AND `atr_ratio > 0.7` AND `close < EMA(50)` (contrarian). Short when `funding_ema > 0.06%` AND `atr_ratio > 0.7` AND `close > EMA(50)`
+- Exit: Take profit at `2.0 * ATR(14)` from entry, stop at `1.5 * ATR(14)`, time exit 72 bars
+- Why it might work in 2025 bear market: Funding extremes spike during short squeezes and liquidation cascades—contrarian entries catch reversals in ranging/bear conditions
+- Priority: HIGH — Fresh from web digest, aligns with 6h/12h winners, uses microstructure data
+
+---
+
+**2. Schaff Trend Cycle with KAMA Trend Filter** *(4h)*
+- Core idea: STC combines MACD momentum with stochastic cycling for cycle-timed entries under KAMA trend direction.
+- Formula: `MACD_Line = EMA(close, 23) - EMA(close, 50)`, `STC_K = stoch(MACD_Line, 10)`, `STC_D = SMA(STC_K, 3)`, `KAMA_trend = KAMA(close, 10, 50, 100) > KAMA(close, 20, 100, 200)`
+- Entry: Long when `STC_K` crosses above `STC_D` AND `STC_K < 30` AND `KAMA_trend == True`. Short when `STC_K` crosses below `STC_D` AND `STC_K > 70` AND `KAMA_trend == False`
+- Exit: Long exit when `STC_K > 85` or cross below `STC_D`. Short exit when `STC_K < 15` or cross above `STC_D`. Stop `2.0 * ATR(14)`
+- Why it might work in 2025 bear market: STC cycle detection catches oversold bounces in downtrends while KAMA prevents fighting the trend
+- Priority: HIGH — Novel indicator combination, KAMA is proven winner, fits 4h timeframe
+
+---
+
+**3. Elder Ray Bear Power Divergence with Daily Pivot Zones** *(1h/4h)*
+- Core idea: Elder Ray separates bull/bear power from EMA baseline; divergences at pivot levels signal reversal zones.
+- Formula: `EMA13 = EMA(close, 13)`, `Bull_Power = high - EMA13`, `Bear_Power = low - EMA13`, `daily_pivot = (prev_high + prev_low + prev_close) / 3`, `R1 = 2 * pivot - prev_low`, `S1 = 2 * pivot - prev_high`
+- Entry: Long when `Bear_Power < 0` AND `Bear_Power > Bear_Power[1]` (divergence—bear power rising) AND `close < S1` AND `close > EMA50_4h`. Short when `Bull_Power > 0` AND `Bull_Power < Bull_Power[1]` AND `close > R1` AND `close < EMA50_4h`
+- Exit: Take profit at `daily_pivot`, stop at `1.5 * ATR(14)` beyond pivot level, time exit 48 bars
+- Why it might work in 2025 bear market: Bear power divergences at support levels catch mean-reversion bounces in downtrends
+- Priority: HIGH — Combines proven pivot concept with novel Elder Ray, multi-TF structure matches winners
+
+---
+
+**4. Hurst Exponent Regime-Switching with Donchian Breakout** *(12h)*
+- Core idea: Hurst exponent detects persistent (H > 0.55) vs mean-reverting (H < 0.45) regimes; apply trend-following or mean-reversion accordingly.
+- Formula: `H = hurst_exponent(close, 100)` via rescaled range method, `Donchian_High = max(high, 20)`, `Donchian_Low = min(low, 20)`, `RSI_14 = RSI(close, 14)`
+- Entry: Trend regime (`H > 0.55`): Long on `close > Donchian_High[1]`, Short on `close < Donchian_Low[1]`. Mean-revert regime (`H < 0.45`): Long when `RSI_14 < 30` AND `close > Donchian_Low`, Short when `RSI_14 > 70` AND `close < Donchian_High`
+- Exit: Trend: `close < SMA(close, 20)` or `close > SMA(close,
+
+### Batch discovered 2026-04-04 12:01
+
+**1. Hurst Exponent Regime Filter + Detrended Price Oscillator Mean Reversion** *(4H timeframe)*
+- Core idea: Use the Hurst Exponent to detect mean-reverting regimes (H < 0.5) and trade price deviations using the Detrended Price Oscillator.
+- Formula: 
+  - `Hurst(t) = Variance(Residuals) / Variance(Price)` calculated over a rolling 100-period window using rescaled range analysis.
+  - `DPO(t) = Price(t) - SMA(t-n/2+1)` where n=20.
+- Entry: `Hurst(t) < 0.45` (significant mean reversion regime) AND `DPO(t) > 2.0 * ATR(20)` (price deviated significantly from cycle high).
+- Exit: `DPO(t) < 0` (price returned to equilibrium) OR `Hurst(t) > 0.55` (regime shifted to trending).
+- Why it might work in 2025 bear market: Bear markets often exhibit choppy, mean-reverting behavior; H<0.5 identifies these periods precisely, avoiding trend-following losses.
+- Priority: HIGH — Directly addresses the regime detection gap for bear/range markets using fractal dimension analysis.
+
+**2. Funding Rate Sentiment Fade + Volume Spike** *(8H timeframe, using 8H funding intervals)*
+- Core idea: Exploit excessive leverage sentiment in perpetuals; extreme positive funding in a downtrend signals overcrowded longs ripe for a squeeze.
+- Formula:
+  - `FR_Z = (Funding_Rate - SMA(Funding_Rate, 30)) / StdDev(Funding_Rate, 30)`
+  - `Vol_Spike = Volume > 2.0 * SMA(Volume, 20)`
+- Entry: `FR_Z > 2.5` (extreme greed) AND `Price < EMA(50)` (downtrend filter) AND `Vol_Spike` confirms participation.
+- Exit: `FR_Z < 0` (sentiment normalized) OR `Price > EMA(50)` (trend break).
+- Why it might work in 2025 bear market: Bear markets punish leveraged longs; funding rate extremes act as a reliable contrarian indicator when aligned with the dominant trend.
+- Priority: HIGH — Unique crypto-native microstructure signal not dependent on standard price patterns.
+
+**3. Ehlers Roofing Filter Stochastic** *(4H timeframe)*
+- Core idea: Apply John Ehlers' digital signal processing to remove trend and noise, isolating the dominant cycle for timing reversals.
+- Formula:
+  - `HP = (1 + 0.5)/2 * Price(t) - (1 - 0.5)/2 * Price(t-1) + (1 - 0.5) * HP(t-1)` (High Pass Filter, period 48).
+  - `SSF = HP(t) + 2*HP(t-1) + 3*HP(t-2) + ...` (Super Smoother, period 10).
+  - Apply Stochastic(14) calculation to the SSF output.
+- Entry: `Stoch_SSF > 85` AND turns down (cycle top) AND `Price < EMA(50)` (bear context).
+- Exit: `Stoch_SSF < 20` OR `Price > EMA(50)`.
+- Why it might work in 2025 bear market: DSP filters out low-frequency trend noise and high-frequency chatter, capturing the clean oscillations typical of range-bound bear markets.
+- Priority: MEDIUM — Requires correct implementation of DSP filters; mathematically robust but less tested in crypto.
+
+**4. Vortex Indicator Bearish Crossover + ATR Volatility Filter** *(1H timeframe)*
+- Core idea: Vortex Indicator captures positive and negative trend movement; combining it with volatility expansion filters out weak signals.
+- Formula:
+  - `VIP(14) = Sum(VM_plus, 14) / Sum(TR, 14)`
+  - `VIM(14) = Sum(VM_minus, 14) / Sum(TR, 14)`
+  - `ATR_Ratio = ATR(14) / ATR(50)`
+- Entry: `VIM(14)` crosses above `VIP(14)` AND `ATR_Ratio > 1.0` (volatility expanding) AND `Price < EMA(100)`.
+- Exit: `VIP(14)` crosses above `VIM(14)` OR `ATR_Ratio < 0.8` (volatility collapsing).
+- Why it might work in 2025 bear market: Vortex excels at identifying the start of impulsive moves; the ATR filter ensures entries occur during volatility expansions typical of bear market dumps.
+- Priority: MEDIUM — Novel trend detection mechanism distinct from ADX/Supertrend; good for catching sharp bear legs.
+
+**5. Schaff Trend Cycle (STC) Momentum Reversal** *(4H timeframe)*
+- Core idea: STC improves on MACD by applying a stochastic oscillator to the MACD line, reducing lag and identifying cycle tops/bottoms faster.
+- Formula:
+  - `MACD = EMA(23) - EMA(50)`
+  - `STC = Stochastic(Stochastic(MACD, 10), 10)` (Double stochastic smoothing).
+- Entry: `STC > 90` AND turns down (cycle peak) AND `EMA(23) < EMA(50)` (bearish alignment).
+- Exit: `STC < 10` (cycle bottom) OR `EMA(23) > EMA(50)` (trend reversal).
+- Why it might work in 2025 bear market: Bear markets consist of cyclical rallies that fail; STC identifies the exact moment momentum cycles turn over with minimal lag.
+- Priority: HIGH — Superior cycle timing compared to standard MACD histogram strategies already tested.
+
+**6. Elder Ray Index (
+
 ### Batch discovered 2026-04-01 12:02
 
 **1. Funding Rate Z-Score + Fractal Volatility Regime** *(30m/4H)*

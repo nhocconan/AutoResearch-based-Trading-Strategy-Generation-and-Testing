@@ -3,14 +3,14 @@
 ## Train Results
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.360 | +10.6% | -8.7% | 187 | FAIL |
-| ETHUSDT | -0.695 | -4.0% | -13.8% | 210 | FAIL |
-| SOLUSDT | 0.210 | +32.5% | -21.3% | 198 | PASS |
+| BTCUSDT | -0.360 | +10.6% | -8.7% | 187 | DISCARD |
+| ETHUSDT | -0.695 | -4.0% | -13.8% | 210 | DISCARD |
+| SOLUSDT | 0.210 | +32.5% | -21.2% | 198 | KEEP |
 
 ## Test Results (2025+)
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| SOLUSDT | 0.071 | +6.6% | -6.6% | 64 | PASS |
+| SOLUSDT | 0.071 | +6.6% | -6.6% | 64 | KEEP |
 
 ## Code
 ```python
@@ -321,4 +321,4 @@ def generate_signals(prices):
 ```
 
 ## Last Updated
-2026-03-22 19:35
+2026-04-07 04:13

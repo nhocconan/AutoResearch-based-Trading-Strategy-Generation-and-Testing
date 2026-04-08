@@ -1,0 +1,112 @@
+# Strategy: 4h_daily_pivot_breakout_1d_trend_volume_v2
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.066 | +14.6% | -13.7% | 272 | FAIL |
+| ETHUSDT | -0.100 | +9.4% | -19.1% | 265 | FAIL |
+| SOLUSDT | 0.893 | +153.9% | -23.4% | 226 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| SOLUSDT | 0.133 | +7.4% | -13.6% | 86 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "4h_daily_pivot_breakout_1d_trend_volume_v2"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 60:
+        return np.zeros(n)
+    
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # 1d data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily pivot points (previous day's values)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
+    
+    # Align pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2_1d)
+    
+    # 4h trend: 50-period EMA
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(50, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50[i]) or np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or 
+            np.isnan(vol_filter[i])):
+            signals[i] = 0.0
+            continue
+        
+        if position == 1:  # Long position
+            # Exit: price < S1 or trend fails
+            if close[i] < s1_4h[i] or close[i] < ema_50[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price > R1 or trend fails
+            if close[i] > r1_4h[i] or close[i] > ema_50[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Trend filter
+            bullish = close[i] > ema_50[i]
+            bearish = close[i] < ema_50[i]
+            
+            # Long: price > R1 + bullish trend + volume
+            if (close[i] > r1_4h[i] and 
+                bullish and 
+                vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short: price < S1 + bearish trend + volume
+            elif (close[i] < s1_4h[i] and 
+                  bearish and 
+                  vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
+    
+    return signals
+```
+
+## Last Updated
+2026-04-08 02:37

@@ -1,21 +1,15 @@
 # Strategy: macd_zscore_volume_mtf_1h_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.149 | Return=+63.4% | DD=-24.8%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.304 | +11.4% | -13.1% | 47 |
-| ETHUSDT | -0.428 | -1.5% | -27.5% | 81 |
-| SOLUSDT | 1.180 | +180.1% | -33.9% | 3 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.287 | +11.9% | -12.9% | 47 | DISCARD |
+| ETHUSDT | -0.411 | -0.7% | -27.1% | 81 | DISCARD |
+| SOLUSDT | 1.180 | +180.2% | -33.9% | 3 | DISCARD |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.847 | -6.8% | -9.9% | 58 |
-| ETHUSDT | -0.830 | -4.5% | -14.3% | 63 |
-| SOLUSDT | -0.404 | -0.1% | -14.0% | 65 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -459,4 +453,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 18:29
+2026-04-07 04:13
