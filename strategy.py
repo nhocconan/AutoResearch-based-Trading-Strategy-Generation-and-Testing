@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-4H Donchian Breakout + Daily Trend + Volume Confirmation
-Hypothesis: 4-hour Donchian channel breakouts (20-period) with daily EMA trend alignment and volume confirmation capture strong momentum moves. Works in both bull and bear markets by following the higher timeframe trend. Target: 20-50 trades/year per symbol.
+4h Donchian Breakout + 1d Trend + Volume Confirmation
+Hypothesis: Donchian(20) breakouts on 4h with daily EMA trend alignment and volume filter capture strong momentum.
+Breakouts above upper band or below lower band with daily EMA trend and volume > 1.5x 20-period MA trigger entries.
+Exit when price crosses the opposite Donchian band or trend reverses. Designed for 4h to target 20-50 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_daily_trend_volume_v1"
+name = "4h_donchian_breakout_1d_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,7 +28,7 @@ def generate_signals(prices):
     # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 4h Donchian channel (20-period)
+    # Donchian(20) on 4h
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -49,28 +51,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band or trend reverses
-            if close[i] < low_20[i] or close[i] < ema_21_4h[i]:
+            # Exit: price crosses below lower Donchian band or trend reverses
+            if close[i] <= low_20[i] or close[i] < ema_21_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band or trend reverses
-            if close[i] > high_20[i] or close[i] > ema_21_4h[i]:
+            # Exit: price crosses above upper Donchian band or trend reverses
+            if close[i] >= high_20[i] or close[i] > ema_21_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long at upper Donchian with trend alignment
+            # Breakout long above upper band with trend alignment
             if (close[i] >= high_20[i] and 
                 close[i] > ema_21_4h[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Breakout short at lower Donchian with trend alignment
+            # Breakout short below lower band with trend alignment
             elif (close[i] <= low_20[i] and 
                   close[i] < ema_21_4h[i] and 
                   vol_filter[i]):
