@@ -1,22 +1,23 @@
-# 4h_donchian_breakout_12h_trend_volume
-# Hypothesis: Donchian(20) breakout on 4h combined with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with uptrend (price > 12h EMA100) and volume > 1.5x average.
-# Short when price breaks below Donchian lower band with downtrend (price < 12h EMA100) and volume > 1.5x average.
-# Exit when price crosses back to Donchian middle band (mean of upper/lower).
-# Designed to capture strong breakouts with trend alignment in both bull and bear markets.
-# Target: 75-200 total trades over 4 years (~19-50/year).
+#!/usr/bin/env python3
+# 12h_camarilla_pivot_1d_trend_volume
+# Hypothesis: Camarilla pivot levels from 1-day data combined with EMA trend filter and volume confirmation.
+# Long when price touches or breaks above Camarilla H3 level with uptrend (price > 1d EMA50) and volume > 1.3x average.
+# Short when price touches or breaks below Camarilla L3 level with downtrend (price < 1d EMA50) and volume > 1.3x average.
+# Exit when price returns to Camarilla P (pivot) level.
+# Designed to capture mean-reversion bounces at key intraday levels in both ranging and trending markets.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_trend_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,23 +26,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 100:
+    # Get daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA100 for trend filter
-    ema_100_12h = pd.Series(close_12h).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_100_12h)
+    # Calculate Camarilla pivot levels for each day
+    # P = (H + L + C) / 3
+    # H3 = P + (H - L) * 1.1 / 2
+    # L3 = P - (H - L) * 1.1 / 2
+    pivot = (high_1d + low_1d + close_1d) / 3
+    camarilla_h3 = pivot + (high_1d - low_1d) * 1.1 / 2
+    camarilla_l3 = pivot - (high_1d - low_1d) * 1.1 / 2
     
-    # Calculate Donchian channels on 4h data (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_100_12h_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -64,29 +73,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian middle band
-            if close[i] < donchian_mid[i]:
+            # Exit: price returns to or below pivot level
+            if close[i] <= pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian middle band
-            if close[i] > donchian_mid[i]:
+            # Exit: price returns to or above pivot level
+            if close[i] >= pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volume confirmation: current volume > 1.3x average volume
+            volume_ok = volume[i] > 1.3 * avg_volume[i]
             
-            # Breakout entries: Donchian upper breakout (long) and lower breakdown (short)
-            if (close[i] > donchian_high[i]) and (close[i] > ema_100_12h_aligned[i]) and volume_ok:
+            # Entry conditions: touch/break of Camarilla H3/L3 with trend alignment
+            if (close[i] >= camarilla_h3_aligned[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (close[i] < donchian_low[i]) and (close[i] < ema_100_12h_aligned[i]) and volume_ok:
+            elif (close[i] <= camarilla_l3_aligned[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
