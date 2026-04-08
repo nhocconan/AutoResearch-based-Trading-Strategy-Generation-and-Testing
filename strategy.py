@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_pivot_v5
-Hypothesis: 4-hour strategy using daily context with Camarilla pivot levels.
-Long when price crosses above daily Pivot with volume > 1.8x average and price > daily EMA200 (bullish trend).
-Short when price crosses below daily Pivot with volume > 1.8x average and price < daily EMA200 (bearish trend).
-Exit when price crosses opposite daily support/resistance or volume drops below average.
-Uses discrete position sizing (0.25) to balance return and risk. Target: 20-30 trades/year.
+12h_1w1d_camarilla_pivot_v1
+Hypothesis: 12-hour strategy using weekly/daily context with Camarilla pivot levels.
+Long when price crosses above weekly Pivot with volume > 1.5x average and price > daily EMA50 (bullish trend).
+Short when price crosses below weekly Pivot with volume > 1.5x average and price < daily EMA50 (bearish trend).
+Exit when price crosses opposite weekly support/resistance or volume drops below average.
+Uses discrete position sizing (0.25) to limit trade frequency and manage drawdown.
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v5"
-timeframe = "4h"
+name = "12h_1w1d_camarilla_pivot_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_camarilla(high, low, close):
@@ -43,7 +44,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -51,30 +52,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for context and Pivot
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get weekly data for context and Pivot
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Pivot (using previous day's data)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    # Daily support/resistance levels
-    S1_1d = pivot_1d - (range_1d * 1.1 / 12)  # Daily S1
-    R1_1d = pivot_1d + (range_1d * 1.1 / 12)  # Daily R1
+    # Calculate weekly Pivot (using previous week's data)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    # Weekly support/resistance levels
+    S1_1w = pivot_1w - (range_1w * 1.1 / 12)  # Weekly S1
+    R1_1w = pivot_1w + (range_1w * 1.1 / 12)  # Weekly R1
     
     # Calculate daily EMA for trend filter
-    ema_200_1d = calculate_ema(close_1d, 200)
+    close_1d = df_1d['close'].values
+    ema_50_1d = calculate_ema(close_1d, 50)
     
-    # Align indicators to 4-hour timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align indicators to 12-hour timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
+    R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -84,10 +91,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(R1_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(S1_1w_aligned[i]) or 
+            np.isnan(R1_1w_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
@@ -97,13 +104,13 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        pivot = pivot_1d_aligned[i]
-        S1 = S1_1d_aligned[i]
-        R1 = R1_1d_aligned[i]
-        trend_up_1d = price > ema_200_1d_aligned[i]
+        pivot = pivot_1w_aligned[i]
+        S1 = S1_1w_aligned[i]
+        R1 = R1_1w_aligned[i]
+        trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below daily S1 or volume drops below average
+            # Exit: price crosses below weekly S1 or volume drops below average
             if price < S1 or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
@@ -111,19 +118,19 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above daily R1 or volume drops below average
+            # Exit: price crosses above weekly R1 or volume drops below average
             if price > R1 or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price crosses above daily Pivot with volume expansion and uptrend on daily
-            if price > pivot and vol_ratio > 1.8 and trend_up_1d:
+            # Enter long: price crosses above weekly Pivot with volume expansion and uptrend on daily
+            if price > pivot and vol_ratio > 1.5 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price crosses below daily Pivot with volume expansion and downtrend on daily
-            elif price < pivot and vol_ratio > 1.8 and not trend_up_1d:
+            # Enter short: price crosses below weekly Pivot with volume expansion and downtrend on daily
+            elif price < pivot and vol_ratio > 1.5 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
