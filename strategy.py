@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian channel breakouts capture strong momentum moves. Filtered by 1d EMA trend to avoid counter-trend trades and volume confirmation to avoid false signals. Works in bull/bear by aligning with higher timeframe trend. Targets 20-50 trades/year on 4h timeframe.
+Hypothesis: Donchian(20) breakouts capture strong momentum. Filtered by 1d EMA(50) trend to avoid counter-trend trades and volume confirmation to avoid false signals. Works in bull/bear by aligning with higher timeframe trend. Targets 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -47,7 +47,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR trend turns bearish
+            # Exit: price closes below Donchian low OR trend turns bearish
             if (close[i] <= period20_low[i] or 
                 close[i] < ema_50_1d_aligned[i]):
                 position = 0
@@ -56,7 +56,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR trend turns bullish
+            # Exit: price closes above Donchian high OR trend turns bullish
             if (close[i] >= period20_high[i] or 
                 close[i] > ema_50_1d_aligned[i]):
                 position = 0
@@ -64,13 +64,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian upper band, uptrend, volume
+            # Long: price breaks above Donchian high, uptrend, volume
             if (close[i] > period20_high[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian lower band, downtrend, volume
+            # Short: price breaks below Donchian low, downtrend, volume
             elif (close[i] < period20_low[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   vol_filter[i]):
