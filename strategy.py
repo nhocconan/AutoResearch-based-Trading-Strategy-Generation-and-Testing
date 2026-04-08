@@ -1,36 +1,53 @@
-#24770
-
 #!/usr/bin/env python3
 """
-4h_1d_donchian_breakout_v1
-Hypothesis: 4-hour Donchian breakout with daily trend filter and volume confirmation.
-Long when price breaks above 20-period Donchian high with volume > 1.5x average and price > daily EMA50 (bullish trend).
-Short when price breaks below 20-period Donchian low with volume > 1.5x average and price < daily EMA50 (bearish trend).
-Exit when price crosses the Donchian midline (average of 20-period high/low).
+6h_1d_trix_volume_regime_v1
+Hypothesis: 6-hour strategy combining daily TRIX momentum with volume confirmation and regime filter.
+Long when TRIX crosses above zero with volume > 1.5x average and price > daily EMA200 (bullish trend).
+Short when TRIX crosses below zero with volume > 1.5x average and price < daily EMA200 (bearish trend).
+Exit when TRIX crosses back across zero or volume drops below average.
 Uses discrete position sizing (0.25) to minimize churn. Target: 20-30 trades/year.
+Works in both bull and bear markets by using momentum (TRIX) and regime filter (EMA200).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_trix_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel: upper and lower bands"""
-    if len(high) < period:
-        return np.full(len(high), np.nan), np.full(len(high), np.nan)
+def calculate_trix(close, period=15):
+    """Calculate TRIX (Triple Exponential Average)"""
+    if len(close) < period * 3:
+        return np.full_like(close, np.nan, dtype=float)
     
-    upper = np.full(len(high), np.nan)
-    lower = np.full(len(high), np.nan)
+    # First EMA
+    ema1 = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema1[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema1[i] = alpha * close[i] + (1 - alpha) * ema1[i-1]
     
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    # Second EMA
+    ema2 = np.full_like(close, np.nan, dtype=float)
+    ema2[period-1] = np.mean(ema1[:period])
+    for i in range(period, len(close)):
+        ema2[i] = alpha * ema1[i] + (1 - alpha) * ema2[i-1]
     
-    return upper, lower
+    # Third EMA
+    ema3 = np.full_like(close, np.nan, dtype=float)
+    ema3[period-1] = np.mean(ema2[:period])
+    for i in range(period, len(close)):
+        ema3[i] = alpha * ema2[i] + (1 - alpha) * ema3[i-1]
+    
+    # TRIX = (EMA3[i] - EMA3[i-1]) / EMA3[i-1] * 100
+    trix = np.full_like(close, np.nan, dtype=float)
+    for i in range(period, len(close)):
+        if ema3[i-1] != 0:
+            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+    
+    return trix
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -46,7 +63,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -54,21 +71,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily TRIX
     close_1d = df_1d['close'].values
-    ema_50_1d = calculate_ema(close_1d, 50)
+    trix_1d = calculate_trix(close_1d, 15)
     
-    # Calculate 4-hour Donchian channel (20-period)
-    donch_hi, donch_lo = calculate_donchian(high, low, 20)
-    donch_mid = (donch_hi + donch_lo) / 2.0
+    # Calculate daily EMA for trend filter
+    ema_200_1d = calculate_ema(close_1d, 200)
     
-    # Align daily EMA to 4-hour timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align indicators to 6-hour timeframe
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -80,8 +97,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(trix_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
@@ -91,33 +107,32 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        upper = donch_hi[i]
-        lower = donch_lo[i]
-        mid = donch_mid[i]
-        trend_up = price > ema_50_1d_aligned[i]
+        trix = trix_1d_aligned[i]
+        trix_prev = trix_1d_aligned[i-1] if i > 0 else 0
+        ema_200 = ema_200_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below Donchian midline
-            if price < mid:
+            # Exit: TRIX crosses below zero or volume drops below average
+            if trix < 0 or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above Donchian midline
-            if price > mid:
+            # Exit: TRIX crosses above zero or volume drops below average
+            if trix > 0 or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and uptrend
-            if price > upper and vol_ratio > 1.5 and trend_up:
+            # Enter long: TRIX crosses above zero with volume expansion and uptrend on daily
+            if trix > 0 and trix_prev <= 0 and vol_ratio > 1.5 and price > ema_200:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and downtrend
-            elif price < lower and vol_ratio > 1.5 and not trend_up:
+            # Enter short: TRIX crosses below zero with volume expansion and downtrend on daily
+            elif trix < 0 and trix_prev >= 0 and vol_ratio > 1.5 and price < ema_200:
                 position = -1
                 signals[i] = -0.25
     
