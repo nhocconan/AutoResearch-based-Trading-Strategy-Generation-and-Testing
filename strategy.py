@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_volume_pivot_v1
-# Hypothesis: 12h long/short entries at Camarilla pivot levels (H3/L3) from 1d timeframe,
-# confirmed by volume spike (>1.5x 20-period average) and ADX trend filter (>25).
-# Exits when price reaches opposite H4/L4 level or ADX drops below 20.
-# Designed to capture intraday reversals at institutional levels while avoiding chop.
-# Works in bull/bear by using mean-reversion at extremes with trend filter.
+# 4h_daily_camarilla_pivot_volume_trend_v2
+# Hypothesis: Camarilla pivot levels from daily timeframe act as institutional support/resistance.
+# Long when price breaks above R4 with volume confirmation in uptrend (EMA50 > EMA200).
+# Short when price breaks below S4 with volume confirmation in downtrend (EMA50 < EMA200).
+# Uses 4h timeframe for entries and daily for pivot calculation to reduce noise.
+# Volume filter requires current volume > 1.5x 20-period average to avoid false breakouts.
+# Designed for fewer, higher-quality trades to minimize fee drag in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_volume_pivot_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,116 +25,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth with Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(high)
-        plus_dm_smooth = np.zeros_like(high)
-        minus_dm_smooth = np.zeros_like(high)
-        
-        atr[period] = np.nansum(tr[1:period+1]) / period
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1]) / period
-        minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1]) / period
-        
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-        minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        
-        adx = np.zeros_like(high)
-        adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
-        for i in range(2*period+1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # EMA50 and EMA200 for trend filter
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    adx = calculate_adx(high, low, close, 14)
+    # Volume average for confirmation
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Volume average (20-period)
-    vol_avg = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
-    
-    # Get 1d data for Camarilla levels
+    # Daily Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Calculate daily Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_h4 = np.zeros_like(high_1d)
-    camarilla_l4 = np.zeros_like(low_1d)
-    camarilla_h3 = np.zeros_like(high_1d)
-    camarilla_l3 = np.zeros_like(low_1d)
+    # Previous day's values for today's levels
+    phigh = np.concatenate([[np.nan], high_1d[:-1]])
+    plow = np.concatenate([[np.nan], low_1d[:-1]])
+    pclose = np.concatenate([[np.nan], close_1d[:-1]])
     
-    for i in range(1, len(high_1d)):
-        range_ = high_1d[i-1] - low_1d[i-1]
-        camarilla_h4[i] = close_1d[i-1] + range_ * 1.1 / 2
-        camarilla_l4[i] = close_1d[i-1] - range_ * 1.1 / 2
-        camarilla_h3[i] = close_1d[i-1] + range_ * 1.1 / 4
-        camarilla_l3[i] = close_1d[i-1] - range_ * 1.1 / 4
+    pivot = (phigh + plow + pclose) / 3
+    range_ = phigh - plow
     
-    # Align to 12h timeframe
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Camarilla levels
+    r4 = pivot + (range_ * 1.1 / 2)
+    r3 = pivot + (range_ * 1.1 / 4)
+    s3 = pivot - (range_ * 1.1 / 4)
+    s4 = pivot - (range_ * 1.1 / 2)
+    
+    # Align to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        if np.isnan(adx[i]) or np.isnan(vol_avg[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]):
-            if position != 0:
-                pass  # Hold position
-            else:
-                signals[i] = 0.0
+        # Skip if any data is NaN
+        if (np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(s4_aligned[i])):
             continue
         
-        vol_spike = volume[i] > 1.5 * vol_avg[i]
-        strong_trend = adx[i] > 25
-        weak_trend = adx[i] < 20
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 1:  # Long position
-            if close[i] >= h4_12h[i] or weak_trend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            if close[i] <= l4_12h[i] or weak_trend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat
-            if vol_spike and strong_trend:
-                if close[i] <= l3_12h[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] >= h3_12h[i]:
-                    position = -1
-                    signals[i] = -0.25
+        # Long: price breaks above R4 with volume in uptrend
+        if (close[i] > r4_aligned[i] and vol_confirm and 
+            ema50[i] > ema200[i]):
+            signals[i] = 0.25
+        # Short: price breaks below S4 with volume in downtrend
+        elif (close[i] < s4_aligned[i] and vol_confirm and 
+              ema50[i] < ema200[i]):
+            signals[i] = -0.25
+        # Otherwise, stay flat (0)
+        else:
+            signals[i] = 0.0
     
     return signals
