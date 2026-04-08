@@ -1,109 +1,76 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_volume_breakout_v1
-# Hypothesis: Price breaking Camarilla pivot levels (H4/L4) on 12h timeframe with volume confirmation and 1-day trend filter.
-# Long when price breaks above H4 (1.125) with volume > 1.5x 20-period average and 1-day close > 1-day SMA(50).
-# Short when price breaks below L4 (0.875) with volume > 1.5x 20-period average and 1-day close < 1-day SMA(50).
-# Uses 12h timeframe for entries and 1-day for trend filter to reduce whipsaw. Designed for 15-35 trades/year.
-# Works in bull markets via upside breakouts and bear markets via downside breakdowns.
+# 6h_1d_rsi_mean_reversion_v1
+# Hypothesis: Mean reversion on 6h timeframe using RSI(14) with 1-day trend filter.
+# Long when RSI < 30 and 1-day close > 1-day SMA(50) (uptrend filter).
+# Short when RSI > 70 and 1-day close < 1-day SMA(50) (downtrend filter).
+# Uses 6h RSI for entry timing and 1-day trend to avoid counter-trend trades.
+# Designed for 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_volume_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_rsi_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 12h SMA(50) for trend filter
-    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 12h volume MA(20) for volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1-day data for Camarilla pivot calculation
+    # 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    # Calculate Camarilla levels from previous day's range
-    # H4 = close + 1.5 * (high - low) * 1.125
-    # L4 = close - 1.5 * (high - low) * 1.125
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Previous day's range (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First value will be incorrect due to roll, but will be handled by min_periods
-    
-    # Calculate Camarilla levels
-    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low) * 1.125
-    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low) * 1.125
-    
-    # Align Camarilla levels to 12h timeframe (already delayed by 1 day due to roll)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure SMA(50) and volume MA are ready
+    start_idx = 50  # Ensure SMA(50) and RSI are ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if np.isnan(sma50[i]) or np.isnan(vol_ma_20[i]) or np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(sma50_1d_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition
-        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
-        
-        # 1-day trend filter: close > SMA(50) for long, close < SMA(50) for short
-        # Get 1-day SMA(50) aligned to 12h timeframe
-        sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-        sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-        
-        if np.isnan(sma50_1d_aligned[i]):
-            if position != 0:
-                pass  # Hold position
-            else:
-                signals[i] = 0.0
-            continue
-            
         if position == 1:  # Long position
-            # Exit: price breaks below L4 (0.875 level) or trend reverses
-            if close[i] < camarilla_l4_aligned[i] or close[i] < sma50_1d_aligned[i]:
+            # Exit: RSI > 50 (mean reversion complete) or trend reverses
+            if rsi[i] > 50 or close[i] < sma50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above H4 (1.125 level) or trend reverses
-            if close[i] > camarilla_h4_aligned[i] or close[i] > sma50_1d_aligned[i]:
+            # Exit: RSI < 50 (mean reversion complete) or trend reverses
+            if rsi[i] < 50 or close[i] > sma50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above H4 with volume surge and uptrend
-            if close[i] > camarilla_h4_aligned[i] and vol_surge and close[i] > sma50_1d_aligned[i]:
+            # Long entry: RSI < 30 (oversold) and uptrend
+            if rsi[i] < 30 and close[i] > sma50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below L4 with volume surge and downtrend
-            elif close[i] < camarilla_l4_aligned[i] and vol_surge and close[i] < sma50_1d_aligned[i]:
+            # Short entry: RSI > 70 (overbought) and downtrend
+            elif rsi[i] > 70 and close[i] < sma50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
