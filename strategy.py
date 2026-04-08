@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_filter_v1
-# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and ATR stoploss.
-# Long when price breaks above 20-period high + volume > 1.5x average volume.
-# Short when price breaks below 20-period low + volume > 1.5x average volume.
-# Uses daily trend filter to avoid counter-trend trades and reduce whipsaw.
-# Designed for 20-50 trades/year on 4h to avoid fee drag. Works in bull/bear via daily trend alignment.
+# 4h_volatility_breakout_volume_regime_v1
+# Hypothesis: 4h ATR-based volatility breakout with volume confirmation and
+# 12h choppiness regime filter. Works in bull/bear by adapting to volatility
+# regimes - breakouts work in trending markets, while the chop filter avoids
+# false signals in ranging markets. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_filter_v1"
+name = "4h_volatility_breakout_volume_regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,78 +23,114 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    period20_high = np.full(n, np.nan)
-    period20_low = np.full(n, np.nan)
+    # ATR(14) for volatility breakout
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.nanmean(tr[i-14:i+1])
+    
+    # Donchian channel (20-period) for breakout levels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     for i in range(20, n):
-        period20_high[i] = np.max(high[i-20:i+1])
-        period20_low[i] = np.min(low[i-20:i+1])
+        donchian_high[i] = np.max(high[i-20:i+1])
+        donchian_low[i] = np.min(low[i-20:i+1])
     
-    # Average volume (20-period)
-    avg_volume = np.full(n, np.nan)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
-            vol_count -= 1
-        if vol_count > 0:
-            avg_volume[i] = vol_sum / vol_count
+    # Volume moving average (20-period) for confirmation
+    vol_ma = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for choppiness regime filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # ATR for 12h chop calculation
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr2_12h[0] = np.nan
+    tr3_12h[0] = np.nan
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    
+    atr_12h = np.full(len(df_12h), np.nan)
+    for i in range(14, len(df_12h)):
+        atr_12h[i] = np.nanmean(tr_12h[i-14:i+1])
+    
+    # True range sum and ATR sum for choppiness
+    tr_sum_12h = np.full(len(df_12h), np.nan)
+    atr_sum_12h = np.full(len(df_12h), np.nan)
+    for i in range(14, len(df_12h)):
+        tr_sum_12h[i] = np.nansum(tr_12h[i-14:i+1])
+        atr_sum_12h[i] = np.nansum(atr_12h[i-14:i+1]) if not np.isnan(atr_12h[i-14:i+1]).all() else np.nan
+    
+    # Choppiness index: 100 * log10(atr_sum / tr_sum) / log10(period)
+    chop_12h = np.full(len(df_12h), np.nan)
+    for i in range(14, len(df_12h)):
+        if tr_sum_12h[i] > 0 and atr_sum_12h[i] > 0 and not np.isnan(tr_sum_12h[i]) and not np.isnan(atr_sum_12h[i]):
+            chop_12h[i] = 100 * np.log10(atr_sum_12h[i] / tr_sum_12h[i]) / np.log10(14)
+        else:
+            chop_12h[i] = np.nan
+    
+    # Align 12h chop to 4h
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 20  # Ensure Donchian is ready
+    start_idx = max(20, 14)  # Donchian and ATR ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_12h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Chop regime filter: only trade when chop < 50 (trending market)
+        trending_regime = chop_12h_aligned[i] < 50
+        
         if position == 1:  # Long position
-            # Exit: price breaks below 20-period low or trend changes
-            if close[i] < period20_low[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: price closes below Donchian low or volatility drops
+            if close[i] < donchian_low[i] or atr[i] < 0.5 * np.nanmean(atr[max(0, i-10):i+1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 20-period high or trend changes
-            if close[i] > period20_high[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: price closes above Donchian high or volatility drops
+            if close[i] > donchian_high[i] or atr[i] < 0.5 * np.nanmean(atr[max(0, i-10):i+1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_confirmed = volume[i] > 1.5 * avg_volume[i]
-            
-            # Long entry: price breaks above 20-period high + volume confirmation + uptrend
-            if (close[i] > period20_high[i] and 
-                volume_confirmed and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long entry: price breaks above Donchian high with volume confirmation in trending regime
+            if (close[i] > donchian_high[i] and 
+                volume_confirm and 
+                trending_regime):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 20-period low + volume confirmation + downtrend
-            elif (close[i] < period20_low[i] and 
-                  volume_confirmed and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short entry: price breaks below Donchian low with volume confirmation in trending regime
+            elif (close[i] < donchian_low[i] and 
+                  volume_confirm and 
+                  trending_regime):
                 position = -1
                 signals[i] = -0.25
     
