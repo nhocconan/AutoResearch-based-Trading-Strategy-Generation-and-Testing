@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_wick_volume_reversal_v1
-Hypothesis: 12h price action shows rejection at key levels via long/short wicks with volume confirmation.
-In bull markets: long wick rejection at support + volume = long setup.
-In bear markets: short wick rejection at resistance + volume = short setup.
-Uses 1d trend filter to avoid counter-trend trades. Target: 15-30 trades/year.
+6h_weekly_pivot_breakout_v1
+Hypothesis: 6h price breaks above/below weekly pivot levels (R4/S4) with volume confirmation and weekly trend filter.
+In bull markets: buy breakouts above weekly resistance with uptrend.
+In bear markets: sell breakdowns below weekly support with downtrend.
+Weekly pivots provide strong institutional levels; volume confirms participation.
+Target: 15-30 trades/year to avoid overtrading on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_wick_volume_reversal_v1"
-timeframe = "12h"
+name = "6h_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,46 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # 12h body and wick calculations
-    body = np.abs(close - open_price)
-    upper_wick = high - np.maximum(close, open_price)
-    lower_wick = np.minimum(close, open_price) - low
+    # Weekly pivot levels (calculated from prior week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Wick strength: wick as % of total range (high-low)
-    total_range = high - low
-    upper_wick_pct = np.where(total_range > 0, upper_wick / total_range, 0)
-    lower_wick_pct = np.where(total_range > 0, lower_wick / total_range, 0)
+    # Calculate weekly pivot points: PP = (H+L+C)/3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Volume confirmation: 24-period average (2 days of 12h data)
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    r4 = weekly_high + 3 * (pp - weekly_low)
+    s4 = weekly_low - 3 * (weekly_high - pp)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    
+    # Weekly trend filter: price vs weekly EMA(13)
+    ema_13 = np.full(len(weekly_close), np.nan)
+    for i in range(13, len(weekly_close)):
+        ema_13[i] = np.mean(weekly_close[i-13:i])  # Simple MA for efficiency
+    
+    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13)
+    
+    # Volume confirmation: 24-period average (4 days of 6h bars)
     vol_ma = np.full(n, np.nan)
     for i in range(24, n):
         vol_ma[i] = np.mean(volume[i-24:i])
-    
-    # 1d trend filter: 50 EMA on close
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_50 = np.full(len(close_1d), np.nan)
-    alpha = 2 / (50 + 1)
-    for i in range(1, len(close_1d)):
-        if np.isnan(ema_50[i-1]):
-            ema_50[i] = close_1d[i]
-        else:
-            ema_50[i] = alpha * close_1d[i] + (1 - alpha) * ema_50[i-1]
-    
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(24, n):
         # Skip if data not ready
-        if (np.isnan(upper_wick_pct[i]) or np.isnan(lower_wick_pct[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_13_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -71,35 +77,37 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        trend_up = close[i] > ema_50_aligned[i]
-        trend_down = close[i] < ema_50_aligned[i]
+        price_above_r4 = close[i] > r4_aligned[i]
+        price_below_s4 = close[i] < s4_aligned[i]
+        weekly_uptrend = close[i] > ema_13_aligned[i]
+        weekly_downtrend = close[i] < ema_13_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price breaks below recent low or trend turns down
-            if low[i] < np.min(low[i-12:i]) or not trend_up:
+            # Exit: price breaks below S4 or weekly trend turns down
+            if price_below_s4 or not weekly_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above recent high or trend turns up
-            if high[i] > np.max(high[i-12:i]) or not trend_down:
+            # Exit: price breaks above R4 or weekly trend turns up
+            if price_above_r4 or not weekly_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: long wick rejection at support with volume and uptrend
-            if (lower_wick_pct[i] > 0.6 and  # Long lower wick >60% of range
-                vol_ratio > 1.8 and          # Strong volume
-                trend_up):                   # Uptrend filter
+            # Long: breakout above R4 with volume and weekly uptrend
+            if (price_above_r4 and 
+                vol_ratio > 1.5 and 
+                weekly_uptrend):
                 position = 1
                 signals[i] = 0.25
-            # Short: short wick rejection at resistance with volume and downtrend
-            elif (upper_wick_pct[i] > 0.6 and  # Long upper wick >60% of range
-                  vol_ratio > 1.8 and          # Strong volume
-                  trend_down):                 # Downtrend filter
+            # Short: breakdown below S4 with volume and weekly downtrend
+            elif (price_below_s4 and 
+                  vol_ratio > 1.5 and 
+                  weekly_downtrend):
                 position = -1
                 signals[i] = -0.25
     
