@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# 1d_moving_average_crossover_1w_trend_v1
-# Hypothesis: On 1d timeframe, use EMA crossover (21/50) with 1w trend filter and volume confirmation.
-# Long when EMA21 crosses above EMA50 with volume > 1.5x average and 1w uptrend.
-# Short when EMA21 crosses below EMA50 with volume > 1.5x average and 1w downtrend.
-# Exit when opposite crossover occurs.
-# Uses daily EMA crossover for trend changes, weekly trend filter to avoid counter-trend trades.
-# Target: 15-25 trades/year to minimize fee drag while capturing major trend shifts.
+# 6h_volume_squeeze_1d_trend_v1
+# Hypothesis: On 6h timeframe, trade volatility breakouts when 6h ATR contracts then expands,
+# filtered by 1d trend (EMA50). Low volatility precedes explosive moves; breakout in trend direction.
+# Works in bull/bear markets as volatility expansion precedes trend continuation.
+# Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_moving_average_crossover_1w_trend_v1"
-timeframe = "1d"
+name = "6h_volume_squeeze_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +24,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA21 and EMA50
-    ema21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # 6h ATR(20) for volatility measurement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w trend filter: EMA21 on weekly data
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 21:
+    # 6h ATR ratio: current ATR / 20-period average ATR (volatility contraction/expansion)
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr / atr_ma  # < 0.8 = contraction, > 1.2 = expansion
+    
+    # 6h Donchian breakout levels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1d EMA50 trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    weekly_close = df_weekly['close'].values
-    weekly_ema21 = pd.Series(weekly_close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    weekly_ema21_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema21)
-    
-    # Volume confirmation: 20-period average on 1d
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    daily_close = df_daily['close'].values
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    daily_ema50_6h = align_htf_to_ltf(prices, df_daily, daily_ema50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(ema21[i]) or np.isnan(ema50[i]) or np.isnan(weekly_ema21_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(atr_ratio[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
+           np.isnan(daily_ema50_6h[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -59,39 +67,40 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: EMA21 crosses below EMA50
-            if ema21[i] < ema50[i]:
+            # Exit: price closes below 6h EMA20 or ATR expansion fades
+            ema20 = pd.Series(close[:i+1]).ewm(span=20, min_periods=20, adjust=False).mean().iloc[-1]
+            if close[i] < ema20 or atr_ratio[i] < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA21 crosses above EMA50
-            if ema21[i] > ema50[i]:
+            # Exit: price closes above 6h EMA20 or ATR expansion fades
+            ema20 = pd.Series(close[:i+1]).ewm(span=20, min_periods=20, adjust=False).mean().iloc[-1]
+            if close[i] > ema20 or atr_ratio[i] < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volatility expansion trigger: ATR ratio > 1.2 (expansion from contraction)
+            vol_expansion = atr_ratio[i] > 1.2
             
-            # Weekly trend filter
-            weekly_uptrend = close[i] > weekly_ema21_aligned[i]
-            weekly_downtrend = close[i] < weekly_ema21_aligned[i]
+            # Breakout confirmation: price breaks Donchian level
+            breakout_up = close[i] > donch_high[i]
+            breakout_down = close[i] < donch_low[i]
             
-            # Bullish crossover: EMA21 crosses above EMA50
-            bullish_crossover = ema21[i] > ema50[i] and ema21[i-1] <= ema50[i-1]
-            # Bearish crossover: EMA21 crosses below EMA50
-            bearish_crossover = ema21[i] < ema50[i] and ema21[i-1] >= ema50[i-1]
+            # 1d trend filter
+            daily_uptrend = close[i] > daily_ema50_6h[i]
+            daily_downtrend = close[i] < daily_ema50_6h[i]
             
-            # Long entry: bullish crossover with volume and weekly uptrend
-            if bullish_crossover and volume_ok and weekly_uptrend:
+            # Long entry: volatility expansion + upward breakout + uptrend
+            if vol_expansion and breakout_up and daily_uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish crossover with volume and weekly downtrend
-            elif bearish_crossover and volume_ok and weekly_downtrend:
+            # Short entry: volatility expansion + downward breakout + downtrend
+            elif vol_expansion and breakout_down and daily_downtrend:
                 position = -1
                 signals[i] = -0.25
     
