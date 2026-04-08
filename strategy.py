@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_weekly_price_action_v1
-# Hypothesis: Uses weekly Donchian channels for trend direction and daily price action for entry.
-# Long when: daily close above weekly Donchian upper band (20) and volume > 1.5x 20-day average.
-# Short when: daily close below weekly Donchian lower band (20) and volume > 1.5x 20-day average.
-# Exit when price crosses back inside the weekly Donchian channel.
-# Uses weekly trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Target: 15-25 trades/year per symbol.
+# 12h_donchian20_daily_pivot_volume_v1
+# Hypothesis: Combines 12h Donchian(20) breakouts with daily pivot point levels and volume confirmation.
+# Long when: Price breaks above Donchian upper band, above daily R2 pivot level, and volume > 1.5x average.
+# Short when: Price breaks below Donchian lower band, below daily S2 pivot level, and volume > 1.5x average.
+# Exit when price crosses the daily pivot point (PP) level.
+# Uses pivot points as strong support/resistance levels, Donchian for breakout confirmation, volume for momentum validation.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_price_action_v1"
-timeframe = "1d"
+name = "12h_donchian20_daily_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: 1.5x 20-day average
+    # 12h Donchian(20) channels
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_ma_period-1, n):
@@ -36,32 +41,33 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get weekly data for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    # Get daily data for pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian channel (20-period)
-    donchian_period = 20
-    upper_weekly = np.full(len(high_weekly), np.nan)
-    lower_weekly = np.full(len(low_weekly), np.nan)
+    # Calculate daily pivot points: PP = (H+L+C)/3, R2 = PP + (H-L), S2 = PP - (H-L)
+    pivot_pp = (high_1d + low_1d + close_1d) / 3.0
+    pivot_range = high_1d - low_1d
+    pivot_r2 = pivot_pp + pivot_range
+    pivot_s2 = pivot_pp - pivot_range
     
-    for i in range(donchian_period-1, len(high_weekly)):
-        upper_weekly[i] = np.max(high_weekly[i-donchian_period+1:i+1])
-        lower_weekly[i] = np.min(low_weekly[i-donchian_period+1:i+1])
-    
-    # Align weekly Donchian levels to daily timeframe
-    upper_weekly_aligned = align_htf_to_ltf(prices, df_weekly, upper_weekly)
-    lower_weekly_aligned = align_htf_to_ltf(prices, df_weekly, lower_weekly)
+    # Align pivot levels to 12h timeframe
+    pivot_pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_pp)
+    pivot_r2_aligned = align_htf_to_ltf(prices, df_1d, pivot_r2)
+    pivot_s2_aligned = align_htf_to_ltf(prices, df_1d, pivot_s2)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(vol_ma_period, donchian_period) + 1
+    start_idx = max(donchian_period, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vol_ma[i]) or np.isnan(upper_weekly_aligned[i]) or np.isnan(lower_weekly_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(pivot_pp_aligned[i]) or 
+            np.isnan(pivot_r2_aligned[i]) or np.isnan(pivot_s2_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -69,27 +75,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below weekly Donchian upper band
-            if close[i] < upper_weekly_aligned[i]:
+            # Exit: Price crosses below daily pivot point
+            if close[i] < pivot_pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above weekly Donchian lower band
-            if close[i] > lower_weekly_aligned[i]:
+            # Exit: Price crosses above daily pivot point
+            if close[i] > pivot_pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above weekly Donchian upper band with volume surge
-            if close[i] > upper_weekly_aligned[i] and vol_surge[i]:
+            # Long entry: Price breaks above Donchian upper band, above R2 pivot, volume surge
+            if (close[i] > highest_high[i] and 
+                close[i] > pivot_r2_aligned[i] and 
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below weekly Donchian lower band with volume surge
-            elif close[i] < lower_weekly_aligned[i] and vol_surge[i]:
+            # Short entry: Price breaks below Donchian lower band, below S2 pivot, volume surge
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < pivot_s2_aligned[i] and 
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
