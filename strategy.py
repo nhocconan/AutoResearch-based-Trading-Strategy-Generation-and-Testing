@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_12h_trend_volume_v1
-# Hypothesis: Use 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
-# Long when price breaks above 20-period high with volume > 1.5x average and price > 12h EMA50.
-# Short when price breaks below 20-period low with volume > 1.5x average and price < 12h EMA50.
-# Exit on opposite Donchian breakout or when price crosses the 20-period midpoint.
-# Designed to capture trend moves with confirmation to reduce false signals.
-# Target: 20-40 trades/year to minimize fee drag while capturing meaningful trends.
+# 6h_volume_price_action_v1
+# Hypothesis: Volume-price action strategy on 6h timeframe using volume spikes and price action at key levels.
+# Long when price makes higher high with volume spike > 2x average and close > open (bullish candle).
+# Short when price makes lower low with volume spike > 2x average and close < open (bearish candle).
+# Uses no indicators - pure price and volume action to avoid lag and curve-fitting.
+# Works in bull markets (momentum continuation) and bear markets (panic selling exhaustion).
+# Target: 20-35 trades/year to stay under fee drag limits.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "6h_volume_price_action_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,39 +23,27 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Calculate 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Volume confirmation: 20-period average
+    # Volume average: 20-period for spike detection
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Price action signals
+    higher_high = high > np.maximum.accumulate(high)  # New high
+    lower_low = low < np.minimum.accumulate(low)      # New low
+    bullish_candle = close > open_price
+    bearish_candle = close < open_price
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(donchian_mid[i]) or np.isnan(ema50_12h_aligned[i]) or \
-           np.isnan(avg_volume[i]):
+        # Skip if volume data not available
+        if np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -65,32 +52,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low or opposite signal
-            if close[i] < donchian_low[i] or \
-               (close[i] > donchian_high[i] and volume[i] > 1.5 * avg_volume[i] and close[i] < ema50_12h_aligned[i]):
+            # Exit: reverse signal or price makes new low
+            if bearish_candle[i] and volume[i] > 2.0 * avg_volume[i] and lower_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or opposite signal
-            if close[i] > donchian_high[i] or \
-               (close[i] < donchian_low[i] and volume[i] > 1.5 * avg_volume[i] and close[i] > ema50_12h_aligned[i]):
+            # Exit: reverse signal or price makes new high
+            if bullish_candle[i] and volume[i] > 2.0 * avg_volume[i] and higher_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volume spike condition
+            volume_spike = volume[i] > 2.0 * avg_volume[i]
             
-            # Long entry: price breaks above Donchian high with volume and uptrend bias
-            if close[i] > donchian_high[i] and volume_ok and close[i] > ema50_12h_aligned[i]:
+            # Long entry: bullish candle with volume spike at new high
+            if bullish_candle[i] and volume_spike and higher_high[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian low with volume and downtrend bias
-            elif close[i] < donchian_low[i] and volume_ok and close[i] < ema50_12h_aligned[i]:
+            # Short entry: bearish candle with volume spike at new low
+            elif bearish_candle[i] and volume_spike and lower_low[i]:
                 position = -1
                 signals[i] = -0.25
     
