@@ -1,47 +1,66 @@
 #!/usr/bin/env python3
-# 6h_1d_12h_engulfing_volume_v1
-# Hypothesis: Engulfing candle patterns on 6h with 12h trend filter and volume confirmation.
-# In 12h uptrend: bullish engulfing + volume spike → long
-# In 12h downtrend: bearish engulfing + volume spike → short
-# Uses volume > 1.5x 20-period average for confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull/bear by following 12h trend direction.
+# 12h_1d_1w_trix_volume_regime
+# Hypothesis: Use TRIX momentum on 1d timeframe to detect trend, confirmed by volume surge and 1w trend filter.
+# Enter long when TRIX crosses above zero with volume surge and 1w uptrend; short when TRIX crosses below zero with volume surge and 1w downtrend.
+# Exit when TRIX crosses back across zero or 1w trend reverses.
+# Uses volume filter to avoid false signals and weekly EMA for trend filter.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_12h_engulfing_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_trix_volume_regime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    open_price = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Weekly EMA21 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Daily data for TRIX calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate TRIX: triple-smoothed EMA of % change
+    # TRIX = EMA(EMA(EMA(close, period), period), period)
+    # Then: TRIX_pct = (TRIX - TRIX.shift(1)) / TRIX.shift(1) * 100
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    
+    # Calculate % change of triple smoothed EMA
+    trix = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        if ema3[i-1] != 0:
+            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+        else:
+            trix[i] = 0
+    
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure all indicators are ready
+    start_idx = 100  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(trix_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -49,42 +68,32 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition
-        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
-        
-        # Bullish engulfing: current candle engulfs previous bearish candle
-        bullish_engulf = (close[i] > open_price[i-1] and 
-                         open_price[i] < close[i-1] and
-                         close[i-1] < open_price[i-1])  # Previous candle bearish
-        
-        # Bearish engulfing: current candle engulfs previous bullish candle
-        bearish_engulf = (open_price[i] > close[i-1] and 
-                         close[i] < open_price[i-1] and
-                         close[i-1] > open_price[i-1])  # Previous candle bullish
+        vol_surge = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: bearish engulfing or 12h trend breaks (price < EMA34)
-            if bearish_engulf or close[i] < ema34_12h_aligned[i]:
+            # Exit: TRIX crosses below zero or weekly trend breaks (price < weekly EMA21)
+            if trix_aligned[i] < 0 or close[i] < ema21_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish engulfing or 12h trend breaks (price > EMA34)
-            if bullish_engulf or close[i] > ema34_12h_aligned[i]:
+            # Exit: TRIX crosses above zero or weekly trend breaks (price > weekly EMA21)
+            if trix_aligned[i] > 0 or close[i] > ema21_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: bullish engulfing + volume surge + 12h uptrend
-            if (bullish_engulf and vol_surge and 
-                close[i] > ema34_12h_aligned[i]):
+            # Long entry: TRIX crosses above zero with volume surge and weekly uptrend
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and vol_surge and 
+                close[i] > ema21_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish engulfing + volume surge + 12h downtrend
-            elif (bearish_engulf and vol_surge and 
-                  close[i] < ema34_12h_aligned[i]):
+            # Short entry: TRIX crosses below zero with volume surge and weekly downtrend
+            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and vol_surge and 
+                  close[i] < ema21_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
