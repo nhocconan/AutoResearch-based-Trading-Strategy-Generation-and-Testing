@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_ema_bounce_volume_v1"
-timeframe = "1d"
+name = "12h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,18 +18,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 1d data for trend and fractal detection
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w EMA 34 (trend filter)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate Williams Fractals (1d)
+    n1 = len(high_1d)
+    bearish_fractal = np.zeros(n1, dtype=bool)
+    bullish_fractal = np.zeros(n1, dtype=bool)
     
-    # Daily EMA 21 (dynamic support/resistance)
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    for i in range(2, n1 - 2):
+        if (high_1d[i] >= high_1d[i-1] and high_1d[i] >= high_1d[i-2] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = True
+        if (low_1d[i] <= low_1d[i-1] and low_1d[i] <= low_1d[i-2] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # Volume filter: 1.5x 20-day average
+    # Align fractal signals to 12h timeframe
+    bearish_fractal_12h = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float))
+    bullish_fractal_12h = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float))
+    
+    # 1d trend: 34-period EMA (responsive trend)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
@@ -38,43 +55,42 @@ def generate_signals(prices):
     
     for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_21[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_12h[i]) or np.isnan(bearish_fractal_12h[i]) or 
+            np.isnan(bullish_fractal_12h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA21 or weekly trend turns bearish
-            if close[i] < ema_21[i] or close[i] < ema_34_1w_aligned[i]:
+            # Exit: bearish fractal or trend fails
+            if bearish_fractal_12h[i] == 1.0 or close[i] < ema_34_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA21 or weekly trend turns bullish
-            if close[i] > ema_21[i] or close[i] > ema_34_1w_aligned[i]:
+            # Exit: bullish fractal or trend fails
+            if bullish_fractal_12h[i] == 1.0 or close[i] > ema_34_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            # Weekly trend filter
-            weekly_bullish = close[i] > ema_34_1w_aligned[i]
-            weekly_bearish = close[i] < ema_34_1w_aligned[i]
+            # Trend filter
+            bullish = close[i] > ema_34_12h[i]
+            bearish = close[i] < ema_34_12h[i]
             
-            # Long: price bounces off EMA21 in bullish weekly trend + volume
-            if (close[i] > ema_21[i] and 
-                low[i] <= ema_21[i] * 1.002 and  # touched or slightly below EMA21
-                weekly_bullish and 
+            # Long: bullish fractal + bullish trend + volume
+            if (bullish_fractal_12h[i] == 1.0 and 
+                bullish and 
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: price rejected from EMA21 in bearish weekly trend + volume
-            elif (close[i] < ema_21[i] and 
-                  high[i] >= ema_21[i] * 0.998 and  # touched or slightly above EMA21
-                  weekly_bearish and 
+                signals[i] = 0.30
+            # Short: bearish fractal + bearish trend + volume
+            elif (bearish_fractal_12h[i] == 1.0 and 
+                  bearish and 
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
