@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_12h1d_camarilla_pivot_v1
-Hypothesis: Use 12-hour and 1-day Camarilla pivot levels on 4-hour chart with volume confirmation and trend filter.
+12h_1d_camarilla_pivot_v2
+Hypothesis: Use 12-hour and 1-day Camarilla pivot levels on 12-hour chart with volume confirmation and trend filter.
 - Long when price touches or crosses above Camarilla H3 level (from 12h) with volume expansion and 1d uptrend
 - Short when price touches or crosses below Camarilla L3 level (from 12h) with volume expansion and 1d downtrend
 - Uses 1-day trend filter (price above/below daily EMA20) to avoid counter-trend trades
-- Designed for low trade frequency (20-50/year) to minimize fee drag
+- Designed for low trade frequency (12-37/year) to minimize fee drag
 - Works in bull/bear via trend filter and volatility-based entry conditions
 """
 
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h1d_camarilla_pivot_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_pivot_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_camarilla(high, low, close):
@@ -73,7 +73,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_20_1d = calculate_ema(close_1d, 20)
     
-    # Align indicators to 4-hour timeframe
+    # Align indicators to 12-hour timeframe
     camarilla_H3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H3_12h)
     camarilla_L3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L3_12h)
     ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
