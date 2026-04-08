@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend and Volume Confirmation
+12h Donchian Breakout with 1d Trend and Volume Confirmation v2
 Hypothesis: Price breaking above/below 20-period Donchian channel on 12h timeframe,
 filtered by 1d EMA(50) trend direction and volume spikes, captures strong momentum moves
 while avoiding false breakouts. Works in bull via breakouts, in bear via short breakdowns.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
+name = "12h_donchian_breakout_1d_trend_volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -55,9 +55,9 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     vol_filter = atr > atr_ma
     
-    # Volume filter: current volume > 1.8x 24-period average
+    # Volume filter: current volume > 2.0x 24-period average (more restrictive)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
