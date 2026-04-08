@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
-"""
-6h Camarilla Pivot with 1d Trend Filter
-Hypothesis: Price reverses at Camarilla pivot levels (S3/R3) on 6h chart when 
-daily trend is weak (ADX<25), and breaks out at S4/R4 when daily trend is strong (ADX>25).
-Works in bull/bear by adapting to regime: mean reversion in range, breakout in trend.
-Target: 15-30 trades/year per symbol.
-"""
+# 12h Donchian Breakout with 1W Trend Filter
+# Hypothesis: Price breaks out of Donchian channels on 12h chart when weekly trend is strong (ADX>25),
+# and mean-reverts at channel boundaries when weekly trend is weak (ADX<25).
+# Uses volatility-adjusted position sizing to manage risk in both bull and bear markets.
+# Target: 20-40 trades/year per symbol.
 
-name = "6h_camarilla_pivot_1d_trend_v1"
-timeframe = "6h"
+name = "12h_donchian_1w_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,39 +22,39 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for trend filter - call ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get weekly data for trend filter - call ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 14-period ADX for 1d
+    # Calculate 14-period ADX for weekly
     # True Range
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    tr1_1w = high_1w[1:] - low_1w[1:]
+    tr2_1w = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3_1w = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.nan], np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))])
     
     # Directional Movement
-    dm_plus_1d = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                          np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus_1d = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                           np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus_1d = np.concatenate([[0], dm_plus_1d])
-    dm_minus_1d = np.concatenate([[0], dm_minus_1d])
+    dm_plus_1w = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                          np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus_1w = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                           np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus_1w = np.concatenate([[0], dm_plus_1w])
+    dm_minus_1w = np.concatenate([[0], dm_minus_1w])
     
     # Smoothed values
-    tr14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14_1d = pd.Series(dm_plus_1d).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14_1d = pd.Series(dm_minus_1d).rolling(window=14, min_periods=14).sum().values
+    tr14_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14_1w = pd.Series(dm_plus_1w).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14_1w = pd.Series(dm_minus_1w).rolling(window=14, min_periods=14).sum().values
     
     # Directional Indicators
-    di_plus_1d = 100 * dm_plus_14_1d / tr14_1d
-    di_minus_1d = 100 * dm_minus_14_1d / tr14_1d
+    di_plus_1w = 100 * dm_plus_14_1w / tr14_1w
+    di_minus_1w = 100 * dm_minus_14_1w / tr14_1w
     
     # DX and ADX
-    dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
-    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
+    dx_1w = 100 * np.abs(di_plus_1w - di_minus_1w) / (di_plus_1w + di_minus_1w)
+    adx_1w = pd.Series(dx_1w).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -67,86 +64,78 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(adx_1d[i]):
+        if np.isnan(adx_1w[i]):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d ADX for current 6h bar
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        # Get aligned weekly ADX for current 12h bar
+        adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)[i]
         
         # Regime detection
-        strong_trend_1d = adx_1d_aligned > 25
+        strong_trend_1w = adx_1w_aligned > 25
         
         if position == 1:  # Long position
             # Exit conditions
-            if strong_trend_1d:
-                # In strong trend: exit on S4 break (stop loss)
-                if i >= 2 and low[i] < (close[i-2] + 1.1 * (high[i-2] - low[i-2])):  # S4 approx
+            if strong_trend_1w:
+                # In strong trend: exit on lower Donchian break (stop loss)
+                if i >= 20 and low[i] < np.min(low[i-20:i]):
                     position = 0
                     signals[i] = 0.0
             else:
-                # In weak trend: exit on R3 (take profit)
-                if i >= 2 and high[i] > (close[i-2] + 1.0 * (high[i-2] - low[i-2])):  # R3 approx
+                # In weak trend: exit on upper Donchian (take profit)
+                if i >= 20 and high[i] > np.max(high[i-20:i]):
                     position = 0
                     signals[i] = 0.0
-                # Or exit on S3 break (stop loss)
-                elif i >= 2 and low[i] < (close[i-2] - 1.0 * (high[i-2] - low[i-2])):  # S3 approx
+                # Or exit on lower Donchian break (stop loss)
+                elif i >= 20 and low[i] < np.min(low[i-20:i]):
                     position = 0
                     signals[i] = 0.0
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit conditions
-            if strong_trend_1d:
-                # In strong trend: exit on R4 break (stop loss)
-                if i >= 2 and high[i] > (close[i-2] - 1.1 * (high[i-2] - low[i-2])):  # R4 approx
+            if strong_trend_1w:
+                # In strong trend: exit on upper Donchian break (stop loss)
+                if i >= 20 and high[i] > np.max(high[i-20:i]):
                     position = 0
                     signals[i] = 0.0
             else:
-                # In weak trend: exit on S3 (take profit)
-                if i >= 2 and low[i] < (close[i-2] - 1.0 * (high[i-2] - low[i-2])):  # S3 approx
+                # In weak trend: exit on lower Donchian (take profit)
+                if i >= 20 and low[i] < np.min(low[i-20:i]):
                     position = 0
                     signals[i] = 0.0
-                # Or exit on R3 break (stop loss)
-                elif i >= 2 and high[i] > (close[i-2] + 1.0 * (high[i-2] - low[i-2])):  # R3 approx
+                # Or exit on upper Donchian break (stop loss)
+                elif i >= 20 and high[i] > np.max(high[i-20:i]):
                     position = 0
                     signals[i] = 0.0
             if position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
-            if i < 2:
+            if i < 20:
                 signals[i] = 0.0
                 continue
                 
-            # Calculate approximate Camarilla levels from 2-period lookback
-            # Using high/low from 2 periods ago to avoid look-ahead
-            range_val = high[i-2] - low[i-2]
-            close_prev = close[i-2]
-            
-            # Resistance levels
-            r3 = close_prev + 1.0 * range_val
-            r4 = close_prev + 1.1 * range_val
-            # Support levels
-            s3 = close_prev - 1.0 * range_val
-            s4 = close_prev - 1.1 * range_val
+            # Calculate Donchian channels (20-period)
+            upper_channel = np.max(high[i-20:i])
+            lower_channel = np.min(low[i-20:i])
             
             # Entry logic based on regime
-            if strong_trend_1d:
+            if strong_trend_1w:
                 # Strong trend: breakout entries
-                if close[i] > r4 and close[i-1] <= r4:
+                if close[i] > upper_channel and close[i-1] <= upper_channel:
                     position = 1
-                    signals[i] = 0.25
-                elif close[i] < s4 and close[i-1] >= s4:
+                    signals[i] = 0.30
+                elif close[i] < lower_channel and close[i-1] >= lower_channel:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
             else:
-                # Weak trend: mean reversion at S3/R3
-                if close[i] < s3 and close[i-1] >= s3:
+                # Weak trend: mean reversion at channel boundaries
+                if close[i] < lower_channel and close[i-1] >= lower_channel:
                     position = 1
-                    signals[i] = 0.25
-                elif close[i] > r3 and close[i-1] <= r3:
+                    signals[i] = 0.30
+                elif close[i] > upper_channel and close[i-1] <= upper_channel:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
