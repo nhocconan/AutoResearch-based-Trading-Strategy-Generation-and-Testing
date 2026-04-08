@@ -1,49 +1,68 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_trend_volume_v1
-# Hypothesis: 4h EMA(21) trend following with 1d EMA(50) confirmation and volume spikes.
-# Works in bull markets (EMA21 > EMA50 with volume) and bear markets (EMA21 < EMA50 with volume).
-# Target: 20-30 trades/year per symbol (80-120 total over 4 years) by requiring multi-timeframe alignment and volume filter.
+# 12h_1w_donchian_breakout_volatility_regime_v1
+# Hypothesis: Use 12h Donchian breakout with 1w ATR-based volatility regime filter and volume confirmation.
+# In high volatility (ATR > median), breakouts are more likely to continue. In low volatility, avoid breakouts to reduce false signals.
+# Works in bull markets (trend continuation) and bear markets (avoids breakdowns in low vol chop).
+# Target: 10-25 trades/year per symbol (40-100 total over 4 years) by requiring volatility expansion and volume surge.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_trend_volume_v1"
-timeframe = "4h"
+name = "12h_1w_donchian_breakout_volatility_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA(21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Get 1d data for EMA(50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for volatility regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(21)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Calculate 1d EMA(50)
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1w ATR(14) for volatility regime
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Volume confirmation: volume > 1.8x average of last 96 periods (24 hours)
-    vol_ma = pd.Series(volume).rolling(window=96, min_periods=96).mean().values
-    vol_confirm = volume > vol_ma * 1.8
+    # Calculate 1w ATR median for regime threshold
+    atr_median = np.nanmedian(atr_1w[~np.isnan(atr_1w)])
+    high_volatility = atr_1w_aligned > atr_median
+    
+    # Volume confirmation: volume > 1.5x average of last 12 periods (1.5 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -53,7 +72,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(atr_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,27 +82,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: 4h EMA crosses below 1d EMA
-            if ema_4h_aligned[i] < ema_1d_aligned[i]:
+            # Exit: price closes below 12h Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: 4h EMA crosses above 1d EMA
-            if ema_4h_aligned[i] > ema_1d_aligned[i]:
+            # Exit: price closes above 12h Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: 4h EMA above 1d EMA with volume
-            if ema_4h_aligned[i] > ema_1d_aligned[i] and vol_confirm[i]:
+            # Long entry: price breaks above 12h Donchian high with high volatility and volume
+            if (close[i] > donchian_high_aligned[i] and 
+                high_volatility[i] and 
+                vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: 4h EMA below 1d EMA with volume
-            elif ema_4h_aligned[i] < ema_1d_aligned[i] and vol_confirm[i]:
+            # Short entry: price breaks below 12h Donchian low with high volatility and volume
+            elif (close[i] < donchian_low_aligned[i] and 
+                  high_volatility[i] and 
+                  vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
     
