@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 1d_1w_donchian_volume_breakout_v1
-# Hypothesis: Daily Donchian breakout with volume confirmation and 1-week EMA trend filter.
-# Long: price > Donchian(20) high AND volume > 1.5x 20-period average volume AND price > 1-week EMA50.
-# Short: price < Donchian(20) low AND volume > 1.5x 20-period average volume AND price < 1-week EMA50.
-# Exit: price crosses Donchian midpoint or opposite breakout with volume.
-# Designed to capture strong trending moves in both bull and bear markets with strict entry criteria to limit trades.
+# 12h_1d_camarilla_pivot_volume_v1
+# Hypothesis: 12-hour Camarilla pivot level reversals with volume confirmation and daily trend filter.
+# Long: price touches or crosses below S3 (strong support) with volume spike AND price > daily EMA200.
+# Short: price touches or crosses above R3 (strong resistance) with volume spike AND price < daily EMA200.
+# Exit: price returns to daily EMA200 or opposite R/S3 touch with volume.
+# Designed to capture mean-reversion bounces at strong intraday levels in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_volume_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,38 +19,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
+    # Previous day's Camarilla pivot levels (R3, S3)
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
-    
-    # 20-period average volume
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # 1-week EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily EMA200 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w_50 = np.full(len(close_1w), np.nan)
-    ema_1w_50[49] = np.mean(close_1w[:50])
-    for i in range(50, len(close_1w)):
-        ema_1w_50[i] = close_1w[i] * (2/51) + ema_1w_50[i-1] * (49/51)
+    close_1d = df_1d['close'].values
+    ema_1d_200 = np.full(len(close_1d), np.nan)
+    ema_1d_200[199] = np.mean(close_1d[:200])
+    for i in range(200, len(close_1d)):
+        ema_1d_200[i] = close_1d[i] * (2/201) + ema_1d_200[i-1] * (199/201)
     
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    
+    # Calculate Camarilla levels using previous day's OHLC
+    for i in range(1, n):
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        if not (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close)):
+            range_val = prev_high - prev_low
+            camarilla_r3[i] = prev_close + range_val * 1.1 / 2
+            camarilla_s3[i] = prev_close - range_val * 1.1 / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -58,39 +58,51 @@ def generate_signals(prices):
     for i in range(50, n):
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        d_high = donchian_high[i]
-        d_low = donchian_low[i]
-        d_mid = donchian_mid[i]
-        ema_1w = ema_1w_50_aligned[i]
         
-        if np.isnan(d_high) or np.isnan(d_low) or np.isnan(d_mid) or np.isnan(avg_vol) or np.isnan(ema_1w):
+        r3 = camarilla_r3[i]
+        s3 = camarilla_s3[i]
+        ema_200 = ema_1d_200_aligned[i]
+        
+        if np.isnan(r3) or np.isnan(s3) or np.isnan(ema_200):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        vol_surge = vol > 1.5 * avg_vol
+        # Volume spike: current volume > 2x 20-period average
+        if i >= 20:
+            avg_vol = np.mean(volume[i-20:i])
+            vol_spike = vol > 2.0 * avg_vol
+        else:
+            vol_spike = False
+        
+        # Price proximity to S3/R3 (within 0.1%)
+        near_s3 = abs(price - s3) / s3 < 0.001
+        near_r3 = abs(price - r3) / r3 < 0.001
         
         if position == 1:  # Long position
-            if price < d_mid or (price < d_low and vol_surge):
+            # Exit: price returns to EMA200 or touches R3 with volume
+            if abs(price - ema_200) / ema_200 < 0.005 or (near_r3 and vol_spike):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if price > d_mid or (price > d_high and vol_surge):
+            # Exit: price returns to EMA200 or touches S3 with volume
+            if abs(price - ema_200) / ema_200 < 0.005 or (near_s3 and vol_spike):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if price > d_high and vol_surge and price > ema_1w:
+            # Enter long at S3 with volume spike and price above EMA200
+            if near_s3 and vol_spike and price > ema_200:
                 position = 1
                 signals[i] = 0.25
-            elif price < d_low and vol_surge and price < ema_1w:
+            # Enter short at R3 with volume spike and price below EMA200
+            elif near_r3 and vol_spike and price < ema_200:
                 position = -1
                 signals[i] = -0.25
     
