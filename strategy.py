@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h timeframe capture significant price moves.
-Trend filter from 1d EMA(50) ensures trades align with higher timeframe direction.
-Volume confirmation (>1.5x 20-period average) filters false breakouts.
-Works in bull/bear markets by using trend filter to only take long in uptrend, short in downtrend.
-Target: 20-40 trades/year on 4h timeframe.
+1d Weekly Donchian Breakout with Volume Confirmation and Trend Filter
+Hypothesis: Weekly Donchian channels identify key support/resistance levels.
+Breakouts above weekly high or below weekly low with volume confirmation and
+trend alignment (using daily EMA) capture strong moves in both bull and bear markets.
+Volatility filter (ATR) avoids choppy markets. Target: 10-25 trades/year on 1d.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,58 +26,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly OHLC for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Donchian channels (20-period)
+    lookback = 20
+    upper_20 = np.full(len(high_1w), np.nan)
+    lower_20 = np.full(len(low_1w), np.nan)
+    
+    for i in range(lookback, len(high_1w)):
+        upper_20[i] = np.max(high_1w[i-lookback:i])
+        lower_20[i] = np.min(low_1w[i-lookback:i])
+    
+    # Align Donchian levels to daily timeframe (shifted by 1 for completed weekly bars only)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
+    
+    # Daily EMA(50) for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # ATR(14) for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First value
+    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
     # Volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
-    # Donchian(20) channels on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volatility filter: avoid extremely high volatility (ATR > 2x its 50-period average)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_regime_filter = atr < (atr_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_filter[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(vol_filter[i]) or 
+            np.isnan(vol_regime_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low OR trend turns bearish
-            if (close[i] <= donchian_low[i] or 
-                close[i] <= ema_50_1d_aligned[i]):
+            # Exit: price breaks below weekly Donchian lower OR trend turns bearish
+            if (close[i] <= lower_20_aligned[i] or 
+                close[i] < ema_50[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high OR trend turns bullish
-            if (close[i] >= donchian_high[i] or 
-                close[i] >= ema_50_1d_aligned[i]):
+            # Exit: price breaks above weekly Donchian upper OR trend turns bullish
+            if (close[i] >= upper_20_aligned[i] or 
+                close[i] > ema_50[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian high with uptrend and volume
-            if (close[i] >= donchian_high[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                vol_filter[i]):
+            # Long: price breaks above weekly Donchian upper with uptrend and volume
+            if (close[i] >= upper_20_aligned[i] and 
+                close[i] > ema_50[i] and 
+                vol_filter[i] and 
+                vol_regime_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low with downtrend and volume
-            elif (close[i] <= donchian_low[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  vol_filter[i]):
+            # Short: price breaks below weekly Donchian lower with downtrend and volume
+            elif (close[i] <= lower_20_aligned[i] and 
+                  close[i] < ema_50[i] and 
+                  vol_filter[i] and 
+                  vol_regime_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
