@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-6h ADX + Supertrend + Volume Confirmation v1
-Hypothesis: ADX filters trending markets (ADX > 25), Supertrend captures direction, and volume confirms breakout strength. This combination avoids whipsaws in sideways markets while capturing sustained moves in both bull and bear regimes by adapting to volatility and trend strength. Targets 15-30 trades/year on 6h timeframe.
+6h Weekly Pivot + Daily Trend + Volume Confirmation v2
+Hypothesis: Weekly pivot points (S1/S2/R1/R2) define key support/resistance zones.
+In trending markets (1d EMA50 alignment), price breaks of pivot levels with volume
+confirmation capture momentum moves. In ranging markets (price between S1/R1),
+mean reversion at pivot levels with volume exhaustion provides counter-trend entries.
+The 6h timeframe balances responsiveness with low turnover (target 15-40 trades/year).
+Works in bull/bear by adapting to trend regime via 1d EMA50.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adx_supertrend_volume_v1"
+name = "6h_weekly_pivot_daily_trend_volume_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,143 +28,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 1d ADX(14) for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly pivot calculation (using prior week's OHLC)
+    # P = (H + L + C) / 3
+    # S1 = (2*P) - H, S2 = P - (H - L)
+    # R1 = (2*P) - L, R2 = P + (H - L)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    s1 = (2 * pivot) - weekly_high
+    s2 = pivot - (weekly_high - weekly_low)
+    r1 = (2 * pivot) - weekly_low
+    r2 = pivot + (weekly_high - weekly_low)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align weekly pivots to 6h (with shift(1) for prior week's data)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
     
-    # Smoothed values
-    tr_ma = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_ma = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_ma = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_ma / tr_ma
-    di_minus = 100 * dm_minus_ma / tr_ma
+    # Daily EMA(50) for trend filter
+    ema_50_daily = df_daily['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 1d Supertrend (ATR=10, mult=3.0)
-    atr_mult = 3.0
-    atr_period = 10
-    
-    # ATR for Supertrend
-    tr1_st = high_1d - low_1d
-    tr2_st = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_st = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_st = np.maximum(tr1_st, np.maximum(tr2_st, tr3_st))
-    tr_st[0] = high_1d[0] - low_1d[0]
-    atr_st = pd.Series(tr_st).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Basic bands
-    basic_ub = (high_1d + low_1d) / 2 + atr_mult * atr_st
-    basic_lb = (high_1d + low_1d) / 2 - atr_mult * atr_st
-    
-    # Final bands
-    final_ub = np.zeros_like(close_1d)
-    final_lb = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if basic_ub[i] < final_ub[i-1] or close_1d[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            if basic_lb[i] > final_lb[i-1] or close_1d[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
-    
-    # Supertrend
-    supertrend = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-        else:
-            if supertrend[i-1] == final_ub[i-1]:
-                if close_1d[i] <= final_ub[i]:
-                    supertrend[i] = final_ub[i]
-                else:
-                    supertrend[i] = final_lb[i]
-            else:
-                if close_1d[i] >= final_lb[i]:
-                    supertrend[i] = final_lb[i]
-                else:
-                    supertrend[i] = final_ub[i]
-    
-    # Align 1d indicators to 6s
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    
-    # 6s ATR(10) for volume filter volatility adjustment
-    tr6 = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr6[0] = high[0] - low[0]
-    atr6 = pd.Series(tr6).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Volume filter (>2.0x ATR-adjusted average)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * (atr6 / np.maximum(atr6.mean(), 0.001)))
+    # Volume filter (>1.5x 24-period average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_daily_aligned[i]) or
             np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: trend weakens or Supertrend flips
-            if adx_aligned[i] < 20 or close[i] < supertrend_aligned[i]:
+            # Exit: price closes below S1 or trend reverses
+            if close[i] <= s1_aligned[i] or close[i] < ema_50_daily_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend weakens or Supertrend flips
-            if adx_aligned[i] < 20 or close[i] > supertrend_aligned[i]:
+            # Exit: price closes above R1 or trend reverses
+            if close[i] >= r1_aligned[i] or close[i] > ema_50_daily_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: strong trend + price above Supertrend + volume
-            if (adx_aligned[i] > 25 and 
-                close[i] > supertrend_aligned[i] and 
-                vol_filter[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: strong trend + price below Supertrend + volume
-            elif (adx_aligned[i] > 25 and 
-                  close[i] < supertrend_aligned[i] and 
-                  vol_filter[i]):
-                position = -1
-                signals[i] = -0.25
+            # Determine regime: trending if price > EMA50, ranging if between S1/R1
+            is_trending_up = close[i] > ema_50_daily_aligned[i]
+            is_trending_down = close[i] < ema_50_daily_aligned[i]
+            is_ranging = (s1_aligned[i] <= close[i] <= r1_aligned[i])
+            
+            # Trending market: breakout of pivot levels with volume
+            if is_trending_up and vol_filter[i]:
+                if close[i] >= r1_aligned[i]:  # Break above R1
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] >= r2_aligned[i]:  # Break above R2 (stronger)
+                    position = 1
+                    signals[i] = 0.25
+                    
+            if is_trending_down and vol_filter[i]:
+                if close[i] <= s1_aligned[i]:  # Break below S1
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] <= s2_aligned[i]:  # Break below S2 (stronger)
+                    position = -1
+                    signals[i] = -0.25
+            
+            # Ranging market: mean reversion at pivot levels with volume exhaustion
+            if is_ranging and vol_filter[i]:
+                # Long near S1/S2 with rejection (price > open and near support)
+                if (close[i] <= s1_aligned[i] * 1.005 and  # Within 0.5% of S1
+                    close[i] > prices['open'].iloc[i]):    # Bullish close
+                    position = 1
+                    signals[i] = 0.25
+                # Short near R1/R2 with rejection (price < open and near resistance)
+                elif (close[i] >= r1_aligned[i] * 0.995 and  # Within 0.5% of R1
+                      close[i] < prices['open'].iloc[i]):   # Bearish close
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
