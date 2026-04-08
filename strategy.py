@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# 1d_1w_keltner_breakout_volume_v1
-# Hypothesis: Trade breakouts of weekly Keltner channels with volume confirmation on daily timeframe.
-# Uses weekly ATR-based channels to capture medium-term trends, with volume surge to confirm breakout strength.
-# Long when price breaks above upper channel with volume surge and weekly uptrend (price > weekly EMA50).
-# Short when price breaks below lower channel with volume surge and weekly downtrend (price < weekly EMA50).
-# Designed for 1d timeframe to target 7-25 trades/year (30-100 total over 4 years).
-# Weekly trend filter ensures alignment with higher timeframe momentum, working in both bull and bear markets.
+# 6h_1d_engulfing_volume_v1
+# Hypothesis: Trade bullish/bearish engulfing patterns on 6h timeframe with volume confirmation and 1d trend filter.
+# Engulfing patterns signal potential reversals. Volume confirms conviction. 1d trend filter ensures alignment with higher timeframe momentum.
+# Works in both bull and bear markets by filtering trades based on 1d EMA50 trend direction.
+# Targets 50-150 total trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_engulfing_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,38 +18,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Keltner channels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(10) for weekly data
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # EMA50 for 1d trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # EMA50 for weekly trend
-    ema50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Keltner channels: EMA20 ± 2*ATR
-    ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper = ema20 + 2.0 * atr
-    lower = ema20 - 2.0 * atr
-    
-    # Align weekly channels to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50)
-    
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -61,8 +42,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -72,30 +52,33 @@ def generate_signals(prices):
         # Volume surge condition
         vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
+        # Bullish engulfing: current green candle engulfs previous red candle
+        bullish_engulf = (close[i] > open_price[i]) and (open_price[i] < close[i-1]) and (close[i] > open_price[i-1])
+        # Bearish engulfing: current red candle engulfs previous green candle
+        bearish_engulf = (close[i] < open_price[i]) and (open_price[i] > close[i-1]) and (close[i] < open_price[i-1])
+        
         if position == 1:  # Long position
-            # Exit: price breaks below middle line (EMA20)
-            if close[i] < ema20_aligned[i]:
+            # Exit: bearish engulfing pattern
+            if bearish_engulf:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above middle line (EMA20)
-            if close[i] > ema20_aligned[i]:
+            # Exit: bullish engulfing pattern
+            if bullish_engulf:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper channel with volume surge and weekly uptrend
-            if (close[i] > upper_aligned[i] and vol_surge and 
-                close[i] > ema50_aligned[i]):
+            # Long entry: bullish engulfing + volume surge + 1d uptrend (price > EMA50)
+            if bullish_engulf and vol_surge and (close[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower channel with volume surge and weekly downtrend
-            elif (close[i] < lower_aligned[i] and vol_surge and 
-                  close[i] < ema50_aligned[i]):
+            # Short entry: bearish engulfing + volume surge + 1d downtrend (price < EMA50)
+            elif bearish_engulf and vol_surge and (close[i] < ema50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
