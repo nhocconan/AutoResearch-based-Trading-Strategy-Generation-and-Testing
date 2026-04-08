@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-# 1d_ema200_rsi21_volume
-# Hypothesis: On daily timeframe, enter long when price > EMA200 + RSI(21) < 30 + volume > 1.5x average; enter short when price < EMA200 + RSI(21) > 70 + volume > 1.5x average. Exit when price crosses back to EMA200 or RSI reverts to 50. Designed to capture mean-reversion within strong trends in both bull and bear markets. Low trade frequency (~10-25/year) to minimize fee drag.
+# 12h_camarilla_pivot_1d_volume
+# Hypothesis: Camarilla pivot levels on 12h derived from 1d OHLC, combined with volume confirmation.
+# Long when price crosses above Camarilla H4 level with volume > 1.5x average.
+# Short when price crosses below Camarilla L4 level with volume > 1.5x average.
+# Exit when price returns to Camarilla H3/L3 levels.
+# Designed to work in both bull and bear markets by capturing mean-reversion bounces at key intraday levels.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_ema200_rsi21_volume"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,29 +26,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (optional, but can add regime filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    # H3 = Close + 1.125 * (High - Low)
+    # L3 = Close - 1.125 * (High - Low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA200 for regime filter (bull/bear)
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
     
-    # Calculate daily EMA200 for trend filter
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Calculate RSI(21)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/21, adjust=False, min_periods=21).mean()
-    avg_loss = loss.ewm(alpha=1/21, adjust=False, min_periods=21).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Align to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,12 +58,13 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 200
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_200[i]) or np.isnan(rsi[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -66,37 +73,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA200 OR RSI crosses above 50 (mean reversion)
-            if close[i] < ema_200[i] or rsi[i] > 50:
+            # Exit: price crosses below Camarilla H3 level
+            if close[i] < camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA200 OR RSI crosses below 50 (mean reversion)
-            if close[i] > ema_200[i] or rsi[i] < 50:
+            # Exit: price crosses above Camarilla L3 level
+            if close[i] > camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Weekly regime filter: only long in bull market (price > weekly EMA200), only short in bear market (price < weekly EMA200)
-            if close[i] > ema_200_1w_aligned[i]:
-                # Bull market: look for long opportunities
-                volume_ok = volume[i] > 1.5 * avg_volume[i]
-                rsi_oversold = rsi[i] < 30
-                price_above_ema = close[i] > ema_200[i]
-                if price_above_ema and rsi_oversold and volume_ok:
-                    position = 1
-                    signals[i] = 0.25
-            else:
-                # Bear market: look for short opportunities
-                volume_ok = volume[i] > 1.5 * avg_volume[i]
-                rsi_overbought = rsi[i] > 70
-                price_below_ema = close[i] < ema_200[i]
-                if price_below_ema and rsi_overbought and volume_ok:
-                    position = -1
-                    signals[i] = -0.25
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            
+            # Entry conditions: Camarilla H4 breakout (long) and L4 breakdown (short)
+            if (close[i] > camarilla_h4_aligned[i]) and volume_ok:
+                position = 1
+                signals[i] = 0.25
+            elif (close[i] < camarilla_l4_aligned[i]) and volume_ok:
+                position = -1
+                signals[i] = -0.25
     
     return signals
