@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 4h_momentum_breakout_v1
-# Hypothesis: Combines 4h momentum (ROC) with 1d trend filter (EMA50) and volume confirmation.
-# Goes long when ROC(10) > 5, price > EMA50(1d), and volume > 1.5x average volume.
-# Goes short when ROC(10) < -5, price < EMA50(1d), and volume > 1.5x average volume.
-# Uses momentum to capture breakouts and trend filter to avoid counter-trend trades.
-# Designed for 20-50 trades/year on 4h to avoid fee drag. Works in bull/bear via trend filter.
+# 1d_weekly_donchian_breakout_volume_v3
+# Hypothesis: Weekly Donchian breakout with daily trend filter and volume confirmation.
+# Enter long when price breaks above weekly Donchian high (20), price > daily EMA50, and volume > 1.5x average volume.
+# Enter short when price breaks below weekly Donchian low (20), price < daily EMA50, and volume > 1.5x average volume.
+# Exit when price returns to weekly Donchian midpoint or trend filter fails.
+# Designed for 8-25 trades/year on 1d to avoid fee drag. Works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_momentum_breakout_v1"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,17 +25,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day EMA50 for trend filter
+    # Weekly Donchian channels (20-period high/low)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Donchian channels for weekly data
+    donchian_high_20 = np.full(len(high_1w), np.nan)
+    donchian_low_20 = np.full(len(low_1w), np.nan)
+    for i in range(20, len(high_1w)):
+        donchian_high_20[i] = np.max(high_1w[i-20:i])
+        donchian_low_20[i] = np.min(low_1w[i-20:i])
+    
+    # Weekly midpoint for exit
+    donchian_mid_20 = (donchian_high_20 + donchian_low_20) / 2.0
+    
+    # Align weekly levels to daily timeframe
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
+    donchian_mid_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_20)
+    
+    # Daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Momentum indicator: ROC(10) - Rate of Change over 10 periods
-    roc = np.full(n, np.nan)
-    for i in range(10, n):
-        if close[i-10] != 0:
-            roc[i] = (close[i] - close[i-10]) / close[i-10] * 100
     
     # Volume average (20-period) for confirmation
     vol_avg = np.full(n, np.nan)
@@ -45,12 +60,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(50, 20, 10)  # Ensure indicators are ready
+    start_idx = max(50, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(roc[i]) or 
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
+            np.isnan(donchian_mid_20_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 pass  # Hold position
@@ -62,29 +77,29 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > 1.5 * vol_avg[i]
         
         if position == 1:  # Long position
-            # Exit: momentum turns negative or trend filter fails
-            if roc[i] <= 0 or close[i] <= ema50_1d_aligned[i]:
+            # Exit: price returns to weekly midpoint or trend filter fails
+            if close[i] < donchian_mid_20_aligned[i] or close[i] <= ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: momentum turns positive or trend filter fails
-            if roc[i] >= 0 or close[i] >= ema50_1d_aligned[i]:
+            # Exit: price returns to weekly midpoint or trend filter fails
+            if close[i] > donchian_mid_20_aligned[i] or close[i] >= ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: positive momentum with trend and volume confirmation
-            if (roc[i] > 5 and 
+            # Long entry: breakout above weekly Donchian high with volume and trend filter
+            if (close[i] > donchian_high_20_aligned[i] and 
                 close[i] > ema50_1d_aligned[i] and 
                 vol_confirmed):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: negative momentum with trend and volume confirmation
-            elif (roc[i] < -5 and 
+            # Short entry: breakdown below weekly Donchian low with volume and trend filter
+            elif (close[i] < donchian_low_20_aligned[i] and 
                   close[i] < ema50_1d_aligned[i] and 
                   vol_confirmed):
                 position = -1
