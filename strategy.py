@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Donchian channel breakouts on 4h timeframe, filtered by 1d EMA trend and volume spikes,
-provide high-probability entries with controlled trade frequency. Works in bull markets via breakouts
-and in bear markets via short breakdowns. Uses 1d trend filter for multi-timeframe alignment.
+4h Donchian Breakout with 1d Trend Filter and Volume Confirmation - Reduced Frequency
+Hypothesis: Donchian breakouts filtered by 1d EMA trend and volume spikes yield fewer but higher quality trades.
+Reduces trade frequency by increasing volume threshold to 2.5x and requiring consecutive closes outside bands.
+Designed to work in bull markets via breakouts and bear markets via breakdowns with controlled frequency.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v4"
+name = "4h_donchian_breakout_1d_trend_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,9 +37,9 @@ def generate_signals(prices):
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current volume > 1.8x 30-period average
+    # Volume filter: current volume > 2.5x 30-period average (increased threshold)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -75,14 +75,14 @@ def generate_signals(prices):
             uptrend = close[i] > ema_50_1d_aligned[i]
             downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long: price breaks above Donchian high with uptrend and volume spike
-            if (high[i] > high_20[i-1] and 
+            # Long: price closes above Donchian high with uptrend and volume spike (stricter)
+            if (close[i] > high_20[i-1] and 
                 uptrend and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low with downtrend and volume spike
-            elif (low[i] < low_20[i-1] and 
+            # Short: price closes below Donchian low with downtrend and volume spike (stricter)
+            elif (close[i] < low_20[i-1] and 
                   downtrend and 
                   vol_spike[i]):
                 position = -1
