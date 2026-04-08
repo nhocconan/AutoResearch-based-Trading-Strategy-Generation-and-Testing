@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-6H Weekly Trend + Daily Volume Filter
-Hypothesis: Combining weekly trend direction with daily volume spikes on 6h timeframe captures
-strong momentum moves while avoiding chop. Weekly trend provides directional bias,
-daily volume filters for conviction, and 6s entry timing avoids false breaks.
-Works in bull (rides trends) and bear (captures sharp moves) markets.
-Target: 15-30 trades/year per symbol.
+12h Donchian Breakout with Weekly Trend and Volume Confirmation
+Hypothesis: 12h Donchian(20) breakouts aligned with weekly trend (EMA40) and volume > 1.5x average capture strong momentum.
+Designed for 12h timeframe to limit trades (target: 12-37/year) and avoid fee drag. Works in bull via breakouts and bear via short breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_trend_daily_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,54 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend
+    # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
+    ema_40 = df_1w['close'].ewm(span=40, adjust=False).mean().values
+    ema_40_12h = align_htf_to_ltf(prices, df_1w, ema_40)
     
-    # Daily data for volume filter
-    df_1d = get_htf_data(prices, '1d')
+    # 12h Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly EMA(34) for trend
-    ema_34w = df_1w['close'].ewm(span=34, adjust=False).mean().values
-    ema_34w_aligned = align_htf_to_ltf(prices, df_1w, ema_34w)
-    
-    # Daily volume average (20-period)
-    vol_ma_d = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_ma_d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_d)
+    # Volume filter (>1.5x 20-period average on 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34w_aligned[i]) or np.isnan(vol_ma_d_aligned[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema_40_12h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: weekly trend turns bearish
-            if close[i] < ema_34w_aligned[i]:
+            # Exit: price closes below Donchian low or trend reverses
+            if close[i] <= low_roll[i] or close[i] < ema_40_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: weekly trend turns bullish
-            if close[i] > ema_34w_aligned[i]:
+            # Exit: price closes above Donchian high or trend reverses
+            if close[i] >= high_roll[i] or close[i] > ema_40_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume spike: current volume > 2x daily average
-            volume_spike = volume[i] > (vol_ma_d_aligned[i] * 2.0)
-            
-            # Long: price above weekly EMA + volume spike
-            if (close[i] > ema_34w_aligned[i] and volume_spike):
+            # Breakout long above Donchian high with trend and volume
+            if (close[i] > high_roll[i] and 
+                close[i] > ema_40_12h[i] and 
+                vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price below weekly EMA + volume spike
-            elif (close[i] < ema_34w_aligned[i] and volume_spike):
+            # Breakdown short below Donchian low with trend and volume
+            elif (close[i] < low_roll[i] and 
+                  close[i] < ema_40_12h[i] and 
+                  vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
