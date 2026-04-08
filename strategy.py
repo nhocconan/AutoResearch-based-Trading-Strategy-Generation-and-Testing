@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_cci_trend_filter_volume_v1
-# Hypothesis: Daily CCI (20) with trend filter and volume confirmation.
-# Long: CCI crosses above -100 in uptrend (price > 200-day SMA) with volume > 1.5x average.
-# Short: CCI crosses below +100 in downtrend (price < 200-day SMA) with volume > 1.5x average.
-# Uses weekly trend filter to avoid counter-trend trades. Targets 15-25 trades/year.
-# Works in bull markets by catching pullbacks in uptrends and in bear markets by
-# catching bounces in downtrends. Volume filter reduces false signals.
+# 12h_donchian_breakout_1d_trend_volume_v1
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Long when price breaks above 20-bar high + price > 1d EMA50 + volume > 1.5x avg volume.
+# Short when price breaks below 20-bar low + price < 1d EMA50 + volume > 1.5x avg volume.
+# Exit on opposite Donchian breakout or volume failure.
+# Designed to capture trend continuations in both bull and bear markets with controlled trade frequency.
+# Target: 20-40 trades/year.
 
-name = "1d_cci_trend_filter_volume_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,87 +26,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # CCI calculation (20-period)
-    cci_period = 20
-    typical_price = (high + low + close) / 3.0
-    tp_mean = np.zeros_like(typical_price)
-    tp_mean[cci_period-1:] = np.convolve(typical_price, np.ones(cci_period)/cci_period, mode='valid')
-    tp_mean[:cci_period-1] = tp_mean[cci_period-1]
+    # Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    tp_std = np.zeros_like(typical_price)
-    for i in range(cci_period-1, len(typical_price)):
-        tp_std[i] = np.std(typical_price[i-cci_period+1:i+1])
-    tp_std[:cci_period-1] = tp_std[cci_period-1]
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # Avoid division by zero
-    tp_std[tp_std == 0] = 1e-10
+    # Volume average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i - 19:i + 1])
     
-    cci = (typical_price - tp_mean) / (0.015 * tp_std)
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    close_daily = df_daily['close'].values
     
-    # Weekly trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # Daily EMA (50-period)
+    ema_period = 50
+    ema_daily = np.full_like(close_daily, np.nan)
+    for i in range(ema_period - 1, len(close_daily)):
+        if i == ema_period - 1:
+            ema_daily[i] = np.mean(close_daily[:ema_period])
+        else:
+            ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Weekly SMA (50-period) for trend filter
-    sma_period = 50
-    sma_weekly = np.zeros_like(close_weekly)
-    sma_weekly[sma_period-1:] = np.convolve(close_weekly, np.ones(sma_period)/sma_period, mode='valid')
-    sma_weekly[:sma_period-1] = sma_weekly[sma_period-1]
+    # Align daily EMA to 12h timeframe
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Align weekly SMA to daily timeframe
-    sma_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma_weekly)
-    
-    # Volume filter: 20-day average volume
-    vol_ma = np.zeros_like(volume)
-    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
-    vol_ma[:19] = vol_ma[19]
-    
-    # Pre-compute signals
-    cci_cross_up = (cci > -100) & (np.roll(cci, 1) <= -100)  # Cross above -100
-    cci_cross_down = (cci < 100) & (np.roll(cci, 1) >= 100)  # Cross below +100
-    
-    # Trend filters
-    uptrend = close > sma_weekly_aligned
-    downtrend = close < sma_weekly_aligned
-    
-    # Volume confirmation
-    volume_filter = volume > 1.5 * vol_ma
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(cci_period, sma_period) + 5
+    start_idx = max(lookback, ema_period) + 5
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or np.isnan(sma_weekly_aligned[i]) or 
-            np.isnan(vol_ma[i]) or volume[i] == 0):
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
+        # Skip if any required data is NaN
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+            signals[i] = 0.0
+            continue
+        
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
+        
+        # Higher timeframe trend filter
+        uptrend_htf = close[i] > ema_daily_aligned[i]
+        downtrend_htf = close[i] < ema_daily_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit if CCI crosses below +100 or trend fails
-            if cci[i] < 100 or not uptrend[i]:
+            # Exit on bearish Donchian break or volume failure
+            if close[i] < lowest_low[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if CCI crosses above -100 or trend fails
-            if cci[i] > -100 or not downtrend[i]:
+            # Exit on bullish Donchian break or volume failure
+            if close[i] > highest_high[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI crosses above -100, volume confirmation, and uptrend
-            if cci_cross_up[i] and volume_filter[i] and uptrend[i]:
+            # Long entry: bullish Donchian break, volume confirmation, and daily uptrend
+            if (close[i] > highest_high[i] and 
+                volume_filter and 
+                uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI crosses below +100, volume confirmation, and downtrend
-            elif cci_cross_down[i] and volume_filter[i] and downtrend[i]:
+            # Short entry: bearish Donchian break, volume confirmation, and daily downtrend
+            elif (close[i] < lowest_low[i] and 
+                  volume_filter and 
+                  downtrend_htf):
                 position = -1
                 signals[i] = -0.25
     
