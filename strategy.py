@@ -1,52 +1,29 @@
 #!/usr/bin/env python3
 """
-6h_1d1w_volatility_breakout_v1
-Hypothesis: Breakouts on 6h timeframe with volatility expansion and weekly trend filter.
-- Long when price breaks above 6h Donchian(20) high with volatility expansion and weekly uptrend
-- Short when price breaks below 6h Donchian(20) low with volatility expansion and weekly downtrend
-- Uses 1-week trend filter (price above/below weekly EMA20) to align with higher timeframe momentum
-- Volatility filter: current ATR(5) > 1.5 * ATR(20) to ensure breakouts occur during expansion
-- Designed for low trade frequency (15-35/year) to minimize fee drag
-- Works in bull/bear via volatility expansion and weekly trend alignment
+12h_1w1d_camarilla_volume_trend_v1
+Hypothesis: Use weekly and daily trend filters with 12-hour Camarilla pivot levels to capture trend continuation moves with volume confirmation. Designed for low trade frequency (15-35/year) to minimize fee drag while capturing significant market moves in both bull and bear regimes. Weekly trend avoids counter-trend trades, daily trend provides intermediate filter, and 12h Camarilla levels provide precise entry/exit points.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d1w_volatility_breakout_v1"
-timeframe = "6h"
+name = "12h_1w1d_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR with proper handling"""
-    if len(high) < period:
-        return np.full(len(high), np.nan, dtype=float)
-    
-    tr = np.zeros(len(high))
-    tr[0] = high[0] - low[0]
-    for i in range(1, len(high)):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.full(len(high), np.nan, dtype=float)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(high)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    if len(high) < period:
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    if len(high) < 1:
         return np.full(len(high), np.nan), np.full(len(high), np.nan)
     
-    upper = np.full(len(high), np.nan)
-    lower = np.full(len(high), np.nan)
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
     
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    H3 = pivot + (range_val * 1.1 / 4)
+    L3 = pivot - (range_val * 1.1 / 4)
     
-    return upper, lower
+    return H3, L3
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -62,82 +39,98 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for weekly aggregation (we'll use 1d to derive weekly)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for primary trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 6h Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # Get daily data for intermediate trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate 6h ATR for volatility filter
-    atr_5 = calculate_atr(high, low, close, 5)
-    atr_20 = calculate_atr(high, low, close, 20)
+    # Get 12-hour data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Calculate weekly EMA from daily data (approximate weekly using 5-day EMA)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = calculate_ema(close_1w, 50)
+    
+    # Calculate daily EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_5_1d = calculate_ema(close_1d, 5)  # 5-day EMA approximates weekly
+    ema_50_1d = calculate_ema(close_1d, 50)
     
-    # Align indicators to 6h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    atr_5_aligned = align_htf_to_ltf(prices, df_1d, atr_5)
-    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
-    ema_5_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_5_1d)
+    # Calculate 12-hour Camarilla levels
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    camarilla_H3_12h, camarilla_L3_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    
+    # Align indicators to 12-hour timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    camarilla_H3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H3_12h)
+    camarilla_L3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L3_12h)
+    
+    # Volume confirmation: 50-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(50, n):
+        vol_ma[i] = np.mean(volume[i-50:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(atr_5_aligned[i]) or np.isnan(atr_20_aligned[i]) or
-            np.isnan(ema_5_1d_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(camarilla_H3_12h_aligned[i]) or np.isnan(camarilla_L3_12h_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        upper = donchian_upper_aligned[i]
-        lower = donchian_lower_aligned[i]
-        atr5 = atr_5_aligned[i]
-        atr20 = atr_20_aligned[i]
-        weekly_ema = ema_5_1d_aligned[i]
-        
-        # Volatility expansion condition
-        vol_expansion = atr5 > 1.5 * atr20
+        weekly_trend_up = price > ema_50_1w_aligned[i]
+        daily_trend_up = price > ema_50_1d_aligned[i]
+        H3 = camarilla_H3_12h_aligned[i]
+        L3 = camarilla_L3_12h_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price closes below Donchian lower or volatility contraction
-            if price < lower or not vol_expansion:
+            # Exit: price closes below L3 or trend turns against position
+            if price < L3 or not (weekly_trend_up and daily_trend_up):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price closes above Donchian upper or volatility contraction
-            if price > upper or not vol_expansion:
+            # Exit: price closes above H3 or trend turns against position
+            if price > H3 or not (not weekly_trend_up and not daily_trend_up):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian upper with volatility expansion and weekly uptrend
-            if price > upper and vol_expansion and price > weekly_ema:
+            # Enter long: price touches/crosses above H3 with volume expansion and both trends up
+            if price >= H3 and vol_ratio > 2.0 and weekly_trend_up and daily_trend_up:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian lower with volatility expansion and weekly downtrend
-            elif price < lower and vol_expansion and price < weekly_ema:
+            # Enter short: price touches/crosses below L3 with volume expansion and both trends down
+            elif price <= L3 and vol_ratio > 2.0 and not weekly_trend_up and not daily_trend_up:
                 position = -1
                 signals[i] = -0.25
     
