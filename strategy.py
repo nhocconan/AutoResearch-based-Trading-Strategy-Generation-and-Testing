@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
-# 4h_cci_breakout_1d_trend_volume
-# Hypothesis: CCI(20) breakout on 4h combined with 1d EMA trend filter and volume confirmation.
-# Long when CCI crosses above +100 with uptrend (price > 1d EMA50) and volume > 1.5x average.
-# Short when CCI crosses below -100 with downtrend (price < 1d EMA50) and volume > 1.5x average.
-# Exit when CCI crosses back to zero.
-# Designed to capture strong momentum breakouts with trend alignment in both bull and bear markets.
-# Target: 80-180 total trades over 4 years (~20-45/year).
+# 6h_rsi_slope_reversal_1d_trend
+# Hypothesis: On 6h, use RSI slope (3-bar change) to detect momentum exhaustion near extremes.
+# Long when RSI slope turns positive from oversold (RSI<30) with 1d uptrend (price > EMA50).
+# Short when RSI slope turns negative from overbought (RSI>70) with 1d downtrend (price < EMA50).
+# Uses 1d EMA50 for trend filter. Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_cci_breakout_1d_trend_volume"
-timeframe = "4h"
+name = "6h_rsi_slope_reversal_1d_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -37,25 +34,30 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate CCI(20) on 4h data
-    tp = (high + low + close) / 3
-    tp_ma = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(tp).rolling(window=20, min_periods=20).std().values
-    cci = (tp - tp_ma) / (0.015 * tp_std)
+    # Calculate RSI (14) on 6h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate RSI slope (3-bar change)
+    rsi_series = pd.Series(rsi)
+    rsi_slope = rsi_series.diff(3).values  # positive = rising momentum
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 30  # need 14 for RSI + 3 for slope
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(rsi[i]) or np.isnan(rsi_slope[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -64,29 +66,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI crosses below zero
-            if cci[i] < 0:
+            # Exit: RSI slope turns negative (momentum fading) OR RSI > 70
+            if rsi_slope[i] < 0 or rsi[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses above zero
-            if cci[i] > 0:
+            # Exit: RSI slope turns positive (momentum fading) OR RSI < 30
+            if rsi_slope[i] > 0 or rsi[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
-            # CCI breakout entries
-            if (cci[i] > 100) and (cci[i-1] <= 100) and (close[i] > ema_50_1d_aligned[i]) and volume_ok:
+            # Long: RSI slope turns positive from oversold with uptrend
+            if (rsi_slope[i] > 0 and rsi[i] < 30 and 
+                close[i] > ema_50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            elif (cci[i] < -100) and (cci[i-1] >= -100) and (close[i] < ema_50_1d_aligned[i]) and volume_ok:
+            # Short: RSI slope turns negative from overbought with downtrend
+            elif (rsi_slope[i] < 0 and rsi[i] > 70 and 
+                  close[i] < ema_50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
