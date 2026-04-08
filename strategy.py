@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# [24969] 4h_1d_donchian_volume_trend_v1
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter (price > SMA50) and volume confirmation.
-# Long when price breaks above 20-period high with volume > 2.0x average and price > 1-day SMA50.
-# Short when price breaks below 20-period low with volume > 2.0x average and price < 1-day SMA50.
-# Exit when price returns to 10-period moving average.
-# Uses 1-day SMA50 for trend bias, effective in both trending and ranging markets.
+# [24970] 1d_1w_volume_trend_v1
+# Hypothesis: Daily breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above 20-day high with volume > 2.5x average and price > weekly SMA50.
+# Short when price breaks below 20-day low with volume > 2.5x average and price < weekly SMA50.
+# Exit when price returns to 10-day moving average.
+# Uses weekly SMA50 for trend bias to avoid counter-trend trades in strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,16 +24,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for SMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for SMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1-day SMA50
-    close_1d = df_1d['close'].values
-    sma50_1d = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        sma50_1d[i] = np.mean(close_1d[i-50:i])
+    # Calculate weekly SMA50
+    close_1w = df_1w['close'].values
+    sma50_1w = np.full(len(close_1w), np.nan)
+    for i in range(50, len(close_1w)):
+        sma50_1w[i] = np.mean(close_1w[i-50:i])
     
     # Calculate Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
@@ -42,7 +42,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Calculate 10-period moving average for exit
+    # Calculate 10-day moving average for exit
     ma_10 = np.full(n, np.nan)
     for i in range(10, n):
         ma_10[i] = np.mean(close[i-10:i])
@@ -52,8 +52,8 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1-day SMA50 to 4-hour timeframe
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Align weekly SMA50 to daily timeframe
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -61,7 +61,7 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_1d_aligned[i])):
+            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_1w_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -72,7 +72,7 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 1:  # Long
-            # Exit: price returns to 10-period MA
+            # Exit: price returns to 10-day MA
             if price <= ma_10[i]:
                 position = 0
                 signals[i] = 0.0
@@ -80,19 +80,19 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price returns to 10-period MA
+            # Exit: price returns to 10-day MA
             if price >= ma_10[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and above SMA50
-            if price > donchian_high[i] and vol_ratio > 2.0 and price > sma50_1d_aligned[i]:
+            # Enter long: price breaks above Donchian high with volume expansion and above weekly SMA50
+            if price > donchian_high[i] and vol_ratio > 2.5 and price > sma50_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and below SMA50
-            elif price < donchian_low[i] and vol_ratio > 2.0 and price < sma50_1d_aligned[i]:
+            # Enter short: price breaks below Donchian low with volume expansion and below weekly SMA50
+            elif price < donchian_low[i] and vol_ratio > 2.5 and price < sma50_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
