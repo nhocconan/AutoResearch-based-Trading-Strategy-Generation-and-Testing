@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend and Volume Confirmation v1
+4h Donchian Breakout with 1d Trend and Volume Confirmation v2
 Hypothesis: Price breaks above/below 20-period Donchian channels on 4h, 
 aligned with strong daily trend (ADX>25) and volume spikes (>2x 20-period average),
 captures momentum moves while avoiding false breakouts. Works in bull/bear by 
 requiring trend alignment. Target: 20-50 trades/year per symbol.
 """
 
-name = "4h_donchian_1d_trend_volume_v1"
+name = "4h_donchian_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
