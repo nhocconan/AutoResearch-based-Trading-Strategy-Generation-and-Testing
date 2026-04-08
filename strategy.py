@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_vwap_deviation_mean_reversion_v1
-# Hypothesis: Mean reversion from daily VWAP on 12h timeframe. Long when price deviates significantly below daily VWAP,
-# short when price deviates significantly above daily VWAP. Uses 1d volatility filter to avoid low-volatility chop.
-# Designed for 12-30 trades/year on 12h to avoid fee drag. Works in bull/bear via mean reversion logic.
+# 4h_donchian_breakout_1d_trend_volume_v6
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Long when price breaks above 4h Donchian upper band, volume > 1.5x 20-period average, and price above 1d EMA50.
+# Short when price breaks below 4h Donchian lower band, volume > 1.5x 20-period average, and price below 1d EMA50.
+# Uses volatility filter (ATR ratio < 0.5) to avoid choppy markets. Designed for 20-40 trades/year on 4h.
+# Works in bull via breakouts and in bear via short breakdowns with trend alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_vwap_deviation_mean_reversion_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,89 +24,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate typical price
-    typical_price = (high + low + close) / 3
+    # 4h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i+1])
+        donchian_low[i] = np.min(low[i-20:i+1])
     
-    # Get 1d data for VWAP calculation
+    # 4h ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
+    
+    # ATR ratio (current ATR / 50-period average ATR) for volatility filter
+    atr_ma = np.full(n, np.nan)
+    for i in range(50, n):
+        atr_ma[i] = np.mean(atr[i-50:i+1])
+    atr_ratio = np.full(n, np.nan)
+    for i in range(50, n):
+        if atr_ma[i] > 0:
+            atr_ratio[i] = atr[i] / atr_ma[i]
+    
+    # Volume average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i+1])
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate typical price for 1d
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    
-    # Calculate cumulative volume and cumulative volume * typical price for VWAP
-    cum_vol_1d = np.cumsum(volume_1d)
-    cum_vol_price_1d = np.cumsum(volume_1d * typical_price_1d)
-    
-    # Calculate VWAP (avoid division by zero)
-    vwap_1d = np.divide(cum_vol_price_1d, cum_vol_1d, out=np.full_like(cum_vol_price_1d, np.nan), where=cum_vol_1d!=0)
-    
-    # Align 1d VWAP to 12h
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # Calculate 1d ATR for volatility filter (14 periods)
-    # True Range components
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Insert first value (no previous close)
-    tr_1d = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr_1d])
-    
-    # Calculate ATR using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr_1d = np.full_like(tr_1d, np.nan)
-    if len(tr_1d) >= 14:
-        # First ATR is simple average of first 14 TR values
-        atr_1d[13] = np.mean(tr_1d[0:14])
-        # Subsequent values: ATR = (prev_atr * 13 + current_tr) / 14
-        for i in range(14, len(tr_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    # Align 1d ATR to 12h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1d EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 14  # Ensure ATR is ready
+    start_idx = max(50, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(vwap_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Calculate deviation from VWAP as percentage of ATR
-        deviation = (close[i] - vwap_1d_aligned[i]) / atr_1d_aligned[i]
+        # Volatility filter: avoid choppy markets (ATR ratio < 0.5 = low volatility)
+        vol_filter = atr_ratio[i] < 0.5
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to VWAP or opposite deviation
-            if deviation >= -0.5:  # Returned halfway to VWAP
+            # Exit: price breaks below Donchian lower band or trend fails
+            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to VWAP or opposite deviation
-            if deviation <= 0.5:  # Returned halfway to VWAP
+            # Exit: price breaks above Donchian upper band or trend fails
+            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price significantly below VWAP (-2.0 ATR deviation) with sufficient volatility
-            if deviation <= -2.0 and atr_1d_aligned[i] > 0:
+            # Long entry: price breaks above Donchian upper band + volume + trend + vol filter
+            if (close[i] > donchian_high[i] and 
+                vol_confirm and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price significantly above VWAP (+2.0 ATR deviation) with sufficient volatility
-            elif deviation >= 2.0 and atr_1d_aligned[i] > 0:
+            # Short entry: price breaks below Donchian lower band + volume + trend + vol filter
+            elif (close[i] < donchian_low[i] and 
+                  vol_confirm and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_filter):
                 position = -1
                 signals[i] = -0.25
     
