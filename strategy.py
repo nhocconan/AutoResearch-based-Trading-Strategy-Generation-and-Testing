@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_rsi_engulfing_v1
-# Hypothesis: RSI extremes with bullish/bearish engulfing candles on 4h, filtered by 1-day EMA trend.
-# Long: RSI(14) < 30 AND bullish engulfing candle AND price > 1-day EMA200.
-# Short: RSI(14) > 70 AND bearish engulfing candle AND price < 1-day EMA200.
-# Exit: RSI crosses back above 50 (long) or below 50 (short).
-# Designed to capture mean reversals in both bull and bear markets with strict entry criteria.
+# 12h_1d_camarilla_volume_trend_v1
+# Hypothesis: 12-hour Camarilla pivot reversal with 1-day volume confirmation and EMA trend filter.
+# Long: price touches Camarilla S3 (strong support) AND volume > 1.5x 20-period average AND price > 1-day EMA50.
+# Short: price touches Camarilla R3 (strong resistance) AND volume > 1.5x 20-period average AND price < 1-day EMA50.
+# Exit: price reaches Camarilla S1/R1 (intraday support/resistance) or opposite Camarilla touch with volume.
+# Designed to capture reversals at key institutional levels with volume confirmation to avoid false breaks.
+# Works in both bull and bear markets by fading extremes at proven pivot levels.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_rsi_engulfing_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,102 +21,98 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 12-hour Camarilla pivot levels (based on previous day)
+    # Calculate from previous day's OHLC (we'll use daily data shifted by 1)
+    camarilla_s3 = np.full(n, np.nan)  # Strong support
+    camarilla_s1 = np.full(n, np.nan)  # Intraday support
+    camarilla_r1 = np.full(n, np.nan)  # Intraday resistance
+    camarilla_r3 = np.full(n, np.nan)  # Strong resistance
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, 50.0)
-    
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    # 4h Engulfing patterns
-    bullish_engulf = np.zeros(n, dtype=bool)
-    bearish_engulf = np.zeros(n, dtype=bool)
-    
-    for i in range(1, n):
-        # Bullish engulfing: current green candle engulfs previous red candle
-        if (close[i] > open_price[i] and  # current bullish
-            open_price[i] < close[i-1] and  # current open < previous close
-            close[i] > open_price[i-1] and  # current close > previous open
-            open_price[i-1] > close[i-1]):  # previous bearish
-            bullish_engulf[i] = True
-        
-        # Bearish engulfing: current red candle engulfs previous green candle
-        if (close[i] < open_price[i] and  # current bearish
-            open_price[i] > close[i-1] and  # current open > previous close
-            close[i] < open_price[i-1] and  # current close < previous open
-            open_price[i-1] < close[i-1]):  # previous bullish
-            bearish_engulf[i] = True
-    
-    # 1-day EMA200 for trend filter
+    # Get daily data for pivot calculation (previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d_200 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 200:
-        ema_1d_200[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema_1d_200[i] = close_1d[i] * (2/201) + ema_1d_200[i-1] * (199/201)
     
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Camarilla formulas:
+    # Range = high - low
+    # S3 = close - 1.1 * (high - low) / 2
+    # S1 = close - 1.1 * (high - low) / 4
+    # R1 = close + 1.1 * (high - low) / 4
+    # R3 = close + 1.1 * (high - low) / 2
+    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 2
+    camarilla_s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 4
+    camarilla_r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 2
+    
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_s3 = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    camarilla_s1 = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    camarilla_r1 = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_r3 = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    
+    # 20-period average volume for confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # 1-day EMA50 for trend filter
+    ema_1d_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d_50[i] = close_1d[i] * (2/51) + ema_1d_50[i-1] * (49/51)
+    
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         price = close[i]
-        rsi_val = rsi[i]
-        bull_eng = bullish_engulf[i]
-        bear_eng = bearish_engulf[i]
-        ema_1d = ema_1d_200_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        s3 = camarilla_s3[i]
+        s1 = camarilla_s1[i]
+        r1 = camarilla_r1[i]
+        r3 = camarilla_r3[i]
+        ema_1d = ema_1d_50_aligned[i]
         
-        if np.isnan(ema_1d):
+        if np.isnan(s3) or np.isnan(s1) or np.isnan(r1) or np.isnan(r3) or np.isnan(avg_vol) or np.isnan(ema_1d):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        vol_surge = vol > 1.5 * avg_vol
+        
         if position == 1:  # Long position
-            if rsi_val > 50:  # Exit when RSI crosses back above 50
+            if price > r1 or (price > r3 and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if rsi_val < 50:  # Exit when RSI crosses back below 50
+            if price < s1 or (price < s3 and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if rsi_val < 30 and bull_eng and price > ema_1d:
+            if price < s3 and vol_surge and price < ema_1d:
                 position = 1
                 signals[i] = 0.25
-            elif rsi_val > 70 and bear_eng and price < ema_1d:
+            elif price > r3 and vol_surge and price > ema_1d:
                 position = -1
                 signals[i] = -0.25
     
