@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_ema_pullback_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -18,28 +18,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 4h data for trend filter (EMA21)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d data for trend strength (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # ATR for volatility filter (14-period)
+    # ATR for volatility filter (14-period on 1h)
     tr1 = pd.Series(high).subtract(pd.Series(low)).abs()
     tr2 = pd.Series(high).subtract(pd.Series(close).shift(1)).abs()
     tr3 = pd.Series(low).subtract(pd.Series(close).shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr > atr_ma  # Avoid low volatility/choppy markets
     
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.3)
+    # Volatility filter: ATR > 20-period ATR mean (avoid choppy markets)
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr > atr_ma
+    
+    # Volume filter: current volume > 1.5x 24-period average
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour
@@ -48,10 +52,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+        if (np.isnan(ema_21_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_spike[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
@@ -61,34 +65,38 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band or trend reverses
-            if close[i] < low_20[i] or close[i] < ema_34_12h_aligned[i]:
+            # Exit: price closes below 4h EMA21 or 1d EMA50
+            if close[i] < ema_21_4h_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band or trend reverses
-            if close[i] > high_20[i] or close[i] > ema_34_12h_aligned[i]:
+            # Exit: price closes above 4h EMA21 or 1d EMA50
+            if close[i] > ema_21_4h_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian upper + uptrend + volume spike + vol filter
-            if (close[i] > high_20[i] and 
-                close[i] > ema_34_12h_aligned[i] and
+            # Trend filter: price vs 4h EMA21 and 1d EMA50
+            uptrend = close[i] > ema_21_4h_aligned[i] and close[i] > ema_50_1d_aligned[i]
+            downtrend = close[i] < ema_21_4h_aligned[i] and close[i] < ema_50_1d_aligned[i]
+            
+            # Long: pullback to 4h EMA21 in uptrend + volume spike + vol filter
+            if (close[i] <= ema_21_4h_aligned[i] * 1.005 and  # within 0.5% of EMA
+                uptrend and 
                 vol_spike[i] and
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: price breaks below Donchian lower + downtrend + volume spike + vol filter
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_34_12h_aligned[i] and
+                signals[i] = 0.20
+            # Short: pullback to 4h EMA21 in downtrend + volume spike + vol filter
+            elif (close[i] >= ema_21_4h_aligned[i] * 0.995 and  # within 0.5% of EMA
+                  downtrend and 
                   vol_spike[i] and
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
