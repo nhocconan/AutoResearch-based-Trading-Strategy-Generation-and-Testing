@@ -1,76 +1,71 @@
 #!/usr/bin/env python3
 """
-1d_1w_momentum_regime_v1
-Hypothesis: On daily timeframe, combine 50-day EMA trend with 14-day RSI momentum and weekly trend filter.
-Enter long when price > EMA50, RSI > 55, and weekly close > weekly EMA20 (bullish alignment).
-Enter short when price < EMA50, RSI < 45, and weekly close < weekly EMA20 (bearish alignment).
-Use volatility filter to avoid choppy markets. Target 10-25 trades/year per symbol.
+12h_1d_pivot_breakout_volume_v1
+Hypothesis: Use 12h price action with 1d pivot levels and volume confirmation for breakout trading.
+Long when 12h price breaks above 1d R1 with volume confirmation.
+Short when 12h price breaks below 1d S1 with volume confirmation.
+Uses pivot points from 1d timeframe to identify key support/resistance levels.
+Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_momentum_regime_v1"
-timeframe = "1d"
+name = "12h_1d_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily indicators
-    # EMA(50) for trend
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d pivot points (standard floor trader pivots)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d pivot point
+    pivot_point = (high_1d + low_1d + close_1d) / 3.0
+    # 1d resistance and support levels
+    r1 = 2 * pivot_point - low_1d
+    s1 = 2 * pivot_point - high_1d
+    r2 = pivot_point + (high_1d - low_1d)
+    s2 = pivot_point - (high_1d - low_1d)
     
-    # Weekly trend: close > EMA(20)
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_bullish = close_1w > ema_20_1w
-    weekly_bearish = close_1w < ema_20_1w
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align 1d pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volatility filter: ATR(14) > 1% of price to avoid chop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    vol_filter = atr > (close * 0.01)
+    # Volume confirmation: volume > 1.5x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_50[i]) or np.isnan(rsi[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -79,29 +74,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: trend breaks down or momentum fades
-            if close[i] <= ema_50[i] or rsi[i] < 45 or weekly_bearish_aligned[i] > 0.5:
+            # Exit: price breaks below 1d S1
+            if close[i] < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: trend breaks up or momentum fades
-            if close[i] >= ema_50[i] or rsi[i] > 55 or weekly_bullish_aligned[i] > 0.5:
+            # Exit: price breaks above 1d R1
+            if close[i] > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: bullish alignment
-            if (close[i] > ema_50[i] and rsi[i] > 55 and 
-                weekly_bullish_aligned[i] > 0.5 and vol_filter[i]):
+            # Long entry: price breaks above 1d R1 with volume
+            if close[i] > r1_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish alignment
-            elif (close[i] < ema_50[i] and rsi[i] < 45 and 
-                  weekly_bearish_aligned[i] > 0.5 and vol_filter[i]):
+            # Short entry: price breaks below 1d S1 with volume
+            elif close[i] < s1_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
