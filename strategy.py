@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# 1d_weekly_donchian_breakout_volume_v2
-# Hypothesis: Uses weekly Donchian channel breakout for trend direction, with daily volume confirmation for entry timing. Enters long when price breaks above 20-week high with above-average volume, short when price breaks below 20-week low with above-average volume. Exits when price returns to the 20-week midpoint. Designed for 15-25 trades/year on daily timeframe to avoid fee drag. Works in bull/bear via trend-following with volume filter.
+# 6h_volume_breakout_1d_trend_v1
+# Hypothesis: Breakout strategy combining 6h Donchian breakout with 1d trend filter (EMA50) and volume confirmation.
+# Enter long when price breaks above 20-period Donchian high, price > 1d EMA50, and volume > 1.5x average volume.
+# Enter short when price breaks below 20-period Donchian low, price < 1d EMA50, and volume > 1.5x average volume.
+# Exit when price returns to the Donchian midpoint or trend filter fails.
+# Designed for 20-40 trades/year on 6h to avoid fee drag. Works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_breakout_volume_v2"
-timeframe = "1d"
+name = "6h_volume_breakout_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,34 +21,29 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channel
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    
-    # Calculate 20-period Donchian channel on weekly data
+    # 6h Donchian channel (20-period)
     lookback = 20
-    donchian_high = np.full_like(high_weekly, np.nan)
-    donchian_low = np.full_like(low_weekly, np.nan)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    for i in range(lookback, len(high_weekly)):
-        donchian_high[i] = np.max(high_weekly[i-lookback:i])
-        donchian_low[i] = np.min(low_weekly[i-lookback:i])
+    for i in range(lookback, n):
+        donchian_high[i] = np.max(high[i-lookback:i])
+        donchian_low[i] = np.min(low[i-lookback:i])
     
-    # Calculate average volume (50-period) for confirmation
-    vol_avg = np.full_like(volume, np.nan)
-    vol_lookback = 50
-    for i in range(vol_lookback, len(volume)):
-        vol_avg[i] = np.mean(volume[i-vol_lookback:i])
+    # 1-day EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    
-    # Calculate midpoint for exit
-    donchian_mid = (donchian_high_aligned + donchian_low_aligned) / 2
+    # Volume average (20-period) for confirmation
+    vol_avg = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_avg[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -52,38 +51,46 @@ def generate_signals(prices):
     start_idx = max(50, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_avg[i]):
+        # Skip if any required data is not available
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
-                pass
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume above average
-        volume_confirmed = volume[i] > vol_avg[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirmed = volume[i] > 1.5 * vol_avg[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to midpoint
-            if close[i] <= donchian_mid[i]:
+            # Exit: price returns to Donchian midpoint or trend filter fails
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] < midpoint or close[i] <= ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to midpoint
-            if close[i] >= donchian_mid[i]:
+            # Exit: price returns to Donchian midpoint or trend filter fails
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] > midpoint or close[i] >= ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high with volume confirmation
-            if close[i] > donchian_high_aligned[i] and volume_confirmed:
+            # Long entry: breakout above Donchian high with volume and trend filter
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_confirmed):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian low with volume confirmation
-            elif close[i] < donchian_low_aligned[i] and volume_confirmed:
+            # Short entry: breakdown below Donchian low with volume and trend filter
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_confirmed):
                 position = -1
                 signals[i] = -0.25
     
