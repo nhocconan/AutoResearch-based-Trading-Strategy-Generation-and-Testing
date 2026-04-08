@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# 1d_rsi_mean_reversion_1w_trend_volume_v1
-# Hypothesis: Daily RSI mean reversion (oversold/overbought) filtered by weekly trend (EMA50) and volume confirmation.
-# Works in bull/bear by following higher timeframe trend. Uses RSI extremes for high-probability reversals with volume validation.
-# Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+# 12h_camarilla_pivot_1d_volume_v1
+# Hypothesis: Camarilla pivot levels from 1-day timeframe act as strong support/resistance. 
+# Enter long at S3 with volume confirmation when price closes above S3, short at R3 when price closes below R3.
+# Uses 1-day trend filter (price above/below EMA50) to align with higher timeframe direction.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag on 12h timeframe.
+# Works in bull/bear by following 1-day trend while using intraday pivot reversals for entries.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_rsi_mean_reversion_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivots and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA50 to daily
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla pivot levels for previous day
+    # PP = (H + L + C) / 3
+    # Range = H - L
+    # S3 = C - (Range * 1.1 / 2)
+    # S2 = C - (Range * 1.1 / 4)
+    # S1 = C - (Range * 1.1 / 6)
+    # R1 = C + (Range * 1.1 / 6)
+    # R2 = C + (Range * 1.1 / 4)
+    # R3 = C + (Range * 1.1 / 2)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    rang = high_1d - low_1d
+    s3 = close_1d - (rang * 1.1 / 2.0)
+    r3 = close_1d + (rang * 1.1 / 2.0)
     
-    # RSI(14) on daily
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 12h (these levels are fixed for the entire day)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Volume filter: daily volume > 1.5x 20-period average
+    # 1-day EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -51,11 +64,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(s3_12h[i]) or np.isnan(r3_12h[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -64,27 +78,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) OR trend change
-            if (rsi[i] > 50) or (close[i] < ema_50_1w_aligned[i]):
+            # Exit: price < S3 (broken support) OR price < EMA50 (trend change)
+            if (close[i] < s3_12h[i]) or (close[i] < ema_50_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 (mean reversion complete) OR trend change
-            if (rsi[i] < 50) or (close[i] > ema_50_1w_aligned[i]):
+            # Exit: price > R3 (broken resistance) OR price > EMA50 (trend change)
+            if (close[i] > r3_12h[i]) or (close[i] > ema_50_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: RSI < 30 (oversold) + volume + price > weekly EMA50
-            if (rsi[i] < 30) and volume_filter[i] and (close[i] > ema_50_1w_aligned[i]):
+            # Long entry: price closes above S3 + volume + price > EMA50 (uptrend)
+            if (close[i] > s3_12h[i]) and volume_filter[i] and (close[i] > ema_50_12h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI > 70 (overbought) + volume + price < weekly EMA50
-            elif (rsi[i] > 70) and volume_filter[i] and (close[i] < ema_50_1w_aligned[i]):
+            # Short entry: price closes below R3 + volume + price < EMA50 (downtrend)
+            elif (close[i] < r3_12h[i]) and volume_filter[i] and (close[i] < ema_50_12h[i]):
                 position = -1
                 signals[i] = -0.25
     
