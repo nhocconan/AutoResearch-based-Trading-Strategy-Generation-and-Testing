@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-# 6h_parabolic_sar_volume_v1
-# Hypothesis: Parabolic SAR identifies trend direction on 6h timeframe. Volume confirmation filters false breakouts.
-# Works in bull/bear by following trend with trailing stop. Volume surge required for entry.
-# Target: 20-40 trades/year.
+# 4h_momentum_confluence_v1
+# Hypothesis: Combines 4h momentum (price above/below SMA50) with 12h trend direction (SMA50 slope) and volume confirmation.
+# Long when: price > SMA50, 12h SMA50 slope > 0, volume > 1.5x average.
+# Short when: price < SMA50, 12h SMA50 slope < 0, volume > 1.5x average.
+# Exit when momentum breaks (price crosses SMA50 opposite direction) or volume drops below average.
+# Uses 3 conditions max to avoid overtrading. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_parabolic_sar_volume_v1"
-timeframe = "6h"
+name = "4h_momentum_confluence_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,55 +24,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Parabolic SAR parameters
-    af_start = 0.02
-    af_increment = 0.02
-    af_max = 0.2
-    
-    # Initialize arrays
-    psar = np.full(n, np.nan)
-    bull = np.full(n, True)  # True = bullish trend
-    af = np.full(n, af_start)
-    ep = np.full(n, np.nan)  # Extreme point
-    
-    # Set initial values
-    psar[0] = low[0]
-    ep[0] = high[0]
-    
-    # Calculate PSAR
-    for i in range(1, n):
-        if bull[i-1]:  # Was bullish
-            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
-            # Check for reversal
-            if low[i] <= psar[i]:
-                bull[i] = False
-                psar[i] = ep[i-1]  # SAR becomes previous EP
-                ep[i] = low[i]
-                af[i] = af_start
-            else:
-                bull[i] = True
-                if high[i] > ep[i-1]:
-                    ep[i] = high[i]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-                else:
-                    ep[i] = ep[i-1]
-                    af[i] = af[i-1]
-        else:  # Was bearish
-            psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
-            # Check for reversal
-            if high[i] >= psar[i]:
-                bull[i] = True
-                psar[i] = ep[i-1]  # SAR becomes previous EP
-                ep[i] = high[i]
-                af[i] = af_start
-            else:
-                bull[i] = False
-                if low[i] < ep[i-1]:
-                    ep[i] = low[i]
-                    af[i] = min(af[i-1] + af_increment, af_max)
-                else:
-                    ep[i] = ep[i-1]
-                    af[i] = af[i-1]
+    # 4h SMA50 for momentum
+    sma_period = 50
+    close_series = pd.Series(close)
+    sma50 = close_series.rolling(window=sma_period, min_periods=sma_period).mean().values
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
@@ -83,14 +40,25 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
+    # Get 12h data for trend direction (SMA50 slope)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    sma50_12h = pd.Series(close_12h).rolling(window=sma_period, min_periods=sma_period).mean().values
+    # Calculate slope: positive if current SMA > SMA 3 periods ago
+    sma50_slope_12h = np.full(len(close_12h), np.nan)
+    for i in range(3, len(close_12h)):
+        if not np.isnan(sma50_12h[i]) and not np.isnan(sma50_12h[i-3]):
+            sma50_slope_12h[i] = sma50_12h[i] - sma50_12h[i-3]
+    sma50_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, sma50_slope_12h)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 1  # Start from second bar
+    start_idx = max(sma_period, vol_ma_period, 3) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(psar[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_slope_12h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -98,27 +66,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below PSAR or volume drops below average
-            if close[i] <= psar[i] or volume[i] < vol_ma[i]:
+            # Exit: Price below SMA50 or volume drops below average
+            if close[i] < sma50[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above PSAR or volume drops below average
-            if close[i] >= psar[i] or volume[i] < vol_ma[i]:
+            # Exit: Price above SMA50 or volume drops below average
+            if close[i] > sma50[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above PSAR, volume surge
-            if close[i] > psar[i] and vol_surge[i]:
+            # Long entry: Price above SMA50, 12h SMA50 slope positive, volume surge
+            if (close[i] > sma50[i] and 
+                sma50_slope_12h_aligned[i] > 0 and 
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below PSAR, volume surge
-            elif close[i] < psar[i] and vol_surge[i]:
+            # Short entry: Price below SMA50, 12h SMA50 slope negative, volume surge
+            elif (close[i] < sma50[i] and 
+                  sma50_slope_12h_aligned[i] < 0 and 
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
