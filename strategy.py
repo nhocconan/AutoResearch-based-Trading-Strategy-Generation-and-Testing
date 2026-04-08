@@ -1,75 +1,61 @@
 #!/usr/bin/env python3
-# 4h_camarilla_pivot_1d_volume_v1
-# Hypothesis: Camarilla pivot levels from 1-day timeframe provide strong support/resistance.
-# Long when price touches or breaks above L3 level with volume > 1.5x average and price > EMA50.
-# Short when price touches or breaks below H3 level with volume > 1.5x average and price < EMA50.
-# Exit when price reaches opposite H3/L3 level or returns to pivot point.
-# Designed to work in both bull and bear markets by trading mean reversion at key intraday levels.
-# Target: 20-35 trades/year to minimize fee drag while capturing high-probability reversals.
+# 1h_triple_confirmation_4h1d_v1
+# Hypothesis: Use 4h EMA(50) and 1d EMA(200) for trend direction, with 1h RSI(14) for entry timing.
+# Long when 4h EMA(50) > 1d EMA(200) and RSI(14) < 30 (oversold bounce in uptrend).
+# Short when 4h EMA(50) < 1d EMA(200) and RSI(14) > 70 (overbought rejection in downtrend).
+# Exit when RSI returns to neutral (40-60 range) or opposite signal.
+# Designed to work in both bull and bear markets by using higher timeframe trend filters.
+# Target: 20-40 trades/year to minimize fee drag while capturing high-probability mean-reversion entries.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "1h_triple_confirmation_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # EMA50 for trend filter
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # === 4h Trend Filter ===
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h_50 = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
     
-    # Get 1-day OHLC data for Camarilla calculation
+    # === 1d Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
+    ema_1d_200 = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # Calculate typical price for pivot
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    pivot = typical_price.values
+    # === 1h Entry Signal: RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels (based on previous day's range)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H3 and L3 are the key levels for intraday trading
-    H3 = pivot + 1.1 * range_1d / 2
-    L3 = pivot - 1.1 * range_1d / 2
-    H4 = pivot + 1.1 * range_1d
-    L4 = pivot - 1.1 * range_1d
-    
-    # Align 1-day levels to 4h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Volume confirmation: 20-period average
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or \
-           np.isnan(pivot_aligned[i]) or np.isnan(ema50[i]) or \
-           np.isnan(avg_volume[i]):
+        if np.isnan(ema_4h_50_aligned[i]) or np.isnan(ema_1d_200_aligned[i]) or \
+           np.isnan(rsi[i]) or not session_filter[i]:
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -77,32 +63,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Trend direction: 4h EMA50 vs 1d EMA200
+        uptrend = ema_4h_50_aligned[i] > ema_1d_200_aligned[i]
+        downtrend = ema_4h_50_aligned[i] < ema_1d_200_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price reaches H3 level or returns to pivot
-            if close[i] >= H3_aligned[i] or close[i] <= pivot_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit: RSI returns to neutral (40-60) or opposite signal
+            if rsi[i] >= 40 or rsi[i] <= 60:  # Actually, exit when RSI >= 40 (recovery from oversold)
+                if rsi[i] >= 40:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.20
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price reaches L3 level or returns to pivot
-            if close[i] <= L3_aligned[i] or close[i] >= pivot_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit: RSI returns to neutral (40-60) or opposite signal
+            if rsi[i] <= 60 or rsi[i] >= 40:  # Exit when RSI <= 60 (recovery from overbought)
+                if rsi[i] <= 60:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
-            # Long entry: price touches or breaks above L3 level with volume and above EMA50
-            if close[i] >= L3_aligned[i] and volume_ok and close[i] > ema50[i]:
+            # Long entry: uptrend + RSI oversold (<30)
+            if uptrend and rsi[i] < 30:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price touches or breaks below H3 level with volume and below EMA50
-            elif close[i] <= H3_aligned[i] and volume_ok and close[i] < ema50[i]:
+                signals[i] = 0.20
+            # Short entry: downtrend + RSI overbought (>70)
+            elif downtrend and rsi[i] > 70:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
