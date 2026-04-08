@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_pivot_breakout_1w_trend_volume_v2"
-timeframe = "1d"
+name = "6h_market_volatility_regime_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,71 +18,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for pivot calculation and trend
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 12h HTF Data for Trend and Volatility Regime ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly pivot points (previous week's values)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # 12h Donchian Channels (20-period) for trend direction
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align pivot levels to daily timeframe
-    pivot_daily = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_daily = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_daily = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # 12h ATR for volatility regime (20-period)
+    tr_12h = np.maximum(
+        high_12h[1:] - low_12h[1:],
+        np.maximum(
+            np.abs(high_12h[1:] - close_12h[:-1]),
+            np.abs(low_12h[1:] - close_12h[:-1])
+        )
+    )
+    tr_12h = np.concatenate([[np.nan], tr_12h])  # Align length
+    atr_12h = pd.Series(tr_12h).rolling(window=20, min_periods=20).mean().values
     
-    # 1w trend: 21-period EMA
-    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_daily = align_htf_to_ltf(prices, df_1w, ema_21)
+    # 12h ATR percentile rank (50-period) for regime detection
+    atr_rank = pd.Series(atr_12h).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan,
+        raw=False
+    ).values
     
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # === 1d HTF Data for Volume Context ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF data to 6h timeframe
+    donchian_high_6h = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_12h, donchian_low)
+    atr_12h_6h = align_htf_to_ltf(prices, df_12h, atr_12h)
+    atr_rank_6h = align_htf_to_ltf(prices, df_12h, atr_rank)
+    vol_ma_1d_6h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_daily[i]) or np.isnan(pivot_daily[i]) or 
-            np.isnan(r1_daily[i]) or np.isnan(s1_daily[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
+            np.isnan(atr_12h_6h[i]) or np.isnan(atr_rank_6h[i]) or 
+            np.isnan(vol_ma_1d_6h[i])):
             signals[i] = 0.0
             continue
         
+        # Market regime detection
+        high_volatility = atr_rank_6h[i] > 0.7  # Top 30% volatility
+        low_volatility = atr_rank_6h[i] < 0.3   # Bottom 30% volatility
+        
+        # Volume filter: current volume > 1.5x 1d average
+        volume_filter = volume[i] > (vol_ma_1d_6h[i] * 1.5)
+        
         if position == 1:  # Long position
-            # Exit: price < S1 or trend fails
-            if close[i] < s1_daily[i] or close[i] < ema_21_daily[i]:
+            # Exit: price breaks below Donchian low OR volatility collapses
+            if close[i] < donchian_low_6h[i] or (not high_volatility and atr_rank_6h[i] < 0.4):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > R1 or trend fails
-            if close[i] > r1_daily[i] or close[i] > ema_21_daily[i]:
+            # Exit: price breaks above Donchian high OR volatility collapses
+            if close[i] > donchian_high_6h[i] or (not high_volatility and atr_rank_6h[i] < 0.4):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter
-            bullish = close[i] > ema_21_daily[i]
-            bearish = close[i] < ema_21_daily[i]
-            
-            # Long: price > R1 + bullish trend + volume
-            if (close[i] > r1_daily[i] and 
-                bullish and 
-                vol_filter[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: price < S1 + bearish trend + volume
-            elif (close[i] < s1_daily[i] and 
-                  bearish and 
-                  vol_filter[i]):
-                position = -1
-                signals[i] = -0.25
+            # Only trade in high volatility regimes with volume confirmation
+            if high_volatility and volume_filter:
+                # Long: price breaks above Donchian high
+                if close[i] > donchian_high_6h[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price breaks below Donchian low
+                elif close[i] < donchian_low_6h[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
