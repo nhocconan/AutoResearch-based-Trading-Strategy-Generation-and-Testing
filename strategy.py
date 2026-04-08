@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h ADX trend strength filter combined with Bollinger Band squeeze breakout
-# Uses ADX to identify trending regimes (>25) and Bollinger Band width percentile to detect squeeze
-# Breakouts from Bollinger Bands with ADX confirmation capture momentum moves in both bull and bear markets
-# Bollinger Band squeeze acts as a volatility filter, reducing false breakouts in choppy markets
-# Target: 12-37 trades/year by requiring both volatility contraction and trend confirmation
-name = "12h_adx_bb_squeeze_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 4h Donchian channel breakout with 1d trend filter (ADX>25) and volume confirmation (volume > 1.5x 20-period average)
+# Breakouts from Donchian channels capture momentum moves, ADX filters for trending markets, volume confirms breakout strength
+# Works in both bull and bear markets by capturing breakouts in either direction
+# Target: 20-50 trades/year by requiring Donchian breakout + trend + volume confirmation
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,13 +22,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators (call ONCE before loop)
+    # Get 1d data for ADX (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ADX for trend strength
+    # Calculate 14-period ADX for trend strength on 1d data
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
@@ -57,67 +56,59 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # 4h Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Band width percentile (50-period) to identify squeeze
-    bb_width_pct = pd.Series(bb_width).rolling(window=50, min_periods=50).rank(pct=True).values
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx[i]) or np.isnan(bb_width_pct[i]) or 
-            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
-            np.isnan(sma_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 12h bar
+        # Get aligned 1d values for current 4h bar
         adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
-        bb_width_pct_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct)[i]
-        upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)[i]
-        lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)[i]
-        sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)[i]
         
         # Trend filter: ADX > 25 indicates strong trend
         strong_trend = adx_aligned > 25
         
-        # Squeeze filter: BB width below 20th percentile indicates volatility contraction
-        squeeze = bb_width_pct_aligned < 0.2
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below middle Bollinger Band OR trend weakens
-            if close[i] < sma_20_aligned or not strong_trend:
+            # Exit: price closes below Donchian lower band OR trend weakens
+            if close[i] < low_20[i] or not strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above middle Bollinger Band OR trend weakens
-            if close[i] > sma_20_aligned or not strong_trend:
+            # Exit: price closes above Donchian upper band OR trend weakens
+            if close[i] > high_20[i] or not strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade during volatility squeeze with strong trend
-            if squeeze and strong_trend:
-                # Long: price breaks above upper Bollinger Band
-                if close[i] > upper_bb_aligned:
+            # Only trade during strong trend with volume confirmation
+            if strong_trend and volume_confirm:
+                # Long: price breaks above Donchian upper band
+                if close[i] > high_20[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below lower Bollinger Band
-                elif close[i] < lower_bb_aligned:
+                # Short: price breaks below Donchian lower band
+                elif close[i] < low_20[i]:
                     position = -1
                     signals[i] = -0.25
     
