@@ -1,6 +1,7 @@
+#%%
 #!/usr/bin/env python3
 """
-4h_1w_1d_price_action_v2
+4h_1w_1d_price_action_v3
 Hypothesis: Weekly bias (from previous week close vs open) filters daily breakouts on 4h timeframe.
 - Weekly bullish bias: weekly close > open → only look for long entries
 - Weekly bearish bias: weekly close < open → only look for short entries  
@@ -15,7 +16,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w_1d_price_action_v2"
+name = "4h_1w_1d_price_action_v3"
 timeframe = "4h"
 leverage = 1.0
 
