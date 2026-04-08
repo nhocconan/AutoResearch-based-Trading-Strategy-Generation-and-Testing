@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_1w_rsi_trend_v1
-# Hypothesis: Trade with the weekly trend using RSI(14) on 12h for entry.
-# In weekly uptrend: go long when RSI < 30 (oversold) with volume confirmation.
-# In weekly downtrend: go short when RSI > 70 (overbought) with volume confirmation.
-# Exit when RSI crosses 50 or weekly trend reverses.
-# Uses weekly EMA21 for trend, daily volume for confirmation, and 12h RSI for timing.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# 4h_1w_trend_1d_camarilla_v2
+# Hypothesis: Trade in direction of weekly trend using daily Camarilla S3/R3 for entry and R4/S4 for exit. Uses volume confirmation to avoid false breaks. Targets 15-35 trades/year (60-140 total) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_rsi_trend_v1"
-timeframe = "12h"
+name = "4h_1w_trend_1d_camarilla_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,68 +20,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA21 for trend filter
+    # Weekly EMA34 for trend filter
     df_1w = get_htf_data(prices, '1w')
-    ema21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Daily volume for confirmation
+    # Daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h RSI(14)
-    delta = pd.Series(close).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels for previous day
+    camarilla_S3 = np.zeros(len(high_1d))
+    camarilla_R3 = np.zeros(len(high_1d))
+    camarilla_S4 = np.zeros(len(high_1d))
+    camarilla_R4 = np.zeros(len(high_1d))
+    
+    for i in range(1, len(high_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        
+        if range_val > 0:
+            camarilla_S3[i] = prev_close - 1.1 * range_val * 1.0/6.0
+            camarilla_R3[i] = prev_close + 1.1 * range_val * 1.0/6.0
+            camarilla_S4[i] = prev_close - 1.1 * range_val * 1.5/6.0
+            camarilla_R4[i] = prev_close + 1.1 * range_val * 1.5/6.0
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
+    camarilla_R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure all indicators are ready
+    start_idx = 100  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
+            np.isnan(camarilla_R3_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Daily volume surge condition (volume > 1.5x 20-day average)
-        vol_surge = volume_1d[i // 2] > 1.5 * vol_ma_20_1d_aligned[i] if vol_ma_20_1d_aligned[i] > 0 else False
+        # Volume surge condition
+        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 or weekly trend breaks (price < weekly EMA21)
-            if rsi[i] > 50 or close[i] < ema21_1w_aligned[i]:
+            # Exit: price < S3 (breakdown) or price > R4 (take profit) or weekly trend breaks
+            if close[i] < camarilla_S3_aligned[i] or close[i] > camarilla_R4_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 or weekly trend breaks (price > weekly EMA21)
-            if rsi[i] < 50 or close[i] > ema21_1w_aligned[i]:
+            # Exit: price > R3 (breakout) or price < S4 (take profit) or weekly trend breaks
+            if close[i] > camarilla_R3_aligned[i] or close[i] < camarilla_S4_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: RSI < 30 (oversold) with volume surge and weekly uptrend
-            if (rsi[i] < 30 and vol_surge and 
-                close[i] > ema21_1w_aligned[i]):
+            # Long entry: price > S3 with volume surge and weekly uptrend
+            if (close[i] > camarilla_S3_aligned[i] and vol_surge and 
+                close[i] > ema34_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI > 70 (overbought) with volume surge and weekly downtrend
-            elif (rsi[i] > 70 and vol_surge and 
-                  close[i] < ema21_1w_aligned[i]):
+            # Short entry: price < R3 with volume surge and weekly downtrend
+            elif (close[i] < camarilla_R3_aligned[i] and vol_surge and 
+                  close[i] < ema34_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
