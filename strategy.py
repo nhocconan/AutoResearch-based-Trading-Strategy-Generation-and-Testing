@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and 12h ADX Filter v2
-Hypothesis: Donchian(20) breakouts on 4h with volume spikes (>2x average) 
-and strong 12h trend (ADX > 25) capture sustained moves while avoiding 
-false breakouts in ranging markets. Works in bull/bear by requiring 
-trend alignment and volume confirmation. Target: 20-50 trades/year.
+1h Breakout with 4h Trend Filter and Volume Spike v1
+Hypothesis: 1h price breakouts from 20-period ranges, aligned with strong 4h trend (ADX>25) 
+and volume confirmation (>2x average), capture momentum moves while avoiding false breakouts.
+Uses 4h for trend direction, 1h for precise entry timing. Target: 15-30 trades/year.
+Works in bull/bear by requiring trend alignment and volume confirmation.
 """
 
-name = "4h_donchian_breakout_volume_adx_v2"
-timeframe = "4h"
+name = "1h_breakout_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -26,41 +26,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter - call ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get 4h data for trend filter - call ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 14-period ADX for 12h
+    # Calculate 14-period ADX for 4h
     # True Range
-    tr1_12h = high_12h[1:] - low_12h[1:]
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    tr1_4h = high_4h[1:] - low_4h[1:]
+    tr2_4h = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3_4h = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
     
     # Directional Movement
-    dm_plus_12h = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                           np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus_12h = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                            np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus_12h = np.concatenate([[0], dm_plus_12h])
-    dm_minus_12h = np.concatenate([[0], dm_minus_12h])
+    dm_plus_4h = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                          np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus_4h = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                           np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus_4h = np.concatenate([[0], dm_plus_4h])
+    dm_minus_4h = np.concatenate([[0], dm_minus_4h])
     
     # Smoothed values
-    tr14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14_12h = pd.Series(dm_plus_12h).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14_12h = pd.Series(dm_minus_12h).rolling(window=14, min_periods=14).sum().values
+    tr14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14_4h = pd.Series(dm_plus_4h).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14_4h = pd.Series(dm_minus_4h).rolling(window=14, min_periods=14).sum().values
     
     # Directional Indicators
-    di_plus_12h = 100 * dm_plus_14_12h / tr14_12h
-    di_minus_12h = 100 * dm_minus_14_12h / tr14_12h
+    di_plus_4h = 100 * dm_plus_14_4h / tr14_4h
+    di_minus_4h = 100 * dm_minus_14_4h / tr14_4h
     
     # DX and ADX
-    dx_12h = 100 * np.abs(di_plus_12h - di_minus_12h) / (di_plus_12h + di_minus_12h)
-    adx_12h = pd.Series(dx_12h).rolling(window=14, min_periods=14).mean().values
+    dx_4h = 100 * np.abs(di_plus_4h - di_minus_4h) / (di_plus_4h + di_minus_4h)
+    adx_4h = pd.Series(dx_4h).rolling(window=14, min_periods=14).mean().values
     
-    # Donchian channels on 4h (20-period)
+    # 1h Donchian channels (20-period)
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -76,40 +76,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_12h[i]) or np.isnan(vol_ma_20[i]) or 
+        if (np.isnan(adx_4h[i]) or np.isnan(vol_ma_20[i]) or 
             np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 12h ADX for current 4h bar
-        adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)[i]
+        # Get aligned 4h ADX for current 1h bar
+        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)[i]
         
-        # Regime filter: only trade in strong trending markets on 12h
-        strong_trend_12h = adx_12h_aligned > 25
+        # Regime filter: only trade in strong trending markets on 4h
+        strong_trend_4h = adx_4h_aligned > 25
         
         if position == 1:  # Long position
             # Exit: trend weakens OR price closes below Donchian low
-            if not strong_trend_12h or close[i] < donch_low[i]:
+            if not strong_trend_4h or close[i] < donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit: trend weakens OR price closes above Donchian high
-            if not strong_trend_12h or close[i] > donch_high[i]:
+            if not strong_trend_4h or close[i] > donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Only trade with volume spike and strong 12h trend
+            # Only trade with volume spike and strong 4h trend
             # Breakout conditions: price breaks Donchian levels
-            if volume_spike[i] and strong_trend_12h and close[i] > donch_high[i]:
+            if volume_spike[i] and strong_trend_4h and close[i] > donch_high[i]:
                 position = 1
-                signals[i] = 0.25
-            elif volume_spike[i] and strong_trend_12h and close[i] < donch_low[i]:
+                signals[i] = 0.20
+            elif volume_spike[i] and strong_trend_4h and close[i] < donch_low[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
