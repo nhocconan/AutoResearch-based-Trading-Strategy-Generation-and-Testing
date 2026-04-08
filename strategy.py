@@ -1,62 +1,59 @@
 #!/usr/bin/env python3
-# 12h_price_channel_breakout_v1
-# Hypothesis: Uses 12h Donchian breakout with volume confirmation and weekly trend filter.
-# Long when price breaks above 20-period Donchian high + volume > 1.5x average + weekly close above 50-week SMA.
-# Short when price breaks below 20-period Donchian low + volume > 1.5x average + weekly close below 50-week SMA.
-# Exit when price crosses back through the middle of the Donchian channel.
-# Designed for low trade frequency (15-30/year) to avoid fee drag in ranging/bear markets.
+# 1d_weekly_price_action_v1
+# Hypothesis: Uses daily price action with weekly trend context and volume confirmation.
+# Long when: Daily close > weekly EMA20, daily close > daily open (bullish candle), volume > 1.5x 20-day average.
+# Short when: Daily close < weekly EMA20, daily close < daily open (bearish candle), volume > 1.5x 20-day average.
+# Exit when price crosses weekly EMA20 in opposite direction or volume drops below average.
+# Uses 3 conditions max to avoid overtrading. Target: 10-25 trades/year on daily timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_price_channel_breakout_v1"
-timeframe = "12h"
+name = "1d_weekly_price_action_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
-    donch_len = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=donch_len, min_periods=donch_len).max().values
-    donch_low = low_series.rolling(window=donch_len, min_periods=donch_len).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Daily bullish/bearish candle
+    bullish_candle = close > open_price
+    bearish_candle = close < open_price
     
-    # Volume filter: 1.5x 20-period average
-    vol_ma_len = 20
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=vol_ma_len, min_periods=vol_ma_len).mean().values
-    vol_surge = volume > (1.5 * vol_ma)
-    
-    # Get weekly data for trend filter
+    # Weekly EMA20 for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    weekly_bull = close_1w > sma50_1w
-    weekly_bear = close_1w < sma50_1w
-    weekly_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_bull)
-    weekly_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_bear)
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Volume filter: 1.5x 20-day average
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donch_len, vol_ma_len, 50) + 1
+    start_idx = max(20, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(weekly_bull_aligned[i]) or 
-            np.isnan(weekly_bear_aligned[i])):
+        if np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 pass  # Hold position
             else:
@@ -64,31 +61,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price crosses below Donchian middle
-            if close[i] < donch_mid[i]:
+            # Exit: Price below weekly EMA20 or volume drops below average
+            if close[i] < ema20_1w_aligned[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above Donchian middle
-            if close[i] > donch_mid[i]:
+            # Exit: Price above weekly EMA20 or volume drops below average
+            if close[i] > ema20_1w_aligned[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Break above Donchian high + volume surge + weekly bullish
-            if (close[i] > donch_high[i] and 
-                vol_surge[i] and 
-                weekly_bull_aligned[i]):
+            # Long entry: Price above weekly EMA20, bullish candle, volume surge
+            if (close[i] > ema20_1w_aligned[i] and 
+                bullish_candle[i] and 
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Break below Donchian low + volume surge + weekly bearish
-            elif (close[i] < donch_low[i] and 
-                  vol_surge[i] and 
-                  weekly_bear_aligned[i]):
+            # Short entry: Price below weekly EMA20, bearish candle, volume surge
+            elif (close[i] < ema20_1w_aligned[i] and 
+                  bearish_candle[i] and 
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
