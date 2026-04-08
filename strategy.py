@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 4h_ema_breakout_volume_regime_v1
-# Hypothesis: Uses 4H EMA20 breakout with 12H EMA50 trend filter and volume surge for entries.
-# Long when: price > EMA20, 12H EMA50 slope up, volume > 1.5x avg.
-# Short when: price < EMA20, 12H EMA50 slope down, volume > 1.5x avg.
-# Exit when price crosses EMA20 opposite direction or volume drops below average.
-# Designed for low trade frequency (<40/year) to avoid fee drag, works in bull/bear via trend filter.
+# 1h_mean_reversion_v1
+# Hypothesis: Mean reversion on 1h with 4h trend filter and volume confirmation.
+# Long when: RSI < 30, price > 4h VWAP (uptrend), volume > 1.5x average.
+# Short when: RSI > 70, price < 4h VWAP (downtrend), volume > 1.5x average.
+# Exit when RSI crosses back to neutral (40-60).
+# Uses 4h for trend direction, 1h for entry timing. Target: 15-35 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ema_breakout_volume_regime_v1"
-timeframe = "4h"
+name = "1h_mean_reversion_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,38 +24,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4H EMA20 for entry/exit
-    ema_period = 20
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    # 1h RSI for mean reversion signals
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: 1.5x 20-period EMA (more responsive than SMA)
-    vol_ema_period = 20
-    vol_ema = np.full(n, np.nan)
-    vol_series = pd.Series(volume)
-    vol_ema = vol_series.ewm(span=vol_ema_period, adjust=False, min_periods=vol_ema_period).mean().values
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
     
-    vol_surge = volume > 1.5 * vol_ema
+    for i in range(rsi_period+1, n):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
     
-    # Get 12H data for trend filter (EMA50 slope)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Calculate slope: positive if current EMA > EMA 3 periods ago
-    ema50_slope_12h = np.full(len(close_12h), np.nan)
-    for i in range(3, len(close_12h)):
-        if not np.isnan(ema50_12h[i]) and not np.isnan(ema50_12h[i-3]):
-            ema50_slope_12h[i] = ema50_12h[i] - ema50_12h[i-3]
-    ema50_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_slope_12h)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:rsi_period] = np.nan
+    
+    # Volume filter: 1.5x 20-period average
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
+    
+    # Get 4h VWAP for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
+    vwap_4h = (typical_price_4h * df_4h['volume']).cumsum() / df_4h['volume'].cumsum()
+    vwap_4h_array = vwap_4h.values
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h_array)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(ema_period, vol_ema_period, 3) + 1
+    start_idx = max(rsi_period, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or np.isnan(vol_ema[i]) or np.isnan(ema50_slope_12h_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(vwap_4h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -63,32 +76,32 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below EMA20 or volume drops below average
-            if close[i] < ema20[i] or volume[i] < vol_ema[i]:
+            # Exit: RSI crosses above 40 (mean reversion complete)
+            if rsi[i] >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: Price above EMA20 or volume drops below average
-            if close[i] > ema20[i] or volume[i] < vol_ema[i]:
+            # Exit: RSI crosses below 60 (mean reversion complete)
+            if rsi[i] <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: Price above EMA20, 12H EMA50 slope up, volume surge
-            if (close[i] > ema20[i] and 
-                ema50_slope_12h_aligned[i] > 0 and 
+            # Long entry: RSI < 30 (oversold), price > 4h VWAP (uptrend), volume surge
+            if (rsi[i] < 30 and 
+                close[i] > vwap_4h_aligned[i] and 
                 vol_surge[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Price below EMA20, 12H EMA50 slope down, volume surge
-            elif (close[i] < ema20[i] and 
-                  ema50_slope_12h_aligned[i] < 0 and 
+                signals[i] = 0.20
+            # Short entry: RSI > 70 (overbought), price < 4h VWAP (downtrend), volume surge
+            elif (rsi[i] > 70 and 
+                  close[i] < vwap_4h_aligned[i] and 
                   vol_surge[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
