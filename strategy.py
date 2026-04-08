@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v2
-# Hypothesis: Williams Fractal breakouts on 4h timeframe with 1d trend filter (ADX > 25) and volume confirmation (volume > 1.5x 20-period average) capture strong momentum moves. Works in bull/bear markets by requiring trend alignment and volume surge. Fractals provide objective support/resistance levels. Position size 0.25 manages risk. Target: 20-50 trades/year per symbol.
+# 1d_weekly_fractal_breakout_volume_v1
+# Hypothesis: Daily timeframe trading using weekly Williams Fractal breakouts with volume confirmation. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Weekly trend filter ensures alignment with higher timeframe direction. Target: 15-25 trades/year per symbol.
 
-name = "4h_fractal_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "1d_weekly_fractal_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -37,45 +37,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter - call ONCE before loop
-    df_d = get_htf_data(prices, '1d')
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
+    # Get weekly data for fractals and trend filter - call ONCE before loop
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate ADX on daily timeframe (trend strength filter)
-    # True Range
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
+    # Calculate weekly ADX for trend strength filter
+    tr1 = high_w - low_w
+    tr2 = np.abs(high_w - np.roll(close_w, 1))
+    tr3 = np.abs(low_w - np.roll(close_w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_d - np.roll(high_d, 1)
-    down_move = np.roll(low_d, 1) - low_d
+    up_move = high_w - np.roll(high_w, 1)
+    down_move = np.roll(low_w, 1) - low_w
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     plus_dm[0] = 0
     minus_dm[0] = 0
     
-    # Smoothed values
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
     minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    # Handle division by zero and invalid values
     adx = np.where((plus_di + minus_di) == 0, 0, adx)
     adx = np.where(np.isnan(adx) | np.isinf(adx), 0, adx)
     
-    # Calculate Williams Fractals on 1d timeframe
-    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_d, low_d)
+    # Calculate weekly Williams Fractals
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_w, low_w)
     # Need 2-bar confirmation for fractals (wait for 2 candles after the fractal)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_d, bullish_fractal, additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_w, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_w, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 20-period average volume for 4h timeframe
+    # Calculate 20-period average volume for daily timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -85,8 +81,8 @@ def generate_signals(prices):
     start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get aligned daily indicators for current 4h bar
-        adx_val = align_htf_to_ltf(prices, df_d, adx)[i]
+        # Get aligned weekly indicators for current daily bar
+        adx_val = align_htf_to_ltf(prices, df_w, adx)[i]
         bearish_val = bearish_fractal_aligned[i]
         bullish_val = bullish_fractal_aligned[i]
         
