@@ -1,18 +1,19 @@
-#!/usr/bin/env python3
-# 6h_1d_elder_ray_volume_trend_v1
-# Hypothesis: 6-hour Elder Ray (Bull/Bear Power) with volume confirmation and 1-day trend filter.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Long: Bull Power > 0 AND increasing AND volume > 1.3x 20-period average volume AND price > 1-day EMA50.
-# Short: Bear Power > 0 AND increasing AND volume > 1.3x 20-period average volume AND price < 1-day EMA50.
-# Exit: Opposite Elder Ray power > 0 with volume confirmation.
-# Designed to capture institutional buying/selling pressure with trend alignment for both bull and bear markets.
+#1/2025-06-20
+# 12h_1w_donchian_volume_breakout_v1
+# Hypothesis: 12-hour Donchian breakout with volume confirmation and 1-week EMA trend filter.
+# Long: price > Donchian(20) high AND volume > 1.5x 20-period average volume AND price > 1-week EMA50.
+# Short: price < Donchian(20) low AND volume > 1.5x 20-period average volume AND price < 1-week EMA50.
+# Exit: price crosses Donchian midpoint or opposite breakout with volume.
+# Designed to capture strong trending moves in both bull and bear markets with strict entry criteria to limit trades.
+# Timeframe: 12h, HTF: 1w
+# Expected trades: 12-37 per year (50-150 over 4 years)
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_volume_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,81 +26,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray calculation
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema13[12] = np.mean(close[:13])
-        for i in range(13, n):
-            ema13[i] = close[i] * (2/14) + ema13[i-1] * (12/14)
+    # 12h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
     
-    # Elder Ray components
-    bull_power = np.full(n, np.nan)
-    bear_power = np.full(n, np.nan)
-    for i in range(13, n):
-        bull_power[i] = high[i] - ema13[i]
-        bear_power[i] = ema13[i] - low[i]
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
     # 20-period average volume
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # 1-day EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_1d_50 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d_50[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d_50[i] = close_1d[i] * (2/51) + ema_1d_50[i-1] * (49/51)
+    close_1w = df_1w['close'].values
+    ema_1w_50 = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_1w_50[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_1w_50[i] = close_1w[i] * (2/51) + ema_1w_50[i-1] * (49/51)
     
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        bp = bull_power[i]
-        br = bear_power[i]
+    for i in range(50, n):
+        price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_1d = ema_1d_50_aligned[i]
+        d_high = donchian_high[i]
+        d_low = donchian_low[i]
+        d_mid = donchian_mid[i]
+        ema_1w = ema_1w_50_aligned[i]
         
-        if np.isnan(bp) or np.isnan(br) or np.isnan(avg_vol) or np.isnan(ema_1d):
+        if np.isnan(d_high) or np.isnan(d_low) or np.isnan(d_mid) or np.isnan(avg_vol) or np.isnan(ema_1w):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        vol_surge = vol > 1.3 * avg_vol
-        
-        # Rising Bull Power (current > previous)
-        bull_rising = i > 13 and bp > bull_power[i-1]
-        # Rising Bear Power (current > previous)
-        bear_rising = i > 13 and br > bear_power[i-1]
+        vol_surge = vol > 1.5 * avg_vol
         
         if position == 1:  # Long position
-            if bear_power[i] > 0 and bear_rising and vol_surge:
-                position = -1
-                signals[i] = -0.25
+            if price < d_mid or (price < d_low and vol_surge):
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if bull_power[i] > 0 and bull_rising and vol_surge:
-                position = 1
-                signals[i] = 0.25
+            if price > d_mid or (price > d_high and vol_surge):
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if bull_power[i] > 0 and bull_rising and vol_surge and price > ema_1d:
+            if price > d_high and vol_surge and price > ema_1w:
                 position = 1
                 signals[i] = 0.25
-            elif bear_power[i] > 0 and bear_rising and vol_surge and price < ema_1d:
+            elif price < d_low and vol_surge and price < ema_1w:
                 position = -1
                 signals[i] = -0.25
     
