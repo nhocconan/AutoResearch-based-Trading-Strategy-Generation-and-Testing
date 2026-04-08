@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4-hour Donchian(20) breakout with 12-hour EMA filter and volume confirmation
-Hypothesis: Breakouts of Donchian(20) channels in the direction of the 12-hour EMA trend,
-confirmed by volume > 1.5x 20-period average, capture momentum with fewer whipsaws.
-Designed for ~20-30 trades/year to minimize fee drag in both bull and bear markets.
+12-hour Donchian(20) breakout with 1-day RSI filter and volume confirmation
+Hypothesis: Breakouts of Donchian(20) channels on 12h timeframe in the direction of 
+1-day RSI trend, confirmed by volume > 1.8x 20-period average, capture momentum 
+with fewer whipsaws in both bull and bear markets. Designed for ~20-30 trades/year 
+to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_ema_volume_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_1d_rsi_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,65 +26,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-hour data for EMA filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # 1-day data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 12-hour EMA(20) for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1-day RSI(14) for trend filter
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1d = (100 - (100 / (1 + rs))).values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_12h_aligned[i]) or 
+        if (np.isnan(rsi_14_1d_aligned[i]) or 
             np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below EMA(20) or Donchian(10) low
-            ema_close = ema_12h_aligned[i]
+            # Exit: RSI turns bearish (<50) OR price breaks below Donchian(10) low
             donchian_low = np.min(low[max(0, i-10):i+1])
-            if (close[i] < ema_close or 
+            if (rsi_14_1d_aligned[i] < 50 or 
                 close[i] <= donchian_low):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above EMA(20) or Donchian(10) high
-            ema_close = ema_12h_aligned[i]
+            # Exit: RSI turns bullish (>50) OR price breaks above Donchian(10) high
             donchian_high = np.max(high[max(0, i-10):i+1])
-            if (close[i] > ema_close or 
+            if (rsi_14_1d_aligned[i] > 50 or 
                 close[i] >= donchian_high):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:  # Flat, look for entry
-            # Donchian(20) channels
+            # Donchian(20) channels - standard width for balance
             donchian_high = np.max(high[max(0, i-20):i])
             donchian_low = np.min(low[max(0, i-20):i])
             
-            # Long: price breaks above Donchian(20) high + volume spike + price > EMA
+            # Long: price breaks above Donchian(20) high + volume spike + RSI > 50
             if (close[i] > donchian_high and
-                vol_spike[i] and
-                close[i] > ema_12h_aligned[i]):
+                rsi_14_1d_aligned[i] > 50 and
+                vol_spike[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: price breaks below Donchian(20) low + volume spike + price < EMA
+                signals[i] = 0.28
+            # Short: price breaks below Donchian(20) low + volume spike + RSI < 50
             elif (close[i] < donchian_low and
-                  vol_spike[i] and
-                  close[i] < ema_12h_aligned[i]):
+                  rsi_14_1d_aligned[i] < 50 and
+                  vol_spike[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
