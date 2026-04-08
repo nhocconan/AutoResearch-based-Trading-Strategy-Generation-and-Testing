@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+"""
+12h_momentum_breakout_volume_v1
+Hypothesis: Use 12h price momentum (close > open) with 1d volume confirmation and 1w trend filter.
+Enter long when 12h candle is bullish, volume > 1.5x 24-period average, and 1w EMA(21) is rising.
+Enter short when 12h candle is bearish, volume > 1.5x 24-period average, and 1w EMA(21) is falling.
+Uses 12h timeframe for entries, 1w for trend filter. Target: 15-25 trades/year.
+Works in bull/bear via trend filter and volume confirmation to avoid false breakouts.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_rsi_momentum_v1"
-timeframe = "4h"
+name = "12h_momentum_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -14,36 +23,22 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1d RSI(14)
-    delta = pd.Series(df_1d['close']).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Get 1w data for trend filter (EMA 21)
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 1w EMA(21)
+    # 1w EMA(21) for trend
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume filter: current volume > 1.5x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > vol_ma * 1.5
+    # Volume confirmation: volume > 1.5x average of last 24 periods (24*12h = 12 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -52,8 +47,8 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        # Skip if data not available
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -61,30 +56,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # 12h candle direction
+        candle_bullish = close[i] > open_price[i]
+        candle_bearish = close[i] < open_price[i]
+        
         if position == 1:  # Long position
-            # Exit: RSI crosses below 50 or trend turns bearish
-            if rsi_1d_aligned[i] < 50 or close[i] < ema_1w_aligned[i]:
+            # Exit: candle turns bearish or 1w trend turns down
+            if not candle_bullish or ema_1w_aligned[i] < ema_1w_aligned[max(0, i-1)]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 50 or trend turns bullish
-            if rsi_1d_aligned[i] > 50 or close[i] > ema_1w_aligned[i]:
+            # Exit: candle turns bullish or 1w trend turns up
+            if not candle_bearish or ema_1w_aligned[i] > ema_1w_aligned[max(0, i-1)]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: RSI > 60 with volume and bullish trend
-            if (rsi_1d_aligned[i] > 60 and vol_filter[i] and 
-                close[i] > ema_1w_aligned[i]):
+            # Long entry: bullish 12h candle with volume and 1w uptrend
+            if candle_bullish and vol_confirm[i] and ema_1w_aligned[i] > ema_1w_aligned[max(0, i-1)]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI < 40 with volume and bearish trend
-            elif (rsi_1d_aligned[i] < 40 and vol_filter[i] and 
-                  close[i] < ema_1w_aligned[i]):
+            # Short entry: bearish 12h candle with volume and 1w downtrend
+            elif candle_bearish and vol_confirm[i] and ema_1w_aligned[i] < ema_1w_aligned[max(0, i-1)]:
                 position = -1
                 signals[i] = -0.25
     
