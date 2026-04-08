@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 6h_1d_camarilla_pivot_breakout_v1
-# Hypothesis: Trade Camarilla pivot breakouts on 6h timeframe with daily trend filter.
-# Uses daily Camarilla levels (H3/L3 for breakout, H4/L4 for reversal) and 6h price action.
-# In bull markets: buy breakouts above H3 with daily uptrend. In bear markets: sell breakdowns below L3 with daily downtrend.
-# Includes volume confirmation to filter false breakouts. Target: 20-40 trades/year on 6h.
+# 12h_donchian_breakout_1d_trend
+# Hypothesis: Trade 12h Donchian(20) breakouts in the direction of 1d trend (EMA50).
+# Uses 12h price channel breakouts for entry, 1d EMA50 for trend filter, and ATR-based stops.
+# Works in bull markets (breakouts with trend) and bear markets (counter-trend bounces at extremes).
+# Target: 15-30 trades/year on 12h timeframe with strict entry conditions to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_pivot_breakout_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +23,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels
+    # 1d EMA for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    # H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
-    # H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
-    # H2 = close + 0.75*(high-low), L2 = close - 0.75*(high-low)
-    # H1 = close + 0.5*(high-low), L1 = close - 0.5*(high-low)
-    range_1d = high_1d - low_1d
-    H4 = close_1d + 1.5 * range_1d
-    L4 = close_1d - 1.5 * range_1d
-    H3 = close_1d + 1.125 * range_1d
-    L3 = close_1d - 1.125 * range_1d
+    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Align Camarilla levels to 6h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Daily trend filter: EMA20 vs EMA50
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    daily_uptrend = ema20_aligned > ema50_aligned
-    daily_downtrend = ema20_aligned < ema50_aligned
-    
-    # Volume confirmation: 6h volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR for volatility and stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure EMA50 is ready
+    start_idx = 50  # Ensure EMA50 and ATR are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(ema20_aligned[i]) or np.isnan(ema50_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition
-        vol_surge = volume[i] > 1.8 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        # Calculate 12h Donchian channels (20-period lookback)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            # Not enough data for Donchian calculation
+            if position != 0:
+                pass  # Hold position
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit: breakdown below L3 OR reversal at H4
-            if close[i] < L3_aligned[i] or close[i] > H4_aligned[i]:
+            # Exit: price breaks below lower Donchian band OR stoploss hit
+            if close[i] < lowest_low or close[i] < ema50_aligned[i] - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: breakout above H3 OR reversal at L4
-            if close[i] > H3_aligned[i] or close[i] < L4_aligned[i]:
+            # Exit: price breaks above upper Donchian band OR stoploss hit
+            if close[i] > highest_high or close[i] > ema50_aligned[i] + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: breakout above H3 with daily uptrend and volume surge
-            if close[i] > H3_aligned[i] and daily_uptrend[i] and vol_surge:
+            # Long entry: price breaks above upper Donchian band with uptrend (price > EMA50)
+            if close[i] > highest_high and close[i] > ema50_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakdown below L3 with daily downtrend and volume surge
-            elif close[i] < L3_aligned[i] and daily_downtrend[i] and vol_surge:
+            # Short entry: price breaks below lower Donchian band with downtrend (price < EMA50)
+            elif close[i] < lowest_low and close[i] < ema50_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
