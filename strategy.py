@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_regime_v1
-# Hypothesis: 12h Camarilla pivot reversals with daily volume spike and 1d chop regime filter.
-# Long: price touches L3/L4 support, 12h volume > 1.5x 20-period avg, 1d chop > 61.8 (range)
-# Short: price touches H3/H4 resistance, same filters
-# Exit: price reaches opposite H/L3 level or chop < 38.2 (trend)
-# Works in bull/bear by fading extremes in ranging markets (chop filter avoids trending whipsaws).
+# 4h_daily_camarilla_pivot_volume_spike_v1
+# Hypothesis: Camarilla pivot levels from daily timeframe act as intraday support/resistance on 4h chart.
+# Long when price breaks above H3 with volume spike; short when breaks below L3 with volume spike.
+# Use choppiness regime filter to avoid false breakouts in ranging markets.
+# Designed to work in both bull (breakouts) and bear (mean reversion at extremes) markets.
+# Volume confirmation ensures institutional participation; chop filter avoids whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_regime_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,136 +24,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h volume confirmation: > 1.5x 20-period average
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for each daily bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H3 = close + 1.1*(high-low)/2
+    # L3 = close - 1.1*(high-low)/2
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align to 4h timeframe (completed daily bars only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume spike detection (20-period volume average)
     vol_ma = np.full(n, np.nan)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if vol_count > 20:
-            vol_sum -= volume[i - 20]
-            vol_count -= 1
         if vol_count >= 20:
-            vol_ma[i] = vol_sum / 20.0
-    vol_ratio = np.full(n, np.nan)
-    for i in range(n):
+            vol_ma[i] = vol_sum / vol_count
+            vol_sum -= volume[i - 19]
+            vol_count -= 1
+    
+    volume_spike = np.zeros(n, dtype=bool)
+    for i in range(20, n):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_ratio[i] = volume[i] / vol_ma[i]
+            volume_spike[i] = volume[i] > 2.0 * vol_ma[i]
     
-    # Daily HTF data for Camarilla pivots and chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Daily Camarilla pivots (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivots for each day (using previous day's OHLC)
-    camarilla_h3 = np.full(len(close_1d), np.nan)
-    camarilla_l3 = np.full(len(close_1d), np.nan)
-    camarilla_h4 = np.full(len(close_1d), np.nan)
-    camarilla_l4 = np.full(len(close_1d), np.nan)
-    
-    for i in range(1, len(close_1d)):
-        # Previous day's values
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        range_val = phigh - plow
-        
-        camarilla_h3[i] = pclose + range_val * 1.1 / 4
-        camarilla_l3[i] = pclose - range_val * 1.1 / 4
-        camarilla_h4[i] = pclose + range_val * 1.1 / 2
-        camarilla_l4[i] = pclose - range_val * 1.1 / 2
-    
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Daily chop regime (Ehler's Chop Index) - needs 14 periods
-    chop = np.full(len(close_1d), np.nan)
-    atr_14 = np.full(len(close_1d), np.nan)
-    atr_sum = 0.0
-    atr_count = 0
-    
-    # Calculate ATR first
-    true_range = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if i == 0:
-            true_range[i] = high_1d[i] - low_1d[i]
+    # Choppiness regime filter (14-period)
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        highest_high = np.max(high[i-14:i+1])
+        lowest_low = np.min(low[i-14:i+1])
+        atr_sum = 0.0
+        for j in range(i-14, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        atr = atr_sum / 15
+        if atr > 0 and (highest_high - lowest_low) > 0:
+            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
         else:
-            true_range[i] = max(high_1d[i] - low_1d[i],
-                               abs(high_1d[i] - close_1d[i-1]),
-                               abs(low_1d[i] - close_1d[i-1]))
-        
-        atr_sum += true_range[i]
-        atr_count += 1
-        if atr_count > 14:
-            atr_sum -= true_range[i - 14]
-            atr_count -= 1
-        if atr_count >= 14:
-            atr_14[i] = atr_sum / 14.0
+            chop[i] = 50.0
     
-    # Calculate Chop: 100 * log10(sum(ATR14) / (max(high)-min(low)) * sqrt(period))
-    for i in range(14, len(close_1d)):
-        if not np.isnan(atr_14[i]):
-            period_high = np.max(high_1d[i-13:i+1])
-            period_low = np.min(low_1d[i-13:i+1])
-            if period_high > period_low:
-                sum_atr = atr_14[i] * 14  # approximate sum
-                chop[i] = 100 * np.log10(sum_atr / (period_high - period_low) * np.sqrt(14))
-    
-    # Align chop to 12h timeframe
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
+    # We use CHOP < 50 to avoid strong trends where breakouts fail
+    chop_regime = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if not np.isnan(chop[i]):
+            chop_regime[i] = chop[i] < 50.0  # Prefer trending to ranging for breakouts
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if any value is NaN
-        if (np.isnan(vol_ratio[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or np.isnan(chop_12h[i])):
+    for i in range(50, n):
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]):
             if position != 0:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol_ok = vol_ratio[i] > 1.5
-        chop_ok = chop_12h[i] > 61.8  # Range regime
-        
         if position == 1:  # Long position
-            # Exit: price reaches H3 or chop turns trending (< 38.2)
-            if price >= h3_12h[i] or chop_12h[i] < 38.2:
+            # Exit: price drops below H3 or momentum fails
+            if close[i] < h3_aligned[i] or not chop_regime[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches L3 or chop turns trending
-            if price <= l3_12h[i] or chop_12h[i] < 38.2:
+            # Exit: price rises above L3 or momentum fails
+            if close[i] > l3_aligned[i] or not chop_regime[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches L3/L4 support in range regime
-            if vol_ok and chop_ok and (price <= l3_12h[i] or price <= l4_12h[i]):
+            # Enter long: price breaks above H3 with volume spike in trending regime
+            if close[i] > h3_aligned[i] and volume_spike[i] and chop_regime[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches H3/H4 resistance in range regime
-            elif vol_ok and chop_ok and (price >= h3_12h[i] or price >= h4_12h[i]):
+            # Enter short: price breaks below L3 with volume spike in trending regime
+            elif close[i] < l3_aligned[i] and volume_spike[i] and chop_regime[i]:
                 position = -1
                 signals[i] = -0.25
-            else:
-                signals[i] = 0.0
     
     return signals
