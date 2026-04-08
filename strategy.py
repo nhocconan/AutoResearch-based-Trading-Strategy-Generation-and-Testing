@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v1
-# Hypothesis: 4h timeframe trading using daily Williams Fractal breakouts with volume confirmation and ADX trend filter. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Daily trend filter (ADX) ensures alignment with higher timeframe direction. Target: 20-50 trades/year per symbol.
+# 1d_weekly_fractal_breakout_volume_v3
+# Hypothesis: 1d timeframe trading using weekly Williams Fractal breakouts with volume confirmation. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Weekly trend filter ensures alignment with higher timeframe direction. Target: 10-30 trades/year per symbol.
 
-name = "4h_fractal_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_fractal_breakout_volume_v3"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -37,41 +37,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for fractals and trend filter - call ONCE before loop
-    df_d = get_htf_data(prices, '1d')
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
+    # Get weekly data for fractals and trend filter - call ONCE before loop
+    df_w = get_htf_data(prices, '1w')
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate daily ADX for trend strength filter
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Calculate weekly EMA20 for trend filter
+    ema20_w = pd.Series(close_w).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    up_move = high_d - np.roll(high_d, 1)
-    down_move = np.roll(low_d, 1) - low_d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx = np.where((plus_di + minus_di) == 0, 0, adx)
-    adx = np.where(np.isnan(adx) | np.isinf(adx), 0, adx)
-    
-    # Calculate daily Williams Fractals
-    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_d, low_d)
+    # Calculate weekly Williams Fractals
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(high_w, low_w)
     # Need 2-bar confirmation for fractals (wait for 2 candles after the fractal)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_d, bullish_fractal, additional_delay_bars=2)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_w, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_w, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 20-period average volume for 4h timeframe
+    # Calculate 20-period average volume for 1d timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -81,21 +62,22 @@ def generate_signals(prices):
     start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get aligned daily indicators for current 4h bar
-        adx_val = align_htf_to_ltf(prices, df_d, adx)[i]
+        # Get aligned weekly indicators for current 1d bar
+        ema20_val = align_htf_to_ltf(prices, df_w, ema20_w)[i]
         bearish_val = bearish_fractal_aligned[i]
         bullish_val = bullish_fractal_aligned[i]
         
         # Skip if any required data is NaN
-        if np.isnan(adx_val) or np.isnan(vol_ma[i]) or volume[i] == 0:
+        if np.isnan(ema20_val) or np.isnan(vol_ma[i]) or volume[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 1.5x 20-period average
-        vol_breakout = volume[i] > 1.5 * vol_ma[i]
+        # Volume breakout condition: current volume > 2.0x 20-period average (stricter for fewer trades)
+        vol_breakout = volume[i] > 2.0 * vol_ma[i]
         
-        # Strong trend condition: ADX > 25
-        strong_trend = adx_val > 25
+        # Trend filter: price above/below weekly EMA20
+        uptrend = close[i] > ema20_val
+        downtrend = close[i] < ema20_val
         
         if position == 1:  # Long position
             # Exit if price breaks below bullish fractal (support)
@@ -113,12 +95,12 @@ def generate_signals(prices):
             elif position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long above bearish fractal (resistance) with volume confirmation and strong trend
-            if not np.isnan(bearish_val) and high[i] >= bearish_val and close[i] > bearish_val and vol_breakout and strong_trend:
+            # Breakout long above bearish fractal (resistance) with volume confirmation and uptrend
+            if not np.isnan(bearish_val) and high[i] >= bearish_val and close[i] > bearish_val and vol_breakout and uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Breakout short below bullish fractal (support) with volume confirmation and strong trend
-            elif not np.isnan(bullish_val) and low[i] <= bullish_val and close[i] < bullish_val and vol_breakout and strong_trend:
+            # Breakout short below bullish fractal (support) with volume confirmation and downtrend
+            elif not np.isnan(bullish_val) and low[i] <= bullish_val and close[i] < bullish_val and vol_breakout and downtrend:
                 position = -1
                 signals[i] = -0.25
     
