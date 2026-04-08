@@ -1,22 +1,15 @@
-# 1d_1w_ema_trend_volume
-# Hypothesis: On daily timeframe, use weekly EMA (10-period) as trend filter and price action for entry.
-# Go long when price closes above weekly EMA with volume confirmation, short when price closes below weekly EMA with volume confirmation.
-# Exit when price crosses back over weekly EMA or volume drops.
-# This strategy aims for low trade frequency (<25/year) by requiring both trend alignment and volume spike.
-# Works in bull/bear markets by only trading in direction of higher timeframe trend.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ema_trend_volume"
-timeframe = "1d"
+name = "6h_12h_1d_ema_trend_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,30 +18,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 10-period EMA on weekly close
-    close_1w = df_1w['close'].values
-    ema_10 = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10)
+    # Calculate 50-period EMA on 12h close for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume confirmation: volume > 2.0x 20-day average (high threshold = fewer trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_confirm = vol_ratio > 2.0
+    # Get 1d data for volume baseline
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 20-period average volume on 1d
+    volume_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # Volume confirmation: 6h volume > 2x 1d average volume (scaled to 6h)
+    # 1d volume represents 4x 6h periods, so divide by 4 for per-period comparison
+    vol_threshold = vol_avg_1d_aligned / 4.0
+    vol_confirm = volume > vol_threshold * 2.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = 20
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if EMA not available
-        if np.isnan(ema_10_aligned[i]):
+        # Skip if EMA or volume average not available
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -56,37 +59,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Only consider new signals with volume confirmation
-        if not vol_confirm[i]:
-            if position != 0:
-                # Hold existing position
-                pass
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below weekly EMA (trend change)
-            if close[i] < ema_10_aligned[i]:
+            # Exit: price closes below 12h EMA (trend change)
+            if close[i] < ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly EMA (trend change)
-            if close[i] > ema_10_aligned[i]:
+            # Exit: price closes above 12h EMA (trend change)
+            if close[i] > ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price closes above weekly EMA with volume confirmation
-            if close[i] > ema_10_aligned[i]:
+            # Long entry: price above 12h EMA with volume confirmation (uptrend)
+            if close[i] > ema_50_12h_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price closes below weekly EMA with volume confirmation
-            elif close[i] < ema_10_aligned[i]:
+            # Short entry: price below 12h EMA with volume confirmation (downtrend)
+            elif close[i] < ema_50_12h_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
