@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-6h_1d_rsi_sma_volume_v1
-Hypothesis: On 6h timeframe, buy when RSI(14) < 30 and price > SMA(50) with volume confirmation,
-sell when RSI(14) > 70 and price < SMA(50) with volume confirmation. Use 1d trend filter: only take
-longs when price > 1d EMA(200) and shorts when price < 1d EMA(200). This combines mean reversion
-(RSI extremes) with trend filter (1d EMA) and volume confirmation to avoid false signals.
-Designed to work in both bull and bear markets by using 1d trend filter to align with higher timeframe trend.
-Target: 12-30 trades/year per symbol (48-120 total over 4 years).
+12h_1d_camarilla_breakout_volume_v3
+Hypothesis: Use 12h price action with 1d Camarilla pivot levels and volume confirmation for breakout trading.
+Long when 12h price breaks above 1d H3 with volume confirmation.
+Short when 12h price breaks below 1d L3 with volume confirmation.
+Camarilla levels are more responsive to recent price action than standard pivots, adapting better to volatility.
+Volume filter reduces false breakouts. Target: 20-35 trades/year per symbol (80-140 total over 4 years).
+Works in bull markets by capturing breakouts and in bear markets by catching breakdowns with volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_alt, align_htf_to_ltf
 
-name = "6h_1d_rsi_sma_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -28,72 +28,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI calculation
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(prices)
-        avg_loss = np.zeros_like(prices)
-        
-        # First average
-        if len(gain) >= period:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-        
-        # Wilder's smoothing
-        for i in range(period + 1, len(prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    # SMA calculation
-    def calculate_sma(prices, period):
-        sma = np.full_like(prices, np.nan)
-        for i in range(period - 1, len(prices)):
-            sma[i] = np.mean(prices[i - period + 1:i + 1])
-        return sma
-    
-    # RSI and SMA
-    rsi = calculate_rsi(close, 14)
-    sma_50 = calculate_sma(close, 50)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA(200) for trend filter
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        # Calculate EMA
-        alpha = 2 / (200 + 1)
-        ema_200[199] = np.mean(close_1d[:200])  # SMA for first value
-        for i in range(200, len(close_1d)):
-            ema_200[i] = alpha * close_1d[i] + (1 - alpha) * ema_200[i-1]
     
-    # Align 1d EMA to 6h
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Camarilla equations
+    range_1d = high_1d - low_1d
+    close_prev = close_1d  # Using same day's close as it's the last completed bar
     
-    # Volume confirmation: volume > 1.5x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    # Camarilla levels for intraday trading
+    h3 = close_prev + (range_1d * 1.1 / 4)
+    l3 = close_prev - (range_1d * 1.1 / 4)
+    h4 = close_prev + (range_1d * 1.1 / 2)
+    l4 = close_prev - (range_1d * 1.1 / 2)
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Volume confirmation: volume > 1.3x average of last 30 periods
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > vol_ma * 1.3
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(rsi[i]) or np.isnan(sma_50[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -102,29 +76,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 or price < SMA(50)
-            if rsi[i] > 50 or close[i] < sma_50[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit: price breaks below 1d L3 (stop and reverse)
+            if close[i] < l3_aligned[i]:
+                position = -1
+                signals[i] = -0.25
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 or price > SMA(50)
-            if rsi[i] < 50 or close[i] > sma_50[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit: price breaks above 1d H3 (stop and reverse)
+            if close[i] > h3_aligned[i]:
+                position = 1
+                signals[i] = 0.25
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: RSI < 30, price > SMA(50), price > 1d EMA(200), volume confirmation
-            if (rsi[i] < 30 and close[i] > sma_50[i] and 
-                close[i] > ema_200_aligned[i] and vol_confirm[i]):
+            # Long entry: price breaks above 1d H3 with volume
+            if close[i] > h3_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI > 70, price < SMA(50), price < 1d EMA(200), volume confirmation
-            elif (rsi[i] > 70 and close[i] < sma_50[i] and 
-                  close[i] < ema_200_aligned[i] and vol_confirm[i]):
+            # Short entry: price breaks below 1d L3 with volume
+            elif close[i] < l3_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
