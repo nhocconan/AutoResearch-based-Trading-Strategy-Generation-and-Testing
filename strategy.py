@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v13
-# Hypothesis: Use daily pivot points as breakout levels (more reliable than fractals) with volume confirmation and daily EMA50 trend filter.
-# Pivot points provide clear support/resistance levels that work in both bull/bear markets. Volume confirms breakout strength.
-# Target: 15-30 trades/year by requiring pivot breakout + volume > 4x average + EMA50 trend alignment.
-# Position size: 0.25 to manage drawdown in volatile markets like 2022.
+# 4h_pivot_breakout_volume_trend_v1
+# Hypothesis: Daily pivot points provide robust support/resistance levels that work in both bull and bear markets.
+# Breakouts above R1 (resistance) or below S1 (support) with volume > 3x average and aligned with daily EMA50 trend.
+# Target: 20-35 trades/year by requiring strict confluence of pivot breakout + volume surge + trend alignment.
+# Position size: 0.25 to manage drawdown. Max holding period: 8 bars (32 hours) to avoid overtrading.
 
-name = "4h_fractal_breakout_1d_trend_volume_v13"
+name = "4h_pivot_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,34 +15,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def calculate_pivot_points(high, low, close):
     """Calculate daily pivot points and support/resistance levels."""
-    n = len(high)
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
     s1 = 2 * pivot - high
     r2 = pivot + (high - low)
     s2 = pivot - (high - low)
     return pivot, r1, r2, s1, s2
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # Wilder's smoothing
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -70,9 +48,6 @@ def generate_signals(prices):
     
     # Calculate 20-period average volume for 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate RSI for momentum filter (optional filter)
-    rsi = calculate_rsi(close, 14)
     
     # Calculate ATR for volatility filter (14-period)
     high_low = high - low
@@ -103,20 +78,16 @@ def generate_signals(prices):
         # Get aligned daily indicators for current 4h bar
         pivot_val = align_htf_to_ltf(prices, df_d, pivot_d)[i]
         r1_val = align_htf_to_ltf(prices, df_d, r1_d)[i]
-        r2_val = align_htf_to_ltf(prices, df_d, r2_d)[i]
         s1_val = align_htf_to_ltf(prices, df_d, s1_d)[i]
-        s2_val = align_htf_to_ltf(prices, df_d, s2_d)[i]
         ema50_val = align_htf_to_ltf(prices, df_d, ema50_d)[i]
         vol_ma_val = vol_ma[i]
         atr_val = atr[i]
         atr_ma_val = atr_ma[i]
-        rsi_val = rsi[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(r2_val) or 
-            np.isnan(s1_val) or np.isnan(s2_val) or np.isnan(ema50_val) or
-            np.isnan(vol_ma_val) or np.isnan(atr_val) or np.isnan(atr_ma_val) or
-            volume[i] == 0 or np.isnan(rsi_val)):
+        if (np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
+            np.isnan(ema50_val) or np.isnan(vol_ma_val) or np.isnan(atr_val) or
+            np.isnan(atr_ma_val) or volume[i] == 0):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
@@ -124,8 +95,8 @@ def generate_signals(prices):
         # Volatility filter: current ATR < 1.5x 20-period average ATR (avoid choppy markets)
         vol_filter = atr_val < 1.5 * atr_ma_val
         
-        # Volume breakout condition: current volume > 4.0x 20-period average
-        vol_breakout = volume[i] > 4.0 * vol_ma_val
+        # Volume breakout condition: current volume > 3.0x 20-period average
+        vol_breakout = volume[i] > 3.0 * vol_ma_val
         
         # Trend filter: price above/below daily EMA50
         uptrend = close[i] > ema50_val
@@ -133,8 +104,8 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             bars_since_entry += 1
-            # Exit if price breaks below pivot (support) OR minimum holding period met
-            if (not np.isnan(pivot_val) and close[i] < pivot_val) or bars_since_entry >= 4:
+            # Exit if price breaks below pivot (support) OR maximum holding period reached
+            if (not np.isnan(pivot_val) and close[i] < pivot_val) or bars_since_entry >= 8:
                 position = 0
                 signals[i] = 0.0
                 bars_since_entry = 0
@@ -143,8 +114,8 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             bars_since_entry += 1
-            # Exit if price breaks above pivot (resistance) OR minimum holding period met
-            if (not np.isnan(pivot_val) and close[i] > pivot_val) or bars_since_entry >= 4:
+            # Exit if price breaks above pivot (resistance) OR maximum holding period reached
+            if (not np.isnan(pivot_val) and close[i] > pivot_val) or bars_since_entry >= 8:
                 position = 0
                 signals[i] = 0.0
                 bars_since_entry = 0
@@ -154,12 +125,12 @@ def generate_signals(prices):
             bars_since_entry = 0
             # Breakout long above R1 (first resistance) with volume confirmation, uptrend
             if (not np.isnan(r1_val) and high[i] >= r1_val and 
-                close[i] > r1_val and vol_breakout and uptrend):
+                close[i] > r1_val and vol_breakout and uptrend and vol_filter):
                 position = 1
                 signals[i] = 0.25
             # Breakout short below S1 (first support) with volume confirmation, downtrend
             elif (not np.isnan(s1_val) and low[i] <= s1_val and 
-                  close[i] < s1_val and vol_breakout and downtrend):
+                  close[i] < s1_val and vol_breakout and downtrend and vol_filter):
                 position = -1
                 signals[i] = -0.25
     
