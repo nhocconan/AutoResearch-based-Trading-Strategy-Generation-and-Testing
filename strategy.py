@@ -1,16 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_fractal_breakout_1d_trend_volume_v7"
-timeframe = "4h"
+name = "12h_fractal_breakout_1d_trend_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -32,23 +31,23 @@ def generate_signals(prices):
     # Calculate 1d volume SMA for volume context (20-period)
     vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period) - standard for breakout
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (15-period) - standard for breakout
+    highest_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
+    lowest_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
     
-    # Calculate 4h ATR for volatility filter (10-period)
+    # Calculate 12h ATR for volatility filter (8-period)
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr = pd.Series(tr).ewm(span=8, adjust=False, min_periods=8).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(20, 50)
+    start_idx = max(15, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -58,7 +57,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
+        # Get aligned 1d values for current 12h bar
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
         vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)[i]
         
