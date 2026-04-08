@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1d Trend Filter and Volume Confirmation
-Hypothesis: Ichimoku cloud signals on 6h timeframe, filtered by 1d EMA trend direction and volume spikes,
-provide high-probability entries with controlled trade frequency. Works in bull markets via cloud breakouts
-and in bear markets via cloud breakdowns. Targets 12-37 trades/year (50-150 total over 4 years).
+12h Camarilla Pivot with 1w Trend Filter and Volume Confirmation
+Hypothesis: Camarilla pivot levels on 12h timeframe provide high-probability reversal points when aligned with 1w trend and volume spikes, offering robust performance in both bull and bear markets by capturing mean-reversion within the dominant trend. Designed for 15-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +23,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA(20) for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily data for Camarilla pivots (calculate from previous day)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels for each 12h bar using prior day's data
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # We'll use these as key reversal levels
+    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high_9 + low_9) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou_span = np.roll(close, 26)  # Will be handled in logic
+    # Align Camarilla levels to 12h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     # Volume filter: current volume > 2.0x 50-period average
     vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
@@ -61,62 +54,124 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(tenkan_sen[i]) or 
-            np.isnan(kijun_sen[i]) or
-            np.isnan(senkou_a[i]) or
-            np.isnan(senkou_b[i]) or
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(camarilla_high_aligned[i]) or 
+            np.isnan(camarilla_low_aligned[i]) or
             np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below cloud OR trend reverses
-            cloud_top = max(senkou_a[i], senkou_b[i])
-            cloud_bottom = min(senkou_a[i], senkou_b[i])
-            if (close[i] < cloud_bottom or 
-                close[i] < ema_50_1d_aligned[i]):
+            # Exit: price reaches Camarilla resistance OR trend reverses
+            if (close[i] >= camarilla_high_aligned[i] or 
+                close[i] < ema_20_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above cloud OR trend reverses
-            cloud_top = max(senkou_a[i], senkou_b[i])
-            cloud_bottom = min(senkou_a[i], senkou_b[i])
-            if (close[i] > cloud_top or 
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit: price reaches Camarilla support OR trend reverses
+            if (close[i] <= camarilla_low_aligned[i] or 
+                close[i] > ema_20_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat, look for entry
-            # Trend filter: price vs 1d EMA50
-            uptrend = close[i] > ema_50_1d_aligned[i]
-            downtrend = close[i] < ema_50_1d_aligned[i]
+        else:  # Flat, look for entry at Camarilla levels with rejection
+            # Look for price rejection at Camarilla levels with volume spike
+            near_high = abs(high[i] - camarilla_high_aligned[i]) < (high[i] * 0.002)  # Within 0.2%
+            near_low = abs(low[i] - camarilla_low_aligned[i]) < (low[i] * 0.002)      # Within 0.2%
             
-            # Cloud values
-            cloud_top = max(senkou_a[i], senkou_b[i])
-            cloud_bottom = min(senkou_a[i], senkou_b[i])
-            
-            # Long: price breaks above cloud with uptrend and volume spike
-            # Also require Tenkan > Kijun (bullish momentum)
-            if (close[i] > cloud_top and 
-                tenkan_sen[i] > kijun_sen[i] and 
-                uptrend and 
+            # Long: rejection at support (low touches L4 then closes above) in uptrend
+            if (near_low and 
+                close[i] > camarilla_low_aligned[i] and 
+                close[i] > open_prices[i] and  # Bullish close
+                close[i] > ema_20_1w_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below cloud with downtrend and volume spike
-            # Also require Tenkan < Kijun (bearish momentum)
-            elif (close[i] < cloud_bottom and 
-                  tenkan_sen[i] < kijun_sen[i] and 
-                  downtrend and 
+            # Short: rejection at resistance (high touches H4 then closes below) in downtrend
+            elif (near_high and 
+                  close[i] < camarilla_high_aligned[i] and 
+                  close[i] < open_prices[i] and  # Bearish close
+                  close[i] < ema_20_1w_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
     
     return signals
+
+# Fix: need to access open prices
+    open_prices = prices['open'].values
+    # Replace open_prices[i] in the loop with the actual open prices array
+    
+    # Rewriting the function with proper open price access:
+    
+    # ... (previous code remains the same until the loop)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(camarilla_high_aligned[i]) or 
+            np.isnan(camarilla_low_aligned[i]) or
+            np.isnan(vol_spike[i])):
+            signals[i] = 0.0
+            continue
+        
+        if position == 1:  # Long position
+            # Exit: price reaches Camarilla resistance OR trend reverses
+            if (close[i] >= camarilla_high_aligned[i] or 
+                close[i] < ema_20_1w_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price reaches Camarilla support OR trend reverses
+            if (close[i] <= camarilla_low_aligned[i] or 
+                close[i] > ema_20_1w_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry at Camarilla levels with rejection
+            # Look for price rejection at Camarilla levels with volume spike
+            near_high = abs(high[i] - camarilla_high_aligned[i]) < (high[i] * 0.002)  # Within 0.2%
+            near_low = abs(low[i] - camarilla_low_aligned[i]) < (low[i] * 0.002)      # Within 0.2%
+            
+            # Long: rejection at support (low touches L4 then closes above) in uptrend
+            if (near_low and 
+                close[i] > camarilla_low_aligned[i] and 
+                close[i] > open_prices[i] and  # Bullish close
+                close[i] > ema_20_1w_aligned[i] and 
+                vol_spike[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short: rejection at resistance (high touches H4 then closes below) in downtrend
+            elif (near_high and 
+                  close[i] < camarilla_high_aligned[i] and 
+                  close[i] < open_prices[i] and  # Bearish close
+                  close[i] < ema_20_1w_aligned[i] and 
+                  vol_spike[i]):
+                position = -1
+                signals[i] = -0.25
+    
+    return signals
+
+# Final correction: need to define open_prices before using it
+    
+    # Price data
+    open_prices = prices['open'].values
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Rest remains the same...
