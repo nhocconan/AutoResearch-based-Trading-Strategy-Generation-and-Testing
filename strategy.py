@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# [24972] 12h_1d_1w_donchian_volume_trend_v1
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day and 1-week trend filter (price > SMA50 on both) and volume confirmation.
-# Long when price breaks above 20-period high with volume > 2.0x average and price > 1-day SMA50 and price > 1-week SMA50.
-# Short when price breaks below 20-period low with volume > 2.0x average and price < 1-day SMA50 and price < 1-week SMA50.
+# [24973] 4h_12h_donchian_volume_trend_v1
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter (price > EMA50) and volume confirmation.
+# Long when price breaks above 20-period high with volume > 2.0x average and price > 12-hour EMA50.
+# Short when price breaks below 20-period low with volume > 2.0x average and price < 12-hour EMA50.
 # Exit when price returns to 10-period moving average.
-# Uses dual timeframe trend filters for robustness in both bull and bear markets.
+# Uses 12-hour EMA50 for trend bias, effective in both trending and ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_donchian_volume_trend_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +24,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day and 1-week data for SMA50 trend filters
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 10 or len(df_1w) < 10:
+    # Get 12-hour data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    # Calculate 1-day SMA50
-    close_1d = df_1d['close'].values
-    sma50_1d = np.full(len(close_1d), np.nan)
-    for i in range(50, len(close_1d)):
-        sma50_1d[i] = np.mean(close_1d[i-50:i])
-    
-    # Calculate 1-week SMA50
-    close_1w = df_1w['close'].values
-    sma50_1w = np.full(len(close_1w), np.nan)
-    for i in range(50, len(close_1w)):
-        sma50_1w[i] = np.mean(close_1w[i-50:i])
+    # Calculate 12-hour EMA50
+    close_12h = df_12h['close'].values
+    ema50_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema = np.zeros(len(close_12h))
+        ema[0] = close_12h[0]
+        alpha = 2.0 / (50 + 1)
+        for i in range(1, len(close_12h)):
+            ema[i] = alpha * close_12h[i] + (1 - alpha) * ema[i-1]
+        ema50_12h[49:] = ema[49:]
     
     # Calculate Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
@@ -59,9 +57,8 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1-day and 1-week SMA50 to 12-hour timeframe
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    # Align 12-hour EMA50 to 4-hour timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,8 +66,7 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(sma50_1d_aligned[i]) or np.isnan(sma50_1w_aligned[i])):
+            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -96,12 +92,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and above both SMA50s
-            if price > donchian_high[i] and vol_ratio > 2.0 and price > sma50_1d_aligned[i] and price > sma50_1w_aligned[i]:
+            # Enter long: price breaks above Donchian high with volume expansion and above EMA50
+            if price > donchian_high[i] and vol_ratio > 2.0 and price > ema50_12h_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and below both SMA50s
-            elif price < donchian_low[i] and vol_ratio > 2.0 and price < sma50_1d_aligned[i] and price < sma50_1w_aligned[i]:
+            # Enter short: price breaks below Donchian low with volume expansion and below EMA50
+            elif price < donchian_low[i] and vol_ratio > 2.0 and price < ema50_12h_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
