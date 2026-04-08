@@ -1,21 +1,15 @@
-# 4h_bollinger_breakout_1d_trend_volume_v1
-# Hypothesis: Bollinger Band breakouts with 1d trend filter and volume confirmation
-# Works in bull/bear: Breakouts capture momentum; 1d trend filter avoids counter-trend trades; volume reduces false signals
-# Target: 20-40 trades/year, <160 total over 4 years to avoid fee drag
-# Edge: Bollinger bands adapt to volatility, breakouts signal institutional interest
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_bollinger_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_rsi_volatility_breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -24,64 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly data for trend and RSI
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Bollinger Bands (4h)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std_dev)
-    lower_band = sma - (bb_std * std_dev)
+    # Weekly RSI (14-period)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # 1d trend: 50-period EMA
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly trend: 34-period EMA
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume filter: 4h volume > 1.3x 20-period average
+    # Daily volatility filter: volume > 2x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    vol_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma[i]) or np.isnan(std_dev[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price touches middle band or trend fails
-            if close[i] <= sma[i] or close[i] < ema_50_4h[i]:
+            # Exit: RSI overbought or trend fails
+            if rsi_1w_aligned[i] > 70 or close[i] < ema_34_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches middle band or trend fails
-            if close[i] >= sma[i] or close[i] > ema_50_4h[i]:
+            # Exit: RSI oversold or trend fails
+            if rsi_1w_aligned[i] < 30 or close[i] > ema_34_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_50_4h[i]
-            bearish = close[i] < ema_50_4h[i]
+            bullish = close[i] > ema_34_1w_aligned[i]
+            bearish = close[i] < ema_34_1w_aligned[i]
             
-            # Long: price breaks above upper band + bullish trend + volume
-            if (close[i] > upper_band[i] and 
+            # Long: RSI oversold + bullish trend + volatility spike
+            if (rsi_1w_aligned[i] < 30 and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below lower band + bearish trend + volume
-            elif (close[i] < lower_band[i] and 
+            # Short: RSI overbought + bearish trend + volatility spike
+            elif (rsi_1w_aligned[i] > 70 and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
