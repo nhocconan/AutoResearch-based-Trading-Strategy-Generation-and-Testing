@@ -1,15 +1,17 @@
-# 4h Donchian Breakout with 1d Trend and Volume Confirmation
-# Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA(50) trend
-# and volume > 2x 20-period average capture strong momentum in both bull and bear markets.
-# Breakouts above upper band or below lower band trigger entries; exits on opposite band touch.
-# Designed for 4h timeframe to achieve 20-40 trades/year with clear trend following logic.
+#!/usr/bin/env python3
+"""
+6H Bollinger Band Width + Daily Trend + Volume Spike
+Hypothesis: Bollinger Band Width (BBW) identifies volatility regimes. Low BBW (<20th percentile) indicates compression/squeeze.
+Breakouts from low volatility with daily EMA trend alignment and volume spike capture explosive moves in both bull and bear markets.
+Designed for 6h timeframe to capture multi-day swings with controlled trade frequency (target: 15-30 trades/year).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_bb_width_daily_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,58 +25,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Bollinger Bands (20, 2) on 6h
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * bb_std_dev
+    lower = sma - bb_std * bb_std_dev
+    bb_width = (upper - lower) / sma  # Normalized width
+    
+    # BBW percentile lookback (50 periods ~ 12.5 days)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_pct = bb_width_series.rolling(window=50, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
     # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
+    ema_21 = df_1d['close'].ewm(span=21, adjust=False).mean().values
+    ema_21_6h = align_htf_to_ltf(prices, df_1d, ema_21)
     
-    # 4h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Daily EMA(50) for trend filter
-    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume filter (>2x 20-period average on 4h)
+    # Volume spike (>2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(bb_period, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(bb_width_pct[i]) or np.isnan(ema_21_6h[i]) or 
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price touches or crosses below lower Donchian band
-            if close[i] <= low_20[i]:
+            # Exit: BBW expands significantly (breakout fading) or trend reverses
+            if bb_width_pct[i] > 80 or close[i] < ema_21_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches or crosses above upper Donchian band
-            if close[i] >= high_20[i]:
+            # Exit: BBW expands significantly or trend reverses
+            if bb_width_pct[i] > 80 or close[i] > ema_21_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long above upper band with trend alignment
-            if (close[i] > high_20[i] and 
-                close[i] > ema_50_4h[i] and 
-                vol_filter[i]):
-                position = 1
-                signals[i] = 0.30
-            # Breakout short below lower band with trend alignment
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_50_4h[i] and 
-                  vol_filter[i]):
-                position = -1
-                signals[i] = -0.30
+            # Entry: Low volatility squeeze (BBW < 20th percentile) + breakout + volume spike + trend alignment
+            if bb_width_pct[i] < 20:
+                # Breakout above upper band with volume and trend
+                if (close[i] > upper[i] and 
+                    close[i] > ema_21_6h[i] and 
+                    vol_spike[i]):
+                    position = 1
+                    signals[i] = 0.25
+                # Breakout below lower band with volume and trend
+                elif (close[i] < lower[i] and 
+                      close[i] < ema_21_6h[i] and 
+                      vol_spike[i]):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
