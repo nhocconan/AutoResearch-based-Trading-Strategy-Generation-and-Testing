@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ema200_breakout_1d_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_pivot_breakout_1w_trend_volume_v5"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 210:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,61 +18,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA200 and volume average
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA200 (long-term trend filter)
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate weekly pivot points (previous week's values)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # 1d volume average (20-period)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align pivot levels to daily timeframe
+    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # 4h EMA20 (entry trigger)
-    ema20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily trend: 20-period EMA
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_4h[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or 
+            np.isnan(s1_1d[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < EMA20 or long-term trend fails
-            if close[i] < ema20_4h[i] or close[i] < ema200_1d_aligned[i]:
+            # Exit: price < S1 or trend fails
+            if close[i] < s1_1d[i] or close[i] < ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > EMA20 or long-term trend fails
-            if close[i] > ema20_4h[i] or close[i] > ema200_1d_aligned[i]:
+            # Exit: price > R1 or trend fails
+            if close[i] > r1_1d[i] or close[i] > ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume filter: volume > 1.3x 1d average
-            vol_filter = volume[i] > (vol_ma_1d_aligned[i] * 1.3)
+            # Trend filter
+            bullish = close[i] > ema_20[i]
+            bearish = close[i] < ema_20[i]
             
-            # Long: price > EMA20 + above long-term EMA200 + volume
-            if (close[i] > ema20_4h[i] and 
-                close[i] > ema200_1d_aligned[i] and 
-                vol_filter):
+            # Long: price > R1 + bullish trend + volume
+            if (close[i] > r1_1d[i] and 
+                bullish and 
+                vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price < EMA20 + below long-term EMA200 + volume
-            elif (close[i] < ema20_4h[i] and 
-                  close[i] < ema200_1d_aligned[i] and 
-                  vol_filter):
+            # Short: price < S1 + bearish trend + volume
+            elif (close[i] < s1_1d[i] and 
+                  bearish and 
+                  vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
