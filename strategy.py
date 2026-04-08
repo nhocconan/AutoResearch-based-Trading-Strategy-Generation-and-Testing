@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# 4h_donchian_volume_chop_regime_v1
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and choppiness regime filter.
-# Long: price breaks above Donchian upper band AND volume > 1.5x average AND chop < 61.8 (trending)
-# Short: price breaks below Donchian lower band AND volume > 1.5x average AND chop < 61.8 (trending)
-# Exit: price crosses Donchian middle band or chop > 61.8 (range) or volume < average
-# Uses 1d HTF for volume average and chop calculation to reduce noise.
-# Designed to capture strong trends in both bull and bear markets with minimal whipsaws.
-# Discrete position sizing: 0.0 (flat), ±0.25 (position) to limit fee churn.
+# 12h_daily_camarilla_pivot_volume_regime_v1
+# Hypothesis: 12h Camarilla pivot reversals with daily volume spike and 1d chop regime filter.
+# Long: price touches L3/L4 support, 12h volume > 1.5x 20-period avg, 1d chop > 61.8 (range)
+# Short: price touches H3/H4 resistance, same filters
+# Exit: price reaches opposite H/L3 level or chop < 38.2 (trend)
+# Works in bull/bear by fading extremes in ranging markets (chop filter avoids trending whipsaws).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_volume_chop_regime_v1"
-timeframe = "4h"
+name = "12h_daily_camarilla_pivot_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,92 +22,138 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    donchian_upper = np.full(n, np.nan)
-    donchian_lower = np.full(n, np.nan)
-    donchian_middle = np.full(n, np.nan)
+    # 12h volume confirmation: > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if vol_count > 20:
+            vol_sum -= volume[i - 20]
+            vol_count -= 1
+        if vol_count >= 20:
+            vol_ma[i] = vol_sum / 20.0
+    vol_ratio = np.full(n, np.nan)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_ratio[i] = volume[i] / vol_ma[i]
     
-    for i in range(20, n):
-        donchian_upper[i] = np.max(high[i-20:i])
-        donchian_lower[i] = np.min(low[i-20:i])
-        donchian_middle[i] = (donchian_upper[i] + donchian_lower[i]) / 2
-    
-    # Get 1d HTF data for volume average and chop calculation
+    # Daily HTF data for Camarilla pivots and chop regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = np.full(len(vol_1d), np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_avg_1d[i] = np.mean(vol_1d[i-20:i])
-    
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    
-    # Calculate 1d Choppiness Index (14-period)
+    # Daily Camarilla pivots (based on previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    atr_1d = np.full(len(close_1d), np.nan)
+    # Calculate pivots for each day (using previous day's OHLC)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
+    
     for i in range(1, len(close_1d)):
-        atr_1d[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
+        # Previous day's values
+        phigh = high_1d[i-1]
+        plow = low_1d[i-1]
+        pclose = close_1d[i-1]
+        range_val = phigh - plow
+        
+        camarilla_h3[i] = pclose + range_val * 1.1 / 4
+        camarilla_l3[i] = pclose - range_val * 1.1 / 4
+        camarilla_h4[i] = pclose + range_val * 1.1 / 2
+        camarilla_l4[i] = pclose - range_val * 1.1 / 2
     
+    # Align Camarilla levels to 12h timeframe (wait for daily close)
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Daily chop regime (Ehler's Chop Index) - needs 14 periods
     chop = np.full(len(close_1d), np.nan)
-    for i in range(14, len(close_1d)):
-        atr_sum = np.sum(atr_1d[i-14:i])
-        highest_high = np.max(high_1d[i-14:i])
-        lowest_low = np.min(low_1d[i-14:i])
-        if highest_high > lowest_low and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    atr_14 = np.full(len(close_1d), np.nan)
+    atr_sum = 0.0
+    atr_count = 0
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate ATR first
+    true_range = np.full(len(close_1d), np.nan)
+    for i in range(len(close_1d)):
+        if i == 0:
+            true_range[i] = high_1d[i] - low_1d[i]
+        else:
+            true_range[i] = max(high_1d[i] - low_1d[i],
+                               abs(high_1d[i] - close_1d[i-1]),
+                               abs(low_1d[i] - close_1d[i-1]))
+        
+        atr_sum += true_range[i]
+        atr_count += 1
+        if atr_count > 14:
+            atr_sum -= true_range[i - 14]
+            atr_count -= 1
+        if atr_count >= 14:
+            atr_14[i] = atr_sum / 14.0
+    
+    # Calculate Chop: 100 * log10(sum(ATR14) / (max(high)-min(low)) * sqrt(period))
+    for i in range(14, len(close_1d)):
+        if not np.isnan(atr_14[i]):
+            period_high = np.max(high_1d[i-13:i+1])
+            period_low = np.min(low_1d[i-13:i+1])
+            if period_high > period_low:
+                sum_atr = atr_14[i] * 14  # approximate sum
+                chop[i] = 100 * np.log10(sum_atr / (period_high - period_low) * np.sqrt(14))
+    
+    # Align chop to 12h timeframe
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
-        # Skip if any required data is NaN
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(donchian_middle[i]) or np.isnan(vol_avg_1d_aligned[i]) or \
-           np.isnan(chop_aligned[i]):
+        # Skip if any value is NaN
+        if (np.isnan(vol_ratio[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
+            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or np.isnan(chop_12h[i])):
             if position != 0:
-                pass  # Hold position
+                # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
             else:
                 signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_1d_now = prices['volume'].values[i]  # Current 4h volume
+        vol_ok = vol_ratio[i] > 1.5
+        chop_ok = chop_12h[i] > 61.8  # Range regime
         
         if position == 1:  # Long position
-            # Exit conditions: price < middle OR chop > 61.8 (range) OR volume < average
-            if price < donchian_middle[i] or chop_aligned[i] > 61.8 or vol_1d_now < vol_avg_1d_aligned[i]:
+            # Exit: price reaches H3 or chop turns trending (< 38.2)
+            if price >= h3_12h[i] or chop_12h[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price > middle OR chop > 61.8 (range) OR volume < average
-            if price > donchian_middle[i] or chop_aligned[i] > 61.8 or vol_1d_now < vol_avg_1d_aligned[i]:
+            # Exit: price reaches L3 or chop turns trending
+            if price <= l3_12h[i] or chop_12h[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: Donchian breakout + volume confirmation + trending regime (chop < 61.8)
-            if price > donchian_upper[i] and vol_1d_now > 1.5 * vol_avg_1d_aligned[i] and chop_aligned[i] < 61.8:
+            # Enter long: price touches L3/L4 support in range regime
+            if vol_ok and chop_ok and (price <= l3_12h[i] or price <= l4_12h[i]):
                 position = 1
                 signals[i] = 0.25
-            elif price < donchian_lower[i] and vol_1d_now > 1.5 * vol_avg_1d_aligned[i] and chop_aligned[i] < 61.8:
+            # Enter short: price touches H3/H4 resistance in range regime
+            elif vol_ok and chop_ok and (price >= h3_12h[i] or price >= h4_12h[i]):
                 position = -1
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
