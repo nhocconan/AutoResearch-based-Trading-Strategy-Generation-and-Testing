@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# 4h_volume_momentum_confirmation_v1
-# Hypothesis: Uses 4h price momentum (close > SMA50 for long, close < SMA50 for short)
-# confirmed by volume surge (>1.5x 20-period average) and 1d trend direction (SMA50 slope).
-# Designed to work in both bull and bear markets by requiring alignment of short-term momentum,
-# volume confirmation, and longer-term trend. Target: 20-40 trades/year to avoid fee drag.
+# 4h_momentum_confluence_v2
+# Hypothesis: Combines 4h momentum (price relative to SMA50) with 12h trend direction (SMA50 slope) and volume confirmation.
+# Long when price > SMA50, 12h SMA50 slope > 0, volume > 1.5x average.
+# Short when price < SMA50, 12h SMA50 slope < 0, volume > 1.5x average.
+# Exit when momentum breaks (price crosses SMA50 opposite direction) or volume drops below average.
+# Uses tight entry conditions to limit trades and reduce fee drag. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_momentum_confirmation_v1"
+name = "4h_momentum_confluence_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -39,16 +40,16 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get 1d data for trend direction (SMA50 slope)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=sma_period, min_periods=sma_period).mean().values
+    # Get 12h data for trend direction (SMA50 slope)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    sma50_12h = pd.Series(close_12h).rolling(window=sma_period, min_periods=sma_period).mean().values
     # Calculate slope: positive if current SMA > SMA 3 periods ago
-    sma50_slope_1d = np.full(len(close_1d), np.nan)
-    for i in range(3, len(close_1d)):
-        if not np.isnan(sma50_1d[i]) and not np.isnan(sma50_1d[i-3]):
-            sma50_slope_1d[i] = sma50_1d[i] - sma50_1d[i-3]
-    sma50_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_slope_1d)
+    sma50_slope_12h = np.full(len(close_12h), np.nan)
+    for i in range(3, len(close_12h)):
+        if not np.isnan(sma50_12h[i]) and not np.isnan(sma50_12h[i-3]):
+            sma50_slope_12h[i] = sma50_12h[i] - sma50_12h[i-3]
+    sma50_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, sma50_slope_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -57,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_slope_1d_aligned[i])):
+        if (np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or np.isnan(sma50_slope_12h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -80,15 +81,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above SMA50, 1d SMA50 slope positive, volume surge
+            # Long entry: Price above SMA50, 12h SMA50 slope positive, volume surge
             if (close[i] > sma50[i] and 
-                sma50_slope_1d_aligned[i] > 0 and 
+                sma50_slope_12h_aligned[i] > 0 and 
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below SMA50, 1d SMA50 slope negative, volume surge
+            # Short entry: Price below SMA50, 12h SMA50 slope negative, volume surge
             elif (close[i] < sma50[i] and 
-                  sma50_slope_1d_aligned[i] < 0 and 
+                  sma50_slope_12h_aligned[i] < 0 and 
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
