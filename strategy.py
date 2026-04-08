@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-# 6h_12h_volume_vwap_breakout_v1
-# Hypothesis: 6-hour VWAP breakout with 12-hour volume confirmation and volume-weighted RSI filter.
-# Long when price breaks above VWAP with rising volume and VWAP-RSI < 30.
-# Short when price breaks below VWAP with rising volume and VWAP-RSI > 70.
-# Uses VWAP on 6h for entry timing and 12h volume for confirmation to avoid fakeouts.
-# Designed to generate ~20-40 trades/year to avoid fee decay while capturing momentum bursts.
+# 1d_1w_atr_breakout_v1
+# Hypothesis: Daily ATR breakout with weekly trend filter. Long when price breaks above daily ATR-based upper band and weekly close > weekly open (bullish weekly candle). Short when price breaks below daily ATR-based lower band and weekly close < weekly open (bearish weekly candle). Exit when price re-enters the ATR band. Designed to capture trending moves with volatility-based entries and weekly trend confirmation to avoid counter-trend trades. Targets 20-50 trades per year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_volume_vwap_breakout_v1"
-timeframe = "6h"
+name = "1d_1w_atr_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,63 +18,43 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate VWAP on 6h data
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, np.nan)
+    # Calculate ATR(14) for volatility-based bands
+    atr_period = 14
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First TR is just high-low
+    atr = np.zeros(n)
+    atr[:atr_period-1] = np.nan
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Calculate volume-weighted RSI on 6h data
-    price_change = np.diff(close, prepend=close[0])
-    gain = np.where(price_change > 0, price_change, 0.0)
-    loss = np.where(price_change < 0, -price_change, 0.0)
+    # ATR multiplier for band width
+    atr_mult = 2.0
     
-    # Volume-weighted gain and loss
-    vgain = gain * volume
-    vloss = loss * volume
+    # Calculate upper and lower bands (ATR-based channels)
+    upper_band = close + atr_mult * atr
+    lower_band = close - atr_mult * atr
     
-    # Wilder's smoothing with volume weighting
-    avg_vgain = np.zeros(n)
-    avg_vloss = np.zeros(n)
-    avg_vgain[0] = vgain[0]
-    avg_vloss[0] = vloss[0]
-    
-    for i in range(1, n):
-        avg_vgain[i] = (avg_vgain[i-1] * 13 + vgain[i]) / 14
-        avg_vloss[i] = (avg_vloss[i-1] * 13 + vloss[i]) / 14
-    
-    rs = np.where(avg_vloss != 0, avg_vgain / avg_vloss, 100)
-    vwap_rsi = 100 - (100 / (1 + rs))
-    
-    # Get 12-hour data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
+    # Weekly trend: bullish if close > open, bearish if close < open
+    weekly_bullish = df_1w['close'].values > df_1w['open'].values
+    weekly_bearish = df_1w['close'].values < df_1w['open'].values
     
-    # Calculate volume moving average and ratio on 12h
-    vol_ma_12h = np.zeros(len(volume_12h))
-    for i in range(len(volume_12h)):
-        if i < 19:
-            vol_ma_12h[i] = np.nan
-        else:
-            vol_ma_12h[i] = np.mean(volume_12h[i-19:i+1])
-    
-    vol_ratio_12h = np.where(vol_ma_12h != 0, volume_12h / vol_ma_12h, np.nan)
-    
-    # Align 12h volume ratio to 6h timeframe
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # Align weekly trend to daily timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(14, n):  # Start after ATR warmup
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(vwap_rsi[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
             if position != 0:
                 pass  # Hold
             else:
@@ -86,33 +62,30 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        vwap_val = vwap[i]
-        vwap_rsi_val = vwap_rsi[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price breaks below VWAP or VWAP-RSI > 70
-            if price < vwap_val or vwap_rsi_val > 70:
+            # Exit: price re-enters the ATR band (price <= upper_band and price >= lower_band)
+            if price <= upper_band[i] and price >= lower_band[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above VWAP or VWAP-RSI < 30
-            if price > vwap_val or vwap_rsi_val < 30:
+            # Exit: price re-enters the ATR band
+            if price <= upper_band[i] and price >= lower_band[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: VWAP breakout with volume confirmation
-            # Bullish: price breaks above VWAP, volume above average, and VWAP-RSI < 30
-            if price > vwap_val and vol_ratio > 1.5 and vwap_rsi_val < 30:
+            # Entry conditions: ATR breakout with weekly trend alignment
+            # Bullish: price breaks above upper band and weekly bullish
+            if price > upper_band[i] and weekly_bullish_aligned[i] == 1.0:
                 position = 1
                 signals[i] = 0.25
-            # Bearish: price breaks below VWAP, volume above average, and VWAP-RSI > 70
-            elif price < vwap_val and vol_ratio > 1.5 and vwap_rsi_val > 70:
+            # Bearish: price breaks below lower band and weekly bearish
+            elif price < lower_band[i] and weekly_bearish_aligned[i] == 1.0:
                 position = -1
                 signals[i] = -0.25
     
