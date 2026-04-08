@@ -1,43 +1,33 @@
 #!/usr/bin/env python3
 """
-1h_4d_rsi_mean_reversion_v1
-Hypothesis: 1-hour strategy using 4-hour RSI for mean reversion with daily trend filter.
-Long when 4h RSI < 30 (oversold) and price > daily EMA50 (bullish trend).
-Short when 4h RSI > 70 (overbought) and price < daily EMA50 (bearish trend).
-Exit when RSI returns to neutral (40-60 range).
-Uses 4h for signal direction, 1h only for entry timing. Target: 20-40 trades/year.
+4h_1d_camarilla_pivot_v3
+Hypothesis: 4-hour strategy using daily context with Camarilla pivot levels.
+Long when price crosses above daily Pivot with volume > 1.8x average and price > daily EMA200 (bullish trend).
+Short when price crosses below daily Pivot with volume > 1.8x average and price < daily EMA200 (bearish trend).
+Exit when price crosses opposite daily support/resistance or volume drops below average.
+Uses discrete position sizing (0.25) to balance return and risk. Target: 20-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_rsi_mean_reversion_v1"
-timeframe = "1h"
+name = "4h_1d_camarilla_pivot_v3"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper handling"""
-    if len(close) < period:
-        return np.full_like(close, np.nan, dtype=float)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    if len(high) < 1:
+        return np.full(len(high), np.nan), np.full(len(high), np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
     
-    avg_gain = np.full_like(close, np.nan, dtype=float)
-    avg_loss = np.full_like(close, np.nan, dtype=float)
+    H3 = pivot + (range_val * 1.1 / 4)
+    L3 = pivot - (range_val * 1.1 / 4)
     
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return H3, L3
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -53,72 +43,88 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for RSI signal
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h RSI
-    close_4h = df_4h['close'].values
-    rsi_4h = calculate_rsi(close_4h, 14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Get daily data for trend filter
+    # Get daily data for context and Pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend
+    # Calculate daily Pivot (using previous day's data)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = calculate_ema(close_1d, 50)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    # Daily support/resistance levels
+    S1_1d = pivot_1d - (range_1d * 1.1 / 12)  # Daily S1
+    R1_1d = pivot_1d + (range_1d * 1.1 / 12)  # Daily R1
+    
+    # Calculate daily EMA for trend filter
+    ema_200_1d = calculate_ema(close_1d, 200)
+    
+    # Align indicators to 4-hour timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Volume confirmation: 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):  # Start after warmup
         # Skip if data not ready
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
+            np.isnan(R1_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        rsi = rsi_4h_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        ema_50 = ema_50_1d_aligned[i]
+        pivot = pivot_1d_aligned[i]
+        S1 = S1_1d_aligned[i]
+        R1 = R1_1d_aligned[i]
+        trend_up_1d = price > ema_200_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: RSI returns to neutral (>40) or trend changes
-            if rsi > 40 or price < ema_50:
+            # Exit: price crosses below daily S1 or volume drops below average
+            if price < S1 or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: RSI returns to neutral (<60) or trend changes
-            if rsi < 60 or price > ema_50:
+            # Exit: price crosses above daily R1 or volume drops below average
+            if price > R1 or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Enter long: 4h RSI oversold (<30) and bullish trend (price > daily EMA50)
-            if rsi < 30 and price > ema_50:
+            # Enter long: price crosses above daily Pivot with volume expansion and uptrend on daily
+            if price > pivot and vol_ratio > 1.8 and trend_up_1d:
                 position = 1
-                signals[i] = 0.20
-            # Enter short: 4h RSI overbought (>70) and bearish trend (price < daily EMA50)
-            elif rsi > 70 and price < ema_50:
+                signals[i] = 0.25
+            # Enter short: price crosses below daily Pivot with volume expansion and downtrend on daily
+            elif price < pivot and vol_ratio > 1.8 and not trend_up_1d:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
