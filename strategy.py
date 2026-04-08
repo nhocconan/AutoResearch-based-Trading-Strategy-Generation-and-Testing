@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# daily_1w_rsi_mean_reversion_v1
-# Hypothesis: On daily timeframe, use weekly RSI(14) as trend filter and daily RSI(14) for mean-reversion entries.
-# In bull markets (weekly RSI > 50), look for daily RSI < 30 to go long.
-# In bear markets (weekly RSI < 50), look for daily RSI > 70 to go short.
-# Exit when daily RSI returns to 50 (mean reversion).
-# Weekly RSI avoids false signals during strong trends; daily RSI captures short-term overextensions.
-# Works in both bull and bear by adapting to weekly trend context.
-# Target: 10-25 trades/year with low frequency to minimize fee drag.
+# [24986] 4h_1d_donchian_volume_trend_v1
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter (price > EMA50) and volume confirmation.
+# Long when price breaks above 20-period high with volume > 2.0x average and price > 1-day EMA50.
+# Short when price breaks below 20-period low with volume > 2.0x average and price < 1-day EMA50.
+# Exit when price returns to 10-period moving average.
+# Uses 1-day EMA50 for trend bias, effective in both trending and ranging markets.
+# Designed to generate ~20-50 trades/year to avoid fee drag while capturing strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "daily_1w_rsi_mean_reversion_v1"
-timeframe = "1d"
+name = "4h_1d_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,87 +21,84 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1-day data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1-day EMA50
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema = np.zeros(len(close_1d))
+        ema[0] = close_1d[0]
+        alpha = 2.0 / (50 + 1)
+        for i in range(1, len(close_1d)):
+            ema[i] = alpha * close_1d[i] + (1 - alpha) * ema[i-1]
+        ema50_1d[49:] = ema[49:]
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close_1w)
-    avg_loss = np.zeros_like(close_1w)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    for i in range(14, len(close_1w)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate 10-period moving average for exit
+    ma_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        ma_10[i] = np.mean(close[i-10:i])
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
-    rsi_1w[:13] = np.nan
+    # Calculate volume moving average (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Calculate daily RSI(14)
-    delta_d = np.diff(close, prepend=close[0])
-    gain_d = np.where(delta_d > 0, delta_d, 0)
-    loss_d = np.where(delta_d < 0, -delta_d, 0)
-    
-    avg_gain_d = np.zeros_like(close)
-    avg_loss_d = np.zeros_like(close)
-    avg_gain_d[13] = np.mean(gain_d[1:14])
-    avg_loss_d[13] = np.mean(loss_d[1:14])
-    
-    for i in range(14, len(close)):
-        avg_gain_d[i] = (avg_gain_d[i-1] * 13 + gain_d[i]) / 14
-        avg_loss_d[i] = (avg_loss_d[i-1] * 13 + loss_d[i]) / 14
-    
-    rs_d = np.where(avg_loss_d != 0, avg_gain_d / avg_loss_d, 100)
-    rsi_d = np.where(avg_loss_d == 0, 100, 100 - (100 / (1 + rs_d)))
-    rsi_d[:13] = np.nan
-    
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align 1-day EMA50 to 4-hour timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if np.isnan(rsi_d[i]) or np.isnan(rsi_1w_aligned[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        price = close[i]
+        
         if position == 1:  # Long
-            # Exit: daily RSI returns to 50 (mean reversion)
-            if rsi_d[i] >= 50:
+            # Exit: price returns to 10-period MA
+            if price <= ma_10[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: daily RSI returns to 50 (mean reversion)
-            if rsi_d[i] <= 50:
+            # Exit: price returns to 10-period MA
+            if price >= ma_10[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: weekly RSI > 50 (bull trend) and daily RSI < 30 (oversold)
-            if rsi_1w_aligned[i] > 50 and rsi_d[i] < 30:
+            # Enter long: price breaks above Donchian high with volume expansion and above EMA50
+            if price > donchian_high[i] and vol_ratio > 2.0 and price > ema50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: weekly RSI < 50 (bear trend) and daily RSI > 70 (overbought)
-            elif rsi_1w_aligned[i] < 50 and rsi_d[i] > 70:
+            # Enter short: price breaks below Donchian low with volume expansion and below EMA50
+            elif price < donchian_low[i] and vol_ratio > 2.0 and price < ema50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
