@@ -1,19 +1,37 @@
 #!/usr/bin/env python3
-# [24981] 4h_1d_1w_rsi_divergence_v1
-# Hypothesis: 4-hour RSI divergence with 1-day and 1-week trend filters. Uses bearish/bullish RSI divergence
-# (price makes new high/low but RSI does not) to anticipate reversals. Long when bullish divergence occurs
-# in oversold conditions (RSI<30) with 1-day/1-week uptrend (price > EMA50). Short when bearish divergence
-# occurs in overbought conditions (RSI>70) with 1-day/1-week downtrend (price < EMA50). Exit when RSI
-# returns to neutral (40-60 range). Designed to work in both bull and bear markets by catching
-# exhaustion moves at extremes.
+# [24982] 12h_1d_williams_alligator_v1
+# Hypothesis: Williams Alligator on 1-day timeframe as trend filter, with price crossing Alligator's Jaw (13-period smoothed median) on 12-hour timeframe for entry. Uses volume confirmation (>1.5x average) to filter false breakouts. Works in both bull and bear markets by only taking trades in direction of Alligator alignment (all three lines ordered). Long when Jaw > Teeth > Lips and price crosses above Jaw; Short when Jaw < Teeth < Lips and price crosses below Jaw. Exit when price crosses back over Jaw or Alligator alignment breaks.
+# Timeframe: 12h, HTF: 1d
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_rsi_divergence_v1"
-timeframe = "4h"
+name = "12h_1d_williams_alligator_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def _sma(arr, window):
+    """Simple moving average with NaN for insufficient data."""
+    if window < 1:
+        return arr.copy()
+    res = np.full_like(arr, np.nan, dtype=float)
+    for i in range(window - 1, len(arr)):
+        res[i] = np.mean(arr[i - window + 1:i + 1])
+    return res
+
+def _smma(arr, window):
+    """Smoothed moving average (SMMA) as used in Williams Alligator."""
+    if window < 1 or len(arr) == 0:
+        return np.full_like(arr, np.nan, dtype=float)
+    res = np.full_like(arr, np.nan, dtype=float)
+    # First value is simple average
+    res[window - 1] = np.mean(arr[:window])
+    # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
+    for i in range(window, len(arr)):
+        if not np.isnan(res[i - 1]):
+            res[i] = (res[i - 1] * (window - 1) + arr[i]) / window
+    return res
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,122 +41,92 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 14-period RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    
-    for i in range(1, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 1-day and 1-week data for trend filters
+    # Get 1-day data for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 10 or len(df_1w) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50
-    close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema = np.zeros(len(close_1d))
-        ema[0] = close_1d[0]
-        alpha = 2.0 / (50 + 1)
-        for i in range(1, len(close_1d)):
-            ema[i] = alpha * close_1d[i] + (1 - alpha) * ema[i-1]
-        ema50_1d[49:] = ema[49:]
+    # Calculate Williams Alligator components (13, 8, 5 periods with future shifts)
+    # Alligator's Jaw: 13-period SMMA shifted by 8 bars
+    # Alligator's Teeth: 8-period SMMA shifted by 5 bars
+    # Alligator's Lips: 5-period SMMA shifted by 3 bars
+    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
     
-    # Calculate 1-week EMA50
-    close_1w = df_1w['close'].values
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema = np.zeros(len(close_1w))
-        ema[0] = close_1w[0]
-        alpha = 2.0 / (50 + 1)
-        for i in range(1, len(close_1w)):
-            ema[i] = alpha * close_1w[i] + (1 - alpha) * ema[i-1]
-        ema50_1w[49:] = ema[49:]
+    jaw_raw = _smma(median_1d, 13)   # Jaw: 13-period SMMA
+    teeth_raw = _smma(median_1d, 8)  # Teeth: 8-period SMMA
+    lips_raw = _smma(median_1d, 5)   # Lips: 5-period SMMA
     
-    # Align EMA50 to 4-hour timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Apply the forward shifts (8, 5, 3 bars respectively)
+    jaw = np.full_like(jaw_raw, np.nan)
+    teeth = np.full_like(teeth_raw, np.nan)
+    lips = np.full_like(lips_raw, np.nan)
+    
+    if len(jaw_raw) > 8:
+        jaw[8:] = jaw_raw[:-8]
+    if len(teeth_raw) > 5:
+        teeth[5:] = teeth_raw[:-5]
+    if len(lips_raw) > 3:
+        lips[3:] = lips_raw[:-3]
+    
+    # Align Alligator components to 12-hour timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Calculate volume moving average (50-period) for confirmation
+    vol_ma = _sma(volume, 50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after RSI warmup
+    # Start after warmup period (need enough data for all indicators)
+    start_idx = max(50, 13)  # Need at least 50 for volume MA, 13 for jaw
+    
+    for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
-                pass  # Hold
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        rsi_now = rsi[i]
-        rsi_prev = rsi[i-1]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        price = close[i]
         
-        if position == 1:  # Long
-            # Exit: RSI returns to neutral range (40-60)
-            if 40 <= rsi_now <= 60:
+        # Check Alligator alignment: Jaw > Teeth > Lips for uptrend, Jaw < Teeth < Lips for downtrend
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        
+        is_uptrend_aligned = jaw_val > teeth_val > lips_val
+        is_downtrend_aligned = jaw_val < teeth_val < lips_val
+        
+        if position == 1:  # Long position
+            # Exit conditions: price crosses below Jaw OR Alligator alignment breaks
+            if price < jaw_val or not is_uptrend_aligned:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
-        elif position == -1:  # Short
-            # Exit: RSI returns to neutral range (40-60)
-            if 40 <= rsi_now <= 60:
+        elif position == -1:  # Short position
+            # Exit conditions: price crosses above Jaw OR Alligator alignment breaks
+            if price > jaw_val or not is_downtrend_aligned:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat
-            # Check for bullish RSI divergence (price makes lower low but RSI makes higher low)
-            bullish_div = False
-            if i >= 2:
-                # Look for recent swing low in price
-                if low[i] < low[i-1] and low[i] < low[i-2]:
-                    # Find prior swing low
-                    j = i - 1
-                    while j >= 2 and low[j] >= low[j-1]:
-                        j -= 1
-                    if j >= 2 and low[j] < low[j-1] and low[j] < low[j-2]:
-                        # Found two swing lows, check if bullish divergence
-                        if low[i] < low[j] and rsi[i] > rsi[j]:
-                            bullish_div = True
-            
-            # Check for bearish RSI divergence (price makes higher high but RSI makes lower high)
-            bearish_div = False
-            if i >= 2:
-                # Look for recent swing high in price
-                if high[i] > high[i-1] and high[i] > high[i-2]:
-                    # Find prior swing high
-                    j = i - 1
-                    while j >= 2 and high[j] <= high[j-1]:
-                        j -= 1
-                    if j >= 2 and high[j] > high[j-1] and high[j] > high[j-2]:
-                        # Found two swing highs, check if bearish divergence
-                        if high[i] > high[j] and rsi[i] < rsi[j]:
-                            bearish_div = True
-            
-            # Enter long: bullish divergence in oversold with uptrend on both 1D and 1W
-            if bullish_div and rsi_now < 30 and close[i] > ema50_1d_aligned[i] and close[i] > ema50_1w_aligned[i]:
+        else:  # Flat - look for entry
+            # Enter long: price crosses above Jaw with volume confirmation and uptrend alignment
+            if price > jaw_val and vol_ratio > 1.5 and is_uptrend_aligned:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: bearish divergence in overbought with downtrend on both 1D and 1W
-            elif bearish_div and rsi_now > 70 and close[i] < ema50_1d_aligned[i] and close[i] < ema50_1w_aligned[i]:
+            # Enter short: price crosses below Jaw with volume confirmation and downtrend alignment
+            elif price < jaw_val and vol_ratio > 1.5 and is_downtrend_aligned:
                 position = -1
                 signals[i] = -0.25
     
