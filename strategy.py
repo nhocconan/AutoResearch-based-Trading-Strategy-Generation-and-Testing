@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 1d_donchian_breakout_1w_trend_volume_v1
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-# Long when price breaks above 20-day high with weekly uptrend (price > weekly EMA50) and volume > 1.5x average.
-# Short when price breaks below 20-day low with weekly downtrend (price < weekly EMA50) and volume > 1.5x average.
-# Exit when price returns to 10-day midpoint or trend reverses.
-# Designed to capture strong breakouts in both bull and bear markets with minimal trades.
+# 6h_ema_rsi_volume_trend
+# Hypothesis: EMA trend filter + RSI momentum + volume confirmation on 6h timeframe.
+# Long when price > EMA20, RSI > 50 and rising, and volume > 1.5x average.
+# Short when price < EMA20, RSI < 50 and falling, and volume > 1.5x average.
+# Uses 12h EMA trend filter for higher timeframe confirmation.
+# Designed to capture momentum in both bull and bear markets with proper risk control.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_ema_rsi_volume_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,25 +25,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA20 on 6h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 10-day midpoint for exit
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    midpoint_10 = (high_10 + low_10) / 2
+    # Calculate RSI(14) on 6h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Calculate RSI slope (momentum)
+    rsi_slope = pd.Series(rsi_values).diff().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,12 +59,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(midpoint_10[i]) or 
+        if (np.isnan(ema_20[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(rsi_slope[i]) or np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -67,16 +74,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to 10-day midpoint OR trend turns against us
-            if (close[i] <= midpoint_10[i]) or (close[i] < ema_50_1w_aligned[i]):
+            # Exit: price below EMA20 OR RSI < 40
+            if (close[i] < ema_20[i]) or (rsi_values[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to 10-day midpoint OR trend turns against us
-            if (close[i] >= midpoint_10[i]) or (close[i] > ema_50_1w_aligned[i]):
+            # Exit: price above EMA20 OR RSI > 60
+            if (close[i] > ema_20[i]) or (rsi_values[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,11 +92,13 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout entries: Donchian(20) breakout/breakdown
-            if (close[i] > high_20[i]) and (close[i] > ema_50_1w_aligned[i]) and volume_ok:
+            # Entry conditions with 12h trend filter
+            if (close[i] > ema_20[i]) and (rsi_values[i] > 50) and (rsi_slope[i] > 0) and \
+               (close[i] > ema_50_12h_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (close[i] < low_20[i]) and (close[i] < ema_50_1w_aligned[i]) and volume_ok:
+            elif (close[i] < ema_20[i]) and (rsi_values[i] < 50) and (rsi_slope[i] < 0) and \
+                 (close[i] < ema_50_12h_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
