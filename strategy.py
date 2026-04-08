@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_daily_trend_volume_v1
-# Hypothesis: Uses Camarilla pivot levels from 1-day timeframe with volume confirmation and trend filter. 
-# Long when price breaks above resistance level (H4) with volume, short when breaks below support (L4).
-# Includes trend filter (price vs daily EMA200) to avoid counter-trend trades. Designed for low frequency (12-37 trades/year) to minimize fee drag.
+# 12h_market_regime_adaptive_v1
+# Hypothesis: Adaptive strategy using regime detection (ADX) with dual logic - trend following in strong trends, mean reversion in chop.
+# Uses 12h price action with 1w regime filter to reduce whipsaw. Target: 12-37 trades/year for low fee drift.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_daily_trend_volume_v1"
+name = "12h_market_regime_adaptive_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,75 +22,136 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1w regime filter (ADX) - load once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # Typical price = (H + L + C) / 3
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels
-    H4 = typical_price + 1.1 * (high_1d - low_1d) / 2
-    L4 = typical_price - 1.1 * (high_1d - low_1d) / 2
-    H3 = typical_price + 1.1 * (high_1d - low_1d) / 4
-    L3 = typical_price - 1.1 * (high_1d - low_1d) / 4
+    # Calculate ADX on 1w data
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Daily EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Volume confirmation (20-period average)
+    tr_smoothed = wilders_smooth(tr, 14)
+    plus_dm_smoothed = wilders_smooth(plus_dm, 14)
+    minus_dm_smoothed = wilders_smooth(minus_dm, 14)
+    
+    plus_di = np.where(tr_smoothed != 0, 100 * plus_dm_smoothed / tr_smoothed, 0)
+    minus_di = np.where(tr_smoothed != 0, 100 * minus_dm_smoothed / tr_smoothed, 0)
+    
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx_1w = wilders_smooth(dx, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # 12h indicators
+    # EMA20 for dynamic support/resistance
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # RSI14 for mean reversion signals
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain = np.concatenate([[np.nan], gain])
+    loss = np.concatenate([[np.nan], loss])
+    
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 200  # Need EMA200 warmed up
+    start_idx = 30  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema20[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(adx_1w_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > 1.5 * avg_volume[i]
+        # Regime detection: ADX > 25 = trending, ADX < 20 = ranging
+        adx_val = adx_1w_aligned[i]
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
         
         if position == 1:  # Long position
-            # Exit conditions: price below L3 or trend reversal
-            if close[i] < L3_aligned[i] or close[i] < ema200_1d_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit conditions
+            if is_trending:
+                # In trend: exit on close below EMA20
+                if close[i] < ema20[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
-                
+                # In range: exit on RSI overbought or mean reversion
+                if rsi[i] > 70:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
-            # Exit conditions: price above H3 or trend reversal
-            if close[i] > H3_aligned[i] or close[i] > ema200_1d_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            # Exit conditions
+            if is_trending:
+                # In trend: exit on close above EMA20
+                if close[i] > ema20[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In range: exit on RSI oversold or mean reversion
+                if rsi[i] < 30:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade in direction of daily trend
-            if close[i] > ema200_1d_aligned[i]:  # Uptrend
-                # Long breakout above H4 with volume
-                if close[i] > H4_aligned[i] and volume_ok:
+            # Volume confirmation
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            
+            if is_trending:
+                # Trend following: enter on breakouts with volume
+                if close[i] > ema20[i] and volume_ok:
                     position = 1
                     signals[i] = 0.25
-            else:  # Downtrend
-                # Short breakdown below L4 with volume
-                if close[i] < L4_aligned[i] and volume_ok:
+                elif close[i] < ema20[i] and volume_ok:
+                    position = -1
+                    signals[i] = -0.25
+            elif is_ranging:
+                # Mean reversion: enter on RSI extremes with volume
+                if rsi[i] < 30 and volume_ok:
+                    position = 1
+                    signals[i] = 0.25
+                elif rsi[i] > 70 and volume_ok:
                     position = -1
                     signals[i] = -0.25
     
