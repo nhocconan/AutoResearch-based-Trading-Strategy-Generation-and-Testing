@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-# 4h_donchian_volatility_breakout_v2
-# Hypothesis: Breakouts from Donchian channels with volatility expansion (ATR ratio > 1.5) and volume confirmation.
-# Long when price breaks above Donchian(20) high, ATR ratio > 1.5, and volume > 1.5x average.
-# Short when price breaks below Donchian(20) low, ATR ratio > 1.5, and volume > 1.5x average.
-# Exit when price crosses opposite Donchian band or ATR ratio < 0.8 (volatility contraction).
-# Uses volatility expansion to capture true breakouts and avoid false signals in ranging markets.
-# Target: 20-40 trades/year with strict entry conditions.
+# 12h_donchian10_volume_trend_v1
+# Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Uses Donchian(10) breakout with volume confirmation and 1d EMA trend filter.
+# Long when price breaks above Donchian(10) high, volume > 1.5x average, and price > 1d EMA50.
+# Short when price breaks below Donchian(10) low, volume > 1.5x average, and price < 1d EMA50.
+# Exit when price crosses the opposite Donchian band.
+# Designed for 10-30 trades/year on 12h timeframe to minimize fee impact while capturing trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_volatility_breakout_v2"
-timeframe = "4h"
+name = "12h_donchian10_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,39 +24,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    lookback = 20
+    # Donchian channel (10-period)
+    lookback = 10
     dc_high = np.full(n, np.nan)
     dc_low = np.full(n, np.nan)
     
     for i in range(lookback-1, n):
         dc_high[i] = np.max(high[i-lookback+1:i+1])
         dc_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # ATR for volatility measurement
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = np.full(n, np.nan)
-    atr[atr_period-1] = np.mean(tr[0:atr_period])
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # ATR ratio (current ATR / 50-period ATR average) for volatility regime
-    atr_ma_period = 50
-    atr_ma = np.full(n, np.nan)
-    for i in range(atr_ma_period-1, n):
-        atr_ma[i] = np.mean(atr[i-atr_ma_period+1:i+1])
-    
-    atr_ratio = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(atr[i]) and not np.isnan(atr_ma[i]) and atr_ma[i] > 0:
-            atr_ratio[i] = atr[i] / atr_ma[i]
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
@@ -70,15 +44,20 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(lookback, atr_period, atr_ma_period, vol_ma_period) + 5
+    start_idx = max(lookback, vol_ma_period) + 5
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
         if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
-            np.isnan(atr_ratio[i]) or np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -86,31 +65,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below Donchian low OR volatility contraction
-            if close[i] < dc_low[i] or atr_ratio[i] < 0.8:
+            # Exit: Price below Donchian low
+            if close[i] < dc_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above Donchian high OR volatility contraction
-            if close[i] > dc_high[i] or atr_ratio[i] < 0.8:
+            # Exit: Price above Donchian high
+            if close[i] > dc_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above Donchian high, volatility expanding, volume surge
+            # Long entry: Price above Donchian high, volume surge, and price above 1d EMA50
             if (close[i] > dc_high[i] and 
-                atr_ratio[i] > 1.5 and 
-                vol_surge[i]):
+                vol_surge[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below Donchian low, volatility expanding, volume surge
+            # Short entry: Price below Donchian low, volume surge, and price below 1d EMA50
             elif (close[i] < dc_low[i] and 
-                  atr_ratio[i] > 1.5 and 
-                  vol_surge[i]):
+                  vol_surge[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
