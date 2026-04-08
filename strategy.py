@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1-day Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 12h timeframe capture medium-term momentum, while 1-day EMA(50) filter avoids counter-trend trades and volume confirmation ensures institutional participation. Designed for ~20-30 trades/year to minimize fee drift in both bull and bear markets.
+4h Donchian Breakout with 1-day Trend Filter and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture momentum, while 1-day EMA trend filter
+avoids counter-trend trades and volume confirmation ensures institutional participation.
+Designed for ~20-30 trades/year to minimize fee drift in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
