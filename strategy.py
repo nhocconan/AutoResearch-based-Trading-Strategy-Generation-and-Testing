@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-# 6h_volume_squeeze_1d_trend_v1
-# Hypothesis: On 6h timeframe, trade volatility breakouts when 6h ATR contracts then expands,
-# filtered by 1d trend (EMA50). Low volatility precedes explosive moves; breakout in trend direction.
-# Works in bull/bear markets as volatility expansion precedes trend continuation.
-# Target: 20-40 trades/year.
+# 4h_atr_breakout_12h_trend_volume_v1
+# Hypothesis: On 4h timeframe, use ATR-based volatility breakout with 12h trend filter and volume confirmation.
+# Long when price breaks above ATR(14) upper band with volume > 1.5x average and 12h uptrend.
+# Short when price breaks below ATR(14) lower band with volume > 1.5x average and 12h downtrend.
+# Exit when price reverses by 1x ATR from breakout level or opposite signal triggers.
+# Uses volatility breakout to capture momentum moves with volatility-adjusted position sizing.
+# Target: 25-35 trades/year to avoid excessive fee drag while capturing significant moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_volume_squeeze_1d_trend_v1"
-timeframe = "6h"
+name = "4h_atr_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -24,41 +26,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h ATR(20) for volatility measurement
+    # Calculate ATR(14) for volatility bands
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = np.zeros(n)
+    atr[13] = np.mean(tr[:14])
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # 6h ATR ratio: current ATR / 20-period average ATR (volatility contraction/expansion)
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr / atr_ma  # < 0.8 = contraction, > 1.2 = expansion
+    # Calculate volatility bands: midpoint ± ATR
+    midpoint = (high + low) / 2
+    upper_band = midpoint + atr
+    lower_band = midpoint - atr
     
-    # 6h Donchian breakout levels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 1d EMA50 trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    # Get 12h trend data (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    daily_close = df_daily['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_6h = align_htf_to_ltf(prices, df_daily, daily_ema50)
+    # Calculate 12h EMA25 for trend filter
+    close_12h = df_12h['close'].values
+    ema25_12h = pd.Series(close_12h).ewm(span=25, min_periods=25, adjust=False).mean().values
+    ema25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema25_12h)
+    
+    # Volume confirmation: 20-period average on 4h
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    breakout_level = 0  # Track breakout level for exit
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 25
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(atr_ratio[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(daily_ema50_6h[i]):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or \
+           np.isnan(ema25_12h_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -67,41 +75,39 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 6h EMA20 or ATR expansion fades
-            ema20 = pd.Series(close[:i+1]).ewm(span=20, min_periods=20, adjust=False).mean().iloc[-1]
-            if close[i] < ema20 or atr_ratio[i] < 1.0:
+            # Exit: price reverses by 1x ATR from breakout level OR opposite signal
+            if close[i] <= breakout_level - atr[i] or \
+               (close[i] < lower_band[i] and volume[i] > 1.5 * avg_volume[i] and close[i] < ema25_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 6h EMA20 or ATR expansion fades
-            ema20 = pd.Series(close[:i+1]).ewm(span=20, min_periods=20, adjust=False).mean().iloc[-1]
-            if close[i] > ema20 or atr_ratio[i] < 1.0:
+            # Exit: price reverses by 1x ATR from breakout level OR opposite signal
+            if close[i] >= breakout_level + atr[i] or \
+               (close[i] > upper_band[i] and volume[i] > 1.5 * avg_volume[i] and close[i] > ema25_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volatility expansion trigger: ATR ratio > 1.2 (expansion from contraction)
-            vol_expansion = atr_ratio[i] > 1.2
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout confirmation: price breaks Donchian level
-            breakout_up = close[i] > donch_high[i]
-            breakout_down = close[i] < donch_low[i]
+            # 12h trend filter
+            uptrend_12h = close[i] > ema25_12h_aligned[i]
+            downtrend_12h = close[i] < ema25_12h_aligned[i]
             
-            # 1d trend filter
-            daily_uptrend = close[i] > daily_ema50_6h[i]
-            daily_downtrend = close[i] < daily_ema50_6h[i]
-            
-            # Long entry: volatility expansion + upward breakout + uptrend
-            if vol_expansion and breakout_up and daily_uptrend:
+            # Long entry: price breaks above upper band with volume and uptrend
+            if close[i] > upper_band[i] and volume_ok and uptrend_12h:
                 position = 1
+                breakout_level = close[i]  # Record breakout level
                 signals[i] = 0.25
-            # Short entry: volatility expansion + downward breakout + downtrend
-            elif vol_expansion and breakout_down and daily_downtrend:
+            # Short entry: price breaks below lower band with volume and downtrend
+            elif close[i] < lower_band[i] and volume_ok and downtrend_12h:
                 position = -1
+                breakout_level = close[i]  # Record breakout level
                 signals[i] = -0.25
     
     return signals
