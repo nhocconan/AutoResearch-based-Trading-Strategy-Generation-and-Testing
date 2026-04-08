@@ -1,16 +1,15 @@
-#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_fractal_breakout_1d_trend_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -19,108 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots and trend
+    # 1d data for trend and fractal detection
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate previous day's close for Camarilla (using shift)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # first value
+    # Calculate Williams Fractals (1d)
+    n1 = len(high_1d)
+    bearish_fractal = np.zeros(n1, dtype=bool)
+    bullish_fractal = np.zeros(n1, dtype=bool)
     
-    # Calculate Camarilla levels for each day
-    # R4 = Close + (High - Low) * 1.5
-    # R3 = Close + (High - Low) * 1.25
-    # R2 = Close + (High - Low) * 1.166
-    # R1 = Close + (High - Low) * 1.083
-    # S1 = Close - (High - Low) * 1.083
-    # S2 = Close - (High - Low) * 1.166
-    # S3 = Close - (High - Low) * 1.25
-    # S4 = Close - (High - Low) * 1.5
+    for i in range(2, n1 - 2):
+        if (high_1d[i] >= high_1d[i-1] and high_1d[i] >= high_1d[i-2] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = True
+        if (low_1d[i] <= low_1d[i-1] and low_1d[i] <= low_1d[i-2] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    range_1d = high_1d - low_1d
-    r4 = prev_close_1d + range_1d * 1.5
-    r3 = prev_close_1d + range_1d * 1.25
-    r2 = prev_close_1d + range_1d * 1.166
-    r1 = prev_close_1d + range_1d * 1.083
-    s1 = prev_close_1d - range_1d * 1.083
-    s2 = prev_close_1d - range_1d * 1.166
-    s3 = prev_close_1d - range_1d * 1.25
-    s4 = prev_close_1d - range_1d * 1.5
+    # Align fractal signals to 12h timeframe
+    bearish_fractal_12h = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float))
+    bullish_fractal_12h = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float))
     
-    # Align Camarilla levels to 6h timeframe
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # 1d trend: 34-period EMA (responsive trend)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d trend: 50-period EMA
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: 6h volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: 12h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_12h[i]) or np.isnan(bearish_fractal_12h[i]) or 
+            np.isnan(bullish_fractal_12h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 or trend fails
-            if close[i] < s3_6h[i] or close[i] < ema_50_6h[i]:
+            # Exit: bearish fractal or trend fails
+            if bearish_fractal_12h[i] == 1.0 or close[i] < ema_34_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 or trend fails
-            if close[i] > r3_6h[i] or close[i] > ema_50_6h[i]:
+            # Exit: bullish fractal or trend fails
+            if bullish_fractal_12h[i] == 1.0 or close[i] > ema_34_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_50_6h[i]
-            bearish = close[i] < ema_50_6h[i]
+            bullish = close[i] > ema_34_12h[i]
+            bearish = close[i] < ema_34_12h[i]
             
-            # Long: break above R4 with volume (continuation)
-            if (close[i] > r4_6h[i] and 
+            # Long: bullish fractal + bullish trend + volume
+            if (bullish_fractal_12h[i] == 1.0 and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: break below S4 with volume (continuation)
-            elif (close[i] < s4_6h[i] and 
+                signals[i] = 0.30
+            # Short: bearish fractal + bearish trend + volume
+            elif (bearish_fractal_12h[i] == 1.0 and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.25
-            # Long: bounce from S3 (mean reversion in range)
-            elif (close[i] > s3_6h[i] and close[i] < s4_6h[i] and 
-                  bearish and  # counter-trend bounce in bear market
-                  vol_filter[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: bounce from R3 (mean reversion in range)
-            elif (close[i] < r3_6h[i] and close[i] > r4_6h[i] and 
-                  bullish and  # counter-trend bounce in bull market
-                  vol_filter[i]):
-                position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
-#%%
