@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v1
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
-# Works in bull (breakouts) and bear (breakdowns) with tight entries to avoid overtrading.
-# Target: 15-25 trades/year for low fee drag.
+# 4h_rsi_adaptive_volume_filter_v1
+# Hypothesis: RSI-based mean reversion with volume confirmation and volatility filter. 
+# Uses RSI(14) extremes (30/70) for entries, volume > 1.5x average for confirmation, 
+# and ATR-based volatility filter to avoid choppy markets. Designed for low trade frequency
+# (target: 20-30 trades/year) to minimize fee drag in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_rsi_adaptive_volume_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,63 +24,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA50) - load once before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # RSI calculation
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain = np.concatenate([[np.nan], gain])
+    loss = np.concatenate([[np.nan], loss])
     
-    # Calculate EMA50 on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation (20-period average)
+    # Average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need indicators warmed up
+    start_idx = 30  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(atr[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > 1.5 * avg_volume[i]
+        # Volatility filter: avoid extremely low volatility (chop) and extreme volatility
+        atr_ratio = atr[i] / np.mean(atr[max(0, i-50):i+1]) if i >= 50 else 1.0
+        vol_filter = 0.5 <= atr_ratio <= 2.0  # Trade only in moderate volatility regimes
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower band
-            if low[i] < lowest_low[i]:
+            # Exit on RSI overbought or volatility breakdown
+            if rsi[i] > 70 or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper band
-            if high[i] > highest_high[i]:
+            # Exit on RSI oversold or volatility breakdown
+            if rsi[i] < 30 or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter: only trade in direction of 1d EMA50
-            trend_up = close[i] > ema50_1d_aligned[i]
-            trend_down = close[i] < ema50_1d_aligned[i]
+            # Volume confirmation
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: price breaks above Donchian upper band + volume + uptrend
-            if trend_up and high[i] > highest_high[i] and volume_ok:
+            # Mean reversion entries with volume and volatility filter
+            if rsi[i] < 30 and volume_ok and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian lower band + volume + downtrend
-            elif trend_down and low[i] < lowest_low[i] and volume_ok:
+            elif rsi[i] > 70 and volume_ok and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
