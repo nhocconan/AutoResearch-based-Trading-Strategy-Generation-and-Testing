@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_trix_volume_regime_v1
-Hypothesis: Use TRIX momentum on 1d for trend bias, TRIX crossovers on 4h for entry timing, volume confirmation, and choppiness regime filter to avoid whipsaws. Long when 4h TRIX crosses above zero with volume and 1d TRIX > 0 and choppiness < 61.8. Short when 4h TRIX crosses below zero with volume and 1d TRIX < 0 and choppiness < 61.8. Designed to capture momentum in trending markets while avoiding range-bound chop.
-Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+12h_1w_1d_pivot_volume_v2
+Hypothesis: Combine weekly pivot points for long-term trend bias with daily pivot points for entry/exit signals, using volume confirmation to filter false breakouts. Designed to work in both bull and bear markets by following weekly trend while using daily levels for precise timing. Target: 12-37 trades/year per symbol (48-148 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_trix_volume_regime_v1"
-timeframe = "4h"
+name = "12h_1w_1d_pivot_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,44 +23,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX and choppiness
+    # Get daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d TRIX (15-period EMA of EMA of EMA of close, then ROC)
-    close_1d = df_1d['close'].values
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix_1d = 100 * (pd.Series(ema3).pct_change().values)  # ROC of triple EMA
+    # Get weekly data for bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate 1d choppiness index (14-period)
+    # Calculate daily pivot points (based on previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    atr_1d = np.zeros(len(close_1d))
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(sum_tr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
     
-    # Align 1d TRIX and choppiness to 4h
-    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Previous day's data for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Calculate 4h TRIX for entry signals
-    ema1_4h = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2_4h = pd.Series(ema1_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3_4h = pd.Series(ema2_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_4h = 100 * (pd.Series(ema3_4h).pct_change().values)
+    # Daily pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
     
-    # Volume confirmation: volume > 1.3x average of last 20 periods
+    # Align daily pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Weekly bias using EMA (21-period)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.3
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -71,8 +81,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trix_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or np.isnan(trix_4h[i]) or
-            np.isnan(trix_4h[i-1]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -81,27 +92,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: 4h TRIX crosses below zero or choppiness too high
-            if trix_4h[i] < 0 and trix_4h[i-1] >= 0 or chop_1d_aligned[i] > 61.8:
+            # Exit: price breaks below daily S1 or weekly bias turns down
+            if close[i] < s1_aligned[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: 4h TRIX crosses above zero or choppiness too high
-            if trix_4h[i] > 0 and trix_4h[i-1] <= 0 or chop_1d_aligned[i] > 61.8:
+            # Exit: price breaks above daily R1 or weekly bias turns up
+            if close[i] > r1_aligned[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: 4h TRIX crosses above zero with volume, 1d TRIX bullish, low chop
-            if trix_4h[i] > 0 and trix_4h[i-1] <= 0 and vol_confirm[i] and trix_1d_aligned[i] > 0 and chop_1d_aligned[i] < 61.8:
+            # Long entry: price breaks above daily R1 with volume and weekly bias up
+            if close[i] > r1_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: 4h TRIX crosses below zero with volume, 1d TRIX bearish, low chop
-            elif trix_4h[i] < 0 and trix_4h[i-1] >= 0 and vol_confirm[i] and trix_1d_aligned[i] < 0 and chop_1d_aligned[i] < 61.8:
+            # Short entry: price breaks below daily S1 with volume and weekly bias down
+            elif close[i] < s1_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
