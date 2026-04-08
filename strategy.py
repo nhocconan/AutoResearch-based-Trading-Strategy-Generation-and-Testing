@@ -1,8 +1,12 @@
-# 4h Donchian Breakout with Volume Spike and 1d ADX Filter
-# Hypothesis: Donchian(20) breakouts on 4h with volume spikes (>3x average) 
-# and strong 1d trend (ADX > 25) capture sustained moves while avoiding 
-# false breakouts in ranging markets. Works in bull/bear by requiring 
-# trend alignment and volume confirmation. Target: 25-35 trades/year.
+#!/usr/bin/env python3
+"""
+4h Donchian Breakout with Volume Spike and 1d ADX Filter
+Hypothesis: Donchian(20) breakouts on 4h with volume spikes (>3x average) 
+and strong 1d trend (ADX > 25) capture sustained moves while avoiding 
+false breakouts in ranging markets. Works in bull/bear by requiring 
+trend alignment and volume confirmation. Target: 25-35 trades/year.
+"""
+
 name = "4h_donchian_breakout_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
