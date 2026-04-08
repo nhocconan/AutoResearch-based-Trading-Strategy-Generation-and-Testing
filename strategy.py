@@ -1,136 +1,121 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 12h_1d_1w_camarilla_pivot_v2
-# Hypothesis: 12-hour strategy using daily Camarilla pivot levels with weekly trend filter and volume confirmation.
-# Long when: price touches S3 level and weekly close > weekly open (bullish week).
-# Short when: price touches R3 level and weekly close < weekly open (bearish week).
-# Exit when price moves to opposite H4/L4 level or weekly trend changes.
-# Uses daily Camarilla for entry/exit levels and weekly trend filter to avoid counter-trend trades.
-# Target: 12-30 trades/year to minimize fee drag while capturing meaningful reversals.
+"""
+4h_12h_vwap_crossover_v1
+Hypothesis: VWAP crossovers on 4h timeframe with 12h trend filter and volume confirmation.
+Works in both bull and bear markets by capturing mean-reversion to VWAP during trends.
+- Long: 4h VWAP crosses above price AND 12h trend up AND volume > 1.5x average
+- Short: 4h VWAP crosses below price AND 12h trend down AND volume > 1.5x average
+- Exit: VWAP crossover in opposite direction
+Uses VWAP as dynamic support/resistance, reducing whipsaws in choppy markets.
+Target: 25-40 trades/year to minimize fee drag while capturing meaningful moves.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_pivot_v2"
-timeframe = "12h"
+name = "4h_12h_vwap_crossover_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    n = len(high)
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    
-    S1 = close - (range_val * 1.0 / 6)
-    S2 = close - (range_val * 2.0 / 6)
-    S3 = close - (range_val * 3.0 / 6)
-    S4 = close - (range_val * 4.0 / 6)
-    
-    R1 = close + (range_val * 1.0 / 6)
-    R2 = close + (range_val * 2.0 / 6)
-    R3 = close + (range_val * 3.0 / 6)
-    R4 = close + (range_val * 4.0 / 6)
-    
-    return S1, S2, S3, S4, R1, R2, R3, R4, pivot
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
+    # Calculate typical price and VWAP components
+    typical_price = (high + low + close) / 3.0
+    tp_volume = typical_price * volume
+    
+    # Cumulative VWAP (reset each day)
+    cum_tp_volume = np.zeros(n)
+    cum_volume = np.zeros(n)
+    vwap = np.full(n, np.nan)
+    
+    # Reset cumulative values at daily boundaries
+    for i in range(n):
+        if i == 0 or prices['open_time'].iloc[i].date() != prices['open_time'].iloc[i-1].date():
+            cum_tp_volume[i] = tp_volume[i]
+            cum_volume[i] = volume[i]
+        else:
+            cum_tp_volume[i] = cum_tp_volume[i-1] + tp_volume[i]
+            cum_volume[i] = cum_volume[i-1] + volume[i]
+        
+        if cum_volume[i] > 0:
+            vwap[i] = cum_tp_volume[i] / cum_volume[i]
+    
     # Calculate average volume for confirmation
-    avg_volume = np.zeros(n)
+    vol_avg = np.zeros(n)
+    vol_avg[19] = np.mean(volume[:20])  # 20-period average
     for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+        vol_avg[i] = (vol_avg[i-1] * 19 + volume[i]) / 20
     
-    # Get daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    # Simple trend: price above/below 20-period SMA
+    sma_12h_20 = np.zeros(len(close_12h))
+    sma_12h_20[:] = np.nan
+    sma_12h_20[19] = np.mean(close_12h[:20])
+    for i in range(20, len(close_12h)):
+        sma_12h_20[i] = (sma_12h_20[i-1] * 19 + close_12h[i]) / 20
     
-    S1_1d, S2_1d, S3_1d, S4_1d, R1_1d, R2_1d, R3_1d, R4_1d, pivot_1d = calculate_camarilla(
-        high_1d, low_1d, close_1d
-    )
-    
-    # Align Camarilla levels to 12h timeframe
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly trend: bullish if close > open, bearish if close < open
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
-    
-    # Align weekly trend to 12h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    sma_12h_20_aligned = align_htf_to_ltf(prices, df_12h, sma_12h_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        s3 = S3_1d_aligned[i]
-        r3 = R3_1d_aligned[i]
-        s4 = S4_1d_aligned[i]
-        r4 = R4_1d_aligned[i]
-        wb = weekly_bullish_aligned[i]
-        wbear = weekly_bearish_aligned[i]
-        
-        if np.isnan(s3) or np.isnan(r3) or np.isnan(s4) or np.isnan(r4) or np.isnan(wb) or np.isnan(wbear):
+        if np.isnan(vwap[i]) or np.isnan(sma_12h_20_aligned[i]) or np.isnan(vol_avg[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        volume_ok = vol > avg_vol * 1.5  # Volume confirmation
+        price = close[i]
+        vwap_val = vwap[i]
+        trend_12h = sma_12h_20_aligned[i]
+        vol_ratio = volume[i] / vol_avg[i] if vol_avg[i] > 0 else 0
         
-        if position == 1:  # Long position
-            # Exit: price reaches S4 level OR weekly trend turns bearish
-            if price <= s4 or wbear > 0.5:
+        if position == 1:  # Long
+            # Exit: price crosses below VWAP OR trend turns down
+            if price < vwap_val or close[i] < trend_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
-        elif position == -1:  # Short position
-            # Exit: price reaches R4 level OR weekly trend turns bullish
-            if price >= r4 or wb > 0.5:
+        elif position == -1:  # Short
+            # Exit: price crosses above VWAP OR trend turns up
+            if price > vwap_val or close[i] > trend_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions
-            if volume_ok:
-                # Long: price touches S3 level during bullish week
-                if abs(price - s3) / s3 < 0.005 and wb > 0.5:  # Within 0.5% of S3
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price touches R3 level during bearish week
-                elif abs(price - r3) / r3 < 0.005 and wbear > 0.5:  # Within 0.5% of R3
-                    position = -1
-                    signals[i] = -0.25
+            # Entry conditions with volume confirmation
+            if vol_ratio > 1.5:  # Volume confirmation
+                # Long: price crosses above VWAP AND trend up
+                if price > vwap_val and close[i] > trend_12h:
+                    # Confirm crossover: previous bar was below VWAP
+                    if i > 0 and close[i-1] <= vwap[i-1]:
+                        position = 1
+                        signals[i] = 0.25
+                # Short: price crosses below VWAP AND trend down
+                elif price < vwap_val and close[i] < trend_12h:
+                    # Confirm crossover: previous bar was above VWAP
+                    if i > 0 and close[i-1] >= vwap[i-1]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
