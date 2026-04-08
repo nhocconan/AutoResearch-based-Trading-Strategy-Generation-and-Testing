@@ -1,15 +1,19 @@
+# 4h_bollinger_breakout_volume_v1
+# Strategy: Bollinger Band breakout with volume confirmation and Bollinger Width regime filter.
+# Long when price breaks above upper BB with volume > 1.5x avg and BW < 50th percentile (low volatility).
+# Short when price breaks below lower BB with volume > 1.5x avg and BW < 50th percentile.
+# Exit when price crosses back inside BB or volatility expands (BW > 70th percentile).
+# Designed to capture volatility breakouts in both trending and ranging markets.
+# Target: 20-50 trades/year per symbol.
+
 #!/usr/bin/env python3
-"""
-12h_1w_1d_pivot_volume_v2
-Hypothesis: Combine weekly pivot points for long-term trend bias with daily pivot points for entry/exit signals, using volume confirmation to filter false breakouts. Designed to work in both bull and bear markets by following weekly trend while using daily levels for precise timing. Target: 12-37 trades/year per symbol (48-148 total over 4 years).
-"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_pivot_volume_v2"
-timeframe = "12h"
+name = "4h_bollinger_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,51 +27,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    close_series = pd.Series(close)
+    bb_ma = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_ma + bb_std * bb_std_dev
+    bb_lower = bb_ma - bb_std * bb_std_dev
     
-    # Get weekly data for bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate daily pivot points (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day's data for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Daily pivot point and support/resistance levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
-    
-    # Align daily pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Weekly bias using EMA (21-period)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Bollinger Width (BW) for volatility regime
+    bb_width = (bb_upper - bb_lower) / bb_ma
+    # Percentile rank of BB width over last 50 periods
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
     
     # Volume confirmation: volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,9 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -92,27 +66,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below daily S1 or weekly bias turns down
-            if close[i] < s1_aligned[i] or close[i] < ema_1w_aligned[i]:
+            # Exit: price crosses back inside BB or volatility expands (BW > 70th percentile)
+            if close[i] < bb_ma[i] or bb_width_percentile[i] > 0.7:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above daily R1 or weekly bias turns up
-            if close[i] > r1_aligned[i] or close[i] > ema_1w_aligned[i]:
+            # Exit: price crosses back inside BB or volatility expands (BW > 70th percentile)
+            if close[i] > bb_ma[i] or bb_width_percentile[i] > 0.7:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above daily R1 with volume and weekly bias up
-            if close[i] > r1_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
+            # Low volatility regime: BB width below 50th percentile
+            low_vol = bb_width_percentile[i] < 0.5
+            
+            # Long entry: price breaks above upper BB with volume and low volatility
+            if close[i] > bb_upper[i] and vol_confirm[i] and low_vol:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below daily S1 with volume and weekly bias down
-            elif close[i] < s1_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
+            # Short entry: price breaks below lower BB with volume and low volatility
+            elif close[i] < bb_lower[i] and vol_confirm[i] and low_vol:
                 position = -1
                 signals[i] = -0.25
     
