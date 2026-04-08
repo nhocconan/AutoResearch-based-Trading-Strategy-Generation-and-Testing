@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Bollinger Band Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: In trending markets (1d EMA alignment + ADX > 25), 4h Bollinger Band breakouts 
-with volume confirmation capture continuation of the trend. Works in bull/bear by requiring 
-trend alignment. Volume spike = current 4h volume > 2.0 x 20-period average. 
-Targets 20-50 trades/year.
+4h Fractal Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Williams fractal breakouts aligned with 1d EMA trend and ADX > 25, 
+confirmed by volume spikes, capture strong momentum moves. Works in bull/bear 
+by requiring trend alignment. Targets 20-50 trades/year.
 """
-name = "4h_bb_breakout_1d_trend_volume_v1"
+name = "4h_fractal_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -65,11 +64,11 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Bollinger Bands (20-period, 2 std dev)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
+    # Calculate Williams fractals on 1d
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Add 2-bar delay for fractal confirmation (needs 2 future candles to confirm)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     # Volume spike detector: current volume > 2.0 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,7 +84,8 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema20_1d[i]) or np.isnan(ema50_1d[i]) or 
             np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
+            np.isnan(bearish_fractal_aligned[i]) if i < len(bearish_fractal_aligned) else True or
+            np.isnan(bullish_fractal_aligned[i]) if i < len(bullish_fractal_aligned) else True):
             signals[i] = 0.0
             continue
         
@@ -93,6 +93,8 @@ def generate_signals(prices):
         ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)[i]
         ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        bull_fractal = bullish_fractal_aligned[i]
+        bear_fractal = bearish_fractal_aligned[i]
         
         # Trend filter: 1d EMA alignment (bullish: EMA20 > EMA50, bearish: EMA20 < EMA50)
         ema_bullish = ema20_1d_aligned > ema50_1d_aligned
@@ -102,26 +104,26 @@ def generate_signals(prices):
         strong_trend_1d = adx_1d_aligned > 25
         
         if position == 1:  # Long position
-            # Exit: trend breaks OR price breaks below BB middle
-            if not (ema_bullish and strong_trend_1d) or close[i] <= bb_middle[i]:
+            # Exit: trend breaks OR bearish fractal appears
+            if not (ema_bullish and strong_trend_1d) or bear_fractal:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend breaks OR price breaks above BB middle
-            if not (ema_bearish and strong_trend_1d) or close[i] >= bb_middle[i]:
+            # Exit: trend breaks OR bullish fractal appears
+            if not (ema_bearish and strong_trend_1d) or bull_fractal:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Only trade with volume spike and both trend filters aligned
-            if volume_spike[i] and ema_bullish and strong_trend_1d and close[i] >= bb_upper[i]:
+            if volume_spike[i] and ema_bullish and strong_trend_1d and bull_fractal:
                 position = 1
                 signals[i] = 0.25
-            elif volume_spike[i] and ema_bearish and strong_trend_1d and close[i] <= bb_lower[i]:
+            elif volume_spike[i] and ema_bearish and strong_trend_1d and bear_fractal:
                 position = -1
                 signals[i] = -0.25
     
