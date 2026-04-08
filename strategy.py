@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_1d_trend_volume_v7
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Long: price breaks above 20-bar high + price > 1d EMA50 + volume > 1.5x avg
-# Short: price breaks below 20-bar low + price < 1d EMA50 + volume > 1.5x avg
-# Exit: opposite breakout or volume < avg volume
-# Uses price channels for structure, EMA for trend, volume for confirmation.
-# Target: 20-50 trades/year to avoid fee drag.
+# 4h_volume_price_action_v4
+# Hypothesis: Price action with volume confirmation on 4h timeframe.
+# Long when price closes above prior swing high with volume > 1.5x average.
+# Short when price closes below prior swing low with volume > 1.5x average.
+# Exit on opposite signal or when volume drops below average.
+# Uses swing points to capture momentum with volume confirmation to reduce whipsaw.
+# Tightened exit conditions to reduce trade frequency and avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v7"
+name = "4h_volume_price_action_v4"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -26,16 +26,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate swing highs and lows (5-period lookback)
+    swing_high = np.full(n, np.nan)
+    swing_low = np.full(n, np.nan)
     
-    # 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    for i in range(5, n-5):
+        # Swing high: highest high in 5 bars before and after
+        if high[i] == np.max(high[i-5:i+6]):
+            swing_high[i] = high[i]
+        # Swing low: lowest low in 5 bars before and after
+        if low[i] == np.min(low[i-5:i+6]):
+            swing_low[i] = low[i]
+    
+    # Forward fill swing levels for comparison
+    swing_high = pd.Series(swing_high).ffill().bfill().values
+    swing_low = pd.Series(swing_low).ffill().bfill().values
     
     # Average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,11 +49,11 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 10
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(swing_high[i]) or np.isnan(swing_low[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -57,30 +62,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low or volume drops below average
-            if close[i] < donchian_low[i] or volume[i] < avg_volume[i]:
+            # Exit: price closes below swing low or volume drops below 0.8x average
+            if close[i] < swing_low[i] or volume[i] < 0.8 * avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high or volume drops below average
-            if close[i] > donchian_high[i] or volume[i] < avg_volume[i]:
+            # Exit: price closes above swing high or volume drops below 0.8x average
+            if close[i] > swing_high[i] or volume[i] < 0.8 * avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Volume confirmation: current volume > 1.8x average volume (tightened)
+            volume_ok = volume[i] > 1.8 * avg_volume[i]
             
-            # Donchian breakout entries with trend filter
-            if close[i] > donchian_high[i] and volume_ok and close[i] > ema_50_1d_aligned[i]:
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < donchian_low[i] and volume_ok and close[i] < ema_50_1d_aligned[i]:
-                position = -1
-                signals[i] = -0.25
+            # Price action entries
+            if close[i] > swing_high[i] and volume_ok:
+                # Additional confirmation: previous close was at or below swing high
+                if i > 0 and close[i-1] <= swing_high[i-1]:
+                    position = 1
+                    signals[i] = 0.25
+            elif close[i] < swing_low[i] and volume_ok:
+                # Additional confirmation: previous close was at or above swing low
+                if i > 0 and close[i-1] >= swing_low[i-1]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
