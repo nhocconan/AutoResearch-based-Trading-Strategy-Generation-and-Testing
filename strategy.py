@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 1d_weekly_fractal_breakout_volume_v1
+# 1d_weekly_fractal_breakout_volume_v2
 # Hypothesis: Daily timeframe trading using weekly Williams Fractal breakouts with volume confirmation. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Weekly trend filter ensures alignment with higher timeframe direction. Target: 15-25 trades/year per symbol.
 
-name = "1d_weekly_fractal_breakout_volume_v1"
+name = "1d_weekly_fractal_breakout_volume_v2"
 timeframe = "1d"
 leverage = 1.0
 
