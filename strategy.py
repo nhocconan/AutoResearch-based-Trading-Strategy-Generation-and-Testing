@@ -1,22 +1,42 @@
 #!/usr/bin/env python3
-# 4h_Donchian_breakout_1d_trend_volume_v1
-# Hypothesis: Breakout from 1-day Donchian channels with volume confirmation and 1-week trend filter.
-# Works in bull markets by buying breakouts above upper channel; in bear markets by shorting breakdowns below lower channel.
-# Uses volume surge to confirm institutional participation and reduce false signals.
-# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-# Target: 75-200 total trades over 4 years (19-50/year).
-
-name = "4h_Donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+"""
+12h_2025_momentum_reversal_v1
+Hypothesis: In 2025's bearish/ranging market, momentum reversals at extreme RSI levels with volume confirmation work well on 12h timeframe. Uses RSI(14) for overbought/oversold conditions, volume spike for confirmation, and 1-week trend filter to avoid counter-trend trades. Designed for low trade frequency (12-37/year) to minimize fee drag in choppy markets.
+"""
+name = "12h_2025_momentum_reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(close, period=14):
+    """Calculate RSI with proper Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing: alpha = 1/period
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    # Initial average
+    avg_gain[period] = np.mean(gain[1:period+1]) if period < len(gain) else np.nan
+    avg_loss[period] = np.mean(loss[1:period+1]) if period < len(loss) else np.nan
+    
+    # Wilder smoothing
+    for i in range(period+1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,65 +45,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1D Donchian channels (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 20-period Donchian channels
-    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to 4h
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # 1W trend filter: EMA crossover
+    # 1-week trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema25_1w = pd.Series(close_1w).ewm(span=25, adjust=False, min_periods=25).mean().values
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Weekly trend: 1 if EMA25 > EMA50 (bullish), -1 if EMA25 < EMA50 (bearish)
-    trend_1w = np.where(ema25_1w > ema50_1w, 1, -1)
+    trend_1w = np.where(close_1w > ema50_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # RSI on 12h closes
+    rsi = calculate_rsi(close, 14)
+    
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (vol_ma * 1.5)
+    vol_ratio = volume / vol_ma
+    vol_spike = vol_ratio > 2.0  # Require 2x average volume for confirmation
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after sufficient warmup
-    start_idx = max(40, 20) + 1
+    start_idx = 50  # Wait for RSI and volume MA to stabilize
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        # Skip if required data is not ready
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(trend_1w_aligned[i]):
             continue
         
-        # Long conditions: price breaks above upper Donchian channel + volume surge + weekly bullish trend
-        if (close[i] > upper_channel_aligned[i] and 
-            vol_surge[i] and 
-            trend_1w_aligned[i] == 1):
-            signals[i] = 0.25
-        
-        # Short conditions: price breaks below lower Donchian channel + volume surge + weekly bearish trend
-        elif (close[i] < lower_channel_aligned[i] and 
-              vol_surge[i] and 
-              trend_1w_aligned[i] == -1):
-            signals[i] = -0.25
-        
-        # Otherwise flat
-        else:
-            signals[i] = 0.0
+        if position == 1:  # Long position
+            # Exit: RSI returns to neutral territory (50) or trend changes
+            if rsi[i] >= 50 or trend_1w_aligned[i] == -1:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: RSI returns to neutral territory (50) or trend changes
+            if rsi[i] <= 50 or trend_1w_aligned[i] == 1:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Only trade with volume spike confirmation
+            if not vol_spike[i]:
+                continue
+                
+            # Look for extreme RSI readings with volume confirmation
+            # Long when oversold (RSI < 30) in uptrend or ranging market
+            # Short when overbought (RSI > 70) in downtrend or ranging market
+            if rsi[i] < 30 and trend_1w_aligned[i] != -1:  # Not in strong downtrend
+                position = 1
+                signals[i] = 0.25
+            elif rsi[i] > 70 and trend_1w_aligned[i] != 1:  # Not in strong uptrend
+                position = -1
+                signals[i] = -0.25
     
     return signals
