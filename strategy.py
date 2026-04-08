@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # 6h Weekly Pivot Breakout with Daily Volume Confirmation
 # Hypothesis: Weekly pivot points act as key institutional support/resistance.
 # Breakouts above R2 or below S2 with strong daily volume (>1.5x 20-period average)
