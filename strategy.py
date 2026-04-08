@@ -1,17 +1,17 @@
-# 4h_triple_confirmation_breakout_v1
-# Hypothesis: Combines 4h price action (breaking above/below 20-period high/low) with 1d trend confirmation (price above/below 200 EMA) and volume surge (2x average volume).
-# Trades only when all three conditions align, reducing false signals.
-# Long when: price breaks above 20-period high, price > 200 EMA on 1d, volume > 2x average.
-# Short when: price breaks below 20-period low, price < 200 EMA on 1d, volume > 2x average.
-# Exit when price breaks back below the 20-period high (for longs) or above the 20-period low (for shorts).
-# Uses strict entry conditions to limit trades to 20-40 per year per symbol, avoiding fee drag.
+#!/usr/bin/env python3
+# daily_price_action_v1
+# Hypothesis: Daily chart strategy using price action at weekly 200 EMA with volume confirmation.
+# Long when price crosses above weekly 200 EMA with volume > 1.5x average.
+# Short when price crosses below weekly 200 EMA with volume > 1.5x average.
+# Exit when price crosses back across weekly 200 EMA.
+# Target: 15-25 trades/year, works in both bull and bear markets by following weekly trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_triple_confirmation_breakout_v1"
-timeframe = "4h"
+name = "daily_price_action_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h price channel: 20-period high/low for breakout
-    period = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    highest_high = high_series.rolling(window=period, min_periods=period).max().values
-    lowest_low = low_series.rolling(window=period, min_periods=period).min().values
+    # Weekly 200 EMA for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
+    ema200_weekly = pd.Series(close_weekly).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
     
-    # Volume filter: 2x 20-period average
+    # Volume filter: 1.5x 20-day average
     vol_ma_period = 20
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=vol_ma_period, min_periods=vol_ma_period).mean().values
-    vol_surge = volume > 2 * vol_ma
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
     
-    # Get 1d data for trend confirmation (price vs 200 EMA)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate 200 EMA on 1d
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    # Align to 4h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(period, vol_ma_period, 200) + 1
+    start_idx = max(200, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema200_1d_aligned[i])):
+        if np.isnan(ema200_weekly_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 pass  # Hold position
             else:
@@ -61,30 +56,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price breaks back below 20-period high
-            if close[i] < highest_high[i]:
+            # Exit: Price below weekly 200 EMA
+            if close[i] < ema200_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price breaks back above 20-period low
-            if close[i] > lowest_low[i]:
+            # Exit: Price above weekly 200 EMA
+            if close[i] > ema200_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above 20-period high, price > 200 EMA on 1d, volume surge
-            if (close[i] > highest_high[i] and 
-                close[i] > ema200_1d_aligned[i] and 
+            # Long entry: Price crosses above weekly 200 EMA with volume surge
+            if (close[i] > ema200_weekly_aligned[i] and 
+                close[i-1] <= ema200_weekly_aligned[i-1] and 
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below 20-period low, price < 200 EMA on 1d, volume surge
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema200_1d_aligned[i] and 
+            # Short entry: Price crosses below weekly 200 EMA with volume surge
+            elif (close[i] < ema200_weekly_aligned[i] and 
+                  close[i-1] >= ema200_weekly_aligned[i-1] and 
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
