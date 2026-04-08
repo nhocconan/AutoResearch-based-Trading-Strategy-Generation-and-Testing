@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1d_2025_scalp_v1
-# Hypothesis: Follow the 1w trend using EMA crossover and ADX strength, with 1d regime filter to avoid sideways markets.
-# Enter on 1d pullbacks in the direction of the 1w trend with volume confirmation. Works in bull/bear by aligning with higher timeframe trend.
-# Uses volume spike to confirm institutional participation and reduce false signals.
-# Target: 30-100 total trades over 4 years (7-25/year).
+# 6h_12h_1d_camarilla_volume_v1
+# Hypothesis: Use daily Camarilla pivot levels for 6h entries with volume confirmation.
+# Fade at R3/S3 levels (mean reversion) when price is outside daily range but showing exhaustion.
+# Breakout continuation at R4/S4 levels when price breaks with strong volume.
+# Uses 12h trend filter to avoid counter-trend trades in strong trends.
+# Works in bull/bear by adapting to price action at key institutional levels.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_2025_scalp_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,127 +26,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend: EMA crossover
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA21 and EMA50 on 1w close
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1w trend direction: 1 if EMA21 > EMA50, -1 if EMA21 < EMA50
-    trend_1w = np.where(ema21_1w > ema50_1w, 1, -1)
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.0 * (high - low)
+    # R2 = close + 0.5 * (high - low)
+    # R1 = close + 0.25 * (high - low)
+    # S1 = close - 0.25 * (high - low)
+    # S2 = close - 0.5 * (high - low)
+    # S3 = close - 1.0 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    range_1d = high_1d - low_1d
+    r4 = close_1d + 1.5 * range_1d
+    r3 = close_1d + 1.0 * range_1d
+    s3 = close_1d - 1.0 * range_1d
+    s4 = close_1d - 1.5 * range_1d
     
-    # 1w ADX for trend strength
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            elif plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                minus_dm[i] = 0
-            
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        atr[period-1] = np.mean(tr[1:period]) if period < len(tr) else np.nan
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-        
-        return adx
+    # Align daily levels to 6h
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
-    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values)
+    # 12h trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Align 1w indicators to 1d
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    close_12h = df_12h['close'].values
+    # Simple trend: price above/below 20-period EMA
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_12h = np.where(close_12h > ema20_12h, 1, -1)
+    trend_12h_6h = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # 1d regime filter: avoid ranging markets
-    close_1d = prices['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    
-    # Market regime: 1 if trending (price > SMA50), -1 if ranging (price < SMA50)
-    regime_1d = np.where(close_1d > sma50_1d, 1, -1)
-    
-    # Volume spike detection on 1d
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24*6h = 6 days
     vol_ratio = volume / vol_ma
-    vol_spike = vol_ratio > 1.5  # 50% above average volume
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_spike = vol_ratio > 1.8  # 80% above average volume
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(50, 20) + 1
+    start_idx = 24  # Need volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trend_1w_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(sma50_1d[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Only trade in session and with volume spike
-        if not (in_session[i] and vol_spike[i]):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(trend_12h_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
-                # Hold position until exit signal
+                # Hold position
                 pass
             else:
                 signals[i] = 0.0
-                continue
+            continue
         
         if position == 1:  # Long position
-            # Exit: 1w trend turns bearish OR ADX weakens
-            if trend_1w_aligned[i] == -1 or adx_1w_aligned[i] < 20:
+            # Exit conditions
+            # 1. Price reaches R3 (take profit)
+            # 2. 12h trend turns bearish
+            # 3. Price breaks below S3 (stop)
+            if (close[i] >= r3_6h[i] or 
+                trend_12h_6h[i] == -1 or 
+                close[i] <= s3_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: 1w trend turns bullish OR ADX weakens
-            if trend_1w_aligned[i] == 1 or adx_1w_aligned[i] < 20:
+            # Exit conditions
+            # 1. Price reaches S3 (take profit)
+            # 2. 12h trend turns bullish
+            # 3. Price breaks above R3 (stop)
+            if (close[i] <= s3_6h[i] or 
+                trend_12h_6h[i] == 1 or 
+                close[i] >= r3_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Need strong trend (ADX > 25) and favorable regime
-            if adx_1w_aligned[i] > 25 and regime_1d == trend_1w_aligned[i]:
-                # Long: 1w bullish trend + price above 1d EMA21 (pullback entry)
-                if trend_1w_aligned[i] == 1:
-                    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-                    if not np.isnan(ema21_1d[i]) and close[i] > ema21_1d[i]:
-                        position = 1
-                        signals[i] = 0.20
-                # Short: 1w bearish trend + price below 1d EMA21
-                elif trend_1w_aligned[i] == -1:
-                    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-                    if not np.isnan(ema21_1d[i]) and close[i] < ema21_1d[i]:
-                        position = -1
-                        signals[i] = -0.20
+            # Fade at R3/S3 levels (mean reversion)
+            # Only when 12h trend is weak or aligning with fade
+            if (abs(trend_12h_6h[i]) <= 1):  # Allow counter-trend if trend not strong
+                # Long when price touches S3 with volume spike (bounce)
+                if (close[i] <= s3_6h[i] * 1.002 and  # Allow small buffer
+                    vol_spike[i]):
+                    position = 1
+                    signals[i] = 0.25
+                # Short when price touches R3 with volume spike (rejection)
+                elif (close[i] >= r3_6h[i] * 0.998 and  # Allow small buffer
+                      vol_spike[i]):
+                    position = -1
+                    signals[i] = -0.25
+            # Breakout at R4/S4 levels with volume (continuation)
+            elif vol_spike[i]:
+                # Long breakout above R4
+                if close[i] >= r4_6h[i] * 1.001:
+                    position = 1
+                    signals[i] = 0.25
+                # Short breakdown below S4
+                elif close[i] <= s4_6h[i] * 0.999:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
