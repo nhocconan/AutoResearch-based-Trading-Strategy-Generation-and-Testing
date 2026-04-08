@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Uses Williams Fractals for breakout detection, 1d EMA for trend, and volume spike
 # Designed to work in both bull and bear markets by requiring strong trend alignment
 # Target: 12-37 trades/year, focused on high-probability breakouts with confirmation
-name = "12h_fractal_breakout_1d_trend_volume_v4"
+name = "12h_fractal_breakout_1d_trend_volume_v5"
 timeframe = "12h"
 leverage = 1.0
 
