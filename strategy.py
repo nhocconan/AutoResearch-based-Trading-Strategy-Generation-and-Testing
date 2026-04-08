@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_1d_trend_volume_v1
-# Hypothesis: On 4h timeframe, buy when price breaks above Donchian(20) high with 1d uptrend and volume > 1.5x average.
-# Sell when price breaks below Donchian(20) low with 1d downtrend and volume > 1.5x average.
-# Exit when price touches opposite Donchian band or volume drops below average.
-# Uses 1d trend filter to avoid counter-trend trades in both bull and bear markets.
-# Volume confirmation ensures momentum behind breakouts.
-# Target: 20-50 trades/year to minimize fee drag.
+# 12h_rsi_extreme_trend_volume_v1
+# Hypothesis: On 12h timeframe, use extreme RSI levels combined with daily trend and volume confirmation.
+# Long when RSI < 20 (deep oversold) with daily trend up (price > daily EMA50) and volume > 1.5x average.
+# Short when RSI > 80 (deep overbought) with daily trend down (price < daily EMA50) and volume > 1.5x average.
+# Exit when RSI returns to neutral range (40-60) or volume drops below average.
+# This strategy targets rare but high-probability mean-reversion setups in both bull and bear markets.
+# Extreme RSI readings indicate exhaustion, and trend filter ensures we trade with higher timeframe momentum.
+# Volume confirmation avoids false signals in low-liquidity periods.
+# Expected trade frequency: 15-25 per year (60-100 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_rsi_extreme_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +28,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate RSI on 12h data
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 1d trend: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Use Wilder's smoothing (alpha = 1/period)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.zeros_like(close)
+    rs[14:] = avg_gain[13:] / (avg_loss[13:] + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
+    # Daily EMA50 for trend filter
+    daily_close = df_daily['close'].values
     daily_ema50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    daily_ema50_4h = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    daily_ema50_12h = align_htf_to_ltf(prices, df_daily, daily_ema50)
     
-    # Volume confirmation: 20-period average on 4h
+    # Volume confirmation: 20-period average on 12h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup
-    start_idx = 50
+    # Start after RSI warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(daily_ema50_4h[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(rsi[i]) or np.isnan(daily_ema50_12h[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -59,16 +77,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price touches lower Donchian band or volume drops below average
-            if close[i] <= donchian_low[i] or volume[i] < avg_volume[i]:
+            # Exit: RSI returns to neutral range (40-60) or volume drops below average
+            if rsi[i] >= 40 and rsi[i] <= 60 or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches upper Donchian band or volume drops below average
-            if close[i] >= donchian_high[i] or volume[i] < avg_volume[i]:
+            # Exit: RSI returns to neutral range (40-60) or volume drops below average
+            if rsi[i] >= 40 and rsi[i] <= 60 or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -77,16 +95,16 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # 1d trend filter
-            daily_uptrend = close[i] > daily_ema50_4h[i]
-            daily_downtrend = close[i] < daily_ema50_4h[i]
+            # Daily trend filter
+            daily_uptrend = close[i] > daily_ema50_12h[i]
+            daily_downtrend = close[i] < daily_ema50_12h[i]
             
-            # Long entry: price breaks above upper Donchian band with volume and uptrend
-            if close[i] > donchian_high[i] and volume_ok and daily_uptrend:
+            # Long entry: RSI < 20 (deep oversold) with volume and uptrend
+            if rsi[i] < 20 and volume_ok and daily_uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower Donchian band with volume and downtrend
-            elif close[i] < donchian_low[i] and volume_ok and daily_downtrend:
+            # Short entry: RSI > 80 (deep overbought) with volume and downtrend
+            elif rsi[i] > 80 and volume_ok and daily_downtrend:
                 position = -1
                 signals[i] = -0.25
     
