@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_4h_1d_camarilla_pullback_v1
-Hypothesis: Trade pullbacks to daily Camarilla pivot levels in the direction of 4h trend.
-- Only trade in direction of 4h EMA trend (above/below EMA50)
-- Long: 4h bullish + price pulls back to daily pivot then closes above it
-- Short: 4h bearish + price pulls back to daily pivot then closes below it
-- Exit on opposite pullback or 4h trend reversal
-- Target: 20-30 trades/year to avoid overtrading
+12h_bb_reversion_v1
+Hypothesis: Mean reversion at Bollinger Bands with 1d trend filter on 12h timeframe.
+- Uses Bollinger Bands (20,2) on 12h for overbought/oversold signals
+- 1d EMA50 filter ensures trades align with higher timeframe trend
+- Volume confirmation (1.5x average) filters false signals
+- Targets 15-25 trades/year to stay within fee limits
+- Works in both bull and bear markets by trading reversions within trends
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_4h_1d_camarilla_pullback_v1"
-timeframe = "4h"
+name = "12h_bb_reversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,45 +25,34 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 4h EMA for trend
+    # Bollinger Bands on 12h (20,2)
     close_s = pd.Series(close)
-    ema_50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
-    bullish = close > ema_50
-    bearish = close < ema_50
+    basis = close_s.rolling(window=20, min_periods=20).mean()
+    dev = close_s.rolling(window=20, min_periods=20).std()
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
     
-    # Daily data for Camarilla pivot
+    # Volume average (20-period)
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=20, min_periods=20).mean()
+    
+    # Daily EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day's OHLC for Camarilla pivot (H4/L4 levels)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = np.nan
-    low_1d_prev[0] = np.nan
-    close_1d_prev[0] = np.nan
-    
-    # Camarilla levels: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
-    camarilla_h4 = close_1d_prev + 1.1 * (high_1d_prev - low_1d_prev) / 2
-    camarilla_l4 = close_1d_prev - 1.1 * (high_1d_prev - low_1d_prev) / 2
-    
-    # Align daily Camarilla levels to 4h
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema_50[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -71,29 +60,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long
-            # Exit: pullback below L4 or 4h turns bearish
-            if close[i] < camarilla_l4_aligned[i] or bearish[i]:
+            # Exit: price touches middle band or trend turns bearish
+            if close[i] >= basis[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: pullback above H4 or 4h turns bullish
-            if close[i] > camarilla_h4_aligned[i] or bullish[i]:
+            # Exit: price touches middle band or trend turns bullish
+            if close[i] <= basis[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: 4h bullish + pullback to L4 then close above
-            if (bullish[i] and 
-                close[i-1] <= camarilla_l4_aligned[i-1] and close[i] > camarilla_l4_aligned[i]):
+            # Long: oversold + volume spike + uptrend
+            if (close[i] <= lower[i] and 
+                volume[i] > 1.5 * vol_ma[i] and
+                close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: 4h bearish + pullback to H4 then close below
-            elif (bearish[i] and 
-                  close[i-1] >= camarilla_h4_aligned[i-1] and close[i] < camarilla_h4_aligned[i]):
+            # Short: overbought + volume spike + downtrend
+            elif (close[i] >= upper[i] and 
+                  volume[i] > 1.5 * vol_ma[i] and
+                  close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
