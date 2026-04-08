@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_1d_trend_volume_v7
-# Hypothesis: Donchian(20) breakout with volume confirmation and 1-day EMA50 trend filter. Only enter long when price breaks above upper band + volume > 1.5x average + price > daily EMA50; short when breaks below lower band + volume > 1.5x average + price < daily EMA50. Uses tight entry conditions to limit trades (~30-50/year) and avoid fee drag. Works in bull/bear by following higher timeframe trend.
+# 4h_donchian_breakout_1d_trend_volume_v2
+# Hypothesis: Donchian(20) breakout on 4h with volume confirmation and 1-day EMA50 trend filter captures strong trend-following entries. Works in bull/bear by following higher timeframe trend. Uses tight entry conditions to limit trades (~30-50/year) and avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v7"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,13 +32,13 @@ def generate_signals(prices):
     # Align 1d EMA50 to 4h
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels (20-period)
+    # Donchian channel (20-period high/low)
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: 4h volume > 1.5x 20-period average
+    # Volume filter: 4h volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -48,8 +48,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
