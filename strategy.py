@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 6h_1d_1w_pivots_momentum_v1
-# Hypothesis: Combine weekly pivot points with daily momentum on 6h timeframe.
-# Long when price breaks above weekly R1 with daily RSI > 50 and volume confirmation.
-# Short when price breaks below weekly S1 with daily RSI < 50 and volume confirmation.
-# Uses weekly pivots for structure and daily momentum for timing.
-# Designed for 6h timeframe targeting 50-150 total trades over 4 years.
-# Works in bull markets via breakout momentum and bear markets via mean reversion at S1/R1.
+# 6h_1d_pivots_breakout_volume_v1
+# Hypothesis: Trade breakouts of daily Camarilla pivot levels with volume confirmation on 6h timeframe.
+# In bullish regime (price > 200-period EMA): long when price breaks above R4 pivot with volume surge.
+# In bearish regime (price < 200-period EMA): short when price breaks below S4 pivot with volume surge.
+# Uses volume filter (2x average) to confirm breakout strength.
+# Camarilla levels provide institutional support/resistance levels that work in both trending and ranging markets.
+# Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
+# Works in both bull and bear markets by adapting to prevailing trend via EMA filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_pivots_momentum_v1"
+name = "6h_1d_pivots_breakout_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,57 +26,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (standard formula)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot)
-    
-    # Align weekly pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Daily RSI for momentum filter
+    # Daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close_1d)
-    delta = np.concatenate([[0], delta])  # First element is 0
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla pivot levels for previous day
+    # Formula: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # We'll use the previous day's high, low, close to calculate today's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # First day will have NaN values due to roll
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align daily RSI to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate Camarilla levels
+    range_hl = prev_high - prev_low
+    r4 = prev_close + (range_hl * 1.1 / 2)
+    r3 = prev_close + (range_hl * 1.1 / 4)
+    s3 = prev_close - (range_hl * 1.1 / 4)
+    s4 = prev_close - (range_hl * 1.1 / 2)
     
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align pivot levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 200-period EMA for trend filter
+    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Volume confirmation: volume > 2x 24-period average (4 days of 6h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Ensure indicators are ready
+    start_idx = 200  # Ensure EMA is ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema200[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -83,30 +80,32 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition
-        vol_surge = volume[i] > 1.3 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        vol_surge = volume[i] > 2.0 * vol_ma_24[i] if vol_ma_24[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: price breaks below weekly S1 or RSI < 40
-            if close[i] < s1_aligned[i] or rsi_aligned[i] < 40:
+            # Exit: price breaks below S3 level (support)
+            if close[i] < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above weekly R1 or RSI > 60
-            if close[i] > r1_aligned[i] or rsi_aligned[i] > 60:
+            # Exit: price breaks above R3 level (resistance)
+            if close[i] > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above weekly R1 with RSI > 50 and volume surge
-            if (close[i] > r1_aligned[i] and rsi_aligned[i] > 50 and vol_surge):
+            # Long entry: price breaks above R4 with volume surge and bullish trend
+            if (close[i] > r4_aligned[i] and vol_surge and 
+                close[i] > ema200[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below weekly S1 with RSI < 50 and volume surge
-            elif (close[i] < s1_aligned[i] and rsi_aligned[i] < 50 and vol_surge):
+            # Short entry: price breaks below S4 with volume surge and bearish trend
+            elif (close[i] < s4_aligned[i] and vol_surge and 
+                  close[i] < ema200[i]):
                 position = -1
                 signals[i] = -0.25
     
