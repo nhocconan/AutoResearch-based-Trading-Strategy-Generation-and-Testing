@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_v1
-# Hypothesis: 4-hour Donchian channel breakout with 1-day trend filter and volume confirmation.
-# Long when: price breaks above 20-period Donchian high, price > 1-day EMA50, and volume > 1.5x average volume.
-# Short when: price breaks below 20-period Donchian low, price < 1-day EMA50, and volume > 1.5x average volume.
-# Exit when price crosses back through the Donchian midpoint or trend fails.
-# Uses 1-day EMA for trend filter to avoid counter-trend trades, volume confirmation to ensure breakout strength.
-# Target: 20-40 trades/year to minimize fee dust while capturing strong trending moves.
+# 6h_1d_weekly_pivot_breakout_v1
+# Hypothesis: 6-hour breakout from weekly pivot levels (R4/S4) with 1-day volume confirmation.
+# Long when price breaks above weekly R4 with volume > 1.5x 20-period average.
+# Short when price breaks below weekly S4 with volume > 1.5x 20-period average.
+# Exit when price returns to weekly pivot (PP) or opposite extreme (S4/R4) is breached.
+# Uses weekly pivot for structure and 1d volume filter to avoid false breakouts.
+# Target: 15-25 trades/year to minimize fee drag while capturing strong moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,71 +25,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 20-period Donchian channels
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
+    # Calculate 20-period average volume
+    vol_avg = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i < 20:
+            vol_avg[i] = np.nan
+        else:
+            if i == 20:
+                vol_avg[i] = vol_sum / 20
+            else:
+                vol_sum -= volume[i-20]
+                vol_avg[i] = vol_sum / 20
     
-    # Calculate Donchian midpoint for exit
-    donchian_mid = (highest_high + lowest_low) / 2
-    
-    # Calculate average volume (20-period)
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-19:i+1])
-    
-    # Get 1-day EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_1d_50 = np.full(len(close_1d), np.nan)
-    ema_1d_50[49] = np.mean(close_1d[:50])
-    for i in range(50, len(close_1d)):
-        ema_1d_50[i] = close_1d[i] * 0.0377 + ema_1d_50[i-1] * 0.9623
+    # Calculate weekly pivot points: PP, R1-R4, S1-S4
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    pp = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    r4 = weekly_high + 3 * (pp - weekly_low)
+    s4 = weekly_low - 3 * (weekly_high - pp)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(avg_volume[i]) or np.isnan(ema_1d_50_aligned[i]):
+    for i in range(20, n):
+        # Skip if any required data is NaN
+        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
-                pass  # Hold
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        vol_ratio = volume[i] / vol_avg[i] if vol_avg[i] > 0 else 0
+        vol_confirm = vol_ratio > 1.5
+        
         if position == 1:  # Long
-            # Exit: price below Donchian midpoint OR below 1-day EMA50
-            if close[i] < donchian_mid[i] or close[i] < ema_1d_50_aligned[i]:
+            # Exit: price returns to pivot point OR breaks below S4
+            if close[i] <= pp_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price above Donchian midpoint OR above 1-day EMA50
-            if close[i] > donchian_mid[i] or close[i] > ema_1d_50_aligned[i]:
+            # Exit: price returns to pivot point OR breaks above R4
+            if close[i] >= pp_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry: bullish breakout with volume confirmation
-            if (close[i] > highest_high[i] and 
-                close[i] > ema_1d_50_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # Entry: long breakout above R4 with volume confirmation
+            if close[i] > r4_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Entry: bearish breakout with volume confirmation
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema_1d_50_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # Entry: short breakout below S4 with volume confirmation
+            elif close[i] < s4_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
