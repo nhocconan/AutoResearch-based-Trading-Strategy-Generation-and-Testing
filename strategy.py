@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v11
-# Hypothesis: Further refine the fractal breakout strategy by adding a volatility filter (ATR-based) to avoid choppy markets and tightening the volume confirmation to 4x average.
-# Uses Williams Fractals from daily timeframe with 2-bar confirmation, trend filter via daily EMA20, and momentum filter via RSI (40-60).
+# 4h_fractal_breakout_1d_trend_volume_v12
+# Hypothesis: Improve upon v11 by further tightening entry conditions to reduce trade frequency and avoid overtrading.
+# Changes from v11: Increased volume confirmation threshold to 5x average, narrowed RSI range to 45-55, and added a minimum holding period of 3 bars.
+# Uses Williams Fractals from daily timeframe with 2-bar confirmation, trend filter via daily EMA20, and momentum filter via RSI (45-55).
 # Trades only during 08-20 UTC to avoid low-liquidity periods. Position size fixed at 0.25.
-# Target: 15-30 trades/year by requiring confluence of trend, fractal breakout, high volume, healthy momentum, and low volatility.
+# Target: 10-25 trades/year by requiring confluence of trend, fractal breakout, high volume, healthy momentum, and low volatility.
 # Designed to work in both bull and bear markets via trend filter and avoid chop with volatility filter and moderate RSI range.
 
-name = "4h_fractal_breakout_1d_trend_volume_v11"
+name = "4h_fractal_breakout_1d_trend_volume_v12"
 timeframe = "4h"
 leverage = 1.0
 
@@ -98,6 +99,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    bars_since_entry = 0  # Track bars since entry for minimum holding period
     
     # Start from sufficient lookback
     start_idx = max(30, 20, 14, 28)  # Need enough data for all indicators
@@ -106,6 +108,7 @@ def generate_signals(prices):
         # Skip if outside trading session
         if not in_session[i]:
             signals[i] = 0.0
+            bars_since_entry = 0  # Reset counter when out of session
             continue
         
         # Get aligned daily indicators for current 4h bar
@@ -121,37 +124,43 @@ def generate_signals(prices):
         if (np.isnan(ema20_val) or np.isnan(vol_ma_val) or np.isnan(atr_val) or np.isnan(atr_ma_val) or
             volume[i] == 0 or np.isnan(rsi_val)):
             signals[i] = 0.0
+            bars_since_entry = 0  # Reset counter when data invalid
             continue
         
         # Volatility filter: current ATR < 1.5x 20-period average ATR (avoid choppy markets)
         vol_filter = atr_val < 1.5 * atr_ma_val
         
-        # Volume breakout condition: current volume > 4.0x 20-period average (tighter)
-        vol_breakout = volume[i] > 4.0 * vol_ma_val
+        # Volume breakout condition: current volume > 5.0x 20-period average (tighter)
+        vol_breakout = volume[i] > 5.0 * vol_ma_val
         
         # Trend filter: price above/below daily EMA20
         uptrend = close[i] > ema20_val
         downtrend = close[i] < ema20_val
         
-        # Momentum filter: RSI in moderate 40-60 range
-        rsi_healthy = 40 <= rsi_val <= 60
+        # Momentum filter: RSI in narrow 45-55 range
+        rsi_healthy = 45 <= rsi_val <= 55
         
         if position == 1:  # Long position
-            # Exit if price breaks below bullish fractal (support)
-            if not np.isnan(bullish_val) and close[i] < bullish_val:
+            bars_since_entry += 1
+            # Exit if price breaks below bullish fractal (support) OR minimum holding period met
+            if (not np.isnan(bullish_val) and close[i] < bullish_val) or bars_since_entry >= 3:
                 position = 0
                 signals[i] = 0.0
+                bars_since_entry = 0
             elif position == 1:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above bearish fractal (resistance)
-            if not np.isnan(bearish_val) and close[i] > bearish_val:
+            bars_since_entry += 1
+            # Exit if price breaks above bearish fractal (resistance) OR minimum holding period met
+            if (not np.isnan(bearish_val) and close[i] > bearish_val) or bars_since_entry >= 3:
                 position = 0
                 signals[i] = 0.0
+                bars_since_entry = 0
             elif position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
+            bars_since_entry = 0
             # Breakout long above bearish fractal (resistance) with volume confirmation, uptrend, healthy momentum, and low volatility
             if (not np.isnan(bearish_val) and high[i] >= bearish_val and 
                 close[i] > bearish_val and vol_breakout and uptrend and rsi_healthy and vol_filter):
