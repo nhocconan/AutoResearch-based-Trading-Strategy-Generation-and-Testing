@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_momentum_v1
-# Hypothesis: Uses weekly pivot points from 1w data to establish long-term bias, combined with 6-hour momentum and volume confirmation.
-# In bull markets (price above weekly pivot), look for long entries on 6h momentum breakouts with volume surge.
-# In bear markets (price below weekly pivot), look for short entries on 6h momentum breakdowns with volume surge.
-# Uses weekly support/resistance levels (S1, R1) for stop/reversal logic to adapt to both trending and ranging markets.
-# Designed for low trade frequency (~20-50/year) to minimize fee drag on 6h timeframe.
+# 12h_donchian_breakout_daily_trend_volume_v1
+# Hypothesis: Uses 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+# Enters long on Donchian breakout above in daily uptrend with volume spike; short on breakdown in downtrend with volume spike.
+# Exits on opposite Donchian break or trend reversal. Designed for low trade frequency (~15-35/year) to minimize fee drift.
+# Uses 1-day EMA for stronger trend filter to reduce whipsaw and improve performance in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_momentum_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -25,83 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points and trend bias
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week's data)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
+    # 1d trend filter: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly data to 6h timeframe (using prior week's values for look-ahead protection)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h momentum: 12-period ROC (rate of change)
-    roc_period = 12
-    roc = ((close / np.roll(close, roc_period)) - 1) * 100
-    # Handle first roc_period values
-    roc[:roc_period] = 0
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation (20-period average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(50, 20)  # Ensure enough data for all indicators
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(roc[i]) or np.isnan(avg_volume[i])):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine market bias from weekly pivot
-        bullish_bias = close[i] > pivot_1w_aligned[i]
-        bearish_bias = close[i] < pivot_1w_aligned[i]
+        # Trend filter
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
-        # Volume confirmation (2x average volume)
-        volume_ok = volume[i] > 2.0 * avg_volume[i]
+        # Donchian breakout signals
+        breakout_high = close[i] > donchian_high[i-1]
+        breakout_low = close[i] < donchian_low[i-1]
+        
+        # Volume confirmation
+        volume_ok = volume[i] > 1.8 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit conditions: price breaks below S1 or momentum reverses
-            if close[i] < s1_1w_aligned[i] or roc[i] < -1.0:
+            # Exit: Donchian breakdown or trend change
+            if close[i] < donchian_low[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price breaks above R1 or momentum reverses
-            if close[i] > r1_1w_aligned[i] or roc[i] > 1.0:
+            # Exit: Donchian breakout or trend change
+            if close[i] > donchian_high[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if volume_ok:
-                # Long entry: bullish bias + positive momentum breakout
-                if bullish_bias and roc[i] > 1.5 and close[i] > r1_1w_aligned[i]:
+                # Long entry: Donchian breakout in uptrend
+                if daily_uptrend and breakout_high:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: bearish bias + negative momentum breakout
-                elif bearish_bias and roc[i] < -1.5 and close[i] < s1_1w_aligned[i]:
+                # Short entry: Donchian breakdown in downtrend
+                elif daily_downtrend and breakout_low:
                     position = -1
                     signals[i] = -0.25
     
