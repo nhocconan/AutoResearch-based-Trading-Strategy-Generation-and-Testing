@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_elder_ray_regime_v1
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX>25) to trade with higher timeframe momentum.
-# Long: Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 AND 1d +DI > -DI (bullish regime)
-# Short: Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 AND 1d -DI > +DI (bearish regime)
-# Exit: Elder Ray divergence (Bull Power < 0 for long, Bear Power > 0 for short) OR ADX < 20 (regime change)
-# Uses 6h primary timeframe with 1d HTF for ADX/DI regime filter.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# 4h_1d_1w_camarilla_pivot_volume_regime_v1
+# Hypothesis: 4h Camarilla pivot breakouts with volume confirmation and 1d/1w regime filter.
+# Long: price breaks above R4 (1d) with volume > 2.0x 20-period average AND 1d close > 1w VWAP (bullish regime)
+# Short: price breaks below S4 (1d) with volume > 2.0x 20-period average AND 1d close < 1w VWAP (bearish regime)
+# Exit: price returns to 1d VWAP or opposite pivot level (R3/S3) with volume confirmation
+# Uses 4h primary timeframe with 1d HTF for pivot levels and 1w HTF for regime filter.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_regime_v1"
-timeframe = "6h"
+name = "4h_1d_1w_camarilla_pivot_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,107 +23,131 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate 4h volume ratio (current vs 20-period average)
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Get 1d data for ADX/DI regime filter
+    # Get 1d data for Camarilla pivot levels and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX and DI (14-period)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    camarilla_r4 = np.full(len(df_1d), np.nan)
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
+    camarilla_s4 = np.full(len(df_1d), np.nan)
+    vwap_1d = np.full(len(df_1d), np.nan)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    for i in range(len(df_1d)):
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        if i == 0:
+            vwap_1d[i] = typical_price
+        else:
+            vwap_1d[i] = (vwap_1d[i-1] * np.sum(volume[:i]) + typical_price * volume[i]) / (np.sum(volume[:i]) + volume[i])
+        
+        if i > 0:
+            prev_close = close_1d[i-1]
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            range_val = prev_high - prev_low
+            
+            camarilla_r4[i] = prev_close + range_val * 1.1 / 2.0
+            camarilla_r3[i] = prev_close + range_val * 1.1 / 4.0
+            camarilla_s3[i] = prev_close - range_val * 1.1 / 4.0
+            camarilla_s4[i] = prev_close - range_val * 1.1 / 2.0
     
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value: simple average
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-        # Rest: EMA
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Get 1w data for VWAP regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    tr14 = wilders_smoothing(tr, 14)
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    # Calculate 1w VWAP
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # DI and ADX
-    plus_di14 = np.where(tr14 > 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 > 0, 100 * minus_dm14 / tr14, 0)
-    dx = np.where((plus_di14 + minus_di14) > 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx14 = wilders_smoothing(dx, 14)
+    vwap_1w = np.full(len(df_1w), np.nan)
+    for i in range(len(df_1w)):
+        typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+        if i == 0:
+            vwap_1w[i] = typical_price
+        else:
+            vwap_1w[i] = (vwap_1w[i-1] * np.sum(volume_1w[:i]) + typical_price * volume_1w[i]) / (np.sum(volume_1w[:i]) + volume_1w[i])
     
-    # Align 1d indicators to 6h timeframe
-    adx14_aligned = align_htf_to_ltf(prices, df_1d, adx14)
-    plus_di14_aligned = align_htf_to_ltf(prices, df_1d, plus_di14)
-    minus_di14_aligned = align_htf_to_ltf(prices, df_1d, minus_di14)
+    # Align 1d indicators to 4h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Align 1w VWAP to 4h timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
     for i in range(50, n):
-        # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx14_aligned[i]) or np.isnan(plus_di14_aligned[i]) or np.isnan(minus_di14_aligned[i])):
+        vol_r = vol_ratio[i]
+        price = close[i]
+        
+        if np.isnan(vol_r):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        bp = bull_power[i]
-        br = bear_power[i]
-        adx = adx14_aligned[i]
-        pdi = plus_di14_aligned[i]
-        mdi = minus_di14_aligned[i]
+        r4 = camarilla_r4_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        s4 = camarilla_s4_aligned[i]
+        vwap1d = vwap_1d_aligned[i]
+        vwap1w = vwap_1w_aligned[i]
+        
+        if np.isnan(r4) or np.isnan(r3) or np.isnan(s3) or np.isnan(s4) or np.isnan(vwap1d) or np.isnan(vwap1w):
+            if position != 0:
+                pass  # Hold position
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit: Bull Power turns negative OR ADX < 20 (regime change)
-            if bp < 0 or adx < 20:
+            # Exit: price returns to 1d VWAP or breaks below R3 with volume
+            if price <= vwap1d or (price < r3 and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bear Power turns positive OR ADX < 20 (regime change)
-            if br > 0 or adx < 20:
+            # Exit: price returns to 1d VWAP or breaks above S3 with volume
+            if price >= vwap1d or (price > s3 and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 AND +DI > -DI
-            if bp > 0 and br < 0 and adx > 25 and pdi > mdi:
+            # Long entry: price breaks above R4 with volume AND 1d close > 1w VWAP (bullish regime)
+            if price > r4 and vol_r > 2.0 and vwap1d > vwap1w:
                 position = 1
+                entry_price = price
                 signals[i] = 0.25
-            # Short entry: Bear Power < 0 AND Bull Power > 0 AND ADX > 25 AND -DI > +DI
-            elif br < 0 and bp > 0 and adx > 25 and mdi > pdi:
+            # Short entry: price breaks below S4 with volume AND 1d close < 1w VWAP (bearish regime)
+            elif price < s4 and vol_r > 2.0 and vwap1d < vwap1w:
                 position = -1
+                entry_price = price
                 signals[i] = -0.25
     
     return signals
