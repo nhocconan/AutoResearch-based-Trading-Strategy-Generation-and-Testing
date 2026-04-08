@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4h_1d_camellia_pivot_breakout_volume_v1
-# Hypothesis: Daily Camarilla pivot levels act as key intraday support/resistance.
-# Price breaking above R4 or below S4 with volume > 1.5x 20-period average and ADX > 25
-# indicates institutional breakout. Works in bull/bear by capturing strong momentum moves
-# from key daily levels with trend filter to avoid false signals in weak trends.
-# Target: 20-50 trades/year per symbol.
+# 12h_1d_camellia_pivot_breakout_volume_v1
+# Hypothesis: Daily Camarilla pivot levels act as key support/resistance. Price breaking above R4 or below S4 with volume > 1.5x 20-period average and ADX > 25 indicates institutional breakout. Works in bull/bear by capturing strong momentum moves from key daily levels with trend filter to avoid false signals in weak trends. Target: 12-37 trades/year per symbol.
 
-name = "4h_1d_camellia_pivot_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camellia_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -75,7 +71,7 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        # Get aligned daily values for current 4h bar
+        # Get aligned daily values for current 12h bar
         r4_level = align_htf_to_ltf(prices, df_d, r4)[i]
         s4_level = align_htf_to_ltf(prices, df_d, s4)[i]
         vol_ma = align_htf_to_ltf(prices, df_d, vol_ma_d)[i]
