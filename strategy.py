@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 12h_donchian20_volume_breakout_v1
-# Hypothesis: Donchian(20) breakout on 12h timeframe with volume confirmation.
-# Long when price breaks above 20-period high + volume > 1.5x average.
-# Short when price breaks below 20-period low + volume > 1.5x average.
-# Exit when price returns to the 20-period midpoint.
-# Uses 1w trend filter to avoid counter-trend trades in strong trends.
+# 1d_kama_roc_volume_v1
+# Hypothesis: Daily trend following using KAMA trend direction, ROC momentum, and volume confirmation.
+# Long when KAMA trend is up, ROC > 0, and volume > 1.5x 20-day average.
+# Short when KAMA trend is down, ROC < 0, and volume > 1.5x 20-day average.
+# Exit when KAMA trend reverses or volume drops below average.
+# Uses KAMA for adaptive trend detection to reduce whipsaw in choppy markets.
 # Target: 15-25 trades/year per symbol.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_breakout_v1"
-timeframe = "12h"
+name = "1d_kama_roc_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,18 +25,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # KAMA parameters
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    for i in range(lookback-1, n):
-        donchian_high[i] = np.max(high[i-lookback+1:i+1])
-        donchian_low[i] = np.min(low[i-lookback+1:i+1])
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_period))  # |close - close[er_period]|
+    change = np.concatenate([np.full(er_period, np.nan), change])
     
-    donchian_mid = (donchian_high + donchian_low) / 2
+    volatility = np.abs(np.diff(close))  # |close - close[1]|
+    volatility = np.concatenate([np.array([np.nan]), volatility])
     
-    # Volume filter: 1.5x 20-period average
+    # Sum volatility over er_period periods
+    vol_sum = np.full(n, np.nan)
+    for i in range(er_period, n):
+        vol_sum[i] = np.nansum(volatility[i-er_period+1:i+1])
+    
+    # Calculate ER
+    er = np.full(n, np.nan)
+    for i in range(er_period, n):
+        if vol_sum[i] > 0:
+            er[i] = change[i] / vol_sum[i]
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    sc = np.full(n, np.nan)
+    for i in range(er_period, n):
+        fast_sc = 2 / (fast_ema + 1)
+        slow_sc = 2 / (slow_ema + 1)
+        sc[i] = (er[i] * fast_sc + (1 - er[i]) * slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[er_period] = close[er_period]  # Seed value
+    for i in range(er_period + 1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # KAMA trend direction: 1 if KAMA rising, -1 if falling
+    kama_trend = np.full(n, 0)
+    for i in range(er_period + 2, n):
+        if not np.isnan(kama[i]) and not np.isnan(kama[i-1]):
+            if kama[i] > kama[i-1]:
+                kama_trend[i] = 1
+            elif kama[i] < kama[i-1]:
+                kama_trend[i] = -1
+    
+    # ROC (Rate of Change) - 10 period
+    roc_period = 10
+    roc = np.full(n, np.nan)
+    for i in range(roc_period, n):
+        if not np.isnan(close[i]) and not np.isnan(close[i-roc_period]) and close[i-roc_period] != 0:
+            roc[i] = (close[i] - close[i-roc_period]) / close[i-roc_period]
+    
+    # Volume filter: 1.5x 20-day average
     vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_ma_period-1, n):
@@ -47,25 +93,14 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # 1w trend filter (SMA50 slope)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_slope_1w = np.full(len(close_1w), np.nan)
-    for i in range(1, len(close_1w)):
-        if not np.isnan(sma50_1w[i]) and not np.isnan(sma50_1w[i-1]):
-            sma50_slope_1w[i] = sma50_1w[i] - sma50_1w[i-1]
-    sma50_slope_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_slope_1w)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(lookback, vol_ma_period, 1) + 1
+    start_idx = max(er_period + 2, roc_period, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(sma50_slope_1w_aligned[i])):
+        if (np.isnan(kama_trend[i]) or np.isnan(roc[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -73,31 +108,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price returns to midpoint or below
-            if close[i] <= donchian_mid[i]:
+            # Exit: KAMA trend turns down or volume drops below average
+            if kama_trend[i] == -1 or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to midpoint or above
-            if close[i] >= donchian_mid[i]:
+            # Exit: KAMA trend turns up or volume drops below average
+            if kama_trend[i] == 1 or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above Donchian high + volume surge + 1w uptrend
-            if (close[i] > donchian_high[i] and 
-                vol_surge[i] and 
-                sma50_slope_1w_aligned[i] > 0):
+            # Long entry: KAMA trend up, ROC positive, volume surge
+            if (kama_trend[i] == 1 and 
+                roc[i] > 0 and 
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low + volume surge + 1w downtrend
-            elif (close[i] < donchian_low[i] and 
-                  vol_surge[i] and 
-                  sma50_slope_1w_aligned[i] < 0):
+            # Short entry: KAMA trend down, ROC negative, volume surge
+            elif (kama_trend[i] == -1 and 
+                  roc[i] < 0 and 
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
