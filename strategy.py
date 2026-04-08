@@ -1,58 +1,89 @@
 #!/usr/bin/env python3
-# 1d_alligator_1w_trend_volume
-# Hypothesis: Williams Alligator on 1d filtered by 1w trend and volume confirmation on 1d.
-# Long when price > Alligator Teeth (green line) with price > Alligator Jaw (blue line) and volume > 1.5x average.
-# Short when price < Alligator Teeth (red line) with price < Alligator Jaw (blue line) and volume > 1.5x average.
-# Designed to capture trending moves while avoiding choppy markets. Target: 20-40 trades/year (~80-160 total over 4 years).
+# 12h_kama_rsi_chop
+# Hypothesis: KAMA trend direction on 12h filtered by RSI momentum and Choppiness regime filter from 1d.
+# Long when KAMA is rising (trending up), RSI < 40 (pullback in uptrend), and 1d Choppiness > 61.8 (range-bound market).
+# Short when KAMA is falling (trending down), RSI > 60 (pullback in downtrend), and 1d Choppiness > 61.8.
+# Uses mean-reversion within higher timeframe trend, optimized for choppy markets like 2025. Target: 15-30 trades/year (~60-120 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_alligator_1w_trend_volume"
-timeframe = "1d"
+name = "12h_kama_rsi_chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    # Get daily data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Williams Alligator lines (13, 8, 5 periods with shifts 8, 5, 3)
-    jaw = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().shift(3).values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly Alligator lines to daily
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # Calculate 12h KAMA (trend filter)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[30] = close[30]  # seed
+    for i in range(31, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate average volume for confirmation (13-period)
-    avg_volume = pd.Series(volume).rolling(window=13, min_periods=13).mean().values
+    # Calculate 12h RSI (momentum filter)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi])  # align with close
+    
+    # Calculate 1d Choppiness Index (regime filter)
+    atr = np.zeros_like(close_1d)
+    tr1 = np.abs(np.subtract(high_1d[1:], low_1d[1:]))
+    tr2 = np.abs(np.subtract(high_1d[1:], close_1d[:-1]))
+    tr3 = np.abs(np.subtract(low_1d[1:], close_1d[:-1]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align indices
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = np.zeros_like(close_1d)
+    mask = (max_high - min_low) != 0
+    chop[mask] = 100 * np.log10(np.sum(tr[-14:], axis=1) / np.log(10) / 14) / np.log10(max_high[mask] - min_low[mask])
+    chop = np.concatenate([np.full(14, np.nan), chop])  # align with close_1d
+    
+    # Align 1d indicators to 12h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -61,30 +92,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below Alligator Teeth OR trend turns against us
-            if (close[i] < teeth_aligned[i]) or (close[i] < jaw_aligned[i]):
+            # Exit: KAMA turns down OR RSI > 50 (exit pullback)
+            if (kama[i] < kama[i-1]) or (rsi[i] > 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Alligator Teeth OR trend turns against us
-            if (close[i] > teeth_aligned[i]) or (close[i] > jaw_aligned[i]):
+            # Exit: KAMA turns up OR RSI < 50 (exit pullback)
+            if (kama[i] > kama[i-1]) or (rsi[i] < 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            # Chop filter: market must be choppy (range-bound) for mean reversion
+            chop_ok = chop_aligned[i] > 61.8
             
-            # Long entry: price > Alligator Teeth and > Alligator Jaw with volume confirmation
-            if (close[i] > teeth_aligned[i]) and (close[i] > jaw_aligned[i]) and volume_ok:
+            # Long entry: KAMA rising (uptrend), RSI < 40 (oversold pullback), choppy market
+            if (kama[i] > kama[i-1]) and (rsi[i] < 40) and chop_ok:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price < Alligator Teeth and < Alligator Jaw with volume confirmation
-            elif (close[i] < teeth_aligned[i]) and (close[i] < jaw_aligned[i]) and volume_ok:
+            # Short entry: KAMA falling (downtrend), RSI > 60 (overbought pullback), choppy market
+            elif (kama[i] < kama[i-1]) and (rsi[i] > 60) and chop_ok:
                 position = -1
                 signals[i] = -0.25
     
