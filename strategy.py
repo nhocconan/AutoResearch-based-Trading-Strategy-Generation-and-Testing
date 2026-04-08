@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h Monthly Pivot Bounce with Volume and Trend Filter
-# Hypothesis: Monthly pivot points act as stronger institutional support/resistance than weekly.
-# Price bouncing off monthly S1/S2/R1/R2 with volume > 1.3x 20-period average and ADX > 20
-# captures institutional defense of key levels. Works in bull/bear by trading reversals
-# from strong monthly levels with trend filter to avoid whipsaws in weak trends.
-# Target: 10-25 trades/year per symbol.
+# 4h_1d_camellia_pivot_breakout_volume_v1
+# Hypothesis: Daily Camarilla pivot levels act as key intraday support/resistance.
+# Price breaking above R4 or below S4 with volume > 1.5x 20-period average and ADX > 25
+# indicates institutional breakout. Works in bull/bear by capturing strong momentum moves
+# from key daily levels with trend filter to avoid false signals in weak trends.
+# Target: 20-50 trades/year per symbol.
 
-name = "6h_monthly_pivot_bounce_volume_adx_v1"
-timeframe = "6h"
+name = "4h_1d_camellia_pivot_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,34 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get monthly data for pivot points and ADX - call ONCE before loop
-    df_m = get_htf_data(prices, '1M')
-    high_m = df_m['high'].values
-    low_m = df_m['low'].values
-    close_m = df_m['close'].values
-    volume_m = df_m['volume'].values
+    # Get daily data for Camarilla pivots and ADX - call ONCE before loop
+    df_d = get_htf_data(prices, '1d')
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
+    volume_d = df_d['volume'].values
     
-    # Calculate monthly pivot points (standard floor trader pivots)
-    pp_m = (high_m + low_m + close_m) / 3
-    r1_m = 2 * pp_m - low_m
-    s1_m = 2 * pp_m - high_m
-    r2_m = pp_m + (high_m - low_m)
-    s2_m = pp_m - (high_m - low_m)
+    # Calculate daily Camarilla pivot levels
+    # Camarilla: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
+    # Where C = (H+L+C)/3 (typical price)
+    typical_price = (high_d + low_d + close_d) / 3
+    r4 = typical_price + ((high_d - low_d) * 1.1 / 2)
+    s4 = typical_price - ((high_d - low_d) * 1.1 / 2)
     
-    # Calculate 20-period average volume for monthly timeframe
-    vol_ma_m = pd.Series(volume_m).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period average volume for daily timeframe
+    vol_ma_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ADX on monthly timeframe (trend strength filter)
+    # Calculate ADX on daily timeframe (trend strength filter)
     # True Range
-    tr1 = high_m - low_m
-    tr2 = np.abs(high_m - np.roll(close_m, 1))
-    tr3 = np.abs(low_m - np.roll(close_m, 1))
+    tr1 = high_d - low_d
+    tr2 = np.abs(high_d - np.roll(close_d, 1))
+    tr3 = np.abs(low_d - np.roll(close_d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_m - np.roll(high_m, 1)
-    down_move = np.roll(low_m, 1) - low_m
+    up_move = high_d - np.roll(high_d, 1)
+    down_move = np.roll(low_d, 1) - low_d
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     plus_dm[0] = 0
@@ -75,47 +75,45 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        # Get aligned monthly values for current 6h bar
-        r1 = align_htf_to_ltf(prices, df_m, r1_m)[i]
-        s1 = align_htf_to_ltf(prices, df_m, s1_m)[i]
-        r2 = align_htf_to_ltf(prices, df_m, r2_m)[i]
-        s2 = align_htf_to_ltf(prices, df_m, s2_m)[i]
-        vol_ma = align_htf_to_ltf(prices, df_m, vol_ma_m)[i]
-        adx_val = align_htf_to_ltf(prices, df_m, adx)[i]
+        # Get aligned daily values for current 4h bar
+        r4_level = align_htf_to_ltf(prices, df_d, r4)[i]
+        s4_level = align_htf_to_ltf(prices, df_d, s4)[i]
+        vol_ma = align_htf_to_ltf(prices, df_d, vol_ma_d)[i]
+        adx_val = align_htf_to_ltf(prices, df_d, adx)[i]
         
         # Skip if any required data is NaN
-        if np.isnan(r1) or np.isnan(s1) or np.isnan(r2) or np.isnan(s2) or np.isnan(vol_ma) or np.isnan(adx_val) or volume[i] == 0:
+        if np.isnan(r4_level) or np.isnan(s4_level) or np.isnan(vol_ma) or np.isnan(adx_val) or volume[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x 20-period average
-        vol_condition = volume[i] > 1.3 * vol_ma
+        # Volume breakout condition: current volume > 1.5x 20-period average
+        vol_breakout = volume[i] > 1.5 * vol_ma
         
-        # Trend condition: ADX > 20
-        trend_condition = adx_val > 20
+        # Strong trend condition: ADX > 25
+        strong_trend = adx_val > 25
         
         if position == 1:  # Long position
-            # Exit if price breaks below S2 (bounce failed)
-            if close[i] < s2:
+            # Exit if price breaks below S4 (breakout failed)
+            if close[i] < s4_level:
                 position = 0
                 signals[i] = 0.0
             elif position == 1:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above R2 (bounce failed)
-            if close[i] > r2:
+            # Exit if price breaks above R4 (breakout failed)
+            if close[i] > r4_level:
                 position = 0
                 signals[i] = 0.0
             elif position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Bounce long at S1/S2 with volume and trend confirmation
-            if ((low[i] <= s1 and close[i] > s1) or (low[i] <= s2 and close[i] > s2)) and vol_condition and trend_condition:
+            # Breakout long above R4 with volume confirmation and strong trend
+            if high[i] >= r4_level and close[i] > r4_level and vol_breakout and strong_trend:
                 position = 1
                 signals[i] = 0.25
-            # Bounce short at R1/R2 with volume and trend confirmation
-            elif ((high[i] >= r1 and close[i] < r1) or (high[i] >= r2 and close[i] < r2)) and vol_condition and trend_condition:
+            # Breakout short below S4 with volume confirmation and strong trend
+            elif low[i] <= s4_level and close[i] < s4_level and vol_breakout and strong_trend:
                 position = -1
                 signals[i] = -0.25
     
