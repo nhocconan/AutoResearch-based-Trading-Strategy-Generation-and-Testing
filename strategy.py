@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_v4
+# 4h_1d_donchian_breakout_volume_v5
 # Hypothesis: Use 1d Donchian channels for long-term trend direction, 4h Donchian breakout for entry, and volume confirmation for institutional participation.
 # Works in bull markets (trend continuation) and bear markets (mean reversion from oversold/overbought levels).
 # Target: 25-40 trades/year per symbol (100-160 total over 4 years) by requiring multi-timeframe alignment and volume filter.
+# Improved version with stricter entry conditions to reduce trade frequency and improve win rate.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_v4"
+name = "4h_1d_donchian_breakout_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -49,9 +50,15 @@ def generate_signals(prices):
     donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
     donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
     
-    # Volume confirmation: volume > 1.8x average of last 48 periods (2 days in 4h)
+    # Volume confirmation: volume > 2.0x average of last 48 periods (2 days in 4h)
     vol_ma = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
-    vol_confirm = volume > vol_ma * 1.8
+    vol_confirm = volume > vol_ma * 2.0
+    
+    # Additional filter: price must be outside 1d Donchian middle 50% range to avoid chop
+    donchian_middle_1d = (donchian_high_1d_aligned + donchian_low_1d_aligned) / 2
+    donchian_range_1d = donchian_high_1d_aligned - donchian_low_1d_aligned
+    price_position = (close - donchian_low_1d_aligned) / donchian_range_1d
+    extreme_zone = (price_position < 0.25) | (price_position > 0.75)  # Outer 50% of range
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -63,7 +70,7 @@ def generate_signals(prices):
         # Skip if data not available
         if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
            np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+           np.isnan(vol_ma[i]) or np.isnan(donchian_middle_1d[i]) or np.isnan(price_position[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -88,15 +95,18 @@ def generate_signals(prices):
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
             # Long entry: price breaks above 4h Donchian high with 1d uptrend bias and volume
+            # Only in extreme zones to avoid chop
             if (close[i] > donchian_high_aligned[i] and 
                 close[i] > donchian_low_1d_aligned[i] and  # Above 1d lower band (not in extreme oversold)
-                vol_confirm[i]):
+                vol_confirm[i] and 
+                extreme_zone[i]):
                 position = 1
                 signals[i] = 0.25
             # Short entry: price breaks below 4h Donchian low with 1d downtrend bias and volume
             elif (close[i] < donchian_low_aligned[i] and 
                   close[i] < donchian_high_1d_aligned[i] and  # Below 1d upper band (not in extreme overbought)
-                  vol_confirm[i]):
+                  vol_confirm[i] and 
+                  extreme_zone[i]):
                 position = -1
                 signals[i] = -0.25
     
