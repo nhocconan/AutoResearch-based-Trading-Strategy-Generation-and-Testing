@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_regime_v1
-# Hypothesis: Use 1d Camarilla pivot levels (H3/L3) on 12h timeframe with volume confirmation and choppiness regime filter.
-# Long: Price breaks above H3 with volume > 1.5x average AND chop > 61.8 (trending regime)
-# Short: Price breaks below L3 with volume > 1.5x average AND chop > 61.8 (trending regime)
-# Exit: Opposite pivot break or chop < 38.2 (range regime) to avoid false breakouts
-# Uses 12h primary timeframe with 1d HTF for Camarilla levels and chop filter.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# 4h_daily_camarilla_pivot_volume_regime_v2
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and choppiness regime filter.
+# Long: Price breaks above H3 pivot with volume > 1.5x 20-period average AND chop > 61.8 (ranging market)
+# Short: Price breaks below L3 pivot with volume > 1.5x 20-period average AND chop > 61.8 (ranging market)
+# Exit: Price returns to H4/L4 levels or opposite pivot break
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation and choppiness filter.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_regime_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,11 +25,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate average volume for confirmation (20-period SMA)
+    # Calculate volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
-    avg_volume = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Camarilla pivot levels and choppiness filter
+    # Get 1d data for Camarilla pivots and choppiness
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -39,36 +39,54 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    # H3 = Pivot + 1.1 * (H - L) / 2
-    # L3 = Pivot - 1.1 * (H - L) / 2
+    # Pivot = (High + Low + Close) / 3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    h3_1d = pivot_1d + 1.1 * (high_1d - low_1d) / 2.0
-    l3_1d = pivot_1d - 1.1 * (high_1d - low_1d) / 2.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
+    # Camarilla levels
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Calculate Choppiness Index on 1d (14-period)
-    # CHOP = 100 * log10(sum(ATR1) / (n * ATRn)) / log10(n)
-    # Where ATR1 = true range, ATRn = n-period ATR
-    tr1 = np.maximum(high_1d - low_1d, 
-                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                np.abs(low_1d - np.roll(close_1d, 1))))
-    # Handle first bar
-    tr1[0] = high_1d[0] - low_1d[0]
-    
-    atr1 = tr1
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of ATR1 over 14 periods
-    sum_atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    
-    # Choppiness Index
-    chop_1d = 100 * np.log10(sum_atr1 / (14 * atr14)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop_1d = np.where((atr14 > 0) & (sum_atr1 > 0), chop_1d, 50.0)
-    
-    # Align 1d indicators to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Calculate choppiness index on 1d (14-period)
+    def calculate_chop(high_arr, low_arr, close_arr, period=14):
+        atr_sum = np.zeros_like(close_arr)
+        true_range = np.zeros_like(close_arr)
+        for i in range(1, len(close_arr)):
+            tr = max(high_arr[i] - low_arr[i], 
+                     abs(high_arr[i] - close_arr[i-1]),
+                     abs(low_arr[i] - close_arr[i-1]))
+            true_range[i] = tr
+        # Calculate ATR using Wilder's smoothing (equivalent to RMA)
+        atr = np.zeros_like(close_arr)
+        atr[period] = np.mean(true_range[1:period+1]) if period < len(true_range) else 0
+        for i in range(period+1, len(close_arr)):
+            atr[i] = (atr[i-1] * (period-1) + true_range[i]) / period
+        # Sum ATR over period
+        atr_sum = np.zeros_like(close_arr)
+        for i in range(period, len(close_arr)):
+            atr_sum[i] = np.sum(atr[i-period+1:i+1])
+        # Calculate choppiness
+        chop = np.zeros_like(close_arr)
+        max_high = np.zeros_like(close_arr)
+        min_low = np.zeros_like(close_arr)
+        for i in range(period, len(close_arr)):
+            max_high[i] = np.max(high_arr[i-period+1:i+1])
+            min_low[i] = np.min(low_arr[i-period+1:i+1])
+            if max_high[i] != min_low[i]:
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral when no range
+        return chop
+    
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
@@ -77,41 +95,40 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_volume[i]) or 
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        
+        # Choppiness regime filter: chop > 61.8 indicates ranging market (good for mean reversion)
+        chop_filter = chop_1d_aligned[i] > 61.8
+        
         if position == 1:  # Long position
-            # Exit conditions:
-            # 1. Price breaks below L3 (opposite pivot break)
-            # 2. Chop < 38.2 (range regime) - avoid false breakouts in ranging markets
-            if low[i] < l3_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
+            # Exit: Price returns to H4 level or breaks below L3 (opposite signal)
+            if close[i] <= h4_1d_aligned[i] or close[i] < l3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions:
-            # 1. Price breaks above H3 (opposite pivot break)
-            # 2. Chop < 38.2 (range regime)
-            if high[i] > h3_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
+            # Exit: Price returns to L4 level or breaks above H3 (opposite signal)
+            if close[i] >= l4_1d_aligned[i] or close[i] > h3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H3 with volume confirmation AND chop > 61.8 (trending regime)
-            if (high[i] > h3_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i] and 
-                chop_1d_aligned[i] > 61.8):
+            # Long entry: Price breaks above H3 with volume confirmation in ranging market
+            if close[i] > h3_1d_aligned[i] and volume_confirmed and chop_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L3 with volume confirmation AND chop > 61.8 (trending regime)
-            elif (low[i] < l3_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i] and 
-                  chop_1d_aligned[i] > 61.8):
+            # Short entry: Price breaks below L3 with volume confirmation in ranging market
+            elif close[i] < l3_1d_aligned[i] and volume_confirmed and chop_filter:
                 position = -1
                 signals[i] = -0.25
     
