@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1d_1w_keltner_squeeze_breakout_v1
-# Hypothesis: Daily Keltner channel breakout with weekly trend filter to capture strong trends while avoiding whipsaws.
-# Long when price breaks above upper Keltner band and weekly EMA21 > weekly EMA50.
-# Short when price breaks below lower Keltner band and weekly EMA21 < weekly EMA50.
-# Exit when price re-enters Keltner channel or weekly trend reverses.
-# Uses Keltner channels on daily for volatility-based breakouts and weekly EMA for trend filter.
-# Designed to generate ~10-20 trades/year to minimize fee decay while capturing major trends.
+# 6h_12h_volume_vwap_breakout_v1
+# Hypothesis: 6-hour VWAP breakout with 12-hour volume confirmation and volume-weighted RSI filter.
+# Long when price breaks above VWAP with rising volume and VWAP-RSI < 30.
+# Short when price breaks below VWAP with rising volume and VWAP-RSI > 70.
+# Uses VWAP on 6h for entry timing and 12h volume for confirmation to avoid fakeouts.
+# Designed to generate ~20-40 trades/year to avoid fee decay while capturing momentum bursts.
 
 import numpy as np
 import pandas as pd
-from mfe_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_squeeze_breakout_v1"
-timeframe = "1d"
+name = "6h_12h_volume_vwap_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,60 +22,63 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate ATR for Keltner channels
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
+    # Calculate VWAP on 6h data
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, np.nan)
+    
+    # Calculate volume-weighted RSI on 6h data
+    price_change = np.diff(close, prepend=close[0])
+    gain = np.where(price_change > 0, price_change, 0.0)
+    loss = np.where(price_change < 0, -price_change, 0.0)
+    
+    # Volume-weighted gain and loss
+    vgain = gain * volume
+    vloss = loss * volume
+    
+    # Wilder's smoothing with volume weighting
+    avg_vgain = np.zeros(n)
+    avg_vloss = np.zeros(n)
+    avg_vgain[0] = vgain[0]
+    avg_vloss[0] = vloss[0]
+    
     for i in range(1, n):
-        if i < 14:
-            atr[i] = np.nan
-        else:
-            atr[i] = np.nanmean(tr[i-13:i+1])
+        avg_vgain[i] = (avg_vgain[i-1] * 13 + vgain[i]) / 14
+        avg_vloss[i] = (avg_vloss[i-1] * 13 + vloss[i]) / 14
     
-    # Keltner channels (20-period EMA +/- 2*ATR)
-    ema20 = np.full(n, np.nan)
-    ema20_smooth = close.astype(float)
-    for i in range(n):
-        if i == 0:
-            ema20[i] = close[i]
-        else:
-            ema20[i] = 0.1 * close[i] + 0.9 * ema20[i-1]
+    rs = np.where(avg_vloss != 0, avg_vgain / avg_vloss, 100)
+    vwap_rsi = 100 - (100 / (1 + rs))
     
-    upper_keltner = ema20 + 2 * atr
-    lower_keltner = ema20 - 2 * atr
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12-hour data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Weekly EMA21 and EMA50 for trend filter
-    ema21_1w = np.full(len(close_1w), np.nan)
-    ema50_1w = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
-        if i == 0:
-            ema21_1w[i] = close_1w[i]
-            ema50_1w[i] = close_1w[i]
+    # Calculate volume moving average and ratio on 12h
+    vol_ma_12h = np.zeros(len(volume_12h))
+    for i in range(len(volume_12h)):
+        if i < 19:
+            vol_ma_12h[i] = np.nan
         else:
-            ema21_1w[i] = 0.09 * close_1w[i] + 0.91 * ema21_1w[i-1]
-            ema50_1w[i] = 0.04 * close_1w[i] + 0.96 * ema50_1w[i-1]
+            vol_ma_12h[i] = np.mean(volume_12h[i-19:i+1])
     
-    # Align weekly EMAs to daily timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    vol_ratio_12h = np.where(vol_ma_12h != 0, volume_12h / vol_ma_12h, np.nan)
+    
+    # Align 12h volume ratio to 6h timeframe
+    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(ema21_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vwap_rsi[i]) or 
+            np.isnan(vol_ratio_12h_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -84,40 +86,33 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        upper_keltner_val = upper_keltner[i]
-        lower_keltner_val = lower_keltner[i]
-        ema21_1w_val = ema21_1w_aligned[i]
-        ema50_1w_val = ema50_1w_aligned[i]
+        vwap_val = vwap[i]
+        vwap_rsi_val = vwap_rsi[i]
+        vol_ratio = vol_ratio_12h_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price re-enters Keltner channel or weekly trend reverses (EMA21 < EMA50)
-            if price <= upper_keltner_val and price >= lower_keltner_val:
-                position = 0
-                signals[i] = 0.0
-            elif ema21_1w_val < ema50_1w_val:  # Bearish trend reversal
+            # Exit: price breaks below VWAP or VWAP-RSI > 70
+            if price < vwap_val or vwap_rsi_val > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price re-enters Keltner channel or weekly trend reverses (EMA21 > EMA50)
-            if price <= upper_keltner_val and price >= lower_keltner_val:
-                position = 0
-                signals[i] = 0.0
-            elif ema21_1w_val > ema50_1w_val:  # Bullish trend reversal
+            # Exit: price breaks above VWAP or VWAP-RSI < 30
+            if price > vwap_val or vwap_rsi_val < 30:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: Keltner breakout with weekly trend alignment
-            # Bullish: price breaks above upper Keltner and weekly EMA21 > EMA50
-            if price > upper_keltner_val and ema21_1w_val > ema50_1w_val:
+            # Entry conditions: VWAP breakout with volume confirmation
+            # Bullish: price breaks above VWAP, volume above average, and VWAP-RSI < 30
+            if price > vwap_val and vol_ratio > 1.5 and vwap_rsi_val < 30:
                 position = 1
                 signals[i] = 0.25
-            # Bearish: price breaks below lower Keltner and weekly EMA21 < EMA50
-            elif price < lower_keltner_val and ema21_1w_val < ema50_1w_val:
+            # Bearish: price breaks below VWAP, volume above average, and VWAP-RSI > 70
+            elif price < vwap_val and vol_ratio > 1.5 and vwap_rsi_val > 70:
                 position = -1
                 signals[i] = -0.25
     
