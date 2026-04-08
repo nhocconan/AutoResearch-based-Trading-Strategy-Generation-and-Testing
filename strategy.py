@@ -1,77 +1,106 @@
 #!/usr/bin/env python3
 """
-6h_1d_cci_reversion_v1
-Hypothesis: Commodity Channel Index (CCI) mean reversion on 6h with 1d trend filter.
-- CCI(20) > +100 indicates overbought, < -100 oversold in ranging markets.
-- Trend filter: 1d EMA(50) - only take reversals against the daily trend.
-- Volume filter: 6h volume > 1.3x 20-period average to confirm reversal interest.
-- Works in both bull/bear markets by fading extremes only when higher timeframe trend is intact.
-- Target: 20-40 trades/year (80-160 total over 4 years).
+12h_1d_1w_camarilla_volume_v1
+Hypothesis: Camarilla pivot levels from 1d with volume confirmation and 1w trend filter.
+- Entry: Price touches Camarilla S3 (long) or R3 (short) with volume > 1.5x 20-period average
+- Trend filter: 1w EMA(50) direction (only long if 1w uptrend, short if downtrend)
+- Exit: Opposite Camarilla level touch (S1 for long, R1 for short) or trend reversal
+- Position sizing: 0.25 for long, -0.25 for short
+- Target: 12-37 trades/year (50-150 total over 4 years)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_cci_reversion_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema_50_1d
-    trend_1d_down = close_1d < ema_50_1d
+    
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    # S4 = close - 1.5*(high-low), S3 = close - 1.1*(high-low), etc.
+    range_1d = high_1d - low_1d
+    camarilla_s3 = close_1d - 1.1 * range_1d
+    camarilla_s1 = close_1d - 1.05 * range_1d
+    camarilla_r1 = close_1d + 1.05 * range_1d
+    camarilla_r3 = close_1d + 1.1 * range_1d
+    
+    # Forward fill the levels (each level is valid until next 1d bar)
+    camarilla_s3_series = pd.Series(camarilla_s3)
+    camarilla_s1_series = pd.Series(camarilla_s1)
+    camarilla_r1_series = pd.Series(camarilla_r1)
+    camarilla_r3_series = pd.Series(camarilla_r3)
+    
+    camarilla_s3_ffilled = camarilla_s3_series.ffill().values
+    camarilla_s1_ffilled = camarilla_s1_series.ffill().values
+    camarilla_r1_ffilled = camarilla_r1_series.ffill().values
+    camarilla_r3_ffilled = camarilla_r3_series.ffill().values
+    
+    # Align 1d Camarilla levels to 12h
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_ffilled)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_ffilled)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_ffilled)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_ffilled)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1w EMA(50) for trend
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema_50_1w
+    trend_1w_down = close_1w < ema_50_1w
     
     # Forward fill trend
-    trend_1d_up_series = pd.Series(trend_1d_up)
-    trend_1d_down_series = pd.Series(trend_1d_down)
-    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
-    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
+    trend_1w_up_series = pd.Series(trend_1w_up)
+    trend_1w_down_series = pd.Series(trend_1w_down)
+    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
+    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
     
-    # Align 1d trend to 6h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
     
-    # 6h CCI(20) calculation
-    typical_price = (high + low + close) / 3.0
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mad_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    # Avoid division by zero
-    cci = np.where(mad_tp != 0, (typical_price - sma_tp) / (0.015 * mad_tp), 0.0)
-    
-    # Volume filter
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(cci[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -80,27 +109,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI returns above -50 OR trend changes
-            if (cci[i] > -50) or trend_1d_down_aligned[i]:
+            # Exit: Price touches S1 OR 1w trend turns down
+            if low[i] <= camarilla_s1_aligned[i] or trend_1w_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: CCI returns below 50 OR trend changes
-            if (cci[i] < 50) or trend_1d_up_aligned[i]:
+            # Exit: Price touches R1 OR 1w trend turns up
+            if high[i] >= camarilla_r1_aligned[i] or trend_1w_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: CCI < -100 (oversold) + 1d uptrend + volume
-            if (cci[i] < -100) and trend_1d_up_aligned[i] and volume_filter[i]:
+            # Long entry: Price touches S3 + 1w uptrend + volume
+            if low[i] <= camarilla_s3_aligned[i] and trend_1w_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI > +100 (overbought) + 1d downtrend + volume
-            elif (cci[i] > 100) and trend_1d_down_aligned[i] and volume_filter[i]:
+            # Short entry: Price touches R3 + 1w downtrend + volume
+            elif high[i] >= camarilla_r3_aligned[i] and trend_1w_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
