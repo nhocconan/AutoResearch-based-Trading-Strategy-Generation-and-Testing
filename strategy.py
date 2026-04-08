@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_pivot_v4
+4h_1d_camarilla_pivot_v5
 Hypothesis: 4-hour strategy using daily context with Camarilla pivot levels.
 Long when price crosses above daily Pivot with volume > 1.8x average and price > daily EMA200 (bullish trend).
 Short when price crosses below daily Pivot with volume > 1.8x average and price < daily EMA200 (bearish trend).
@@ -13,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v4"
+name = "4h_1d_camarilla_pivot_v5"
 timeframe = "4h"
 leverage = 1.0
 
