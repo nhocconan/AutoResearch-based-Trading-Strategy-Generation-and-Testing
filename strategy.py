@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power with 1-day Trend Filter and Volume Confirmation
-Hypothesis: Elder Ray (Bull/Bear Power) captures institutional buying/selling pressure.
-When combined with 1-day EMA trend filter and volume confirmation, it avoids whipsaws
-in both bull and bear markets. Designed for ~20-30 trades/year to minimize fee drag.
+12h Donchian Breakout with 1-day Trend Filter and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture institutional breakout moves. 
+Combined with 1-day EMA trend filter and volume confirmation to avoid whipsaws.
+Designed for ~15-25 trades/year to minimize fee drift in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,40 +33,39 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Elder Ray components (13-period EMA as per standard)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
             np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Bear Power turns positive (selling pressure) OR price closes below EMA13
-            if (bear_power[i] > 0 or 
-                close[i] < ema13[i]):
+            # Exit: price closes below Donchian low OR trend reverses
+            if (close[i] < donchian_low[i] or 
+                close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bull Power turns negative (buying pressure) OR price closes above EMA13
-            if (bull_power[i] < 0 or 
-                close[i] > ema13[i]):
+            # Exit: price closes above Donchian high OR trend reverses
+            if (close[i] > donchian_high[i] or 
+                close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -76,14 +75,14 @@ def generate_signals(prices):
             uptrend = close[i] > ema_50_1d_aligned[i]
             downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long: Bull Power rising (increasing buying pressure) + uptrend + volume spike
-            if (bull_power[i] > bull_power[i-1] and 
+            # Long: price breaks above Donchian high + uptrend + volume spike
+            if (close[i] > donchian_high[i] and 
                 uptrend and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: Bear Power falling (increasing selling pressure) + downtrend + volume spike
-            elif (bear_power[i] < bear_power[i-1] and 
+            # Short: price breaks below Donchian low + downtrend + volume spike
+            elif (close[i] < donchian_low[i] and 
                   downtrend and 
                   vol_spike[i]):
                 position = -1
