@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
-"""
-12h CAMARILLA PIVOT + 1D TREND + VOLUME SPIKE
-Hypothesis: CAMARILLA pivot levels on 12h provide strong intraday support/resistance.
-Breakouts above/below key levels (H3/L3) with 1d trend alignment and volume spikes
-capture momentum moves while avoiding false breakouts. Works in bull (breakouts above H3)
-and bear (breakdowns below L3). Target: 12-37 trades/year.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -26,38 +18,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for CAMARILLA pivot calculation (based on prior day)
+    # 1d data for daily pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for CAMARILLA calculation
-    prev_high = high_1d
-    prev_low = low_1d
-    prev_close = close_1d
+    # Daily pivot points (using prior day's data)
+    daily_high = high_1d
+    daily_low = low_1d
+    daily_close = close_1d
     
-    # CAMARILLA pivot levels
-    # Pivot = (H + L + C) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Pivot point calculation: (H + L + C) / 3
+    pivot_point = (daily_high + daily_low + daily_close) / 3.0
     
-    # Resistance levels
-    r1 = pivot + (range_val * 1.0833)
-    r2 = pivot + (range_val * 1.1666)
-    r3 = pivot + (range_val * 1.2500)
-    r4 = pivot + (range_val * 1.5000)
+    # Support and resistance levels
+    r1 = 2 * pivot_point - daily_low
+    s1 = 2 * pivot_point - daily_high
+    r2 = pivot_point + (daily_high - daily_low)
+    s2 = pivot_point - (daily_high - daily_low)
     
-    # Support levels
-    s1 = pivot - (range_val * 1.0833)
-    s2 = pivot - (range_val * 1.1666)
-    s3 = pivot - (range_val * 1.2500)
-    s4 = pivot - (range_val * 1.5000)
-    
-    # Align CAMARILLA levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align daily pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -81,25 +67,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(vol_spike[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 or trend reverses
-            if close[i] < s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price closes below S1 or trend reverses
+            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 or trend reverses
-            if close[i] > r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price closes above R1 or trend reverses
+            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -109,15 +96,15 @@ def generate_signals(prices):
             uptrend = close[i] > ema_50_1d_aligned[i]
             downtrend = close[i] < ema_50_1d_aligned[i]
             
-            # Long: price breaks above R3 + uptrend + volume spike + vol filter
-            if (close[i] > r3_aligned[i] and 
+            # Long: price breaks above R2 + uptrend + volume spike + vol filter
+            if (close[i] > r2_aligned[i] and 
                 uptrend and 
                 vol_spike[i] and
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below S3 + downtrend + volume spike + vol filter
-            elif (close[i] < s3_aligned[i] and 
+            # Short: price breaks below S2 + downtrend + volume spike + vol filter
+            elif (close[i] < s2_aligned[i] and 
                   downtrend and 
                   vol_spike[i] and
                   vol_filter[i]):
