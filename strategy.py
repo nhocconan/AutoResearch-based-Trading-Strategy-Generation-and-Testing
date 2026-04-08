@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-# 6h_ema_rsi_volume_trend
-# Hypothesis: EMA trend filter + RSI momentum + volume confirmation on 6h timeframe.
-# Long when price > EMA20, RSI > 50 and rising, and volume > 1.5x average.
-# Short when price < EMA20, RSI < 50 and falling, and volume > 1.5x average.
-# Uses 12h EMA trend filter for higher timeframe confirmation.
-# Designed to capture momentum in both bull and bear markets with proper risk control.
+# 4h_ema200_rsi_21_volume
+# Hypothesis: 4h EMA200 trend filter + RSI21 momentum + volume confirmation. Long when price > EMA200 and RSI21 crosses above 50 with volume > 1.5x average. Short when price < EMA200 and RSI21 crosses below 50 with volume > 1.5x average. Uses daily EMA200 for stronger trend filter to avoid whipsaws. Designed for 4h timeframe to capture medium-term trends in both bull and bear markets with low trade frequency.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema_rsi_volume_trend"
-timeframe = "6h"
+name = "4h_ema200_rsi_21_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 210:
         return np.zeros(n)
     
     # Price data
@@ -25,32 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get daily data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate daily EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate EMA20 on 6h
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate RSI(14) on 6h
+    # Calculate RSI(21) on 4h close
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_gain = gain.ewm(alpha=1/21, adjust=False, min_periods=21).mean()
+    avg_loss = loss.ewm(alpha=1/21, adjust=False, min_periods=21).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
-    
-    # Calculate RSI slope (momentum)
-    rsi_slope = pd.Series(rsi_values).diff().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,12 +49,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 210
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_20[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(rsi_slope[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(rsi_values[i]) or 
             np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -74,16 +64,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price below EMA20 OR RSI < 40
-            if (close[i] < ema_20[i]) or (rsi_values[i] < 40):
+            # Exit: price crosses below EMA200 OR RSI crosses below 50
+            if (close[i] < ema_200_1d_aligned[i]) or (rsi_values[i] < 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above EMA20 OR RSI > 60
-            if (close[i] > ema_20[i]) or (rsi_values[i] > 60):
+            # Exit: price crosses above EMA200 OR RSI crosses above 50
+            if (close[i] > ema_200_1d_aligned[i]) or (rsi_values[i] > 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,14 +82,16 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Entry conditions with 12h trend filter
-            if (close[i] > ema_20[i]) and (rsi_values[i] > 50) and (rsi_slope[i] > 0) and \
-               (close[i] > ema_50_12h_aligned[i]) and volume_ok:
-                position = 1
-                signals[i] = 0.25
-            elif (close[i] < ema_20[i]) and (rsi_values[i] < 50) and (rsi_slope[i] < 0) and \
-                 (close[i] < ema_50_12h_aligned[i]) and volume_ok:
-                position = -1
-                signals[i] = -0.25
+            # Entry conditions
+            if (close[i] > ema_200_1d_aligned[i]) and (rsi_values[i] > 50) and volume_ok:
+                # Check for RSI crossing above 50 (momentum confirmation)
+                if i > start_idx and rsi_values[i-1] <= 50:
+                    position = 1
+                    signals[i] = 0.25
+            elif (close[i] < ema_200_1d_aligned[i]) and (rsi_values[i] < 50) and volume_ok:
+                # Check for RSI crossing below 50 (momentum confirmation)
+                if i > start_idx and rsi_values[i-1] >= 50:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
