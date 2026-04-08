@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_camarilla_volume_v3
-Hypothesis: Camarilla pivot levels from 1d combined with 1w trend filter and volume confirmation.
-In bull markets: buy near S3/S4 with 1w uptrend. In bear markets: sell near R3/R4 with 1w downtrend.
-Volume confirms institutional interest at pivot levels. Designed for low-frequency, high-conviction trades.
+6h_1w_1d_volume_acceleration_v1
+Hypothesis: Volume acceleration + price breakout on 6h with 1w trend filter. 
+- Volume surge detection: current volume > 2x 20-period average AND rising for 2 consecutive periods
+- Price breakout: close breaks above/below Donchian(20) channel
+- Trend filter: 1w EMA(50) direction (bullish if close > EMA50, bearish if close < EMA50)
+- Entry: Long on bullish breakout in bullish trend; Short on bearish breakout in bearish trend
+- Exit: Opposite breakout or trend reversal
+- Position sizing: 0.25 long, -0.25 short
+- Designed to capture momentum bursts in both bull and bear markets with volume confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_volume_v3"
-timeframe = "12h"
+name = "6h_1w_1d_volume_acceleration_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,71 +30,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    r4 = close_1d + range_1d * 1.500
-    r3 = close_1d + range_1d * 1.250
-    r2 = close_1d + range_1d * 1.166
-    r1 = close_1d + range_1d * 1.083
-    s1 = close_1d - range_1d * 1.083
-    s2 = close_1d - range_1d * 1.166
-    s3 = close_1d - range_1d * 1.250
-    s4 = close_1d - range_1d * 1.500
-    
     # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
+    # 1w EMA(50) for trend
     close_1w = df_1w['close'].values
-    # Simple trend: price above/below 20-period EMA
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_1w_up = close_1w > ema_20_1w
-    trend_1w_down = close_1w < ema_20_1w
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema_50_1w
+    trend_1w_down = close_1w < ema_50_1w
     
-    # Forward fill trends
-    trend_1w_up_ffilled = pd.Series(trend_1w_up).ffill().values
-    trend_1w_down_ffilled = pd.Series(trend_1w_down).ffill().values
+    # Forward fill trend
+    trend_1w_up_series = pd.Series(trend_1w_up)
+    trend_1w_down_series = pd.Series(trend_1w_down)
+    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
+    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
     
-    # Align 1d Camarilla levels to 12h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Align 1w trend to 12h
+    # Align 1w trend to 6h
     trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
     trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume acceleration: current volume > 2x 20-period MA AND rising for 2 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_surge = volume > (2.0 * vol_ma)
+    volume_rising = volume > np.roll(volume, 1)  # volume > previous period
+    volume_rising_2 = volume_rising & np.roll(volume_rising, 1)  # rising for 2 consecutive periods
+    volume_acceleration = volume_surge & volume_rising_2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(volume_acceleration[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -98,29 +81,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches R3 or 1w trend turns down
-            if (close[i] >= r3_aligned[i]) or trend_1w_down_aligned[i]:
+            # Exit: bearish breakout OR 1w trend turns down
+            if (close[i] < low_20[i]) or trend_1w_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: price reaches S3 or 1w trend turns up
-            if (close[i] <= s3_aligned[i]) or trend_1w_up_aligned[i]:
+            # Exit: bullish breakout OR 1w trend turns up
+            if (close[i] > high_20[i]) or trend_1w_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: price at S3/S4 + 1w uptrend + volume
-            if ((close[i] <= s3_aligned[i]) or (close[i] <= s4_aligned[i])) and \
-               trend_1w_up_aligned[i] and volume_filter[i]:
+            # Long entry: bullish breakout + 1w uptrend + volume acceleration
+            if (close[i] > high_20[i]) and trend_1w_up_aligned[i] and volume_acceleration[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price at R3/R4 + 1w downtrend + volume
-            elif ((close[i] >= r3_aligned[i]) or (close[i] >= r4_aligned[i])) and \
-                 trend_1w_down_aligned[i] and volume_filter[i]:
+            # Short entry: bearish breakout + 1w downtrend + volume acceleration
+            elif (close[i] < low_20[i]) and trend_1w_down_aligned[i] and volume_acceleration[i]:
                 position = -1
                 signals[i] = -0.25
     
