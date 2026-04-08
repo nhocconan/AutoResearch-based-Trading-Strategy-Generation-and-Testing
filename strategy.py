@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian Channel Breakout + 1d Trend + Volume Confirmation v1
-Hypothesis: Donchian breakouts on 12h timeframe capture sustained moves while filtering by 1d EMA trend and volume confirmation. 12h timeframe targets 12-37 trades/year, reducing turnover and fee drag. Volume validates breakout strength, and 1d trend ensures alignment with higher-timeframe momentum, working in both bull and bear regimes by adapting to volatility regimes.
+12h Donchian Breakout + 1d Trend + Volume Confirmation v1
+Hypothesis: 12-hour Donchian channel breakouts with 1-day trend filtering and volume confirmation capture sustained trends while minimizing whipsaws. The 12h timeframe targets 12-37 trades/year, reducing fee impact. Breakouts are only taken in the direction of the 1d EMA trend, ensuring alignment with higher-timeframe momentum. Volume confirms breakout strength, improving reliability in both bull and bear markets by filtering low-conviction moves.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     # Price data
@@ -31,8 +31,8 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # 12h Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter (>1.5x 30-period average)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
@@ -41,37 +41,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if close[i] <= donch_low[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price closes below Donchian lower or trend reverses
+            if close[i] <= lowest_low[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if close[i] >= donch_high[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price closes above Donchian upper or trend reverses
+            if close[i] >= highest_high[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Long breakout with trend alignment and volume
-            if (close[i] >= donch_high[i] and 
+            if (close[i] >= highest_high[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
             # Short breakdown with trend alignment and volume
-            elif (close[i] <= donch_low[i] and 
+            elif (close[i] <= lowest_low[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   vol_filter[i]):
                 position = -1
