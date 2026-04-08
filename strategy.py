@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_volatility_breakout_v1
-# Hypothesis: Combines 4h ATR-based volatility breakout with 1d trend direction (SMA50 slope) and volume confirmation.
-# Long when: price > upper ATR band, 1d SMA50 slope > 0, volume > 1.5x average.
-# Short when: price < lower ATR band, 1d SMA50 slope < 0, volume > 1.5x average.
-# Exit when price returns to SMA50 or volume drops below average.
-# Uses volatility breakout to capture momentum with volatility filter to avoid false signals.
-# Target: 20-40 trades/year.
+# daily_price_action_v1
+# Hypothesis: Price action strategy on daily timeframe using weekly trend filter.
+# Long when: daily close > weekly EMA200 and daily close breaks above daily Donchian upper (20)
+# Short when: daily close < weekly EMA200 and daily close breaks below daily Donchian lower (20)
+# Exit when: price crosses back below/above weekly EMA200 or daily Donchian middle
+# Uses weekly trend to filter direction and daily breakout for entry timing.
+# Target: 15-25 trades/year (~60-100 total over 4 years) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_v1"
-timeframe = "4h"
+name = "daily_price_action_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,60 +25,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h ATR for volatility bands
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = np.zeros(n)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Daily Donchian channels (20-period)
+    donch_len = 20
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=donch_len, min_periods=donch_len).max().values
+    donch_low = low_series.rolling(window=donch_len, min_periods=donch_len).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    # 4h SMA50 for mean reversion exit
-    sma_period = 50
-    close_series = pd.Series(close)
-    sma50 = close_series.rolling(window=sma_period, min_periods=sma_period).mean().values
-    
-    # ATR multiplier for bands
-    atr_mult = 2.0
-    upper_band = sma50 + atr_mult * atr
-    lower_band = sma50 - atr_mult * atr
-    
-    # Volume filter: 1.5x 20-period average
-    vol_ma_period = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
-    
-    vol_surge = np.full(n, False)
-    for i in range(n):
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
-    
-    # Get 1d data for trend direction (SMA50 slope)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=sma_period, min_periods=sma_period).mean().values
-    # Calculate slope: positive if current SMA > SMA 3 periods ago
-    sma50_slope_1d = np.full(len(close_1d), np.nan)
-    for i in range(3, len(close_1d)):
-        if not np.isnan(sma50_1d[i]) and not np.isnan(sma50_1d[i-3]):
-            sma50_slope_1d[i] = sma50_1d[i] - sma50_1d[i-3]
-    sma50_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_slope_1d)
+    # Weekly EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_len = 200
+    ema200_1w = pd.Series(close_1w).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(atr_period, sma_period, vol_ma_period, 3) + 1
+    start_idx = max(donch_len, ema_len)
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(sma50[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(sma50_slope_1d_aligned[i])):
+        # Skip if weekly EMA not available
+        if np.isnan(ema200_1w_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
@@ -86,31 +55,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below SMA50 or volume drops below average
-            if close[i] < sma50[i] or volume[i] < vol_ma[i]:
+            # Exit: Close below weekly EMA200 or below daily Donchian middle
+            if close[i] < ema200_1w_aligned[i] or close[i] < donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above SMA50 or volume drops below average
-            if close[i] > sma50[i] or volume[i] < vol_ma[i]:
+            # Exit: Close above weekly EMA200 or above daily Donchian middle
+            if close[i] > ema200_1w_aligned[i] or close[i] > donch_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above upper ATR band, 1d SMA50 slope positive, volume surge
-            if (close[i] > upper_band[i] and 
-                sma50_slope_1d_aligned[i] > 0 and 
-                vol_surge[i]):
+            # Long entry: Close above weekly EMA200 and breaks above daily Donchian upper
+            if close[i] > ema200_1w_aligned[i] and close[i] > donch_high[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below lower ATR band, 1d SMA50 slope negative, volume surge
-            elif (close[i] < lower_band[i] and 
-                  sma50_slope_1d_aligned[i] < 0 and 
-                  vol_surge[i]):
+            # Short entry: Close below weekly EMA200 and breaks below daily Donchian lower
+            elif close[i] < ema200_1w_aligned[i] and close[i] < donch_low[i]:
                 position = -1
                 signals[i] = -0.25
     
