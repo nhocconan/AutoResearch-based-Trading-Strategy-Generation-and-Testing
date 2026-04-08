@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_pivot_breakout_v1"
-timeframe = "1d"
+name = "6h_cci_reversal_12h_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,69 +18,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # 12h data for trend and CCI calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly pivot points (previous week's values)
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r1_weekly = 2 * pivot_weekly - low_weekly
-    s1_weekly = 2 * pivot_weekly - high_weekly
+    # Calculate CCI(20) on 12h data
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
+    sma_tp_12h = pd.Series(typical_price_12h).rolling(window=20, min_periods=20).mean().values
+    mad_tp_12h = pd.Series(typical_price_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # Avoid division by zero
+    mad_tp_12h = np.where(mad_tp_12h == 0, 1e-10, mad_tp_12h)
+    cci_12h = (typical_price_12h - sma_tp_12h) / (0.015 * mad_tp_12h)
     
-    # Align pivot levels to 1d timeframe
-    pivot_daily = align_htf_to_ltf(prices, df_weekly, pivot_weekly)
-    r1_daily = align_htf_to_ltf(prices, df_weekly, r1_weekly)
-    s1_daily = align_htf_to_ltf(prices, df_weekly, s1_weekly)
+    # 12h trend: 34-period EMA
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily trend: 34-period EMA
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align indicators to 6h timeframe
+    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Volume filter: volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    # Volume filter on 6h: volume > 1.5x 20-period average
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter_6h = volume > (vol_ma_6h * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34[i]) or np.isnan(pivot_daily[i]) or np.isnan(r1_daily[i]) or 
-            np.isnan(s1_daily[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(cci_12h_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
+            np.isnan(vol_filter_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < S1 or trend fails
-            if close[i] < s1_daily[i] or close[i] < ema_34[i]:
+            # Exit: CCI crosses below 0 or trend fails
+            if cci_12h_aligned[i] < 0 or close[i] < ema_34_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > R1 or trend fails
-            if close[i] > r1_daily[i] or close[i] > ema_34[i]:
+            # Exit: CCI crosses above 0 or trend fails
+            if cci_12h_aligned[i] > 0 or close[i] > ema_34_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter
-            bullish = close[i] > ema_34[i]
-            bearish = close[i] < ema_34[i]
+            # Look for CCI extremes with trend alignment
+            cci = cci_12h_aligned[i]
             
-            # Long: price > R1 + bullish trend + volume
-            if (close[i] > r1_daily[i] and 
-                bullish and 
-                vol_filter[i]):
+            # Long: CCI < -100 (oversold) + bullish trend + volume
+            if (cci < -100 and 
+                close[i] > ema_34_12h_aligned[i] and 
+                vol_filter_6h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price < S1 + bearish trend + volume
-            elif (close[i] < s1_daily[i] and 
-                  bearish and 
-                  vol_filter[i]):
+            # Short: CCI > 100 (overbought) + bearish trend + volume
+            elif (cci > 100 and 
+                  close[i] < ema_34_12h_aligned[i] and 
+                  vol_filter_6h[i]):
                 position = -1
                 signals[i] = -0.25
     
