@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 6h_1d_volatility_mean_reversion_v1
-# Hypothesis: In 6h timeframe, mean-reversion opportunities arise when volatility spikes
-# (ATR ratio > 2.0) and price reaches Bollinger Bands extremes (2.5 std) in the opposite
-# direction of the 1d trend. Uses 1d EMA50 as trend filter: long only when price > EMA50,
-# short only when price < EMA50. Exit when volatility contracts (ATR ratio < 1.2) or
-# price returns to mean (middle Bollinger Band). Designed for 12-30 trades/year to
-# minimize fee drag while capturing volatility mean reversion in both bull and bear markets.
+# 4h_1w_12h_adaptive_mean_reversion_v1
+# Hypothesis: Mean reversion from extreme 12h RSI with weekly trend filter and volume confirmation.
+# In weekly uptrend: buy when 12h RSI < 30 and price > weekly VWAP with volume surge.
+# In weekly downtrend: sell when 12h RSI > 70 and price < weekly VWAP with volume surge.
+# Exit when RSI returns to neutral (40-60) or weekly trend fails.
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_volatility_mean_reversion_v1"
-timeframe = "6h"
+name = "4h_1w_12h_adaptive_mean_reversion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly VWAP for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap_1w = vwap_1w.replace(0, np.nan).ffill().bfill().values
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # Bollinger Bands (20, 2.5) on 6h
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.5 * bb_std
-    bb_lower = bb_middle - 2.5 * bb_std
+    # 12h RSI for mean reversion signals
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # ATR for volatility measurement
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate RSI(14) on 12h data
+    delta = pd.Series(close_12h).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h = rsi_12h.fillna(50).values
     
-    # ATR ratio: current ATR(7) / ATR(30) to detect volatility spikes
-    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = np.where(atr30 > 0, atr7 / atr30, 1.0)
+    # Align 12h RSI to 4h timeframe
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -58,40 +58,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or 
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        # Volume surge condition
+        vol_surge = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        
         if position == 1:  # Long position
-            # Exit: volatility contracts OR price returns to mean
-            if atr_ratio[i] < 1.2 or close[i] > bb_middle[i]:
+            # Exit: RSI > 50 (mean reversion complete) or weekly trend fails (price < VWAP)
+            if rsi_12h_aligned[i] > 50 or close[i] < vwap_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: volatility contracts OR price returns to mean
-            if atr_ratio[i] < 1.2 or close[i] < bb_middle[i]:
+            # Exit: RSI < 50 (mean reversion complete) or weekly trend fails (price > VWAP)
+            if rsi_12h_aligned[i] < 50 or close[i] > vwap_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volatility spike condition
-            vol_spike = atr_ratio[i] > 2.0
-            
-            # Long entry: volatility spike + price at lower BB + uptrend (price > EMA50)
-            if vol_spike and close[i] <= bb_lower[i] and close[i] > ema50_1d_aligned[i]:
+            # Long entry: RSI < 30 with volume surge and weekly uptrend (price > VWAP)
+            if (rsi_12h_aligned[i] < 30 and vol_surge and 
+                close[i] > vwap_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: volatility spike + price at upper BB + downtrend (price < EMA50)
-            elif vol_spike and close[i] >= bb_upper[i] and close[i] < ema50_1d_aligned[i]:
+            # Short entry: RSI > 70 with volume surge and weekly downtrend (price < VWAP)
+            elif (rsi_12h_aligned[i] > 70 and vol_surge and 
+                  close[i] < vwap_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
