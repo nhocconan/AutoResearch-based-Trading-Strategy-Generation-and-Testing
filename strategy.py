@@ -1,7 +1,10 @@
-# 4h ADX Volume Breakout - Focus on high-probability trend continuations with strong volume
-# Hypothesis: Strong trends (ADX>25) with volume confirmation (>1.5x average) produce reliable breakouts
-# Uses 20-period Donchian channels for entry/exit to capture trends while avoiding whipsaw
-# Designed for 15-30 trades/year per symbol to minimize fee drag and work in both bull/bear markets
+#!/usr/bin/env python3
+"""
+4h ADX Volume Breakout - Focus on high-probability trend continuations with strong volume
+Hypothesis: Strong trends (ADX>25) with volume confirmation (>1.5x average) produce reliable breakouts
+Uses 20-period Donchian channels for entry/exit to capture trends while avoiding whipsaw
+Designed for 15-30 trades/year per symbol to minimize fee drag and work in both bull/bear markets
+"""
 
 name = "4h_adx_volume_breakout_v1"
 timeframe = "4h"
