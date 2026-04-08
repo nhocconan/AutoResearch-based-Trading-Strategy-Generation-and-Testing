@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
-# 4h_pivot_breakout_volume_trend_v2
-# Hypothesis: Daily pivot points (R1, S1) act as strong support/resistance. Breakouts with volume > 3x average and aligned with daily EMA50 trend capture momentum in both bull and bear markets.
-# Using tighter filters: volume > 3.5x average, ATR volatility filter (ATR < 1.2x average), and max holding period of 6 bars to reduce trade frequency and avoid overtrading.
-# Target: 20-35 trades/year by requiring strict confluence of pivot breakout + volume surge + trend alignment + volatility filter.
-# Position size: 0.25 to manage drawdown.
+# 4h_ema_pullback_volume_surge_v1
+# Hypothesis: In trending markets, price pulls back to the 21-period EMA on 4h charts with high volume (>2.5x average) present high-probability continuation entries.
+# Uses EMA trend filter (price > EMA50 for longs, < EMA50 for shorts) to ensure alignment with higher timeframe trend.
+# Volume surge confirms institutional interest during pullback. Works in both bull and bear markets by following the trend.
+# Target: 25-35 trades/year via strict EMA alignment + volume surge requirement.
 
-name = "4h_pivot_breakout_volume_trend_v2"
+name = "4h_ema_pullback_volume_surge_v1"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_pivot_points(high, low, close):
-    """Calculate daily pivot points and support/resistance levels."""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, r2, s1, s2
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,28 +25,23 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Get daily data for pivot points and trend filter - call ONCE before loop
+    # EMA21 for pullback target (calculated on 4h data)
+    ema21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    
+    # EMA50 for trend filter (calculated on 4h data)
+    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # 20-period average volume for volume surge filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Get daily data for higher timeframe trend filter
     df_d = get_htf_data(prices, '1d')
     high_d = df_d['high'].values
     low_d = df_d['low'].values
     close_d = df_d['close'].values
     
-    # Calculate daily pivot points
-    pivot_d, r1_d, r2_d, s1_d, s2_d = calculate_pivot_points(high_d, low_d, close_d)
-    
-    # Calculate daily EMA50 for trend filter
+    # Daily EMA50 for higher timeframe trend confirmation
     ema50_d = pd.Series(close_d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Calculate 20-period average volume for 4h timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ATR for volatility filter (14-period)
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -66,7 +52,7 @@ def generate_signals(prices):
     bars_since_entry = 0  # Track bars since entry for minimum holding period
     
     # Start from sufficient lookback
-    start_idx = max(50, 20, 14)  # Need enough data for all indicators
+    start_idx = max(50, 20)  # Need enough data for EMAs and volume average
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -75,37 +61,23 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
         
-        # Get aligned daily indicators for current 4h bar
-        pivot_val = align_htf_to_ltf(prices, df_d, pivot_d)[i]
-        r1_val = align_htf_to_ltf(prices, df_d, r1_d)[i]
-        s1_val = align_htf_to_ltf(prices, df_d, s1_d)[i]
-        ema50_val = align_htf_to_ltf(prices, df_d, ema50_d)[i]
-        vol_ma_val = vol_ma[i]
-        atr_val = atr[i]
-        atr_ma_val = atr_ma[i]
+        # Get aligned daily EMA50 for trend filter
+        ema50_d_val = align_htf_to_ltf(prices, df_d, ema50_d)[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(ema50_val) or np.isnan(vol_ma_val) or np.isnan(atr_val) or
-            np.isnan(atr_ma_val) or volume[i] == 0):
+        if (np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
+            np.isnan(ema50_d_val) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
-        # Volatility filter: current ATR < 1.2x 20-period average ATR (avoid choppy markets)
-        vol_filter = atr_val < 1.2 * atr_ma_val
-        
-        # Volume breakout condition: current volume > 3.5x 20-period average (stricter)
-        vol_breakout = volume[i] > 3.5 * vol_ma_val
-        
-        # Trend filter: price above/below daily EMA50
-        uptrend = close[i] > ema50_val
-        downtrend = close[i] < ema50_val
+        # Volume surge condition: current volume > 2.5x 20-period average
+        volume_surge = volume[i] > 2.5 * vol_ma[i]
         
         if position == 1:  # Long position
             bars_since_entry += 1
-            # Exit if price breaks below pivot (support) OR maximum holding period reached
-            if (not np.isnan(pivot_val) and close[i] < pivot_val) or bars_since_entry >= 6:
+            # Exit if price breaks below EMA21 OR maximum holding period reached
+            if close[i] < ema21[i] or bars_since_entry >= 6:
                 position = 0
                 signals[i] = 0.0
                 bars_since_entry = 0
@@ -114,8 +86,8 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             bars_since_entry += 1
-            # Exit if price breaks above pivot (resistance) OR maximum holding period reached
-            if (not np.isnan(pivot_val) and close[i] > pivot_val) or bars_since_entry >= 6:
+            # Exit if price breaks above EMA21 OR maximum holding period reached
+            if close[i] > ema21[i] or bars_since_entry >= 6:
                 position = 0
                 signals[i] = 0.0
                 bars_since_entry = 0
@@ -123,14 +95,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat, look for entry
             bars_since_entry = 0
-            # Breakout long above R1 (first resistance) with volume confirmation, uptrend
-            if (not np.isnan(r1_val) and high[i] >= r1_val and 
-                close[i] > r1_val and vol_breakout and uptrend and vol_filter):
+            # Pullback long: price crosses above EMA21 with volume surge, aligned with uptrend
+            if (close[i] > ema21[i] and 
+                close[i-1] <= ema21[i-1] and  # crossed above this bar
+                volume_surge and 
+                ema50[i] > ema50_d_val):  # 4h EMA50 above daily EMA50 = uptrend alignment
                 position = 1
                 signals[i] = 0.25
-            # Breakout short below S1 (first support) with volume confirmation, downtrend
-            elif (not np.isnan(s1_val) and low[i] <= s1_val and 
-                  close[i] < s1_val and vol_breakout and downtrend and vol_filter):
+            # Pullback short: price crosses below EMA21 with volume surge, aligned with downtrend
+            elif (close[i] < ema21[i] and 
+                  close[i-1] >= ema21[i-1] and  # crossed below this bar
+                  volume_surge and 
+                  ema50[i] < ema50_d_val):  # 4h EMA50 below daily EMA50 = downtrend alignment
                 position = -1
                 signals[i] = -0.25
     
