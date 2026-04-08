@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_volume_v1
-# Hypothesis: 4h price breaking above/below daily Camarilla pivot point resistance/support levels
-# (R4/S4) with volume confirmation creates high-probability breakout trades in both bull and bear markets.
-# Uses daily timeframe for pivot calculation (major support/resistance) and 4h for entry timing.
-# Volume filter ensures breakouts have conviction. Target: 20-50 trades/year.
+# 6h_1d_weekly_pivot_breakout_volume_v1
+# Hypothesis: 6h price breaking above/below weekly pivot point resistance/support levels
+# (R2/S2) with volume confirmation creates high-probability breakout trades.
+# Uses weekly timeframe for pivot calculation (stronger support/resistance) and
+# 6h for entry timing. Works in both bull/bear markets by trading breakouts in
+# direction of prevailing trend. Target: 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "6h_1d_weekly_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,47 +26,54 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_prices = prices['open'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
     # Pivot point = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
-    r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
-    # R3/S3 for exit: R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4)
-    r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    pivot = (high_weekly + low_weekly + close_weekly) / 3.0
+    # Resistance 1 = (2 * P) - L
+    r1 = (2 * pivot) - low_weekly
+    # Support 1 = (2 * P) - H
+    s1 = (2 * pivot) - high_weekly
+    # Resistance 2 = P + (H - L)
+    r2 = pivot + (high_weekly - low_weekly)
+    # Support 2 = P - (H - L)
+    s2 = pivot - (high_weekly - low_weekly)
+    # Resistance 3 = H + 2*(P - L)
+    r3 = high_weekly + 2 * (pivot - low_weekly)
+    # Support 3 = L - 2*(H - P)
+    s3 = low_weekly - 2 * (high_weekly - pivot)
     
-    # Align Camarilla levels to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_weekly_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    r3_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s3)
     
-    # Volume confirmation: volume > 1.5x average of last 12 periods (6 hours)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation: volume > 1.5x average of last 20 periods (5 days)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(pivot_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or \
-           np.isnan(s4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or \
-           np.isnan(s3_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(pivot_weekly_aligned[i]) or np.isnan(r2_weekly_aligned[i]) or \
+           np.isnan(s2_weekly_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -74,30 +82,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 (reversal signal)
-            if close[i] < s3_1d_aligned[i]:
+            # Exit: price closes below S2 or loses upward momentum
+            if close[i] < s2_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 (reversal signal)
-            if close[i] > r3_1d_aligned[i]:
+            # Exit: price closes above R2 or loses downward momentum
+            if close[i] > r2_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above R4 with volume
-            if (close[i] > r4_1d_aligned[i] and 
-                open_prices[i] <= r4_1d_aligned[i] and  # Ensure breakout happened this bar
+            # Long entry: price breaks above R2 with volume
+            if (close[i] > r2_weekly_aligned[i] and 
+                open_prices[i] <= r2_weekly_aligned[i] and  # Ensure breakout happened this bar
                 vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below S4 with volume
-            elif (close[i] < s4_1d_aligned[i] and 
-                  open_prices[i] >= s4_1d_aligned[i] and  # Ensure breakdown happened this bar
+            # Short entry: price breaks below S2 with volume
+            elif (close[i] < s2_weekly_aligned[i] and 
+                  open_prices[i] >= s2_weekly_aligned[i] and  # Ensure breakdown happened this bar
                   vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
