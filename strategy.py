@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_fractal_breakout_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -18,78 +18,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend and fractal detection
+    # 1d data for trend and Donchian channels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Williams Fractals (1d)
-    # Bearish fractal: high[n] is highest of [n-2, n-1, n, n+1, n+2]
-    # Bullish fractal: low[n] is lowest of [n-2, n-1, n, n+1, n+2]
+    # Calculate Donchian channels (20-period) on 1d
     n1 = len(high_1d)
-    bearish_fractal = np.zeros(n1, dtype=bool)
-    bullish_fractal = np.zeros(n1, dtype=bool)
+    donchian_high = np.full(n1, np.nan)
+    donchian_low = np.full(n1, np.nan)
     
-    for i in range(2, n1 - 2):
-        if (high_1d[i] >= high_1d[i-1] and high_1d[i] >= high_1d[i-2] and
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = True
-        if (low_1d[i] <= low_1d[i-1] and low_1d[i] <= low_1d[i-2] and
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = True
+    for i in range(20, n1):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    # Align fractal signals to 6h timeframe
-    bearish_fractal_6h = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float))
-    bullish_fractal_6h = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float))
+    # Align Donchian channels to 12h timeframe
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # 1d trend: 34-period EMA (responsive trend)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d trend: 50-period EMA
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: 6h volume > 1.5x 20-period average
+    # Volume filter: 12h volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(34, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_6h[i]) or np.isnan(bearish_fractal_6h[i]) or 
-            np.isnan(bullish_fractal_6h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: bearish fractal or trend fails
-            if bearish_fractal_6h[i] == 1.0 or close[i] < ema_34_6h[i]:
+            # Exit: price breaks below Donchian low or trend fails
+            if close[i] <= donchian_low_12h[i] or close[i] < ema_50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish fractal or trend fails
-            if bullish_fractal_6h[i] == 1.0 or close[i] > ema_34_6h[i]:
+            # Exit: price breaks above Donchian high or trend fails
+            if close[i] >= donchian_high_12h[i] or close[i] > ema_50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_34_6h[i]
-            bearish = close[i] < ema_34_6h[i]
+            bullish = close[i] > ema_50_12h[i]
+            bearish = close[i] < ema_50_12h[i]
             
-            # Long: bullish fractal + bullish trend + volume
-            if (bullish_fractal_6h[i] == 1.0 and 
+            # Long: price breaks above Donchian high + bullish trend + volume
+            if (close[i] > donchian_high_12h[i] and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: bearish fractal + bearish trend + volume
-            elif (bearish_fractal_6h[i] == 1.0 and 
+            # Short: price breaks below Donchian low + bearish trend + volume
+            elif (close[i] < donchian_low_12h[i] and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
