@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d trend filter (ADX>25) and volume confirmation (volume > 1.5x 20-period average)
+# Hypothesis: 6h Donchian channel breakout with 1d trend filter (ADX>25) and volume confirmation (volume > 1.5x 20-period average)
 # Breakouts from Donchian channels capture momentum moves, ADX filters for trending markets, volume confirms breakout strength
 # Works in both bull and bear markets by capturing breakouts in either direction
-# Target: 20-50 trades/year by requiring Donchian breakout + trend + volume confirmation
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+# Target: 12-37 trades/year by requiring Donchian breakout + trend + volume confirmation
+name = "6h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -56,7 +56,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # 4h Donchian channel (20-period)
+    # 6h Donchian channel (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -76,7 +76,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
+        # Get aligned 1d values for current 6h bar
         adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
         
         # Trend filter: ADX > 25 indicates strong trend
