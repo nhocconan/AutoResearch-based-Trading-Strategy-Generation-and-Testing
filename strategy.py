@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-1h 4h/1d Multi-Timeframe Trend with Volume Confirmation
-Hypothesis: 4h Donchian breakout (20) + 1d EMA50 trend filter + volume spike + 1h entry timing.
-4h provides direction, 1d confirms higher timeframe trend, volume ensures conviction, 1h catches pullbacks to reduce false breakouts.
-Works in bull/bear via trend filter and volatility-adjusted position sizing. Target 15-37 trades/year on 1h.
+12h Donchian Breakout + 1d EMA Trend + Volume + ATR Stop
+Hypothesis: Donchian breakouts capture strong trends. Filter by 1d EMA trend (stable long-term) and volume confirmation. ATR-based stop manages risk. Works in bull/bear by using volatility-adjusted stops and trend alignment. Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_trend_volume_confirmation_v1"
-timeframe = "1h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,72 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian Channel (20-period) - directional bias
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
-    
-    # 1d EMA50 - higher timeframe trend filter
+    # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
     ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter (1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # 12h ATR(20) for stop loss
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC (reduce noise)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 12h Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter (>1.5x 30-period average)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(highest_high_4h_aligned[i]) or np.isnan(lowest_low_4h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_filter[i]) or
-            not session_filter[i]):
+    for i in range(60, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: 4h breakdown OR 1d trend reversal OR volume fails
-            if (close[i] <= lowest_low_4h_aligned[i] or
+            # Exit: price closes below Donchian low OR trend reverses OR ATR stop
+            if (close[i] <= lowest_low[i] or 
                 close[i] < ema_50_1d_aligned[i] or
-                not vol_filter[i]):
+                close[i] <= (highest_high[i-1] - 2.5 * atr[i])):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: 4h breakout OR 1d trend reversal OR volume fails
-            if (close[i] >= highest_high_4h_aligned[i] or
+            # Exit: price closes above Donchian high OR trend reverses OR ATR stop
+            if (close[i] >= highest_high[i] or 
                 close[i] > ema_50_1d_aligned[i] or
-                not vol_filter[i]):
+                close[i] >= (lowest_low[i-1] + 2.5 * atr[i])):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: 4h breakout + 1d uptrend + volume + pullback entry
-            if (close[i] > highest_high_4h_aligned[i-1] and
-                close[i] > ema_50_1d_aligned[i] and
-                vol_filter[i] and
-                close[i] < (highest_high_4h_aligned[i-1] + lowest_low_4h_aligned[i-1]) / 2):  # Pullback to midpoint
+            # Long breakout with trend alignment and volume
+            if (close[i] > highest_high[i-1] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                vol_filter[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short: 4h breakdown + 1d downtrend + volume + pullback entry
-            elif (close[i] < lowest_low_4h_aligned[i-1] and
-                  close[i] < ema_50_1d_aligned[i] and
-                  vol_filter[i] and
-                  close[i] > (highest_high_4h_aligned[i-1] + lowest_low_4h_aligned[i-1]) / 2):  # Pullback to midpoint
+                signals[i] = 0.25
+            # Short breakdown with trend alignment and volume
+            elif (close[i] < lowest_low[i-1] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  vol_filter[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
