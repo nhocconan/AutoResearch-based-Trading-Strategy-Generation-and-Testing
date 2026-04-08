@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_1d_trend_volume_v2
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Works in bull markets by buying breakouts above 4h high in uptrend, and in bear markets by selling breakdowns below 4h low in downtrend.
-# Volume filter ensures breakouts have institutional participation. Target: 25-40 trades/year via strict entry conditions.
+# 12h_donchian_volume_trend_v1
+# Hypothesis: 12h Donchian channel breakouts with volume confirmation and daily trend filter.
+# In bull markets, buy breakouts above upper channel with rising volume and daily uptrend.
+# In bear markets, sell breakdowns below lower channel with rising volume and daily downtrend.
+# Uses tight entry conditions to limit trades and reduce fee drag.
 
-name = "4h_donchian_breakout_1d_trend_volume_v2"
-timeframe = "4h"
+name = "12h_donchian_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,21 +25,19 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian Channel (20-period)
-    donchian_period = 20
-    upper_channel = np.full(n, np.nan)
-    lower_channel = np.full(n, np.nan)
+    dc_period = 20
+    upper_channel = np.full_like(high, np.nan)
+    lower_channel = np.full_like(low, np.nan)
     
-    for i in range(donchian_period - 1, n):
-        upper_channel[i] = np.max(high[i - donchian_period + 1:i + 1])
-        lower_channel[i] = np.min(low[i - donchian_period + 1:i + 1])
+    for i in range(dc_period - 1, n):
+        upper_channel[i] = np.max(high[i-dc_period+1:i+1])
+        lower_channel[i] = np.min(low[i-dc_period+1:i+1])
     
     # Volume filter: 20-period average volume
-    vol_ma = np.full(n, np.nan)
+    vol_ma = np.full_like(volume, np.nan)
     for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i - 19:i + 1])
-    # Fill beginning with first valid value
-    if not np.isnan(vol_ma[19]):
-        vol_ma[:19] = vol_ma[19]
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_ma[:19] = vol_ma[19]  # Fill beginning
     
     # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
@@ -46,13 +45,11 @@ def generate_signals(prices):
     
     # Daily EMA (50-period) for higher timeframe trend
     ema_period = 50
-    ema_daily = np.full(len(close_daily), np.nan)
-    if len(close_daily) >= ema_period:
-        ema_daily[ema_period - 1] = np.mean(close_daily[:ema_period])
-        for i in range(ema_period, len(close_daily)):
-            ema_daily[i] = (close_daily[i] * 2 + ema_daily[i - 1] * (ema_period - 1)) / (ema_period + 1)
+    ema_daily = np.full_like(close_daily, np.nan)
+    for i in range(ema_period - 1, len(close_daily)):
+        ema_daily[i] = np.mean(close_daily[i-ema_period+1:i+1])
     
-    # Align daily EMA to 4h timeframe
+    # Align daily EMA to 12h timeframe
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -63,7 +60,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(donchian_period, ema_period) + 5
+    start_idx = max(dc_period, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -85,31 +82,31 @@ def generate_signals(prices):
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if trend reverses or price breaks below lower channel
-            if downtrend_htf or close[i] < lower_channel[i]:
+            # Exit if price breaks below lower channel or trend reverses
+            if close[i] < lower_channel[i] or not uptrend_htf:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if trend reverses or price breaks above upper channel
-            if uptrend_htf or close[i] > upper_channel[i]:
+            # Exit if price breaks above upper channel or trend reverses
+            if close[i] > upper_channel[i] or not downtrend_htf:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper channel, uptrend on daily EMA, volume confirmation
+            # Long entry: price breaks above upper channel with volume and daily uptrend
             if (close[i] > upper_channel[i] and 
-                uptrend_htf and 
-                volume_filter):
+                volume_filter and 
+                uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower channel, downtrend on daily EMA, volume confirmation
+            # Short entry: price breaks below lower channel with volume and daily downtrend
             elif (close[i] < lower_channel[i] and 
-                  downtrend_htf and 
-                  volume_filter):
+                  volume_filter and 
+                  downtrend_htf):
                 position = -1
                 signals[i] = -0.25
     
