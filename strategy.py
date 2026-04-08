@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_daily_trend_volume_v2
+# 12h_camarilla_pivot_daily_trend_volume_v3
 # Hypothesis: Uses daily Camarilla pivot levels with 1d trend filter and volume confirmation on 12h timeframe.
-# Goes long when price rebounds from S3/S4 in daily uptrend with volume confirmation.
-# Goes short when price rebounds from R3/R4 in daily downtrend with volume confirmation.
+# Goes long when price bounces from S3/S4 in daily uptrend with volume confirmation.
+# Goes short when price bounces from R3/R4 in daily downtrend with volume confirmation.
 # Uses 12h candles to reduce trade frequency and avoid fee drag. Target: 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_daily_trend_volume_v2"
+name = "12h_camarilla_pivot_daily_trend_volume_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -31,10 +31,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate daily Camarilla levels
-    # R4 = Close + 1.5 * (High - Low)
-    # R3 = Close + 1.0 * (High - Low)
-    # S3 = Close - 1.0 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
     hl_range = high_1d - low_1d
     r4 = close_1d + 1.5 * hl_range
     r3 = close_1d + 1.0 * hl_range
@@ -77,7 +73,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price reaches R3 or trend changes
@@ -85,7 +81,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Volume confirmation
             volume_ok = volume[i] > 1.5 * avg_volume[i]
@@ -94,10 +90,10 @@ def generate_signals(prices):
                 # Long entry: price bounces from S4/S3 in uptrend
                 if daily_uptrend and close[i] > s4_aligned[i] and close[i-1] <= s4_aligned[i-1]:
                     position = 1
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                 # Short entry: price bounces from R4/R3 in downtrend
                 elif daily_downtrend and close[i] < r4_aligned[i] and close[i-1] >= r4_aligned[i-1]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
