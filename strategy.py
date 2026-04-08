@@ -1,33 +1,36 @@
+#24770
+
 #!/usr/bin/env python3
 """
-12h_1w1d_camarilla_pivot_v1
-Hypothesis: 12-hour strategy using weekly and daily context with Camarilla pivot levels.
-Long when price crosses above weekly Pivot with volume > 2x average and price > daily EMA200 (bullish trend).
-Short when price crosses below weekly Pivot with volume > 2x average and price < daily EMA200 (bearish trend).
-Exit when price crosses opposite weekly support/resistance or volume drops below average.
-Uses discrete position sizing (0.25) to minimize churn. Target: 12-37 trades/year.
+4h_1d_donchian_breakout_v1
+Hypothesis: 4-hour Donchian breakout with daily trend filter and volume confirmation.
+Long when price breaks above 20-period Donchian high with volume > 1.5x average and price > daily EMA50 (bullish trend).
+Short when price breaks below 20-period Donchian low with volume > 1.5x average and price < daily EMA50 (bearish trend).
+Exit when price crosses the Donchian midline (average of 20-period high/low).
+Uses discrete position sizing (0.25) to minimize churn. Target: 20-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    if len(high) < 1:
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel: upper and lower bands"""
+    if len(high) < period:
         return np.full(len(high), np.nan), np.full(len(high), np.nan)
     
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
+    upper = np.full(len(high), np.nan)
+    lower = np.full(len(high), np.nan)
     
-    H3 = pivot + (range_val * 1.1 / 4)
-    L3 = pivot - (range_val * 1.1 / 4)
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     
-    return H3, L3
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -43,7 +46,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -51,36 +54,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for context and Pivot
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly Pivot (using previous week's data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    # Weekly support/resistance levels
-    S1_1w = pivot_1w - (range_1w * 1.1 / 12)  # Weekly S1
-    R1_1w = pivot_1w + (range_1w * 1.1 / 12)  # Weekly R1
-    
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_200_1d = calculate_ema(close_1d, 200)
+    ema_50_1d = calculate_ema(close_1d, 50)
     
-    # Align indicators to 12-hour timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
-    R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 4-hour Donchian channel (20-period)
+    donch_hi, donch_lo = calculate_donchian(high, low, 20)
+    donch_mid = (donch_hi + donch_lo) / 2.0
+    
+    # Align daily EMA to 4-hour timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -90,10 +78,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(S1_1w_aligned[i]) or 
-            np.isnan(R1_1w_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or 
+            np.isnan(donch_mid[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
@@ -103,33 +91,33 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        pivot = pivot_1w_aligned[i]
-        S1 = S1_1w_aligned[i]
-        R1 = R1_1w_aligned[i]
-        trend_up_1d = price > ema_200_1d_aligned[i]
+        upper = donch_hi[i]
+        lower = donch_lo[i]
+        mid = donch_mid[i]
+        trend_up = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below weekly S1 or volume drops below average
-            if price < S1 or vol_ratio < 1.0:
+            # Exit: price crosses below Donchian midline
+            if price < mid:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above weekly R1 or volume drops below average
-            if price > R1 or vol_ratio < 1.0:
+            # Exit: price crosses above Donchian midline
+            if price > mid:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price crosses above weekly Pivot with volume expansion and uptrend on daily
-            if price > pivot and vol_ratio > 2.0 and trend_up_1d:
+            # Enter long: price breaks above Donchian high with volume expansion and uptrend
+            if price > upper and vol_ratio > 1.5 and trend_up:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price crosses below weekly Pivot with volume expansion and downtrend on daily
-            elif price < pivot and vol_ratio > 2.0 and not trend_up_1d:
+            # Enter short: price breaks below Donchian low with volume expansion and downtrend
+            elif price < lower and vol_ratio > 1.5 and not trend_up:
                 position = -1
                 signals[i] = -0.25
     
