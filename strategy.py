@@ -1,6 +1,8 @@
-# 4h_volatility_breakout_v2
-# Hypothesis: Volatility breakout strategy using ATR-based channels. Trades breakouts of dynamic ATR channels during high volatility periods.
-# Uses ATR(14) to set upper/lower bands around EMA(20). Enters on breakout with volume confirmation.
+#!/usr/bin/env python3
+
+# 4h_volatility_breakout_v3
+# Hypothesis: Volatility breakout strategy using ATR-based channels with improved filters.
+# Uses ATR(14) to set upper/lower bands around EMA(20). Enters on breakout with volume confirmation and trend filter.
 # Designed to work in both bull and bear markets by capturing volatility expansion phases.
 # Target: 20-30 trades/year for low fee drag.
 
@@ -8,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_v2"
+name = "4h_volatility_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
