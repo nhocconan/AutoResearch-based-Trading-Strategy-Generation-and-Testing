@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-# 12h_supertrend_momentum_volume_v2
-# Hypothesis: 12h Supertrend for trend direction, momentum (RSI) for entry timing, and volume confirmation.
-# Optimized: reduced trade frequency by tightening RSI thresholds and volume filter.
-# Works in bull markets by following uptrend and buying pullbacks, and in bear markets by following downtrend and selling rallies.
-# Volume filter ensures trades occur with institutional participation, reducing false signals.
-# Target: 15-30 trades/year via stricter entry conditions.
+# 12h_donchian_breakout_1d_trend_volume_v1
+# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation.
+# Breakouts capture momentum in both bull and bear markets. Volume ensures institutional participation.
+# 1d EMA filter avoids counter-trend trades. Target: 20-30 trades/year via strict breakout conditions.
 
-name = "12h_supertrend_momentum_volume_v2"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,77 +23,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Supertrend (ATR=10, multiplier=3.0)
-    atr_period = 10
-    multiplier = 3.0
+    # Donchian channel (20-period)
+    period = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # First bar
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR using Wilder's smoothing
-    atr = np.zeros_like(tr)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
-    
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
-        else:
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
-    
-    # RSI (14-period) for momentum
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-    
-    for i in range(rsi_period, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
     # Volume filter: 20-period average volume
-    vol_ma = np.zeros_like(volume)
-    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
-    vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i - 19:i + 1])
     
-    # Get daily data for trend filter (higher timeframe)
+    # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
     close_daily = df_daily['close'].values
     
     # Daily EMA (50-period) for higher timeframe trend
     ema_period = 50
-    ema_daily = np.zeros_like(close_daily)
-    ema_daily[ema_period-1] = np.mean(close_daily[:ema_period])
-    for i in range(ema_period, len(close_daily)):
-        ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
+    ema_daily = np.full_like(close_daily, np.nan)
+    for i in range(ema_period - 1, len(close_daily)):
+        ema_daily[i] = np.mean(close_daily[i - ema_period + 1:i + 1])
     
     # Align daily EMA to 12h timeframe
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
@@ -108,7 +58,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(atr_period, rsi_period, ema_period) + 5
+    start_idx = max(period, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -117,46 +67,40 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(supertrend[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
             np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average (stricter)
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
         # Higher timeframe trend filter: price above/below daily EMA
         uptrend_htf = close[i] > ema_daily_aligned[i]
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if trend reverses or momentum fails
-            if direction[i] == -1 or rsi[i] < 40:
+            # Exit if price breaks below lower Donchian band or trend reverses
+            if close[i] < lower[i] or not uptrend_htf:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if trend reverses or momentum fails
-            if direction[i] == 1 or rsi[i] > 60:
+            # Exit if price breaks above upper Donchian band or trend reverses
+            if close[i] > upper[i] or not downtrend_htf:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: uptrend on Supertrend, RSI momentum, volume, and HTF uptrend
-            if (direction[i] == 1 and 
-                rsi[i] > 55 and rsi[i] < 65 and  # Tighter RSI range for momentum
-                volume_filter and 
-                uptrend_htf):
+            # Long entry: price breaks above upper Donchian band, volume, and HTF uptrend
+            if close[i] > upper[i] and volume_filter and uptrend_htf:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: downtrend on Supertrend, RSI momentum, volume, and HTF downtrend
-            elif (direction[i] == -1 and 
-                  rsi[i] < 45 and rsi[i] > 35 and  # Tighter RSI range for momentum
-                  volume_filter and 
-                  downtrend_htf):
+            # Short entry: price breaks below lower Donchian band, volume, and HTF downtrend
+            elif close[i] < lower[i] and volume_filter and downtrend_htf:
                 position = -1
                 signals[i] = -0.25
     
