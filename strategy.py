@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_volume_breakout_v7
-# Hypothesis: 4-hour Donchian breakout with volume confirmation and 1-day EMA trend filter.
-# Long: price > Donchian(20) high AND volume > 1.5x 20-period average volume AND price > 1-day EMA50.
-# Short: price < Donchian(20) low AND volume > 1.5x 20-period average volume AND price < 1-day EMA50.
-# Exit: price crosses Donchian midpoint or opposite breakout with volume.
-# Designed to capture strong trending moves in both bull and bear markets with strict entry criteria to limit trades.
+# 12h_1d_wkly_camarilla_volume_v2
+# Hypothesis: 12-hour Camarilla pivot reversal with volume confirmation and weekly trend filter.
+# Long: price touches Camarilla S3 (support) from above, volume > 1.5x avg, price > weekly EMA50.
+# Short: price touches Camarilla R3 (resistance) from below, volume > 1.5x avg, price < weekly EMA50.
+# Exit: price crosses Camarilla pivot point (center) or opposite S3/R3 touch with volume.
+# Designed for mean-reversion in ranging markets with trend filter to avoid counter-trend trades.
+# Weekly EMA filter ensures alignment with higher timeframe trend, reducing whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_breakout_v7"
-timeframe = "4h"
+name = "12h_1d_wkly_camarilla_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
+    # Calculate 12h Camarilla levels (using previous period's HLC)
+    camarilla_pivot = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_r3 = np.full(n, np.nan)
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    for i in range(1, n):
+        # Use previous bar's HLC for current bar's levels (no look-ahead)
+        ph = high[i-1]
+        pl = low[i-1]
+        pc = close[i-1]
+        
+        pivot = (ph + pl + pc) / 3
+        range_ = ph - pl
+        
+        camarilla_pivot[i] = pivot
+        camarilla_s3[i] = pc - 1.1 * range_  # S3 level
+        camarilla_r3[i] = pc + 1.1 * range_  # R3 level
     
-    # 20-period average volume
+    # 20-period average volume for confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # 1-day EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_1d_50 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d_50[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d_50[i] = close_1d[i] * (2/51) + ema_1d_50[i-1] * (49/51)
+    close_1w = df_1w['close'].values
+    ema_1w_50 = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_1w_50[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_1w_50[i] = close_1w[i] * (2/51) + ema_1w_50[i-1] * (49/51)
     
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -60,12 +69,12 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        d_high = donchian_high[i]
-        d_low = donchian_low[i]
-        d_mid = donchian_mid[i]
-        ema_1d = ema_1d_50_aligned[i]
+        pivot = camarilla_pivot[i]
+        s3 = camarilla_s3[i]
+        r3 = camarilla_r3[i]
+        ema_1w = ema_1w_50_aligned[i]
         
-        if np.isnan(d_high) or np.isnan(d_low) or np.isnan(d_mid) or np.isnan(avg_vol) or np.isnan(ema_1d):
+        if np.isnan(pivot) or np.isnan(s3) or np.isnan(r3) or np.isnan(avg_vol) or np.isnan(ema_1w):
             if position != 0:
                 pass  # Hold position
             else:
@@ -75,23 +84,25 @@ def generate_signals(prices):
         vol_surge = vol > 1.5 * avg_vol
         
         if position == 1:  # Long position
-            if price < d_mid or (price < d_low and vol_surge):
+            if price > pivot or (price < s3 and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if price > d_mid or (price > d_high and vol_surge):
+            if price < pivot or (price > r3 and vol_surge):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if price > d_high and vol_surge and price > ema_1d:
+            # Long: price touches S3 from above with volume surge and above weekly EMA
+            if price <= s3 and close[i-1] > s3 and vol_surge and price > ema_1w:
                 position = 1
                 signals[i] = 0.25
-            elif price < d_low and vol_surge and price < ema_1d:
+            # Short: price touches R3 from below with volume surge and below weekly EMA
+            elif price >= r3 and close[i-1] < r3 and vol_surge and price < ema_1w:
                 position = -1
                 signals[i] = -0.25
     
