@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# 1d_volume_momentum_breakout_v1
-# Hypothesis: On daily timeframe, capture breakouts from volatility contractions using volume-weighted momentum. 
-# Uses Bollinger Band squeeze (low volatility) followed by expansion with volume confirmation and momentum alignment.
-# Works in bull/bear by trading breakouts in direction of momentum. Low trade frequency (~10-20/year) minimizes fee drag.
+# 12h_trix_volume_regime_v1
+# Hypothesis: On 12h timeframe, capture momentum reversals using TRIX crossing zero with volume confirmation and Choppiness regime filter.
+# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume spike confirms breakout strength.
+# Chop > 61.8 identifies ranging markets where TRIX crossovers are more reliable.
+# Works in bull/bear by following momentum direction with volume confirmation.
+# Target: 20-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_volume_momentum_breakout_v1"
-timeframe = "1d"
+name = "12h_trix_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,31 +21,47 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * bb_std_dev)
-    lower_band = sma - (bb_std * bb_std_dev)
-    bb_width = (upper_band - lower_band) / sma
+    # Get daily data for trend filter (1d HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Bollinger Band Squeeze detection (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    squeeze = bb_width < bb_width_ma * 0.8  # Bollinger Bands contracted
+    close_1d = df_1d['close'].values
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Momentum indicator (Rate of Change)
-    roc_period = 10
-    roc = np.zeros(n)
-    roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / close[:-roc_period] * 100
+    # TRIX (12-period)
+    # EMA1
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
+    trix = np.zeros(n)
+    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix[0] = 0
     
-    # Volume confirmation
+    # Volume spike detector (volume > 1.5 * 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > vol_ma * 1.5  # Volume 50% above average
+    vol_spike = volume > (1.5 * vol_ma)
+    
+    # Choppiness Index (14-period)
+    high = prices['high'].values
+    low = prices['low'].values
+    
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((atr * 14) / (max_high - min_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -53,8 +71,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(squeeze[i]) or np.isnan(roc[i]) or np.isnan(volume_surge[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_spike[i]) or np.isnan(chop[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -63,33 +81,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price returns to middle Bollinger Band OR momentum fades
-            if close[i] <= sma[i] or roc[i] < 0:
+            # Exit: TRIX crosses below zero OR volume dries up OR chop < 38.2 (strong trend)
+            if (trix[i] < 0 and trix[i-1] >= 0) or (not vol_spike[i]) or (chop[i] < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to middle Bollinger Band OR momentum fades
-            if close[i] >= sma[i] or roc[i] > 0:
+            # Exit: TRIX crosses above zero OR volume dries up OR chop < 38.2
+            if (trix[i] > 0 and trix[i-1] <= 0) or (not vol_spike[i]) or (chop[i] < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Entry conditions: Bollinger Band breakout with volume surge and momentum alignment
-            if squeeze[i-1] and not squeeze[i]:  # Just exited squeeze
-                # Long breakout: Price breaks above upper band with volume and positive momentum
-                if (close[i] > upper_band[i] and 
-                    volume_surge[i] and 
-                    roc[i] > 0):
+            # Require Chop > 61.8 (ranging market) and volume spike
+            if chop[i] > 61.8 and vol_spike[i]:
+                # Long entry: TRIX crosses above zero AND above daily EMA50 (bullish alignment)
+                if (trix[i] > 0 and trix[i-1] <= 0) and (close[i] > ema_50_1d_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: Price breaks below lower band with volume and negative momentum
-                elif (close[i] < lower_band[i] and 
-                      volume_surge[i] and 
-                      roc[i] < 0):
+                # Short entry: TRIX crosses below zero AND below daily EMA50 (bearish alignment)
+                elif (trix[i] < 0 and trix[i-1] >= 0) and (close[i] < ema_50_1d_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
