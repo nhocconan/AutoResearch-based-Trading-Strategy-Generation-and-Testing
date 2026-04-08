@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-# 12h_kama_trend_1d_rsi_v1
-# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 12h for trend direction, 
-# combined with daily RSI for overbought/oversold conditions. 
-# Go long when KAMA turns up and RSI < 30 (oversold), short when KAMA turns down and RSI > 70 (overbought).
-# Uses 1-day trend filter: only take longs when price > daily EMA50, shorts when price < daily EMA50.
+# 6h_ema_pullback_1d_trend_volume_v2
+# Hypothesis: Buy pullbacks to EMA21 on 6h chart when 1d trend is up (price > EMA50), short rallies to EMA21 when 1d trend is down.
+# Uses volume confirmation (volume > 20-bar average) to avoid false breakouts.
 # Works in bull/bear by following higher timeframe trend. Low trade frequency (~15-25/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_kama_trend_1d_rsi_v1"
-timeframe = "12h"
+name = "6h_ema_pullback_1d_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,44 +23,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA calculation (12h)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |diff| over 10 periods
-    # Fix array lengths
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # 6h EMA21 for pullback entries
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Get daily data for RSI and trend filter
+    # Daily trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Daily RSI (14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Daily EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily indicators to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -72,7 +47,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(kama[i]) or np.isnan(rsi_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if np.isnan(ema_21[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -81,27 +56,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: KAMA turns down OR RSI overbought OR trend turns against us
-            if (kama[i] < kama[i-1]) or (rsi_aligned[i] > 70) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: price crosses below EMA21 OR daily trend turns against us
+            if (close[i] < ema_21[i]) or (close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: KAMA turns up OR RSI oversold OR trend turns against us
-            if (kama[i] > kama[i-1]) or (rsi_aligned[i] < 30) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: price crosses above EMA21 OR daily trend turns against us
+            if (close[i] > ema_21[i]) or (close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: KAMA turning up AND RSI oversold AND price above daily EMA50
-            if (kama[i] > kama[i-1]) and (rsi_aligned[i] < 30) and (close[i] > ema_50_1d_aligned[i]):
+            # Long entry: price pulls back to EMA21 from above with volume confirmation AND daily uptrend
+            if (close[i] > ema_21[i]) and (close[i] <= ema_21[i] * 1.005) and (volume[i] > vol_ma[i]) and (close[i] > ema_50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: KAMA turning down AND RSI overbought AND price below daily EMA50
-            elif (kama[i] < kama[i-1]) and (rsi_aligned[i] > 70) and (close[i] < ema_50_1d_aligned[i]):
+            # Short entry: price pulls back to EMA21 from below with volume confirmation AND daily downtrend
+            elif (close[i] < ema_21[i]) and (close[i] >= ema_21[i] * 0.995) and (volume[i] > vol_ma[i]) and (close[i] < ema_50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
