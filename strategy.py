@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_regime_v1
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and chop regime filter.
-# Long: price breaks above H3 with volume > 1.5x average volume AND market is trending (CHOP < 61.8)
-# Short: price breaks below L3 with volume > 1.5x average volume AND market is trending (CHOP < 61.8)
-# Exit: price reverses to H4/L4 levels or momentum shifts.
-# Designed to capture intraday breakouts from key daily pivot levels while avoiding false breakouts in ranging markets.
-# Camarilla levels provide institutional reference points; volume confirms participation; chop filter avoids whipsaws.
+# 6h_weekly_pivot_volume_breakout_v1
+# Hypothesis: 6h strategy using 1w Camarilla pivot levels with volume confirmation.
+# Long: price breaks above weekly H3 with volume > 1.8x average volume
+# Short: price breaks below weekly L3 with volume > 1.8x average volume
+# Exit: price reverses to weekly H4/L4 levels
+# Uses weekly pivots for structural support/resistance; volume confirms institutional participation.
+# Designed for lower frequency (12-30 trades/year) to minimize fee drag on 6h timeframe.
+# Weekly timeframe captures major market structure; 6h provides timely execution.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_regime_v1"
-timeframe = "4h"
+name = "6h_weekly_pivot_volume_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,15 +26,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 1w Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Use previous day's OHLC for Camarilla calculation (standard approach)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Use previous week's OHLC for Camarilla calculation
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
@@ -45,10 +46,10 @@ def generate_signals(prices):
     L4 = pivot - (range_val * 1.1 / 2)
     
     # Align HTF levels to LTF
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
     
     # Calculate volume ratio (current vs 20-period average)
     vol_sma = np.full(n, np.nan)
@@ -56,30 +57,14 @@ def generate_signals(prices):
         vol_sma[i] = np.mean(volume[i-20:i])
     vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Calculate Chopiness Index for regime filter (14-period)
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        atr_sum = 0
-        for j in range(i-13, i+1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
-        atr = atr_sum / 14
-        max_high = np.max(high[i-13:i+1])
-        min_low = np.min(low[i-13:i+1])
-        if max_high != min_low:
-            chop[i] = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when no range
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         vol_r = vol_ratio[i]
-        ch = chop[i]
         price = close[i]
         
-        if np.isnan(vol_r) or np.isnan(ch):
+        if np.isnan(vol_r):
             if position != 0:
                 pass  # Hold position
             else:
@@ -99,23 +84,23 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            if price < h4 or vol_r < 1.2 or ch > 61.8:
+            if price < h4:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if price > l4 or vol_r < 1.2 or ch > 61.8:
+            if price > l4:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if price > h3 and vol_r > 1.5 and ch < 61.8:
+            if price > h3 and vol_r > 1.8:
                 position = 1
                 signals[i] = 0.25
-            elif price < l3 and vol_r > 1.5 and ch < 61.8:
+            elif price < l3 and vol_r > 1.8:
                 position = -1
                 signals[i] = -0.25
     
