@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_crossover_volume_v2
-# Hypothesis: Trade EMA crossovers on daily timeframe with volume confirmation on 4h.
-# Uses EMA20/50 crossovers for trend detection, volume surge for confirmation, and ATR-based stops.
-# Works in bull markets (trend following) and bear markets (counter-trend reversals at extremes).
+# 4h_1d_rsi_extreme_volume_v1
+# Hypothesis: Trade extreme RSI levels on daily timeframe with volume confirmation on 4h.
+# Uses RSI(14) on daily timeframe: RSI < 30 for long, RSI > 70 for short.
+# Volume confirmation: 4h volume > 1.5x 20-period average.
+# Exit on opposite RSI extreme or ATR stop.
+# Works in bull markets (mean reversion from oversold) and bear markets (mean reversion from overbought).
 # Target: 20-50 trades/year on 4h timeframe with strict entry conditions to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_crossover_volume_v2"
+name = "4h_1d_rsi_extreme_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,16 +25,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA for trend
+    # Daily RSI for extreme levels
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align daily EMA to 4h timeframe
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    # Align daily RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # ATR for volatility and stop
     tr1 = high - low
@@ -47,12 +54,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Ensure EMA50 and ATR are ready
+    start_idx = 100  # Ensure RSI and ATR are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20_aligned[i]) or np.isnan(ema50_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -63,27 +70,27 @@ def generate_signals(prices):
         vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: EMA cross down OR stoploss hit
-            if ema20_aligned[i] < ema50_aligned[i] or close[i] < ema20_aligned[i] - 2.5 * atr[i]:
+            # Exit: RSI > 70 (overbought) OR stoploss hit
+            if rsi_aligned[i] > 70 or close[i] < close[i-1] - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA cross up OR stoploss hit
-            if ema20_aligned[i] > ema50_aligned[i] or close[i] > ema20_aligned[i] + 2.5 * atr[i]:
+            # Exit: RSI < 30 (oversold) OR stoploss hit
+            if rsi_aligned[i] < 30 or close[i] > close[i-1] + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA cross up with volume surge
-            if ema20_aligned[i] > ema50_aligned[i] and vol_surge:
+            # Long entry: RSI < 30 (oversold) with volume surge
+            if rsi_aligned[i] < 30 and vol_surge:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: EMA cross down with volume surge
-            elif ema20_aligned[i] < ema50_aligned[i] and vol_surge:
+            # Short entry: RSI > 70 (overbought) with volume surge
+            elif rsi_aligned[i] > 70 and vol_surge:
                 position = -1
                 signals[i] = -0.25
     
