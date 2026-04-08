@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 
-# 1d_1w_trend_follow_v1
-# Hypothesis: Weekly trend following with daily entries. Uses weekly Donchian channels for trend direction,
-# daily price action for entry timing, and volume confirmation to avoid false breakouts.
-# Designed to capture major trends while minimizing whipsaws in ranging markets.
-# Target: 10-20 trades/year for low fee drag.
+"""
+12h_camarilla_pivot_daily_trend_volume_v1
+Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
+In uptrend (price > daily EMA200), buy at S3/S4 levels with volume confirmation.
+In downtrend (price < daily EMA200), sell at R3/R4 levels with volume confirmation.
+Uses 12h timeframe for lower frequency trading to reduce fee drag.
+Works in both bull and bear markets by trading mean reversion within the trend.
+Target: 12-30 trades per year to minimize fee impact.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_trend_follow_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,68 +29,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter - load once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    high_max = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high = align_htf_to_ltf(prices, df_1w, high_max)
-    donchian_low = align_htf_to_ltf(prices, df_1w, low_min)
+    # Calculate Camarilla pivot levels from previous day
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.1 * (High - Low)
+    # S3 = Close - 1.1 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    daily_range = high_1d - low_1d
+    r4 = close_1d + 1.5 * daily_range
+    r3 = close_1d + 1.1 * daily_range
+    s3 = close_1d - 1.1 * daily_range
+    s4 = close_1d - 1.5 * daily_range
     
-    # Daily indicators
-    # 20-period EMA for dynamic support/resistance
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align Camarilla levels to 12h timeframe (using previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation
+    # Daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Volume confirmation (20-period average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need indicators warmed up
+    start_idx = 50  # Ensure indicators are warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema20[i]) or np.isnan(avg_volume[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
-                pass
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > donchian_high[i]
-        weekly_downtrend = close[i] < donchian_low[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema200_1d_aligned[i]
+        daily_downtrend = close[i] < ema200_1d_aligned[i]
+        
+        # Volume confirmation (at least 1.5x average volume)
+        volume_ok = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: close below weekly Donchian low or EMA20
-            if close[i] < donchian_low[i] or close[i] < ema20[i]:
+            # Exit when price reaches R3 (take profit) or trend changes
+            if close[i] >= r3_aligned[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: close above weekly Donchian high or EMA20
-            if close[i] > donchian_high[i] or close[i] > ema20[i]:
+            # Exit when price reaches S3 (take profit) or trend changes
+            if close[i] <= s3_aligned[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
-            # Entry conditions
             if volume_ok:
-                # Long entry: price breaks above weekly Donchian high in uptrend
-                if weekly_uptrend and close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]:
+                # Long entry at S4 in uptrend with volume confirmation
+                if daily_uptrend and close[i] <= s4_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price breaks below weekly Donchian low in downtrend
-                elif weekly_downtrend and close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]:
+                # Short entry at R4 in downtrend with volume confirmation
+                elif daily_downtrend and close[i] >= r4_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
