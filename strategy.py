@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-1D Donchian Breakout + Weekly Trend + Volume Confirmation
-Hypothesis: Donchian(20) breakouts on daily timeframe capture strong trends.
-Weekly EMA(21) filter ensures alignment with higher timeframe trend.
-Volume confirmation (>1.5x 20-day average) filters weak breakouts.
-Designed for low trade frequency (10-30/year) to minimize fee drag and work in both bull/bear markets.
+4H Donchian Breakout + Daily EMA + Volume Confirmation
+Hypothesis: 4-hour Donchian(20) breakouts in the direction of the daily EMA(50) trend,
+confirmed by volume (>1.5x 20-period average), capture strong momentum moves.
+Exit when price crosses the opposite Donchian band or daily EMA. Designed for 4h
+to balance trade frequency and signal strength in both bull and bear markets.
+Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "4h_donchian_breakout_daily_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +27,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA(21) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_21_w = df_1w['close'].ewm(span=21, adjust=False).mean().values
-    ema_21_w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_w)
+    # Daily EMA(50) for trend filter
+    ema_50 = df_1d['close'].ewm(span=50, adjust=False).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume filter (>1.5x 20-day average)
+    # 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter (>1.5x 20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
@@ -44,36 +49,36 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_21_w_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_4h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or weekly trend reverses
-            if close[i] <= low_roll[i] or close[i] < ema_21_w_aligned[i]:
+            # Exit: price crosses below Donchian low or trend reverses
+            if close[i] <= donchian_low[i] or close[i] < ema_50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or weekly trend reverses
-            if close[i] >= high_roll[i] or close[i] > ema_21_w_aligned[i]:
+            # Exit: price crosses above Donchian high or trend reverses
+            if close[i] >= donchian_high[i] or close[i] > ema_50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Breakout long above Donchian high with trend alignment
-            if (close[i] > high_roll[i] and 
-                close[i] > ema_21_w_aligned[i] and 
+            if (close[i] >= donchian_high[i] and 
+                close[i] > ema_50_4h[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
             # Breakout short below Donchian low with trend alignment
-            elif (close[i] < low_roll[i] and 
-                  close[i] < ema_21_w_aligned[i] and 
+            elif (close[i] <= donchian_low[i] and 
+                  close[i] < ema_50_4h[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
