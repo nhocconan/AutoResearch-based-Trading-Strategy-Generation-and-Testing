@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-# 4h_rsi_momentum_v1
-# Hypothesis: RSI momentum strategy with volume and volatility filters. Uses RSI(14) to identify overbought/oversold conditions,
-# enters on mean reversion during low volatility and momentum continuation during high volatility.
-# Includes volume confirmation and ATR-based stop management. Designed for 4H timeframe to work in both bull and bear markets.
+# 6h_weekly_pivot_breakout
+# Hypothesis: Breakout strategy using weekly pivot levels (from 1w data) with 6h price action and volume confirmation.
+# In both bull and bear markets, price tends to respect weekly support/resistance levels.
+# Breakouts above weekly R3 or below S3 with volume indicate strong momentum.
+# Uses 12h trend filter to avoid counter-trend trades.
+# Target: 15-30 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
-name = "4h_rsi_momentum_v1"
-timeframe = "4h"
+name = "6h_weekly_pivot_breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -23,30 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter (1d EMA50) - load once before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly data for pivot points (1w) - load once before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on daily data
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot points
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pp_1w - low_1w
+    s1_1w = 2 * pp_1w - high_1w
+    r2_1w = pp_1w + (high_1w - low_1w)
+    s2_1w = pp_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pp_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pp_1w)
     
-    # 4h indicators
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly pivots to 6h timeframe
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # ATR(14) for volatility
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 12h trend filter - load once before loop
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # 6h indicators
+    # EMA20 for dynamic reference
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,59 +61,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need indicators warmed up
+    start_idx = 100  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(ema20[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_12h_aligned[i]) or \
+           np.isnan(pp_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Daily trend filter
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        # 12h trend filter
+        trend_up = close[i] > ema50_12h_aligned[i]
+        trend_down = close[i] < ema50_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit conditions: RSI overbought or volatility contraction
-            if rsi[i] > 70 or atr[i] < atr[i-1] * 0.8:
+            # Exit: close below EMA20 or reversal below weekly pivot
+            if close[i] < ema20[i] or close[i] < pp_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: RSI oversold or volatility contraction
-            if rsi[i] < 30 or atr[i] < atr[i-1] * 0.8:
+            # Exit: close above EMA20 or reversal above weekly pivot
+            if close[i] > ema20[i] or close[i] > pp_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.2 * avg_volume[i]
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
             if volume_ok:
-                # Mean reversion in low volatility
-                if atr[i] < np.nanmedian(atr[max(0, i-50):i+1]):
-                    # Long when oversold in uptrend
-                    if daily_uptrend and rsi[i] < 30:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short when overbought in downtrend
-                    elif daily_downtrend and rsi[i] > 70:
-                        position = -1
-                        signals[i] = -0.25
-                # Momentum continuation in high volatility
-                else:
-                    # Long when bullish momentum in uptrend
-                    if daily_uptrend and rsi[i] > 50 and rsi[i] > rsi[i-1]:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short when bearish momentum in downtrend
-                    elif daily_downtrend and rsi[i] < 50 and rsi[i] < rsi[i-1]:
-                        position = -1
-                        signals[i] = -0.25
+                # Long breakout: price crosses above weekly R3 in uptrend
+                if trend_up and close[i] > r3_1w_aligned[i] and close[i-1] <= r3_1w_aligned[i-1]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short breakdown: price crosses below weekly S3 in downtrend
+                elif trend_down and close[i] < s3_1w_aligned[i] and close[i-1] >= s3_1w_aligned[i-1]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
