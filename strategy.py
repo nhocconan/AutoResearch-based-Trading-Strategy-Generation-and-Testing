@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1d_volume_v1
-# Hypothesis: Camarilla pivot levels from 1-day chart combined with volume confirmation and 1-week trend filter.
-# Long when price touches S3 level with volume > 1.5x average and 1-week close > 1-week open.
-# Short when price touches R3 level with volume > 1.5x average and 1-week close < 1-week open.
-# Exit when price reaches S1/R1 levels or opposite signal.
-# Designed to work in both bull and bear markets by exploiting mean reversion at extreme intraday levels.
-# Target: 15-25 trades/year to minimize fee drag while capturing high-probability reversals.
+# 12h_trix_volume_sr_1d
+# Hypothesis: TRIX momentum + volume spike + daily support/resistance. Long when TRIX crosses above zero with volume > 1.5x avg and price above daily pivot; short when TRIX crosses below zero with volume > 1.5x avg and price below daily pivot. Exit on TRIX reversal or price reaching opposite pivot. Designed to capture momentum bursts in both bull and bear markets with controlled trade frequency.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
+name = "12h_trix_volume_sr_1d"
 timeframe = "12h"
 leverage = 1.0
 
@@ -26,46 +21,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivots (calculate once before loop)
+    # Get 1-day data for pivot points (calculate once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1-day bar
+    # Calculate daily pivot points (standard)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    # Camarilla multipliers
-    S1 = close_1d - (high_1d - low_1d) * 1.0833
-    S2 = close_1d - (high_1d - low_1d) * 1.1666
-    S3 = close_1d - (high_1d - low_1d) * 1.2500
-    S4 = close_1d - (high_1d - low_1d) * 1.3333
-    R1 = close_1d + (high_1d - low_1d) * 1.0833
-    R2 = close_1d + (high_1d - low_1d) * 1.1666
-    R3 = close_1d + (high_1d - low_1d) * 1.2500
-    R4 = close_1d + (high_1d - low_1d) * 1.3333
+    # Align daily pivot to 12-hour chart
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Align 1-day Camarilla levels to 12-hour chart
-    S3_1d = align_htf_to_ltf(prices, df_1d, S3)
-    S1_1d = align_htf_to_ltf(prices, df_1d, S1)
-    R1_1d = align_htf_to_ltf(prices, df_1d, R1)
-    R3_1d = align_htf_to_ltf(prices, df_1d, R3)
+    # Get 1-day data for TRIX (same timeframe as pivot for alignment)
+    # TRIX: triple exponential smoothing of close, then % change
+    close_1d_series = pd.Series(close_1d)
+    ema1 = close_1d_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix_raw = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix_raw.fillna(0).values  # TRIX indicator
     
-    # Get 1-week data for trend filter (calculate once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # 1-week trend: close > open = uptrend, close < open = downtrend
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_uptrend = close_1w > open_1w
-    weekly_downtrend = close_1w < open_1w
-    
-    # Align 1-week trend to 12-hour chart
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    # Align TRIX to 12-hour chart
+    trix_12h = align_htf_to_ltf(prices, df_1d, trix)
     
     # Volume confirmation: 24-period average (2 days of 12h data)
     avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -78,9 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(S3_1d[i]) or np.isnan(S1_1d[i]) or np.isnan(R1_1d[i]) or np.isnan(R3_1d[i]) or \
-           np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or \
-           np.isnan(avg_volume[i]):
+        if np.isnan(pivot_12h[i]) or np.isnan(trix_12h[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -89,18 +67,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches S1 level or opposite signal
-            if close[i] <= S1_1d[i] or \
-               (close[i] >= R3_1d[i] and volume[i] > 1.5 * avg_volume[i] and weekly_downtrend_aligned[i]):
+            # Exit: TRIX turns down or price reaches opposite pivot (below pivot)
+            if trix_12h[i] < 0 or close[i] < pivot_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R1 level or opposite signal
-            if close[i] >= R1_1d[i] or \
-               (close[i] <= S3_1d[i] and volume[i] > 1.5 * avg_volume[i] and weekly_uptrend_aligned[i]):
+            # Exit: TRIX turns up or price reaches opposite pivot (above pivot)
+            if trix_12h[i] > 0 or close[i] > pivot_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -109,12 +85,12 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: price touches S3 level with volume and weekly uptrend
-            if close[i] <= S3_1d[i] and volume_ok and weekly_uptrend_aligned[i]:
+            # Long entry: TRIX crosses above zero with volume and price above pivot
+            if i > 0 and trix_12h[i-1] <= 0 and trix_12h[i] > 0 and volume_ok and close[i] > pivot_12h[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price touches R3 level with volume and weekly downtrend
-            elif close[i] >= R3_1d[i] and volume_ok and weekly_downtrend_aligned[i]:
+            # Short entry: TRIX crosses below zero with volume and price below pivot
+            elif i > 0 and trix_12h[i-1] >= 0 and trix_12h[i] < 0 and volume_ok and close[i] < pivot_12h[i]:
                 position = -1
                 signals[i] = -0.25
     
