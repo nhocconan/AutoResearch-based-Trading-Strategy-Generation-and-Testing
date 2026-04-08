@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# 1h_4h1d_ema_trend_pullback_v1
-# Hypothesis: Uses 4h EMA50 for primary trend direction and 1d EMA200 for regime filter.
-# Enters on 1h pullbacks to EMA20 with volume confirmation when aligned with higher timeframe trends.
-# Long when: price > 4h EMA50, price > 1d EMA200, price pulls back to 1h EMA20, volume > 1.5x average.
-# Short when: price < 4h EMA50, price < 1d EMA200, price pulls back to 1h EMA20, volume > 1.5x average.
-# Uses 4 conditions max to avoid overtrading. Target: 15-35 trades/year.
+# 12h_donchian20_daily_pivot_volume_v1
+# Hypothesis: Breakout from daily Donchian channels with pivot level confirmation and volume filter.
+# Long when: price breaks above daily Donchian high(20) AND price > daily pivot point AND volume > 1.5x average.
+# Short when: price breaks below daily Donchian low(20) AND price < daily pivot point AND volume > 1.5x average.
+# Exit when price returns to pivot point or volume drops below average.
+# Uses daily timeframe for structure (Donchian/pivot) and 12h for execution to avoid overtrading.
+# Target: 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_ema_trend_pullback_v1"
-timeframe = "1h"
+name = "12h_donchian20_daily_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,10 +25,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h EMA20 for pullback entries
-    ema_period = 20
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    # Get daily data for Donchian channels and pivot points
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Daily Donchian channels (20-period)
+    donchian_period = 20
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = low_series.rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Daily pivot point: (H + L + C) / 3
+    pivot_point = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Align daily levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
@@ -40,27 +57,15 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get 4h EMA50 for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Get 1d EMA200 for regime filter (bull/bear)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(ema_period, vol_ma_period, 50, 200) + 1
+    start_idx = max(donchian_period, vol_ma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(pivot_point_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -68,34 +73,32 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below 1h EMA20 or volume drops below average
-            if close[i] < ema20[i] or volume[i] < vol_ma[i]:
+            # Exit: Price below pivot point or volume drops below average
+            if close[i] < pivot_point_aligned[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above 1h EMA20 or volume drops below average
-            if close[i] > ema20[i] or volume[i] < vol_ma[i]:
+            # Exit: Price above pivot point or volume drops below average
+            if close[i] > pivot_point_aligned[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price > 4h EMA50, Price > 1d EMA200, Pullback to 1h EMA20, Volume surge
-            if (close[i] > ema50_4h_aligned[i] and 
-                close[i] > ema200_1d_aligned[i] and 
-                close[i] <= ema20[i] * 1.005 and  # Allow small tolerance for pullback
+            # Long entry: Price breaks above Donchian high AND price > pivot AND volume surge
+            if (close[i] > donchian_high_aligned[i] and 
+                close[i] > pivot_point_aligned[i] and 
                 vol_surge[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: Price < 4h EMA50, Price < 1d EMA200, Pullback to 1h EMA20, Volume surge
-            elif (close[i] < ema50_4h_aligned[i] and 
-                  close[i] < ema200_1d_aligned[i] and 
-                  close[i] >= ema20[i] * 0.995 and  # Allow small tolerance for pullback
+                signals[i] = 0.25
+            # Short entry: Price breaks below Donchian low AND price < pivot AND volume surge
+            elif (close[i] < donchian_low_aligned[i] and 
+                  close[i] < pivot_point_aligned[i] and 
                   vol_surge[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
