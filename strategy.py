@@ -1,73 +1,67 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_v4
-Hypothesis: Use 1d trend via EMA(21), 1d Camarilla pivot levels (R1/S1) for support/resistance, and 4h breakout with volume confirmation. 
-Only trade when price breaks R1 in uptrend (long) or S1 in downtrend (short). Exit when price reverts to pivot or trend changes.
-Designed for fewer trades (<40/year) to avoid fee drag, works in bull/bear via trend filter.
+1d_1w_ema_crossover_volume_v1
+Hypothesis: Use 1w EMA crossover for long-term trend direction, 1d EMA crossover for entry timing, and volume confirmation. 
+Only trade when 1d EMA(8) crosses above/below EMA(21) in the direction of 1w trend (EMA(50)). 
+Exit when 1d EMA(8) crosses back or 1w trend changes.
+Designed for fewer trades (<25/year) to avoid fee decay and work in both bull/bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v4"
-timeframe = "4h"
+name = "1d_1w_ema_crossover_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and Camarilla pivots
+    # Get 1w data for long-term trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Get 1d data for entry signals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA(21) for trend
+    # 1d EMA(8) and EMA(21) for entry
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_8_1d = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align 1d EMAs to 1d timeframe (no shift needed as they are on same timeframe)
+    ema_8_1d_aligned = ema_8_1d  # Already on 1d timeframe
+    ema_21_1d_aligned = ema_21_1d  # Already on 1d timeframe
     
-    # Calculate pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    
-    # Key Camarilla levels: R1 and S1 (most significant for intraday)
-    r1 = close_1d + range_ * 1.1 / 12
-    s1 = close_1d - range_ * 1.1 / 12
-    pivot_level = pivot  # for exit
-    
-    # Align to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_level)
-    
-    # Volume confirmation: volume > 1.5x average of last 24 periods (24*4h = 4 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: volume > 1.5x average of last 20 days
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_8_1d_aligned[i]) or 
+            np.isnan(ema_21_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -76,30 +70,32 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to pivot or trend changes
-            if close[i] <= pivot_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: EMA(8) crosses below EMA(21) or 1w trend turns down
+            if ema_8_1d_aligned[i] < ema_21_1d_aligned[i] or ema_50_1w_aligned[i] < close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price returns to pivot or trend changes
-            if close[i] >= pivot_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: EMA(8) crosses above EMA(21) or 1w trend turns up
+            if ema_8_1d_aligned[i] > ema_21_1d_aligned[i] or ema_50_1w_aligned[i] > close[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above R1 with volume and uptrend
-            if (close[i] > r1_aligned[i] and 
-                ema_1d_aligned[i] > ema_1d_aligned[max(0, i-3)] and  # Uptrend confirmation
+            # Long entry: EMA(8) crosses above EMA(21) with volume and 1w uptrend
+            if (ema_8_1d_aligned[i] > ema_21_1d_aligned[i] and 
+                ema_8_1d_aligned[i-1] <= ema_21_1d_aligned[i-1] and  # Cross just happened
+                ema_50_1w_aligned[i] < close[i] and  # 1w uptrend (price above EMA50)
                 vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below S1 with volume and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  ema_1d_aligned[i] < ema_1d_aligned[max(0, i-3)] and  # Downtrend confirmation
+            # Short entry: EMA(8) crosses below EMA(21) with volume and 1w downtrend
+            elif (ema_8_1d_aligned[i] < ema_21_1d_aligned[i] and 
+                  ema_8_1d_aligned[i-1] >= ema_21_1d_aligned[i-1] and  # Cross just happened
+                  ema_50_1w_aligned[i] > close[i] and  # 1w downtrend (price below EMA50)
                   vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
