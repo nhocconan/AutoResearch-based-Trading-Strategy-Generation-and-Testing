@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: In trending markets (1d EMA alignment + ADX > 25), 4h Donchian breakouts with volume
-confirmation capture continuation of the trend. Works in bull/bear by requiring trend alignment.
-Volume spike = current 4h volume > 2.0 x 20-period average. Targets 20-50 trades/year.
+4h Bollinger Band Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: In trending markets (1d EMA alignment + ADX > 25), 4h Bollinger Band breakouts 
+with volume confirmation capture continuation of the trend. Works in bull/bear by requiring 
+trend alignment. Volume spike = current 4h volume > 2.0 x 20-period average. 
+Targets 20-50 trades/year.
 """
-name = "4h_donchian_breakout_1d_trend_volume_v1"
+name = "4h_bb_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,13 +65,15 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
+    # Bollinger Bands (20-period, 2 std dev)
+    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
+    
     # Volume spike detector: current volume > 2.0 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # Donchian channels (20-period high/low)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -82,7 +85,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema20_1d[i]) or np.isnan(ema50_1d[i]) or 
             np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+            np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             signals[i] = 0.0
             continue
         
@@ -99,26 +102,26 @@ def generate_signals(prices):
         strong_trend_1d = adx_1d_aligned > 25
         
         if position == 1:  # Long position
-            # Exit: trend breaks OR price breaks below Donchian low
-            if not (ema_bullish and strong_trend_1d) or close[i] <= donchian_low[i]:
+            # Exit: trend breaks OR price breaks below BB middle
+            if not (ema_bullish and strong_trend_1d) or close[i] <= bb_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend breaks OR price breaks above Donchian high
-            if not (ema_bearish and strong_trend_1d) or close[i] >= donchian_high[i]:
+            # Exit: trend breaks OR price breaks above BB middle
+            if not (ema_bearish and strong_trend_1d) or close[i] >= bb_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Only trade with volume spike and both trend filters aligned
-            if volume_spike[i] and ema_bullish and strong_trend_1d and close[i] >= donchian_high[i]:
+            if volume_spike[i] and ema_bullish and strong_trend_1d and close[i] >= bb_upper[i]:
                 position = 1
                 signals[i] = 0.25
-            elif volume_spike[i] and ema_bearish and strong_trend_1d and close[i] <= donchian_low[i]:
+            elif volume_spike[i] and ema_bearish and strong_trend_1d and close[i] <= bb_lower[i]:
                 position = -1
                 signals[i] = -0.25
     
