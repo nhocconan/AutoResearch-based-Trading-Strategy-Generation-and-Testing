@@ -9,7 +9,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -38,8 +38,6 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate Camarilla pivot levels for each 1d bar
-    # Camarilla: R4 = Close + 1.1*(High - Low)*1.5, R3 = Close + 1.1*(High - Low)*1.25
-    #          S3 = Close - 1.1*(High - Low)*1.25, S4 = Close - 1.1*(High - Low)*1.5
     hl_range = high_1d - low_1d
     r4_level = close_1d + 1.1 * hl_range * 1.5
     r3_level = close_1d + 1.1 * hl_range * 1.25
@@ -50,7 +48,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(50, 1)  # EMA50 and ATR50 lookback
+    start_idx = max(50, 1)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
