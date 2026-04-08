@@ -1,68 +1,79 @@
 #!/usr/bin/env python3
-# 1d_weekly_funding_rate_mean_reversion_v1
-# Hypothesis: Funding rate mean reversion on 1d timeframe with 1w HTF regime filter.
-# Long: 1w funding rate Z-score < -2.0 AND price > 1d EMA200 (bull regime)
-# Short: 1w funding rate Z-score > +2.0 AND price < 1d EMA200 (bear regime)
-# Exit: Funding rate Z-score between -0.5 and +0.5 OR opposite regime
-# Uses 1d primary timeframe with 1w HTF for funding rate Z-score.
-# Target: 50-100 total trades over 4 years to minimize fee drag.
+# 6h_daily_elder_ray_regime_v3
+# Hypothesis: Elder Ray (Bull Power/Bear Power) with 1d regime filter on 6h timeframe.
+# Long: Bull Power > 0 AND Bear Power < 0 AND close > 1d EMA50 (bull regime)
+# Short: Bear Power < 0 AND Bull Power > 0 AND close < 1d EMA50 (bear regime)
+# Exit: Opposite signal or Elder Power divergence (Bull Power makes lower high while price makes higher high for longs, vice versa for shorts)
+# Uses 6h primary timeframe with 1d HTF for EMA50 regime filter.
+# Target: 50-150 total trades over 4 years to minimize fee drag and avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_funding_rate_mean_reversion_v1"
-timeframe = "1d"
+name = "6h_daily_elder_ray_regime_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate EMA200 for regime filter with min_periods
+    # Calculate EMA13 for Elder Ray power with min_periods
     close_s = pd.Series(close)
-    ema200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 1w data for funding rate
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
+    
+    # Get 1d data for regime filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate funding rate Z-score on 1w
-    # Funding rate data should be in the 1w dataframe
-    funding_rate = df_1w['taker_buy_volume'].values  # placeholder - actual funding rate data would be in separate column
-    # For now, we'll use a proxy: calculate Z-score of price momentum as funding rate proxy
-    # In practice, funding rate data would be loaded separately
-    returns = np.diff(np.log(df_1w['close'].values), prepend=np.log(df_1w['close'].values[0]))
-    funding_rate_proxy = pd.Series(returns).ewm(span=7, adjust=False, min_periods=7).mean().values
+    close_1d = df_1d['close'].values
+    # Calculate EMA50 on 1d with min_periods
+    close_1d_s = pd.Series(close_1d)
+    ema50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Z-score of funding rate proxy (20-period)
-    funding_mean = pd.Series(funding_rate_proxy).rolling(window=20, min_periods=20).mean().values
-    funding_std = pd.Series(funding_rate_proxy).rolling(window=20, min_periods=20).std().values
-    funding_zscore = np.where(funding_std > 0, (funding_rate_proxy - funding_mean) / funding_std, 0)
-    
-    # Align 1w funding Z-score to 1d timeframe
-    funding_zscore_aligned = align_htf_to_ltf(prices, df_1w, funding_zscore)
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    # Track previous Bull Power and Bear Power for divergence detection
+    prev_bull_power = bull_power[0] if not np.isnan(bull_power[0]) else 0
+    prev_bear_power = bear_power[0] if not np.isnan(bear_power[0]) else 0
+    
+    for i in range(13, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200[i]) or np.isnan(funding_zscore_aligned[i]) or 
-            np.isnan(close[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            # Update previous values for next iteration
+            if not np.isnan(bull_power[i]):
+                prev_bull_power = bull_power[i]
+            if not np.isnan(bear_power[i]):
+                prev_bear_power = bear_power[i]
             continue
         
         if position == 1:  # Long position
             # Exit conditions:
-            # 1. Funding rate Z-score between -0.5 and +0.5 (mean reversion complete)
-            # 2. Opposite regime (price < EMA200)
-            if ((-0.5 <= funding_zscore_aligned[i] <= 0.5) or 
-                (close[i] < ema200[i])):
+            # 1. Opposite signal (Bear Power > 0 AND Bull Power < 0) - regime change
+            # 2. Bearish divergence: Bull Power makes lower high while price makes higher high
+            bull_divergence = (bull_power[i] < prev_bull_power and 
+                              close[i] > close[i-1] and 
+                              prev_bull_power > 0)  # Only when previously bullish
+            
+            if (bear_power[i] > 0 and bull_power[i] < 0) or bull_divergence:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -70,22 +81,29 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions:
-            # 1. Funding rate Z-score between -0.5 and +0.5 (mean reversion complete)
-            # 2. Opposite regime (price > EMA200)
-            if ((-0.5 <= funding_zscore_aligned[i] <= 0.5) or 
-                (close[i] > ema200[i])):
+            # 1. Opposite signal (Bull Power > 0 AND Bear Power < 0) - regime change
+            # 2. Bullish divergence: Bear Power makes higher low while price makes lower low
+            bear_divergence = (bear_power[i] > prev_bear_power and 
+                              close[i] < close[i-1] and 
+                              prev_bear_power < 0)  # Only when previously bearish
+            
+            if (bull_power[i] > 0 and bear_power[i] < 0) or bear_divergence:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Funding rate Z-score < -2.0 AND price > EMA200 (bull regime)
-            if funding_zscore_aligned[i] < -2.0 and close[i] > ema200[i]:
+            # Long entry: Bull Power > 0 AND Bear Power < 0 AND close > 1d EMA50 (bull regime)
+            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Funding rate Z-score > +2.0 AND price < EMA200 (bear regime)
-            elif funding_zscore_aligned[i] > 2.0 and close[i] < ema200[i]:
+            # Short entry: Bear Power < 0 AND Bull Power > 0 AND close < 1d EMA50 (bear regime)
+            elif bear_power[i] < 0 and bull_power[i] > 0 and close[i] < ema50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
+        
+        # Update previous values for next iteration
+        prev_bull_power = bull_power[i]
+        prev_bear_power = bear_power[i]
     
     return signals
