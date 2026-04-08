@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-1h Volume Spike + 4h Trend + Daily Volatility Regime Filter
-Hypothesis: In strong trends (4h EMA21), 1h volume spikes above 2x average signal momentum continuation.
-Only trade during low volatility regimes (daily ATR percentile < 50%) to avoid whipsaws.
-Long when price > 4h EMA21, short when price < 4h EMA21. Volume spike confirms institutional interest.
-Session filter (08-20 UTC) reduces noise. Target: 20-40 trades/year per symbol.
+6H Donchian Breakout + Weekly Trend + Volume Confirmation
+Hypothesis: Donchian channel breakouts from weekly trend direction with volume confirmation capture strong momentum.
+Weekly trend filter prevents counter-trend trades, improving performance in both bull and bear markets.
+Target: 20-40 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_spike_4h_trend_daily_vol_regime_v1"
-timeframe = "1h"
+name = "6h_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,65 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h_21 = df_4h['close'].ewm(span=21, adjust=False).mean().values
-    ema_4h_21_1h = align_htf_to_ltf(prices, df_4h, ema_4h_21)
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
+    weekly_ema_50_6h = align_htf_to_ltf(prices, df_1w, weekly_ema_50)
     
-    # Daily ATR percentile for volatility regime (<50% = low vol)
+    # Daily data for Donchian channel (20-day high/low)
     df_1d = get_htf_data(prices, '1d')
-    atr_1d = pd.DataFrame({
-        'high': df_1d['high'],
-        'low': df_1d['low'],
-        'close': df_1d['close']
-    })
-    atr_1d['tr'] = np.maximum(
-        atr_1d['high'] - atr_1d['low'],
-        np.maximum(
-            abs(atr_1d['high'] - atr_1d['close'].shift(1)),
-            abs(atr_1d['low'] - atr_1d['close'].shift(1))
-        )
-    )
-    atr_1d_val = atr_1d['tr'].rolling(window=14, min_periods=14).mean().values
-    atr_percentile = pd.Series(atr_1d_val).rolling(window=100, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_1h = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high_6h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # 1h volume spike (>2x 20-period average)
+    # Volume filter (>1.5x 20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_21_1h[i]) or np.isnan(atr_percentile_1h[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
+            np.isnan(weekly_ema_50_6h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in low volatility regime (ATR percentile < 50)
-        if atr_percentile_1h[i] >= 50:
-            signals[i] = 0.0
-            continue
-        
-        # Session filter
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Long: price above 4h EMA21 + volume spike
-        if close[i] > ema_4h_21_1h[i] and vol_spike[i]:
-            signals[i] = 0.20
-        # Short: price below 4h EMA21 + volume spike
-        elif close[i] < ema_4h_21_1h[i] and vol_spike[i]:
-            signals[i] = -0.20
-        else:
-            signals[i] = 0.0
+        if position == 1:  # Long position
+            # Exit: price closes below weekly EMA50 or Donchian lower band
+            if close[i] < weekly_ema_50_6h[i] or close[i] < donchian_low_6h[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price closes above weekly EMA50 or Donchian upper band
+            if close[i] > weekly_ema_50_6h[i] or close[i] > donchian_high_6h[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Breakout long above Donchian high with weekly uptrend and volume
+            if (close[i] >= donchian_high_6h[i] and 
+                close[i] > weekly_ema_50_6h[i] and 
+                vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            # Breakout short below Donchian low with weekly downtrend and volume
+            elif (close[i] <= donchian_low_6h[i] and 
+                  close[i] < weekly_ema_50_6h[i] and 
+                  vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
