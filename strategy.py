@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot Reversal with Volume Spike and 1d Trend Filter
-Hypothesis: Price reversals at 1d Camarilla pivot levels (L3/H3) with volume spikes
-capture mean-reversion in ranging markets while trend filter (1d EMA60) avoids
-counter-trend trades in strong trends. Works in both bull/bear by taking longs
-near support in uptrends and shorts near resistance in downtrends. Target: 15-30 trades/year on 12h.
+4h Donchian breakout with 12h trend filter and volume concentration
+Hypothesis: Price breaking Donchian(20) channels in direction of 12h EMA(30) trend with volume concentration (current volume > 1.8x 20-period average) captures momentum. Uses 12h trend filter for better trend detection, reducing whipsaws. Target: 25-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_reversal_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,70 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Camarilla pivot levels: H3, L3
-    # H3 = High + 1.1*(High-Low)/6, L3 = Low - 1.1*(High-Low)/6
-    range_1d = high_1d - low_1d
-    camarilla_h3 = high_1d + 1.1 * range_1d / 6
-    camarilla_l3 = low_1d - 1.1 * range_1d / 6
+    # 12h EMA(30) for trend filter
+    ema_30_12h = pd.Series(close_12h).ewm(span=30, min_periods=30, adjust=False).mean().values
+    ema_30_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_30_12h)
     
-    # Align H3/L3 to 12h timeframe (shifted by 1 for completed bar)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # 1d EMA(60) for trend filter
-    ema_60_1d = pd.Series(close_1d).ewm(span=60, min_periods=60, adjust=False).mean().values
-    ema_60_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_60_1d)
-    
-    # Volume spike: current volume > 2.0 x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_surge = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(h3_12h[i]) or 
-            np.isnan(l3_12h[i]) or 
-            np.isnan(ema_60_1d_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema_30_12h_aligned[i]) or 
+            np.isnan(vol_surge[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches H3 (resistance) OR trend turns bearish
-            if (close[i] >= h3_12h[i] or 
-                close[i] < ema_60_1d_aligned[i]):
+            # Exit: trend turns bearish OR price breaks below Donchian(10) low
+            donchian_low = np.min(low[max(0, i-10):i+1])
+            if (close[i] <= ema_30_12h_aligned[i] or 
+                close[i] <= donchian_low):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches L3 (support) OR trend turns bullish
-            if (close[i] <= l3_12h[i] or 
-                close[i] > ema_60_1d_aligned[i]):
+            # Exit: trend turns bullish OR price breaks above Donchian(10) high
+            donchian_high = np.max(high[max(0, i-10):i+1])
+            if (close[i] >= ema_30_12h_aligned[i] or 
+                close[i] >= donchian_high):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat, look for entry at reversal levels
-            # Long near L3 support with volume spike and uptrend bias
-            if (close[i] <= l3_12h[i] * 1.005 and  # within 0.5% of L3
-                close[i] > ema_60_1d_aligned[i] and  # above trend (uptrend bias)
-                vol_spike[i]):
+        else:  # Flat, look for entry
+            # Donchian(20) channels
+            donchian_high = np.max(high[max(0, i-20):i])
+            donchian_low = np.min(low[max(0, i-20):i])
+            
+            # Long: price breaks above Donchian(20) high + volume surge + uptrend
+            if (close[i] > donchian_high and
+                close[i] > ema_30_12h_aligned[i] and
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short near H3 resistance with volume spike and downtrend bias
-            elif (close[i] >= h3_12h[i] * 0.995 and  # within 0.5% of H3
-                  close[i] < ema_60_1d_aligned[i] and  # below trend (downtrend bias)
-                  vol_spike[i]):
+            # Short: price breaks below Donchian(20) low + volume surge + downtrend
+            elif (close[i] < donchian_low and
+                  close[i] < ema_30_12h_aligned[i] and
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
