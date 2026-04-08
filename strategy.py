@@ -1,137 +1,89 @@
 #!/usr/bin/env python3
 """
-4h_Triple_Screen_Trading_System
-Based on Elder's Triple Screen system:
-- Long-term trend (weekly EMA13) filters direction
-- Intermediate trend (daily MACD histogram) confirms momentum
-- Short-term entry (4h RSI<30 for long, RSI>70 for short) with overbought/oversold
-- Exit on opposite RSI extreme or trend reversal
-- Designed for low trade frequency (<50/year) with strong edge in both bull/bear markets
+6h_12h_1d_price_action_v1
+Hypothesis: Use 12h and 1d timeframes to establish trend and key levels, then trade breakouts on 6h.
+- Trend: 12h close above/below 12h EMA(50) determines long/short bias
+- Support/Resistance: 1d high/low act as dynamic levels
+- Entry: 6h price breaks 1d high/low in direction of 12h trend with volume confirmation
+- Exit: Opposite 1d level touch or trend reversal
+- Volume: Require 6h volume > 1.5x 20-period average to avoid false breakouts
+Target: 12-37 trades/year (50-150 total over 4 years)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Triple_Screen_Trading_System"
-timeframe = "4h"
+name = "6h_12h_1d_price_action_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (EMA13) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Weekly EMA13 for trend direction
-    weekly_close = df_1w['close'].values
-    alpha = 2 / (13 + 1)
-    ema_w13 = np.full_like(weekly_close, np.nan, dtype=float)
-    ema_w13[0] = weekly_close[0]
-    for i in range(1, len(weekly_close)):
-        ema_w13[i] = alpha * weekly_close[i] + (1 - alpha) * ema_w13[i-1]
+    # 12h EMA(50) for trend
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = close_12h > ema_50
+    trend_down = close_12h < ema_50
     
-    # Weekly trend: bullish if price > EMA13, bearish if price < EMA13
-    weekly_bullish = weekly_close > ema_w13
-    weekly_bearish = weekly_close < ema_w13
+    # Forward fill trend
+    trend_up_series = pd.Series(trend_up)
+    trend_down_series = pd.Series(trend_down)
+    trend_up_ffilled = trend_up_series.ffill().values
+    trend_down_ffilled = trend_down_series.ffill().values
     
-    # Forward fill and align to 4h
-    weekly_bullish_ffilled = pd.Series(weekly_bullish).ffill().values
-    weekly_bearish_ffilled = pd.Series(weekly_bearish).ffill().values
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_ffilled)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish_ffilled)
+    # Align 12h trend to 6h
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up_ffilled)
+    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down_ffilled)
     
-    # === DAILY MOMENTUM CONFIRMATION (MACD HISTOGRAM) ===
+    # Get 1d data for support/resistance
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily MACD: EMA12 - EMA26
-    daily_close = df_1d['close'].values
+    # Daily high/low
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # EMA12
-    alpha12 = 2 / (12 + 1)
-    ema12 = np.full_like(daily_close, np.nan, dtype=float)
-    ema12[0] = daily_close[0]
-    for i in range(1, len(daily_close)):
-        ema12[i] = alpha12 * daily_close[i] + (1 - alpha12) * ema12[i-1]
+    # Forward fill daily levels
+    daily_high_series = pd.Series(daily_high)
+    daily_low_series = pd.Series(daily_low)
+    daily_high_ffilled = daily_high_series.ffill().values
+    daily_low_ffilled = daily_low_series.ffill().values
     
-    # EMA26
-    alpha26 = 2 / (26 + 1)
-    ema26 = np.full_like(daily_close, np.nan, dtype=float)
-    ema26[0] = daily_close[0]
-    for i in range(1, len(daily_close)):
-        ema26[i] = alpha26 * daily_close[i] + (1 - alpha26) * ema26[i-1]
+    # Align daily levels to 6h
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high_ffilled)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low_ffilled)
     
-    macd_line = ema12 - ema26
-    
-    # Signal line: EMA9 of MACD
-    alpha9 = 2 / (9 + 1)
-    signal_line = np.full_like(macd_line, np.nan, dtype=float)
-    valid = ~np.isnan(macd_line)
-    if np.any(valid):
-        first_valid = np.where(valid)[0][0]
-        signal_line[first_valid] = macd_line[first_valid]
-        for i in range(first_valid + 1, len(macd_line)):
-            if not np.isnan(macd_line[i]):
-                signal_line[i] = alpha9 * macd_line[i] + (1 - alpha9) * signal_line[i-1]
-            else:
-                signal_line[i] = signal_line[i-1]
-    
-    # MACD histogram: positive = bullish momentum, negative = bearish momentum
-    macd_hist = macd_line - signal_line
-    daily_bullish_momentum = macd_hist > 0
-    daily_bearish_momentum = macd_hist < 0
-    
-    # Forward fill and align to 4h
-    daily_bullish_mom_ffilled = pd.Series(daily_bullish_momentum).ffill().values
-    daily_bearish_mom_ffilled = pd.Series(daily_bearish_momentum).ffill().values
-    daily_bullish_mom_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish_mom_ffilled)
-    daily_bearish_mom_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish_mom_ffilled)
-    
-    # === SHORT-TERM ENTRY (4H RSI) ===
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    # Smoothed gains/losses (Wilder's smoothing)
-    alpha_rsi = 1 / 14
-    avg_gain = np.full_like(gain, np.nan, dtype=float)
-    avg_loss = np.full_like(loss, np.nan, dtype=float)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(gain)):
-        avg_gain[i] = alpha_rsi * gain[i] + (1 - alpha_rsi) * avg_gain[i-1]
-        avg_loss[i] = alpha_rsi * loss[i] + (1 - alpha_rsi) * avg_loss[i-1]
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100  # All gains, no losses
-    
-    # RSI thresholds
-    rsi_oversold = rsi < 30
-    rsi_overbought = rsi > 70
+    # Volume filter: 6h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
-            np.isnan(daily_bullish_mom_aligned[i]) or np.isnan(daily_bearish_mom_aligned[i])):
+        if (np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or 
+            np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -140,27 +92,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI overbought OR weekly trend turns bearish OR daily momentum turns bearish
-            if rsi_overbought[i] or weekly_bearish_aligned[i] or not daily_bullish_mom_aligned[i]:
+            # Exit: price touches daily low (support) or trend turns down
+            if low[i] <= daily_low_aligned[i] or trend_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: RSI oversold OR weekly trend turns bullish OR daily momentum turns bullish
-            if rsi_oversold[i] or weekly_bullish_aligned[i] or not daily_bearish_mom_aligned[i]:
+            # Exit: price touches daily high (resistance) or trend turns up
+            if high[i] >= daily_high_aligned[i] or trend_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: Weekly bullish AND daily bullish momentum AND RSI oversold
-            if weekly_bullish_aligned[i] and daily_bullish_mom_aligned[i] and rsi_oversold[i]:
+            # Long entry: price breaks above daily high with 12h uptrend and volume
+            if high[i] > daily_high_aligned[i] and trend_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Weekly bearish AND daily bearish momentum AND RSI overbought
-            elif weekly_bearish_aligned[i] and daily_bearish_mom_aligned[i] and rsi_overbought[i]:
+            # Short entry: price breaks below daily low with 12h downtrend and volume
+            elif low[i] < daily_low_aligned[i] and trend_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
