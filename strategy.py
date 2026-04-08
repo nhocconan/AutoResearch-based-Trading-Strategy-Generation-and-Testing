@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-# 4h_12h_momentum_reversal_v1
-# Hypothesis: Combines 12h RSI momentum with 4h price action reversal at key levels. Uses 12h RSI to identify overbought/oversold conditions and 4h candlestick patterns for entry timing. Designed for lower trade frequency (<30/year) with clear reversal signals that work in both bull and bear markets by fading extremes.
+# 6h_1w_1d_donchian_breakout_volume_v2
+# Hypothesis: Breakout of 6h Donchian channels with weekly trend filter and volume confirmation.
+# Uses weekly EMA200 to filter trend direction (bull/bear) and only trades in direction of weekly trend.
+# Volume confirmation requires 6h volume > 1.8x 20-period average to avoid false breakouts.
+# Designed for 6h timeframe to limit overtrading (<50 trades/year) and work in both bull/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_momentum_reversal_v1"
-timeframe = "4h"
+name = "6h_1w_1d_donchian_breakout_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,50 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for RSI momentum
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Get 6h data for Donchian calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 12h close
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
-    # Align to 4h timeframe (no additional delay needed for RSI)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # Calculate 4h support/resistance levels from recent swing points
-    # Use 20-period high/low for context
-    high_4h = df_12h['high'].values if len(df_12h) >= len(df_12h) else df_12h['high'].values  # fallback
-    # Actually get proper 4h data for price levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    res_level = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    supp_level = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    res_level_aligned = align_htf_to_ltf(prices, df_4h, res_level)
-    supp_level_aligned = align_htf_to_ltf(prices, df_4h, supp_level)
     
-    # Volume filter: above average
+    # Calculate Donchian(20) on 6h high/low
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Align to 6h timeframe (no additional delay needed for Donchian)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    
+    # Calculate EMA200 on weekly close for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Align to 6h timeframe (no additional delay needed for EMA)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Volume confirmation: 6h volume > 1.8x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > vol_ma * 1.2
+    vol_confirm = volume > vol_ma * 1.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(rsi_12h_aligned[i]) or np.isnan(res_level_aligned[i]) or np.isnan(supp_level_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -73,31 +70,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI becomes overbought OR price hits resistance
-            if rsi_12h_aligned[i] > 70 or close[i] >= res_level_aligned[i] * 0.995:
+            # Exit: price closes below 6h Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI becomes oversold OR price hits support
-            if rsi_12h_aligned[i] < 30 or close[i] <= supp_level_aligned[i] * 1.005:
+            # Exit: price closes above 6h Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: RSI oversold (<30) AND price near support with volume
-            if (rsi_12h_aligned[i] < 30 and 
-                close[i] <= supp_level_aligned[i] * 1.01 and
-                vol_filter[i]):
+            # Long entry: price breaks above 6h Donchian high, above weekly EMA200 (bullish trend), with volume confirmation
+            if close[i] > donchian_high_aligned[i] and close[i] > ema200_1w_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI overbought (>70) AND price near resistance with volume
-            elif (rsi_12h_aligned[i] > 70 and 
-                  close[i] >= res_level_aligned[i] * 0.99 and
-                  vol_filter[i]):
+            # Short entry: price breaks below 6h Donchian low, below weekly EMA200 (bearish trend), with volume confirmation
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema200_1w_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
