@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_1w_trend_volume_v1"
-timeframe = "12h"
+name = "1d_weekly_pivot_breakout_1w_trend_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,71 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily Camarilla pivot levels (previous day)
-    range_1d = high_1d - low_1d
-    close_prev = close_1d
-    # Camarilla levels: H4 = close + 1.5*range, L4 = close - 1.5*range
-    h4_1d = close_prev + 1.5 * range_1d
-    l4_1d = close_prev - 1.5 * range_1d
-    
-    # Align Camarilla levels to 12h timeframe
-    h4_12h = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_12h = align_htf_to_ltf(prices, df_1d, l4_1d)
-    
-    # 1w trend: 20-period EMA (slower trend filter)
+    # 1w data for pivot calculation and trend
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Volume filter: volume > 1.5x 30-period average (strict for 12h)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Calculate weekly pivot points (previous week's values)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align pivot levels to daily timeframe
+    pivot_daily = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_daily = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_daily = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # 1w trend: 21-period EMA
+    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_daily = align_htf_to_ltf(prices, df_1w, ema_21)
+    
+    # Volume filter: volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(21, n):
         # Skip if any required data is NaN
-        if (np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_21_daily[i]) or np.isnan(pivot_daily[i]) or 
+            np.isnan(r1_daily[i]) or np.isnan(s1_daily[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < L4 or trend fails (price below weekly EMA)
-            if close[i] < l4_12h[i] or close[i] < ema_20_1w_aligned[i]:
+            # Exit: price < S1 or trend fails
+            if close[i] < s1_daily[i] or close[i] < ema_21_daily[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > H4 or trend fails (price above weekly EMA)
-            if close[i] > h4_12h[i] or close[i] > ema_20_1w_aligned[i]:
+            # Exit: price > R1 or trend fails
+            if close[i] > r1_daily[i] or close[i] > ema_21_daily[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter from 1w EMA
-            bullish = close[i] > ema_20_1w_aligned[i]
-            bearish = close[i] < ema_20_1w_aligned[i]
+            # Trend filter
+            bullish = close[i] > ema_21_daily[i]
+            bearish = close[i] < ema_21_daily[i]
             
-            # Long: price > H4 (break above resistance) + bullish trend + volume
-            if (close[i] > h4_12h[i] and 
+            # Long: price > R1 + bullish trend + volume
+            if (close[i] > r1_daily[i] and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price < L4 (break below support) + bearish trend + volume
-            elif (close[i] < l4_12h[i] and 
+            # Short: price < S1 + bearish trend + volume
+            elif (close[i] < s1_daily[i] and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
