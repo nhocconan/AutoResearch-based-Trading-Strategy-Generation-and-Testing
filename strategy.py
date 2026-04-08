@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1w_trend_volume_v1
-# Hypothesis: Use daily Camarilla pivot points on 12h timeframe with volume confirmation and weekly trend filter.
-# Long when price breaks above H4 with volume > 20-period average and price > weekly EMA50.
-# Short when price breaks below L4 with volume > 20-period average and price < weekly EMA50.
-# Weekly trend filter ensures alignment with higher timeframe direction, reducing whipsaw.
-# Target: 15-30 trades/year on 12h to stay within fee limits.
+# 12h_kama_trend_1d_rsi_v1
+# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 12h for trend direction, 
+# combined with daily RSI for overbought/oversold conditions. 
+# Go long when KAMA turns up and RSI < 30 (oversold), short when KAMA turns down and RSI > 70 (overbought).
+# Uses 1-day trend filter: only take longs when price > daily EMA50, shorts when price < daily EMA50.
+# Works in bull/bear by following higher timeframe trend. Low trade frequency (~15-25/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1w_trend_volume_v1"
+name = "12h_kama_trend_1d_rsi_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,41 +25,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot points
+    # KAMA calculation (12h)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |diff| over 10 periods
+    # Fix array lengths
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Get daily data for RSI and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Daily RSI (14)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels (using previous day's data)
-    # Camarilla formulas: 
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.25 * (High - Low)
-    # L3 = Close - 1.25 * (High - Low)
-    # We'll use H4/L4 for breakouts
-    daily_range = high_1d - low_1d
-    h4 = close_1d + 1.5 * daily_range
-    l4 = close_1d - 1.5 * daily_range
-    
-    # Align Camarilla levels to 12h timeframe (using previous day's values)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align daily indicators to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,8 +72,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -79,27 +81,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below H4 OR weekly trend turns against us
-            if (close[i] < h4_aligned[i]) or (close[i] < ema_50_1w_aligned[i]):
+            # Exit: KAMA turns down OR RSI overbought OR trend turns against us
+            if (kama[i] < kama[i-1]) or (rsi_aligned[i] > 70) or (close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above L4 OR weekly trend turns against us
-            if (close[i] > l4_aligned[i]) or (close[i] > ema_50_1w_aligned[i]):
+            # Exit: KAMA turns up OR RSI oversold OR trend turns against us
+            if (kama[i] > kama[i-1]) or (rsi_aligned[i] < 30) or (close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above H4 with volume confirmation AND weekly uptrend
-            if (close[i] > h4_aligned[i]) and (volume[i] > vol_ma[i]) and (close[i] > ema_50_1w_aligned[i]):
+            # Long entry: KAMA turning up AND RSI oversold AND price above daily EMA50
+            if (kama[i] > kama[i-1]) and (rsi_aligned[i] < 30) and (close[i] > ema_50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below L4 with volume confirmation AND weekly downtrend
-            elif (close[i] < l4_aligned[i]) and (volume[i] > vol_ma[i]) and (close[i] < ema_50_1w_aligned[i]):
+            # Short entry: KAMA turning down AND RSI overbought AND price below daily EMA50
+            elif (kama[i] < kama[i-1]) and (rsi_aligned[i] > 70) and (close[i] < ema_50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
