@@ -1,86 +1,96 @@
 #!/usr/bin/env python3
-# 6h_cci_extreme_reversion_v1
-# Hypothesis: Mean reversion using CCI(40) on 6h with 1d trend filter.
-# Enter long when CCI < -250 (extreme oversold) and price > 1d EMA50.
-# Enter short when CCI > +250 (extreme overbought) and price < 1d EMA50.
-# Exit when CCI returns to zero or trend filter fails.
-# Designed for 15-30 trades/year on 6h to avoid fee drag. Works in bull/bear via trend filter.
+# 4h_donchian_breakout_12h_trend_volume_v1
+# Hypothesis: Breakout strategy combining 4h Donchian breakout with 12h trend filter (EMA50) and volume confirmation.
+# Enter long when price breaks above 20-period Donchian high, price > 12h EMA50, and volume > 1.5x average volume.
+# Enter short when price breaks below 20-period Donchian low, price < 12h EMA50, and volume > 1.5x average volume.
+# Exit when price returns to the Donchian midpoint or trend filter fails.
+# Designed for 20-50 trades/year on 4h to avoid fee drag. Works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_extreme_reversion_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 6h CCI (40-period)
-    period = 40
-    tp = (high + low + close) / 3
-    sma_tp = np.full(n, np.nan)
-    mad = np.full(n, np.nan)
+    # 4h Donchian channel (20-period)
+    lookback = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    for i in range(period, n):
-        sma_tp[i] = np.mean(tp[i-period:i])
-        md = np.mean(np.abs(tp[i-period:i] - sma_tp[i]))
-        mad[i] = md if md > 0 else 1e-10
+    for i in range(lookback, n):
+        donchian_high[i] = np.max(high[i-lookback:i])
+        donchian_low[i] = np.min(low[i-lookback:i])
     
-    cci = np.full(n, np.nan)
-    for i in range(period, n):
-        cci[i] = (tp[i] - sma_tp[i]) / (0.015 * mad[i])
+    # 12-hour EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 1-day EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Volume average (20-period) for confirmation
+    vol_avg = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_avg[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(50, 40)  # Ensure indicators are ready
+    start_idx = max(50, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(cci[i]) or np.isnan(ema50_1d_aligned[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        vol_confirmed = volume[i] > 1.5 * vol_avg[i]
+        
         if position == 1:  # Long position
-            # Exit: CCI returns to zero or trend filter fails
-            if cci[i] >= 0 or close[i] <= ema50_1d_aligned[i]:
+            # Exit: price returns to Donchian midpoint or trend filter fails
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] < midpoint or close[i] <= ema50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI returns to zero or trend filter fails
-            if cci[i] <= 0 or close[i] >= ema50_1d_aligned[i]:
+            # Exit: price returns to Donchian midpoint or trend filter fails
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] > midpoint or close[i] >= ema50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: extreme oversold with uptrend filter
-            if cci[i] < -250 and close[i] > ema50_1d_aligned[i]:
+            # Long entry: breakout above Donchian high with volume and trend filter
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema50_12h_aligned[i] and 
+                vol_confirmed):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: extreme overbought with downtrend filter
-            elif cci[i] > 250 and close[i] < ema50_1d_aligned[i]:
+            # Short entry: breakdown below Donchian low with volume and trend filter
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
+                  vol_confirmed):
                 position = -1
                 signals[i] = -0.25
     
