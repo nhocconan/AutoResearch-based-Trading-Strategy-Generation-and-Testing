@@ -1,32 +1,44 @@
 #!/usr/bin/env python3
-# 1d_weekly_pivot_reversion_v1
-# Hypothesis: In bear/ranging markets (2025+), price tends to revert to weekly pivot levels.
-# Long when: price touches weekly S1 support with bullish engulfing candle and volume > 1.5x average.
-# Short when: price touches weekly R1 resistance with bearish engulfing candle and volume > 1.5x average.
-# Exit when price moves back toward weekly pivot (PP) or shows opposite rejection.
-# Uses weekly pivot points (PP, R1, S1) calculated from prior week's OHLC.
-# Target: 15-25 trades/year to avoid fee drag in ranging markets.
+# 4h_camilla_pivot_volume_reversal_v1
+# Hypothesis: Uses 1d Camarilla pivot levels (L3, H3) for mean reversion entries
+# with volume confirmation and 4h momentum filter. Works in both bull/bear
+# as pivots act as support/resistance in ranging markets and trend continuations
+# in trending markets. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_pivot_reversion_v1"
-timeframe = "1d"
+name = "4h_camilla_pivot_volume_reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Volume filter: 1.5x 20-day average
+    # 4h RSI(14) for momentum filter
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
+    for i in range(rsi_period+1, n):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_ma_period-1, n):
@@ -37,45 +49,38 @@ def generate_signals(prices):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Bullish/bearish engulfing detection
-    bullish_engulf = np.full(n, False)
-    bearish_engulf = np.full(n, False)
-    for i in range(1, n):
-        bullish_engulf[i] = (close[i] > open_price[i] and 
-                            open_price[i] < close[i-1] and 
-                            close[i] > open_price[i-1])
-        bearish_engulf[i] = (close[i] < open_price[i] and 
-                            open_price[i] > close[i-1] and 
-                            close[i] < open_price[i-1])
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
-        return np.zeros(n)
+    # Calculate Camarilla levels for previous day
+    # H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
+    # H2 = close + 0.75*(high-low), L2 = close - 0.75*(high-low)
+    # H1 = close + 0.5*(high-low), L1 = close - 0.5*(high-low)
+    # Pivot = (high + low + close)/3
+    camarilla_H3 = np.zeros(len(close_1d))
+    camarilla_L3 = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        high_low = high_1d[i-1] - low_1d[i-1]
+        camarilla_H3[i] = close_1d[i-1] + 1.125 * high_low
+        camarilla_L3[i] = close_1d[i-1] - 1.125 * high_low
     
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    
-    # Align weekly pivot levels to daily timeframe (with 1-week delay for completion)
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = vol_ma_period  # Wait for volume MA to be ready
+    start_idx = max(rsi_period, vol_ma_period, 1) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -83,31 +88,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price moves back toward weekly pivot or shows bearish rejection
-            if close[i] >= pp_aligned[i] or bearish_engulf[i]:
+            # Exit: Price reaches H3 or RSI > 70 (overbought)
+            if close[i] >= camarilla_H3_aligned[i] or rsi[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves back toward weekly pivot or shows bullish rejection
-            if close[i] <= pp_aligned[i] or bullish_engulf[i]:
+            # Exit: Price reaches L3 or RSI < 30 (oversold)
+            if close[i] <= camarilla_L3_aligned[i] or rsi[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price touches S1 support with bullish engulfing and volume surge
-            if (abs(low[i] - s1_aligned[i]) < 0.005 * s1_aligned[i] and  # Within 0.5% of S1
-                bullish_engulf[i] and 
-                vol_surge[i]):
+            # Long entry: Price touches L3 with volume surge and RSI < 40 (not overbought)
+            if (close[i] <= camarilla_L3_aligned[i] and 
+                vol_surge[i] and 
+                rsi[i] < 40):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price touches R1 resistance with bearish engulfing and volume surge
-            elif (abs(high[i] - r1_aligned[i]) < 0.005 * r1_aligned[i] and  # Within 0.5% of R1
-                  bearish_engulf[i] and 
-                  vol_surge[i]):
+            # Short entry: Price touches H3 with volume surge and RSI > 60 (not oversold)
+            elif (close[i] >= camarilla_H3_aligned[i] and 
+                  vol_surge[i] and 
+                  rsi[i] > 60):
                 position = -1
                 signals[i] = -0.25
     
