@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_donchian_breakout_volume_v1
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day volume confirmation and ATR volatility filter.
-# Long when price breaks above 20-period high with above-average volume; short when breaks below 20-period low with above-average volume.
-# Uses 1-day ATR to filter out low-volatility chop. Designed for 12-30 trades/year on 12h to avoid fee drag.
-# Works in bull/bear via breakout logic with volume confirmation.
+# 4h_triple_reversal_volume_v1
+# Hypothesis: 4h mean reversion at extreme RSI with volume confirmation and 1d trend filter.
+# Long when RSI < 20 and volume > 1.5x average, short when RSI > 80 and volume > 1.5x average.
+# Uses 1d EMA50 to filter trades in direction of higher timeframe trend.
+# Designed for 20-40 trades/year on 4h to minimize fee drag. Works in ranging markets via mean reversion.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_triple_reversal_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,92 +23,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(period - 1, n):
-        donchian_high[i] = np.max(high[i - period + 1:i + 1])
-        donchian_low[i] = np.min(low[i - period + 1:i + 1])
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
     
-    # Get 1d data for volume and ATR filters
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1-day average volume (20-period)
-    avg_volume_1d = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        avg_volume_1d[i] = np.mean(volume_1d[i - 19:i + 1])
-    
-    # 1-day ATR (14-period) for volatility filter
-    atr_period = 14
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(atr_period, len(df_1d)):
-        atr_1d[i] = np.mean(tr[i - atr_period + 1:i + 1])
-    
-    # Align 1d filters to 12h
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 12-period average volume for 12h timeframe
-    avg_volume_12h = np.full(n, np.nan)
-    for i in range(11, n):
-        avg_volume_12h[i] = np.mean(volume[i - 11:i + 1])
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(period - 1, 19, atr_period)  # Ensure all indicators are ready
+    start_idx = 20  # Ensure RSI and volume average are ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(avg_volume_12h[i])):
+        # Skip if required data is not available
+        if np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume and volatility conditions
-        volume_surge = volume[i] > avg_volume_12h[i] * 1.5  # 50% above average volume
-        vol_filter = atr_1d_aligned[i] > 0  # Ensure volatility data exists
-        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or volume drops significantly
-            if close[i] < donchian_low[i] or volume[i] < avg_volume_12h[i] * 0.5:
+            # Exit: RSI returns to neutral (40-60) or price closes below EMA50
+            if rsi[i] >= 40 or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or volume drops significantly
-            if close[i] > donchian_high[i] or volume[i] < avg_volume_12h[i] * 0.5:
+            # Exit: RSI returns to neutral (40-60) or price closes above EMA50
+            if rsi[i] <= 60 or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above Donchian high with volume surge and adequate volatility
-            if (close[i] > donchian_high[i] and 
-                volume_surge and 
-                vol_filter):
+            # Volume confirmation: current volume > 1.5x average
+            volume_confirm = volume[i] > 1.5 * vol_avg[i]
+            
+            # Long entry: RSI oversold (<20) with volume confirmation and 1d uptrend
+            if (rsi[i] < 20 and 
+                volume_confirm and 
+                close[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian low with volume surge and adequate volatility
-            elif (close[i] < donchian_low[i] and 
-                  volume_surge and 
-                  vol_filter):
+            # Short entry: RSI overbought (>80) with volume confirmation and 1d downtrend
+            elif (rsi[i] > 80 and 
+                  volume_confirm and 
+                  close[i] < ema50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
