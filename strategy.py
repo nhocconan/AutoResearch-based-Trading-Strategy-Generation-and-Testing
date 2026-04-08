@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_volume_acceleration_v1
-Hypothesis: Volume acceleration + price breakout on 6h with 1w trend filter. 
-- Volume surge detection: current volume > 2x 20-period average AND rising for 2 consecutive periods
-- Price breakout: close breaks above/below Donchian(20) channel
-- Trend filter: 1w EMA(50) direction (bullish if close > EMA50, bearish if close < EMA50)
-- Entry: Long on bullish breakout in bullish trend; Short on bearish breakout in bearish trend
+4h_atr_breakout_1d_trend_volume_v2
+Hypothesis: ATR-based breakout with 1d trend filter and volume confirmation works in both bull and bear markets.
+- Entry: Price breaks above/below ATR-based channel + 1d trend alignment + volume surge
+- Trend filter: 1d EMA(50) direction
+- Volume filter: Current volume > 2.0 x 20-period average
 - Exit: Opposite breakout or trend reversal
 - Position sizing: 0.25 long, -0.25 short
-- Designed to capture momentum bursts in both bull and bear markets with volume confirmation
+- Designed to capture strong moves while avoiding choppy markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_volume_acceleration_v1"
-timeframe = "6h"
+name = "4h_atr_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,37 +29,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(50) for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema_50_1w
-    trend_1w_down = close_1w < ema_50_1w
+    # 1d EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema_50_1d
+    trend_1d_down = close_1d < ema_50_1d
     
     # Forward fill trend
-    trend_1w_up_series = pd.Series(trend_1w_up)
-    trend_1w_down_series = pd.Series(trend_1w_down)
-    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
-    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
+    trend_1d_up_series = pd.Series(trend_1d_up)
+    trend_1d_down_series = pd.Series(trend_1d_down)
+    trend_1d_up_ffilled = trend_1d_up_series.ffill().values
+    trend_1d_down_ffilled = trend_1d_down_series.ffill().values
     
-    # Align 1w trend to 6h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
+    # Align 1d trend to 4h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
     
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # ATR calculation (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume acceleration: current volume > 2x 20-period MA AND rising for 2 periods
+    # ATR-based channels (2.0 * ATR)
+    atr_mult = 2.0
+    upper_channel = close + (atr_mult * atr)
+    lower_channel = close - (atr_mult * atr)
+    
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (2.0 * vol_ma)
-    volume_rising = volume > np.roll(volume, 1)  # volume > previous period
-    volume_rising_2 = volume_rising & np.roll(volume_rising, 1)  # rising for 2 consecutive periods
-    volume_acceleration = volume_surge & volume_rising_2
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,9 +77,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(volume_acceleration[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -81,27 +88,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: bearish breakout OR 1w trend turns down
-            if (close[i] < low_20[i]) or trend_1w_down_aligned[i]:
+            # Exit: Price breaks below lower channel OR 1d trend turns down
+            if (close[i] < lower_channel[i]) or trend_1d_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: bullish breakout OR 1w trend turns up
-            if (close[i] > high_20[i]) or trend_1w_up_aligned[i]:
+            # Exit: Price breaks above upper channel OR 1d trend turns up
+            if (close[i] > upper_channel[i]) or trend_1d_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: bullish breakout + 1w uptrend + volume acceleration
-            if (close[i] > high_20[i]) and trend_1w_up_aligned[i] and volume_acceleration[i]:
+            # Long entry: Price breaks above upper channel + 1d uptrend + volume
+            if (close[i] > upper_channel[i]) and trend_1d_up_aligned[i] and volume_filter[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish breakout + 1w downtrend + volume acceleration
-            elif (close[i] < low_20[i]) and trend_1w_down_aligned[i] and volume_acceleration[i]:
+            # Short entry: Price breaks below lower channel + 1d downtrend + volume
+            elif (close[i] < lower_channel[i]) and trend_1d_down_aligned[i] and volume_filter[i]:
                 position = -1
                 signals[i] = -0.25
     
