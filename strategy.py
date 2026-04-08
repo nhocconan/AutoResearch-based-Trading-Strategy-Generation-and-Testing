@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -18,70 +18,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot calculation
+    # 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    range_1d = high_1d - low_1d
-    close_prev = close_1d  # Using close as the base for pivot
+    # Calculate daily pivot points (previous day's values)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
     
-    # Camarilla levels: H5 = close + 1.1 * range / 2, L5 = close - 1.1 * range / 2
-    camarilla_h5 = close_prev + 1.1 * range_1d / 2
-    camarilla_l5 = close_prev - 1.1 * range_1d / 2
+    # Align pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align Camarilla levels to 12h timeframe
-    h5_12h = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    l5_12h = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    # 4h trend: 34-period EMA (faster than 50 for better responsiveness)
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 1d trend: 50-period EMA on daily close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    # Volume filter: volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(h5_12h[i]) or np.isnan(l5_12h[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34[i]) or np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or 
+            np.isnan(s1_4h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < L5 or trend fails
-            if close[i] < l5_12h[i] or close[i] < ema_50_12h[i]:
+            # Exit: price < S1 or trend fails
+            if close[i] < s1_4h[i] or close[i] < ema_34[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > H5 or trend fails
-            if close[i] > h5_12h[i] or close[i] > ema_50_12h[i]:
+            # Exit: price > R1 or trend fails
+            if close[i] > r1_4h[i] or close[i] > ema_34[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_50_12h[i]
-            bearish = close[i] < ema_50_12h[i]
+            bullish = close[i] > ema_34[i]
+            bearish = close[i] < ema_34[i]
             
-            # Long: price > H5 + bullish trend + volume
-            if (close[i] > h5_12h[i] and 
+            # Long: price > R1 + bullish trend + volume
+            if (close[i] > r1_4h[i] and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price < L5 + bearish trend + volume
-            elif (close[i] < l5_12h[i] and 
+            # Short: price < S1 + bearish trend + volume
+            elif (close[i] < s1_4h[i] and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
