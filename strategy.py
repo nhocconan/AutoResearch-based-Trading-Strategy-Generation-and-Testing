@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter (ADX>25) and volume confirmation (volume > 1.5x 20-period average)
-# Breakouts from Donchian channels capture momentum moves, ADX filters for trending markets, volume confirms breakout strength
-# Works in both bull and bear markets by capturing breakouts in either direction
-# Target: 20-50 trades/year by requiring Donchian breakout + trend + volume confirmation
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Breakouts from Donchian channels capture momentum moves; ADX > 25 filters for trending markets;
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Works in both bull and bear markets by capturing breakouts in either direction.
+# Target: 20-50 trades/year by requiring Donchian breakout + trend + volume confirmation.
 name = "4h_donchian_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
