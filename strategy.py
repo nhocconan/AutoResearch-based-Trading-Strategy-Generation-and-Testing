@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4x4 Grid Strategy with 1d Trend Filter
-Hypothesis: A 4x4 grid of support/resistance levels based on 1d high/low and ATR provides
-clear entry zones. Combined with 1d EMA trend filter and volume confirmation, this
-captures breakouts and mean-reversion within ranges. Grid structure reduces whipsaw.
-Designed to work in bull via breakouts, in bear via mean-reversion to grid levels.
+4x4 Grid Strategy for BTC/ETH/SOL USDT-M Perpetual Futures
+Hypothesis: The 4x4 grid strategy combines 4 independent signals across 4 timeframes (4h, 1d, 1w, and a volatility regime filter) to generate high-probability trades with low frequency. Each signal must align for entry, reducing false signals and overtrading. The strategy is designed to work in both bull and bear markets by using trend-following on higher timeframes and volatility-based regime filtering to avoid choppy markets. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -26,95 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for grid and trend
+    # Signal 1: 4h EMA(21) vs EMA(50) trend
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h = ema_21 - ema_50  # >0 = uptrend, <0 = downtrend
+    
+    # Signal 2: 1d Donchian breakout (20-period)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
+    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
     
-    # 1d ATR(14) for grid spacing
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    # Signal 3: 1w EMA(50) trend
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 4x4 grid levels: 4 above, 4 below 1d midpoint
-    # Grid uses 1d ATR as unit size
-    grid_unit = atr_14 * 0.5  # Half ATR spacing for tighter grid
-    midpoint = (high_1d + low_1d) / 2
-    
-    # Generate 4 levels above and below midpoint
-    grid_upper = np.zeros_like(midpoint)
-    grid_lower = np.zeros_like(midpoint)
-    for i in range(1, 5):
-        grid_upper += grid_unit * i
-        grid_lower -= grid_unit * i
-    
-    # Align grid levels to 4h
-    grid_upper_aligned = [align_htf_to_ltf(prices, df_1d, grid_upper + midpoint) for _ in range(4)]
-    grid_lower_aligned = [align_htf_to_ltf(prices, df_1d, grid_lower + midpoint) for _ in range(4)]
-    
-    # Flatten grid levels for easy access
-    grid_levels = []
-    for i in range(4):
-        grid_levels.append(grid_lower_aligned[i])
-        grid_levels.append(grid_upper_aligned[i])
-    grid_levels = np.array(grid_levels)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Signal 4: Volatility regime filter (ATR ratio)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = high[0] - close[0]
+    tr3[0] = low[0] - close[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_50  # <1 = low volatility, >1 = high volatility
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike[i]):
-            signals[i] = 0.0
-            continue
-        
-        # Skip if grid levels not ready
-        if any(np.isnan(grid_levels[:, i])) if grid_levels.ndim > 1 else False:
+        if (np.isnan(trend_4h[i]) or 
+            np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below nearest grid level or trend reverses
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit: 4h trend turns negative OR price breaks below 1d Donchian low
+            if trend_4h[i] < 0 or close[i] < donchian_low_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above nearest grid level or trend reverses
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit: 4h trend turns positive OR price breaks above 1d Donchian high
+            if trend_4h[i] > 0 or close[i] > donchian_high_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter
-            uptrend = close[i] > ema_50_1d_aligned[i]
-            downtrend = close[i] < ema_50_1d_aligned[i]
+            # All 4 signals must agree for entry
+            # Signal 1: 4h EMA trend
+            s1_long = trend_4h[i] > 0
+            s1_short = trend_4h[i] < 0
             
-            # Check if price is near any grid level (within 0.2 * ATR)
-            near_grid = False
-            for level in grid_levels:
-                if not np.isnan(level[i]) and abs(close[i] - level[i]) < (atr_14[i] * 0.2 if not np.isnan(atr_14[i]) else np.inf):
-                    near_grid = True
-                    break
+            # Signal 2: Price vs 1d Donchian channels
+            s2_long = close[i] > donchian_high_1d_aligned[i]
+            s2_short = close[i] < donchian_low_1d_aligned[i]
             
-            # Long: price above grid + uptrend + volume spike
-            if uptrend and vol_spike[i] and near_grid:
+            # Signal 3: Price vs 1w EMA50 trend
+            s3_long = close[i] > ema_50_1w_aligned[i]
+            s3_short = close[i] < ema_50_1w_aligned[i]
+            
+            # Signal 4: Volatility regime (prefer low volatility for breakouts)
+            s4 = atr_ratio[i] < 1.0  # Low volatility regime
+            
+            # Long entry: all signals agree on long + low volatility
+            if s1_long and s2_long and s3_long and s4:
                 position = 1
                 signals[i] = 0.25
-            # Short: price below grid + downtrend + volume spike
-            elif downtrend and vol_spike[i] and near_grid:
+            # Short entry: all signals agree on short + low volatility
+            elif s1_short and s2_short and s3_short and s4:
                 position = -1
                 signals[i] = -0.25
     
