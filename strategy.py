@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_fractal_breakout_1d_trend_volume_v2"
+name = "4h_fractal_breakout_1d_trend_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,9 +31,9 @@ def generate_signals(prices):
     # Calculate 1d volume SMA for volume context (20-period)
     vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (15-period) - tighter for fewer trades
-    highest_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
-    lowest_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
+    # Calculate 4h Donchian channels (20-period) - standard for breakout
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 4h ATR for volatility filter (10-period)
     tr1 = np.abs(high[1:] - low[1:])
@@ -47,7 +47,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(15, 50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -65,7 +65,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned
         downtrend = close[i] < ema_1d_aligned
         
-        # Volume filter: current volume above 2.0x 1d average volume (stricter)
+        # Volume filter: current volume above 2.0x 1d average volume
         volume_filter = volume[i] > (vol_sma_1d_aligned * 2.0)
         
         if position == 1:  # Long position
