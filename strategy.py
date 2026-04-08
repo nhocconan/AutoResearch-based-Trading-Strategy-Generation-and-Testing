@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 6h_1w_1d_adaptive_kelly_ema_cross_v1
-# Hypothesis: 6h EMA9/EMA21 crossover with 1d volatility filter and 1w trend filter.
-# Uses adaptive Kelly sizing based on recent win rate and volatility to manage risk.
-# Long when EMA9 > EMA21, price above 1d VWAP, and 1w uptrend; short when opposite.
-# Designed for 15-35 trades/year on 6h to avoid fee drag. Works in bull/bear via multi-timeframe alignment.
+# 12h_1d_camarilla_pivot_volume_squeeze_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume squeeze filter.
+# Long when price breaks above H3 with volume > 1.5x average, short when breaks below L3.
+# Uses 1d ADX < 25 to filter ranging markets and avoid false breakouts.
+# Designed for 15-30 trades/year on 12h to minimize fee drag. Works in bull/bear via volatility filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_adaptive_kelly_ema_cross_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_volume_squeeze_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,80 +23,123 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h EMAs for entry signal
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate average volume for volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 1d VWAP for mean reversion filter
+    # Get 1d data for Camarilla pivots and ADX
     df_1d = get_htf_data(prices, '1d')
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d_values = vwap_1d.values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (High + Low + Close) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Volatility measure for Kelly sizing (ATR-based)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Resistance levels
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    r4_1d = close_1d + (range_1d * 1.1 / 2)
+    
+    # Support levels
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    s4_1d = close_1d - (range_1d * 1.1 / 2)
+    
+    # H3 and L3 are the key levels for breakouts
+    h3_1d = r3_1d
+    l3_1d = s3_1d
+    
+    # Align H3 and L3 to 12h
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Calculate 1d ADX for trend filter
+    # TR = max(H-L, abs(H-PC), abs(L-PC))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (similar to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
+    
+    atr_period = 14
+    atr_1d = wilders_smooth(tr, atr_period)
+    plus_di_1d = wilders_smooth(plus_dm, atr_period) / atr_1d * 100
+    minus_di_1d = wilders_smooth(minus_dm, atr_period) / atr_1d * 100
+    dx_1d = np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d) * 100
+    adx_1d = wilders_smooth(dx_1d, atr_period)
+    
+    # Align ADX to 12h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(21, 14)  # Ensure indicators are ready
+    start_idx = max(30, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or 
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(atr14[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine trend direction
-        uptrend_6h = ema9[i] > ema21[i]
-        downtrend_6h = ema9[i] < ema21[i]
+        # Volume filter: current volume > 1.5x average volume
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Price relative to 1d VWAP
-        price_above_vwap = close[i] > vwap_1d_aligned[i]
-        price_below_vwap = close[i] < vwap_1d_aligned[i]
-        
-        # 1w trend filter
-        uptrend_1w = close[i] > ema50_1w_aligned[i]
-        downtrend_1w = close[i] < ema50_1w_aligned[i]
+        # ADX filter: only trade when ADX < 25 (ranging market) to avoid false breakouts in strong trends
+        adx_filter = adx_1d_aligned[i] < 25
         
         if position == 1:  # Long position
-            # Exit: EMA cross down or price drops significantly below VWAP
-            if not uptrend_6h or close[i] < vwap_1d_aligned[i] - 0.5 * atr14[i]:
+            # Exit: price closes below L3 or volume dries up
+            if close[i] < l3_1d_aligned[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
-                # Kelly sizing: base size 0.25, scaled by recent performance
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA cross up or price rises significantly above VWAP
-            if not downtrend_6h or close[i] > vwap_1d_aligned[i] + 0.5 * atr14[i]:
+            # Exit: price closes above H3 or volume dries up
+            if close[i] > h3_1d_aligned[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA9 crosses above EMA21, price above VWAP, and 1w uptrend
-            if (uptrend_6h and price_above_vwap and uptrend_1w):
+            # Long entry: price breaks above H3 with volume and ADX filter
+            if (close[i] > h3_1d_aligned[i] and 
+                volume_filter and 
+                adx_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: EMA9 crosses below EMA21, price below VWAP, and 1w downtrend
-            elif (downtrend_6h and price_below_vwap and downtrend_1w):
+            # Short entry: price breaks below L3 with volume and ADX filter
+            elif (close[i] < l3_1d_aligned[i] and 
+                  volume_filter and 
+                  adx_filter):
                 position = -1
                 signals[i] = -0.25
     
