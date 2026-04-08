@@ -1,13 +1,18 @@
-# 4h Donchian Breakout with 1D Trend Filter and Volume Confirmation
-# Strategy: Uses 20-period Donchian channels from 1D data for trend direction and breakout levels.
-# Filters by 1D ADX > 25 for trend strength and volume > 1.3x 20-period average.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# Uses 20-period Donchian channels from 1d data for trend direction and breakout levels.
+# Filters by 1d ADX > 25 for trend strength and volume > 1.3x 20-period average.
 # In trending markets (ADX>25): breakout continuation at Donchian breakout levels.
 # In ranging markets (ADX<=25): no trades to avoid whipsaw.
 # Designed to capture strong trends while avoiding choppy markets.
-# Target: 20-40 trades/year via Donchian + trend + volume confluence.
+# Target: 12-37 trades/year via Donchian + trend + volume confluence on 12h timeframe.
 
-name = "4h_donchian_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -77,7 +82,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
+        # Get aligned 1d values for current 12h bar
         high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)[i]
         low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)[i]
         adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
