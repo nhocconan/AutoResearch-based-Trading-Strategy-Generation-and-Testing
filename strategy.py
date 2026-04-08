@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 12h_fractal_breakout_1d_trend_volume_v4
+# 12h_fractal_breakout_1d_trend_volume_v5
 # Hypothesis: 12h timeframe trading using daily Williams Fractal breakouts with volume confirmation and ADX trend filter. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Daily trend filter (ADX) ensures alignment with higher timeframe direction. Target: 20-40 trades/year per symbol.
 
-name = "12h_fractal_breakout_1d_trend_volume_v4"
+name = "12h_fractal_breakout_1d_trend_volume_v5"
 timeframe = "12h"
 leverage = 1.0
 
