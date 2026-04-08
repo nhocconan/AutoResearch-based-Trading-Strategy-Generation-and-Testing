@@ -1,43 +1,34 @@
 #!/usr/bin/env python3
 """
-4h_mtf_cci_trend_reversal_v1
-Hypothesis: Use Commodity Channel Index (CCI) on daily chart with trend filter from weekly chart.
-- Long when CCI crosses above -100 from below with price above weekly EMA20 (uptrend)
-- Short when CCI crosses below +100 from above with price below weekly EMA20 (downtrend)
-- Uses mean-reversion within trend context to avoid counter-trend trades
-- Designed for low trade frequency (20-50/year) with high win rate
-- Works in bull/bear via trend filter and mean-reversion logic
+12h_1d1w_camarilla_pivot_v1
+Hypothesis: Use weekly and daily Camarilla pivot levels on 12h chart with volume confirmation.
+- Long when price touches or crosses above daily H3 level with volume expansion
+- Short when price touches or crosses below daily L3 level with volume expansion
+- Use weekly trend filter (price above/below weekly EMA20) to avoid counter-trend trades
+- Designed for low trade frequency (12-37/year) to minimize fee drag
+- Works in bull/bear via trend filter and volatility-based entry conditions
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_mtf_cci_trend_reversal_v1"
-timeframe = "4h"
+name = "12h_1d1w_camarilla_pivot_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_cci(high, low, close, period=20):
-    """Calculate Commodity Channel Index"""
-    if len(high) < period:
-        return np.full(len(high), np.nan)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    if len(high) < 1:
+        return np.full(len(high), np.nan), np.full(len(high), np.nan)
     
-    tp = (high + low + close) / 3.0
-    ma = np.full_like(tp, np.nan)
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
     
-    for i in range(period-1, len(tp)):
-        ma[i] = np.mean(tp[i-period+1:i+1])
+    H3 = pivot + (range_val * 1.1 / 4)
+    L3 = pivot - (range_val * 1.1 / 4)
     
-    mad = np.full_like(tp, np.nan)
-    for i in range(period-1, len(tp)):
-        mad[i] = np.mean(np.abs(tp[i-period+1:i+1] - ma[i]))
-    
-    cci = np.full_like(tp, np.nan)
-    for i in range(period-1, len(tp)):
-        if mad[i] != 0:
-            cci[i] = (tp[i] - ma[i]) / (0.015 * mad[i])
-    
-    return cci
+    return H3, L3
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -59,10 +50,11 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for CCI
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Get weekly data for trend filter
@@ -70,61 +62,69 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily CCI
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    cci = calculate_cci(high_1d, low_1d, close_1d, 20)
+    
+    camarilla_H3, camarilla_L3 = calculate_camarilla(high_1d, low_1d, close_1d)
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_20_1w = calculate_ema(close_1w, 20)
     
-    # Align indicators to 4h timeframe
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    # Align indicators to 12h timeframe
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume confirmation: 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if np.isnan(cci_aligned[i]) or np.isnan(ema_20_1w_aligned[i]):
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        cci_val = cci_aligned[i]
-        ema_trend = ema_20_1w_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
+        H3 = camarilla_H3_aligned[i]
+        L3 = camarilla_L3_aligned[i]
+        trend_up = price > ema_20_1w_aligned[i]
         
         if position == 1:  # Long
-            # Exit: CCI crosses below +100 (overbought) or trend changes
-            if cci_val < 100 or price < ema_trend:
+            # Exit: price closes below L3 or volume drops significantly
+            if price < L3 or vol_ratio < 0.7:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: CCI crosses above -100 (oversold) or trend changes
-            if cci_val > -100 or price > ema_trend:
+            # Exit: price closes above H3 or volume drops significantly
+            if price > H3 or vol_ratio < 0.7:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: CCI crosses above -100 from below with uptrend
-            if i > 50 and not np.isnan(cci_aligned[i-1]):
-                if cci_aligned[i-1] <= -100 and cci_val > -100 and price > ema_trend:
-                    position = 1
-                    signals[i] = 0.25
-            # Enter short: CCI crosses below +100 from above with downtrend
-            elif i > 50 and not np.isnan(cci_aligned[i-1]):
-                if cci_aligned[i-1] >= 100 and cci_val < 100 and price < ema_trend:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long: price touches/crosses above H3 with volume expansion and uptrend
+            if price >= H3 and vol_ratio > 1.8 and trend_up:
+                position = 1
+                signals[i] = 0.25
+            # Enter short: price touches/crosses below L3 with volume expansion and downtrend
+            elif price <= L3 and vol_ratio > 1.8 and not trend_up:
+                position = -1
+                signals[i] = -0.25
     
     return signals
