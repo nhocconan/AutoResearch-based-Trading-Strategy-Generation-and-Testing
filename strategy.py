@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-# 4h_rsi_ema_pullback_v1
-# Hypothesis: RSI pullback strategy with EMA trend filter on 4h timeframe.
-# Uses EMA(50) for trend direction and RSI(14) for mean-reversion entries.
-# In uptrend (price > EMA50), look for RSI < 30 (oversold) for long entries.
-# In downtrend (price < EMA50), look for RSI > 70 (overbought) for short entries.
-# Includes volume confirmation and ATR-based stop via position management.
-# Designed to work in both bull and bear markets by trading pullbacks to the trend.
+# 4h_volatility_breakout_v3
+# Hypothesis: Volatility breakout strategy using ATR-based channels with improved filters.
+# Uses ATR(14) to set upper/lower bands around EMA(20). Enters on breakout with volume confirmation.
+# Added: volume ratio filter, momentum filter, and tighter exit conditions to reduce false signals.
+# Designed to work in both bull and bear markets by capturing volatility expansion phases.
 # Target: 20-30 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_ema_pullback_v1"
+name = "4h_volatility_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -27,65 +25,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h indicators
-    # EMA50 for trend direction
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily trend filter (1d EMA200) - load once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
+    # Calculate EMA200 on daily data
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # 4h indicators
+    # EMA20 for dynamic center line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ATR(14) for volatility bands
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Upper and lower bands (EMA20 ± 2*ATR)
+    upper_band = ema20 + 2.0 * atr
+    lower_band = ema20 - 2.0 * atr
+    
+    # Volume metrics
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
+    
+    # Momentum filter: RSI(14)
+    delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss > 0, avg_loss, 1)
     rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pad first value
+    rsi = np.concatenate([[50], rsi])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need indicators warmed up
+    start_idx = 60  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema50[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(volume_ratio[i]) or np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend direction
-        uptrend = close[i] > ema50[i]
-        downtrend = close[i] < ema50[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema200_1d_aligned[i]
+        daily_downtrend = close[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit conditions: RSI > 70 (overbought) or trend change
-            if rsi[i] > 70 or close[i] < ema50[i]:
+            # Exit conditions: close below EMA20, momentum loss, or volatility contraction
+            if close[i] < ema20[i] or rsi[i] < 40 or atr[i] < atr[i-1] * 0.85:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: RSI < 30 (oversold) or trend change
-            if rsi[i] < 30 or close[i] > ema50[i]:
+            # Exit conditions: close above EMA20, momentum loss, or volatility contraction
+            if close[i] > ema20[i] or rsi[i] > 60 or atr[i] < atr[i-1] * 0.85:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.2 * avg_volume[i]
+            volume_ok = volume_ratio[i] > 1.5
             
+            # Momentum filter
+            mom_ok_long = rsi[i] > 50 and rsi[i] < 70
+            mom_ok_short = rsi[i] < 50 and rsi[i] > 30
+            
+            # Breakout conditions
             if volume_ok:
-                # Long entry: uptrend + RSI oversold
-                if uptrend and rsi[i] < 30:
+                # Long breakout: price crosses above upper band in uptrend with momentum
+                if daily_uptrend and mom_ok_long and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: downtrend + RSI overbought
-                elif downtrend and rsi[i] > 70:
+                # Short breakdown: price crosses below lower band in downtrend with momentum
+                elif daily_downtrend and mom_ok_short and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
                     position = -1
                     signals[i] = -0.25
     
