@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 4h_price_action_channel_v1
-# Hypothesis: Price channel breakout with volume confirmation and trend filter.
-# Long: Price breaks above 4h Donchian(20) high + volume > 1.5x 20-period avg + 1d close > 1d SMA50
-# Short: Price breaks below 4h Donchian(20) low + volume > 1.5x 20-period avg + 1d close < 1d SMA50
-# Exit: Price crosses back through Donchian midpoint or volume drops below average.
-# Target: 20-40 trades/year per symbol for low fee drag and robust performance in bull/bear markets.
+# 12h_camilla_pivot_volume_v3
+# Hypothesis: Uses daily Camarilla pivot levels with volume confirmation on 12h timeframe.
+# Long when price touches S3/S4 support with volume surge, short when price touches R3/R4 resistance with volume surge.
+# Exits when price moves back toward median (Pivot) or volume drops.
+# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+# Works in bull/bear via mean reversion at extreme pivot levels.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_price_action_channel_v1"
-timeframe = "4h"
+name = "12h_camilla_pivot_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,38 +24,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
-    donch_period = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=donch_period, min_periods=donch_period).max().values
-    donch_low = low_series.rolling(window=donch_period, min_periods=donch_period).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # Volume filter: 1.5x 20-period average
-    vol_ma_period = 20
-    close_series = pd.Series(close)
-    vol_ma = close_series.rolling(window=vol_ma_period, min_periods=vol_ma_period).mean().values
-    vol_surge = volume > (1.5 * vol_ma)
-    vol_surge[:vol_ma_period-1] = False  # Not enough data for MA
-    
-    # Get 1d data for trend filter (close vs SMA50)
+    # Calculate daily Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    # Trend: 1 if close > SMA50, -1 if close < SMA50
-    trend_1d = np.where(close_1d > sma50_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Camarilla formulas
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    
+    # Resistance levels
+    R4 = close_1d + range_hl * 1.500
+    R3 = close_1d + range_hl * 1.250
+    R2 = close_1d + range_hl * 1.166
+    R1 = close_1d + range_hl * 1.083
+    
+    # Support levels
+    S1 = close_1d - range_hl * 1.083
+    S2 = close_1d - range_hl * 1.166
+    S3 = close_1d - range_hl * 1.250
+    S4 = close_1d - range_hl * 1.500
+    
+    # Align levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    R4_12h = align_htf_to_ltf(prices, df_1d, R4)
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume filter: 2.0x 24-period average (2 days of 12h data)
+    vol_ma = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 2.0 * vol_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donch_period, vol_ma_period, 50) + 1
+    start_idx = 24
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(trend_1d_aligned[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(R4_12h[i]) or np.isnan(R3_12h[i]) or 
+            np.isnan(S4_12h[i]) or np.isnan(S3_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -63,31 +79,33 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below midpoint or volume drops below average
-            if close[i] < donch_mid[i] or volume[i] < vol_ma[i]:
+            # Exit: Price moves back to pivot or volume drops
+            if close[i] >= pivot_12h[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above midpoint or volume drops below average
-            if close[i] > donch_mid[i] or volume[i] < vol_ma[i]:
+            # Exit: Price moves back to pivot or volume drops
+            if close[i] <= pivot_12h[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above Donchian high, volume surge, 1d uptrend
-            if (close[i] > donch_high[i] and 
-                vol_surge[i] and 
-                trend_1d_aligned[i] > 0):
+            # Long entry: Price at S3/S4 support with volume surge
+            if vol_surge[i] and (
+                (close[i] <= S3_12h[i] and low[i] <= S4_12h[i]) or  # Touched S4
+                (close[i] <= S4_12h[i] and low[i] <= S3_12h[i])   # Touched S3
+            ):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low, volume surge, 1d downtrend
-            elif (close[i] < donch_low[i] and 
-                  vol_surge[i] and 
-                  trend_1d_aligned[i] < 0):
+            # Short entry: Price at R3/R4 resistance with volume surge
+            elif vol_surge[i] and (
+                (close[i] >= R3_12h[i] and high[i] >= R4_12h[i]) or  # Touched R4
+                (close[i] >= R4_12h[i] and high[i] >= R3_12h[i])   # Touched R3
+            ):
                 position = -1
                 signals[i] = -0.25
     
