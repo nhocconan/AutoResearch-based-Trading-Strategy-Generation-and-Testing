@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_camarilla_pivot_1d_volume_v1
-# Hypothesis: Use daily Camarilla pivot levels with volume confirmation on 4h timeframe.
-# Long when price touches or crosses above S3 level with volume > 2x average and bullish bias.
-# Short when price touches or crosses below R3 level with volume > 2x average and bearish bias.
-# Exit on opposite signal or when price crosses H4/L4 levels.
-# Uses mean-reversion at extreme pivot levels with volume filter to avoid false signals.
-# Target: 20-30 trades/year to minimize fee drag while capturing reversals at key levels.
+"""
+6h_cci_trend_volume_v1
+Hypothesis: Use 12h CCI as trend filter and 6h CCI for entries with volume confirmation.
+In trending markets (|CCI_12h| > 100), look for pullbacks in CCI_6h to enter with the trend.
+Volume > 1.5x average confirms momentum. Works in both bull/bear by following trend.
+Target: 20-40 trades/year to avoid fee drag.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_1d_volume_v1"
-timeframe = "4h"
+name = "6h_cci_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,96 +26,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    # Based on previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate CCI on 12h (20-period)
+    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
+    ma_12h = typical_price_12h.rolling(window=20, min_periods=20).mean()
+    mad_12h = typical_price_12h.rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci_12h = (typical_price_12h - ma_12h) / (0.015 * mad_12h)
+    cci_12h = cci_12h.values
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate CCI on 6h (20-period) for entries
+    typical_price = (high + low + close) / 3
+    ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci = (typical_price - ma) / (0.015 * mad)
+    cci = cci.values
     
-    # Camarilla levels
-    S1 = close_1d - (range_1d * 1.1 / 12)
-    S2 = close_1d - (range_1d * 1.1 / 6)
-    S3 = close_1d - (range_1d * 1.1 / 4)
-    S4 = close_1d - (range_1d * 1.1 / 2)
+    # Align 12h CCI to 6h timeframe
+    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
     
-    R1 = close_1d + (range_1d * 1.1 / 12)
-    R2 = close_1d + (range_1d * 1.1 / 6)
-    R3 = close_1d + (range_1d * 1.1 / 4)
-    R4 = close_1d + (range_1d * 1.1 / 2)
-    
-    # Align daily levels to 4h timeframe (1d -> 4h)
-    S3_1d = S3
-    R3_1d = R3
-    S4_1d = S4
-    R4_1d = R4
-    
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3_1d)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4_1d)
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4_1d)
-    
-    # Volume confirmation: 20-period average on 4h
+    # Volume confirmation: 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Simple trend filter: price vs 50-period EMA on 4h
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    uptrend = close > ema50
-    downtrend = close < ema50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(S3_4h[i]) or np.isnan(R3_4h[i]) or \
-           np.isnan(S4_4h[i]) or np.isnan(R4_4h[i]) or \
-           np.isnan(avg_volume[i]) or np.isnan(ema50[i]):
+        if np.isnan(cci[i]) or np.isnan(cci_12h_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
-                # Hold position until exit conditions met
                 pass
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below S4 or opposite signal
-            if close[i] < S4_4h[i] or \
-               (close[i] < R3_4h[i] and volume[i] > 2.0 * avg_volume[i] and downtrend[i]):
+            # Exit: CCI_6h > 100 (overbought) or opposite signal
+            if cci[i] > 100 or \
+               (cci[i] < -100 and cci_12h_aligned[i] < -100 and volume[i] > 1.5 * avg_volume[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above R4 or opposite signal
-            if close[i] > R4_4h[i] or \
-               (close[i] > S3_4h[i] and volume[i] > 2.0 * avg_volume[i] and uptrend[i]):
+            # Exit: CCI_6h < -100 (oversold) or opposite signal
+            if cci[i] < -100 or \
+               (cci[i] > 100 and cci_12h_aligned[i] > 100 and volume[i] > 1.5 * avg_volume[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 2x average volume
-            volume_ok = volume[i] > 2.0 * avg_volume[i]
+            # Trend filter: |CCI_12h| > 100 indicates trend
+            strong_uptrend = cci_12h_aligned[i] > 100
+            strong_downtrend = cci_12h_aligned[i] < -100
             
-            # Long entry: price touches or crosses above S3 with volume and uptrend bias
-            if close[i] >= S3_4h[i] and volume_ok and uptrend[i]:
+            # Volume confirmation
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            
+            # Long entry: pullback in uptrend (CCI_6h < -50) with volume
+            if strong_uptrend and cci[i] < -50 and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price touches or crosses below R3 with volume and downtrend bias
-            elif close[i] <= R3_4h[i] and volume_ok and downtrend[i]:
+            # Short entry: pullback in downtrend (CCI_6h > 50) with volume
+            elif strong_downtrend and cci[i] > 50 and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
