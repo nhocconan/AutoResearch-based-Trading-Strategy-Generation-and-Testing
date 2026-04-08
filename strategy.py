@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-# 4h_ema_pullback_1d_trend_volume_v1
-# Hypothesis: EMA20 pullback in 4h with volume confirmation and 1-day EMA50 trend filter captures trend-following entries during pullbacks. Works in bull/bear by following higher timeframe trend. Uses tight entry conditions to limit trades (~30-50/year) and avoid fee drag.
+# 1h_volume_breakout_4h_trend_v1
+# Hypothesis: In 1h timeframe, capture breakouts with volume confirmation aligned with 4h trend direction.
+# Uses 4h EMA50 for trend filter and 1h volume spike for entry timing. Limits trades to 15-35/year via
+# strict volume threshold (2.0x average) and trend alignment. Works in bull/bear by following 4h trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ema_pullback_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1h_volume_breakout_4h_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,33 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for EMA50 trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 4h EMA50 to 1h
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # EMA20 on 4h
+    # 1h EMA20 for dynamic support/resistance
     ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: 4h volume > 1.3x 20-period average
+    # Volume filter: 1h volume > 2.0x 20-period average (very strict to limit trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Session filter: 08-20 UTC (reduce noise outside active hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(session_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -56,28 +63,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price < EMA20 OR price < 1d EMA50
-            if (close[i] < ema_20[i]) or (close[i] < ema_50_1d_aligned[i]):
+            # Exit: price < EMA20 OR trend turns bearish (price < 4h EMA50)
+            if (close[i] < ema_20[i]) or (close[i] < ema_50_4h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price > EMA20 OR price > 1d EMA50
-            if (close[i] > ema_20[i]) or (close[i] > ema_50_1d_aligned[i]):
+            # Exit: price > EMA20 OR trend turns bullish (price > 4h EMA50)
+            if (close[i] > ema_20[i]) or (close[i] > ema_50_4h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price > EMA20 + volume + price > 1d EMA50
-            if (close[i] > ema_20[i]) and volume_filter[i] and (close[i] > ema_50_1d_aligned[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price < EMA20 + volume + price < 1d EMA50
-            elif (close[i] < ema_20[i]) and volume_filter[i] and (close[i] < ema_50_1d_aligned[i]):
-                position = -1
-                signals[i] = -0.25
+            # Require session filter and volume spike
+            if session_filter[i] and volume_spike[i]:
+                # Long entry: price > EMA20 AND price > 4h EMA50 (bullish alignment)
+                if (close[i] > ema_20[i]) and (close[i] > ema_50_4h_aligned[i]):
+                    position = 1
+                    signals[i] = 0.20
+                # Short entry: price < EMA20 AND price < 4h EMA50 (bearish alignment)
+                elif (close[i] < ema_20[i]) and (close[i] < ema_50_4h_aligned[i]):
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
