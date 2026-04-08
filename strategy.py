@@ -1,83 +1,66 @@
 #!/usr/bin/env python3
-# 12h_engulfing_1w1d_volume_v1
-# Hypothesis: Weekly and daily bullish/bearish engulfing candles combined with volume confirmation on 12h chart.
-# Long when daily candle is bullish engulfing, weekly trend is up, and 12h volume > 1.5x average.
-# Short when daily candle is bearish engulfing, weekly trend is down, and 12h volume > 1.5x average.
-# Exit on opposite engulfing signal or when price reaches opposite engulfing level.
-# Designed to capture momentum shifts at key turning points with volume confirmation.
-# Target: 15-25 trades/year to minimize fee drift while capturing high-probability moves.
+# 4h_donchian_breakout_1d_trend_volume_v2
+# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high with 1-day uptrend and volume spike.
+# Short when price breaks below 20-period Donchian low with 1-day downtrend and volume spike.
+# Exit when price returns to the 10-period Donchian midpoint or opposite signal.
+# Designed to capture trend continuation in both bull and bear markets with low trade frequency.
+# Target: 20-40 trades/year to minimize fee drift while capturing strong momentum moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_engulfing_1w1d_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for engulfing patterns
+    # Calculate 20-period Donchian channels
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = high_roll.values
+    donchian_low = low_roll.values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Get 1-day data for trend filter (calculate once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily OHLC
+    # 1-day trend: close > open = uptrend, close < open = downtrend
     open_1d = df_1d['open'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    daily_uptrend = close_1d > open_1d
+    daily_downtrend = close_1d < open_1d
     
-    # Bullish engulfing: current close > previous open AND current open < previous close
-    bullish_engulf = (close_1d > open_1d[:-1]) & (open_1d < close_1d[:-1])
-    bullish_engulf = np.concatenate([np.array([False]), bullish_engulf])
+    # Align 1-day trend to 4-hour chart
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
-    # Bearish engulfing: current close < previous open AND current open > previous close
-    bearish_engulf = (close_1d < open_1d[:-1]) & (open_1d > close_1d[:-1])
-    bearish_engulf = np.concatenate([np.array([False]), bearish_engulf])
-    
-    # Align daily engulfing signals to 12h chart
-    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
-    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Weekly trend: based on close vs open
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_up = close_1w > open_1w
-    weekly_down = close_1w < open_1w
-    
-    # Align weekly trend to 12h chart
-    weekly_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_up.astype(float))
-    weekly_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_down.astype(float))
-    
-    # Volume confirmation: 24-period average (2 days of 12h data)
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: 20-period average
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 24
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or \
-           np.isnan(weekly_up_aligned[i]) or np.isnan(weekly_down_aligned[i]) or \
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or \
+           np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]) or \
            np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
@@ -87,16 +70,18 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: bearish engulfing signal or opposite conditions
-            if bearish_engulf_aligned[i] > 0.5:
+            # Exit: price returns to midpoint or opposite signal
+            if close[i] <= donchian_mid[i] or \
+               (close[i] >= donchian_high[i] and volume[i] > 1.5 * avg_volume[i] and daily_downtrend_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish engulfing signal or opposite conditions
-            if bullish_engulf_aligned[i] > 0.5:
+            # Exit: price returns to midpoint or opposite signal
+            if close[i] >= donchian_mid[i] or \
+               (close[i] <= donchian_low[i] and volume[i] > 1.5 * avg_volume[i] and daily_uptrend_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,12 +90,12 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: daily bullish engulfing, weekly up trend, volume confirmation
-            if bullish_engulf_aligned[i] > 0.5 and weekly_up_aligned[i] > 0.5 and volume_ok:
+            # Long entry: price breaks above Donchian high with volume and daily uptrend
+            if close[i] > donchian_high[i] and volume_ok and daily_uptrend_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: daily bearish engulfing, weekly down trend, volume confirmation
-            elif bearish_engulf_aligned[i] > 0.5 and weekly_down_aligned[i] > 0.5 and volume_ok:
+            # Short entry: price breaks below Donchian low with volume and daily downtrend
+            elif close[i] < donchian_low[i] and volume_ok and daily_downtrend_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
