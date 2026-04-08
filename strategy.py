@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-# 1h_4h1d_trend_follow_with_volume
-# Hypothesis: Use 4h and 1d trends for direction, 1h for entry timing with volume confirmation.
-# Long when: price > 4h SMA50, 1d SMA50 slope > 0, volume > 1.5x 20-period average.
-# Short when: price < 4h SMA50, 1d SMA50 slope < 0, volume > 1.5x 20-period average.
-# Exit when price crosses 4h SMA50 opposite direction.
-# Uses tight entry conditions to target 15-37 trades/year on 1h timeframe.
+# 12h_ema_crossover_volume_v1
+# Hypothesis: Uses 12h EMA crossover for trend direction and volume confirmation to reduce false signals.
+# Long when EMA25 crosses above EMA50 with volume > 1.5x average; short when EMA25 crosses below EMA50 with volume > 1.5x average.
+# Exit when opposite crossover occurs. Uses 1d trend filter to avoid counter-trend trades in strong trends.
+# Designed for low trade frequency (10-30/year) to minimize fee drag on 12h timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_trend_follow_with_volume"
-timeframe = "1h"
+name = "12h_ema_crossover_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,47 +23,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h SMA50 for momentum filter
-    sma_period = 50
-    close_series = pd.Series(close)
-    sma50_4h_raw = close_series.rolling(window=sma_period, min_periods=sma_period).mean().values
-    
-    # Get 4h data for SMA50
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    sma50_4h = pd.Series(close_4h).rolling(window=sma_period, min_periods=sma_period).mean().values
-    sma50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma50_4h)
-    
-    # Get 1d data for trend direction (SMA50 slope)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=sma_period, min_periods=sma_period).mean().values
-    # Calculate slope: positive if current SMA > SMA 3 periods ago
-    sma50_slope_1d = np.full(len(close_1d), np.nan)
-    for i in range(3, len(close_1d)):
-        if not np.isnan(sma50_1d[i]) and not np.isnan(sma50_1d[i-3]):
-            sma50_slope_1d[i] = sma50_1d[i] - sma50_1d[i-3]
-    sma50_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_slope_1d)
+    # 12h EMA25 and EMA50 for crossover signals
+    ema_fast = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_slow = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume filter: 1.5x 20-period average
-    vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period-1, n):
-        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     vol_surge = np.full(n, False)
     for i in range(n):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
+    # Get 1d data for trend filter (close vs SMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(sma_period, vol_ma_period, 3) + 1
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma50_4h_aligned[i]) or np.isnan(sma50_slope_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(sma50_1d_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -72,32 +59,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below 4h SMA50
-            if close[i] < sma50_4h_aligned[i]:
+            # Exit: EMA25 crosses below EMA50
+            if ema_fast[i] < ema_slow[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above 4h SMA50
-            if close[i] > sma50_4h_aligned[i]:
+            # Exit: EMA25 crosses above EMA50
+            if ema_fast[i] > ema_slow[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above 4h SMA50, 1d SMA50 slope positive, volume surge
-            if (close[i] > sma50_4h_aligned[i] and 
-                sma50_slope_1d_aligned[i] > 0 and 
-                vol_surge[i]):
+            # Long entry: EMA25 crosses above EMA50, volume surge, and price above 1d SMA50 (uptrend filter)
+            if (ema_fast[i] > ema_slow[i] and 
+                ema_fast[i-1] <= ema_slow[i-1] and  # crossover just happened
+                vol_surge[i] and
+                close[i] > sma50_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: Price below 4h SMA50, 1d SMA50 slope negative, volume surge
-            elif (close[i] < sma50_4h_aligned[i] and 
-                  sma50_slope_1d_aligned[i] < 0 and 
-                  vol_surge[i]):
+                signals[i] = 0.25
+            # Short entry: EMA25 crosses below EMA50, volume surge, and price below 1d SMA50 (downtrend filter)
+            elif (ema_fast[i] < ema_slow[i] and 
+                  ema_fast[i-1] >= ema_slow[i-1] and  # crossover just happened
+                  vol_surge[i] and
+                  close[i] < sma50_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
