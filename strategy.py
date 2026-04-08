@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Uses Williams Fractals for swing high/low detection, 1d EMA for trend filter, and volume spike for confirmation
 # Designed to work in both bull and bear markets by requiring strong trend alignment and volume confirmation
 # Target: 12-37 trades/year, focused on high-probability breakouts with confirmation
-name = "12h_fractal_breakout_1d_trend_volume_v3"
+name = "12h_fractal_breakout_1d_trend_volume_v4"
 timeframe = "12h"
 leverage = 1.0
 
@@ -70,8 +70,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned
         downtrend = close[i] < ema_1d_aligned
         
-        # Volume filter: current volume above 2.0x 1d average volume
-        volume_filter = volume[i] > (vol_sma_1d_aligned * 2.0)
+        # Volume filter: current volume above 2.5x 1d average volume (more selective)
+        volume_filter = volume[i] > (vol_sma_1d_aligned * 2.5)
         
         if position == 1:  # Long position
             # Exit: bullish fractal broken OR trend reversal
@@ -79,7 +79,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: bearish fractal broken OR trend reversal
@@ -87,15 +87,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Long: bullish fractal forms + uptrend + volume filter
             if bullish_fractal[i] and uptrend and volume_filter:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Short: bearish fractal forms + downtrend + volume filter
             elif bearish_fractal[i] and downtrend and volume_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
