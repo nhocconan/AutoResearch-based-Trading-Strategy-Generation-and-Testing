@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 6h_ema_crossover_12h_volume_momentum
-# Hypothesis: EMA(9) crossover on 6h with 12h EMA(50) trend filter and volume momentum filter.
-# Long when 6h EMA9 crosses above EMA21, price > 12h EMA50, and volume > 1.3x 6-period average.
-# Short when 6h EMA9 crosses below EMA21, price < 12h EMA50, and volume > 1.3x 6-period average.
-# Exit on opposite EMA crossover.
-# Designed to capture momentum shifts with higher timeframe trend alignment.
-# Target: 60-120 total trades over 4 years (~15-30/year).
+# 4h_donchian_breakout_1d_trend_volume
+# Hypothesis: Donchian(20) breakout on 4h combined with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with uptrend (price > 1d EMA100) and volume > 1.5x average.
+# Short when price breaks below Donchian lower band with downtrend (price < 1d EMA100) and volume > 1.5x average.
+# Exit when price crosses back to Donchian middle band (mean of upper/lower).
+# Designed to capture strong breakouts with trend alignment in both bull and bear markets.
+# Target: 75-200 total trades over 4 years (~19-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema_crossover_12h_volume_momentum"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -26,34 +26,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate daily EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Calculate 6h EMAs (9 and 21) for crossover
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate Donchian channels on 4h data (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate average volume for momentum filter (6-period)
-    avg_volume = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Calculate average volume for confirmation (20-period)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 21
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,33 +65,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: EMA9 crosses below EMA21
-            if ema_9[i] < ema_21[i]:
+            # Exit: price crosses below Donchian middle band
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA9 crosses above EMA21
-            if ema_9[i] > ema_21[i]:
+            # Exit: price crosses above Donchian middle band
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume momentum: current volume > 1.3x 6-period average
-            volume_momentum = volume[i] > 1.3 * avg_volume[i]
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # EMA crossover signals
-            ema_cross_up = ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]
-            ema_cross_down = ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]
-            
-            # Entry conditions with 12h trend filter
-            if ema_cross_up and (close[i] > ema_50_12h_aligned[i]) and volume_momentum:
+            # Breakout entries: Donchian upper breakout (long) and lower breakdown (short)
+            if (close[i] > donchian_high[i]) and (close[i] > ema_100_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif ema_cross_down and (close[i] < ema_50_12h_aligned[i]) and volume_momentum:
+            elif (close[i] < donchian_low[i]) and (close[i] < ema_100_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
