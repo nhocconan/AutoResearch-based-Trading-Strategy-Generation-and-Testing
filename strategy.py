@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and 1d ADX Filter v5
-Hypothesis: Donchian(20) breakouts on 4h with volume spikes (>2.5x average) 
+12h Donchian Breakout with Volume Spike and 1d ADX Filter v1
+Hypothesis: Donchian(20) breakouts on 12h with volume spikes (>2.5x average) 
 and strong 1d trend (ADX > 20) capture sustained moves while avoiding 
 false breakouts in ranging markets. Works in bull/bear by requiring 
-trend alignment and volume confirmation. Target: 30-40 trades/year.
+trend alignment and volume confirmation. Target: 12-37 trades/year.
 """
 
-name = "4h_donchian_breakout_volume_adx_v5"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -60,11 +60,11 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Donchian channels on 4h (20-period)
+    # Donchian channels on 12h (20-period)
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detector: current volume > 2.5 x 20-period average (reduced threshold)
+    # Volume spike detector: current volume > 2.5 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.5 * vol_ma_20)
     
@@ -81,7 +81,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d ADX for current 4h bar
+        # Get aligned 1d ADX for current 12h bar
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
         # Regime filter: only trade in strong trending markets on daily
