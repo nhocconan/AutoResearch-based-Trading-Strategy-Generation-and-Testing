@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Trend_Filtered_Breakout_v2
-# Hypothesis: Capture weekly trend continuation with daily breakouts. In bull/bear markets, price tends to continue in the direction of the weekly trend after consolidating. Enter on daily breakouts in the direction of the weekly trend with volume confirmation. Exit when weekly trend reverses or volatility expands. Designed for low trade frequency (7-25/year) to minimize fee drag on 1d timeframe.
+# 6h_1d_pullback_reversal_v1
+# Hypothesis: On 6b, enter pullbacks in the direction of the 1d trend using RSI(2) for entry timing and volume confirmation.
+# Works in bull/bear by aligning with higher timeframe trend. Uses RSI(2) to catch deep pullbacks in strong trends.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1d_Weekly_Trend_Filtered_Breakout_v2"
-timeframe = "1d"
+name = "6h_1d_pullback_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,72 +23,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA21/EMA50 crossover
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w = np.where(ema21_1w > ema50_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d trend direction: 1 if close > EMA50, -1 if close < EMA50
+    trend_1d = np.where(close_1d > ema50_1d, 1, -1)
     
-    # Volatility filter: ATR(20) < ATR(50) to avoid high volatility periods
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    low_vol = atr20 < atr50  # Lower recent volatility
+    # Align 1d trend to 6h
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma20 * 1.5)
+    # RSI(2) for entry timing
+    def calculate_rsi(close, period=2):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period-1] = np.mean(gain[1:period]) if period < len(gain) else np.nan
+        avg_loss[period-1] = np.mean(loss[1:period]) if period < len(loss) else np.nan
+        
+        for i in range(period, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi2 = calculate_rsi(close)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trend_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(atr20[i]) or np.isnan(atr50[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(rsi2[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in session and with volume confirmation
+        if not (in_session[i] and vol_confirm[i]):
+            if position != 0:
+                # Hold position until exit signal
+                pass
+            else:
+                signals[i] = 0.0
+                continue
+        
         if position == 1:  # Long position
-            # Exit: weekly trend turns bearish OR price breaks below Donchian low
-            if trend_1w_aligned[i] == -1 or low[i] < low_20[i]:
+            # Exit: RSI > 70 (overbought) or trend changes
+            if rsi2[i] > 70 or trend_1d_aligned[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: weekly trend turns bullish OR price breaks above Donchian high
-            if trend_1w_aligned[i] == 1 or high[i] > high_20[i]:
+            # Exit: RSI < 30 (oversold) or trend changes
+            if rsi2[i] < 30 or trend_1d_aligned[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Enter in direction of weekly trend with confirmation
-            if trend_1w_aligned[i] == 1 and high[i] > high_20[i]:
-                # Weekly uptrend + break above Donchian high + low volatility + volume
-                if low_vol[i] and vol_confirm[i]:
+            # Enter pullback in direction of 1d trend
+            if trend_1d_aligned[i] == 1:  # 1d uptrend
+                # Long on RSI(2) < 10 (deep pullback)
+                if rsi2[i] < 10:
                     position = 1
                     signals[i] = 0.25
-            elif trend_1w_aligned[i] == -1 and low[i] < low_20[i]:
-                # Weekly downtrend + break below Donchian low + low volatility + volume
-                if low_vol[i] and vol_confirm[i]:
+            elif trend_1d_aligned[i] == -1:  # 1d downtrend
+                # Short on RSI(2) > 90 (strong pullback)
+                if rsi2[i] > 90:
                     position = -1
                     signals[i] = -0.25
     
