@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_fractal_breakout_1d_trend_volume_v4
+# 4h_fractal_breakout_1d_trend_volume_v6
 # Hypothesis: Use daily timeframe for trend (EMA20) and fractal structure (Williams Fractals with 2-bar confirmation), 
-# and 12h for entry timing with volume confirmation (>2x average) and RSI filter (40-60). 
+# and 4h for entry with volume confirmation (>2x average) and RSI filter (40-60). 
 # Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.25.
-# Target: 12-37 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
+# Target: 20-50 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
 # Works in bull/bear via trend filter and avoids chop with RSI range filter.
 
-name = "12h_fractal_breakout_1d_trend_volume_v4"
-timeframe = "12h"
+name = "4h_fractal_breakout_1d_trend_volume_v6"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -78,7 +78,7 @@ def generate_signals(prices):
     bearish_fractal_aligned = align_htf_to_ltf(prices, df_d, bearish_fractal, additional_delay_bars=2)
     bullish_fractal_aligned = align_htf_to_ltf(prices, df_d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 20-period average volume for 12h timeframe
+    # Calculate 20-period average volume for 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Calculate RSI for momentum filter
@@ -100,7 +100,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned daily indicators for current 12h bar
+        # Get aligned daily indicators for current 4h bar
         ema20_val = align_htf_to_ltf(prices, df_d, ema20_d)[i]
         bearish_val = bearish_fractal_aligned[i]
         bullish_val = bullish_fractal_aligned[i]
