@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 6h_1d_weekly_pivot_momentum_v1
-# Hypothesis: Trade momentum aligned with weekly pivot levels on 6h timeframe.
-# Uses weekly pivot points as structural support/resistance with momentum confirmation.
-# Long when price breaks above weekly R1 with bullish momentum, short when breaks below S1 with bearish momentum.
-# Works in trending markets (breakouts) and ranging markets (mean reversion at pivot levels).
-# Target: 15-35 trades/year on 6h timeframe with strict entry conditions.
+# 1h_4h1d_donchian_breakout_volume_v1
+# Hypothesis: Trade Donchian breakouts on 1h with 4h/1d trend filter and volume confirmation.
+# Long when price breaks 1h high with 4h/1d uptrend and volume surge.
+# Short when price breaks 1h low with 4h/1d downtrend and volume surge.
+# Uses 4h EMA20/50 and 1d EMA50/200 for trend, ATR for stop, volume > 1.5x average for confirmation.
+# Designed for low trade frequency (15-30/year) to avoid fee drag in choppy 1h market.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_weekly_pivot_momentum_v1"
-timeframe = "6h"
+name = "1h_4h1d_donchian_breakout_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,44 +24,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 4h EMA for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # 1d EMA for stronger trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # ATR for volatility and stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Momentum: RSI(9) on 6h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/9, adjust=False, min_periods=9).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/9, adjust=False, min_periods=9).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: 6h volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 1h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 30  # Ensure RSI and volatility are ready
+    start_idx = 200  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -69,31 +72,37 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition
-        vol_surge = volume[i] > 1.3 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        
+        # Trend conditions
+        uptrend_4h = ema20_4h_aligned[i] > ema50_4h_aligned[i]
+        downtrend_4h = ema20_4h_aligned[i] < ema50_4h_aligned[i]
+        uptrend_1d = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        downtrend_1d = ema50_1d_aligned[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price below pivot OR momentum fails
-            if close[i] < pivot_aligned[i] or rsi[i] < 40:
+            # Exit: trend reversal OR stoploss hit
+            if not uptrend_4h or not uptrend_1d or close[i] < ema20_4h_aligned[i] - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price above pivot OR momentum fails
-            if close[i] > pivot_aligned[i] or rsi[i] > 60:
+            # Exit: trend reversal OR stoploss hit
+            if not downtrend_4h or not downtrend_1d or close[i] > ema20_4h_aligned[i] + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price above R1 with bullish momentum and volume
-            if close[i] > r1_aligned[i] and rsi[i] > 55 and vol_surge:
+            # Long entry: break above 1h high with uptrend and volume surge
+            if close[i] > high_20[i] and uptrend_4h and uptrend_1d and vol_surge:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price below S1 with bearish momentum and volume
-            elif close[i] < s1_aligned[i] and rsi[i] < 45 and vol_surge:
+                signals[i] = 0.20
+            # Short entry: break below 1h low with downtrend and volume surge
+            elif close[i] < low_20[i] and downtrend_4h and downtrend_1d and vol_surge:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
