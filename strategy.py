@@ -1,18 +1,16 @@
-#!/usr/bin/env python3
-# 1h_volume_spike_4h1d_trend
-# Hypothesis: Volume spike breakouts with 4h/1d trend filter. Volume spikes (>2x avg) indicate strong momentum.
-# Long when price breaks above recent high with volume spike and 4h/1d uptrend.
-# Short when price breaks below recent low with volume spike and 4h/1d downtrend.
-# Exit when price crosses back to 4h EMA20.
-# Uses volume confirmation to avoid false breakouts and reduce trade frequency.
-# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+# 6h_renko_brick_trend_volume
+# Hypothesis: Renko brick trend with volume confirmation on 6h timeframe.
+# Uses 1% brick size to filter noise. Long when green brick forms with volume > 1.5x average.
+# Short when red brick forms with volume > 1.5x average.
+# Renko bricks reduce whipsaw in sideways markets while capturing trends.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_spike_4h1d_trend"
-timeframe = "1h"
+name = "6h_renko_brick_trend_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,34 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for additional trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate average volume for spike detection (20-period)
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate recent high/low for breakout detection (10-period)
-    recent_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    recent_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Calculate Renko bricks (1% brick size)
+    brick_size = 0.01  # 1% of price
+    renko_direction = np.zeros(n)  # 1=up brick, -1=down brick, 0=no new brick
+    brick_low = np.full(n, np.nan)
+    brick_high = np.full(n, np.nan)
+    
+    # Initialize first brick
+    if n > 0:
+        brick_low[0] = close[0] - (close[0] % brick_size)
+        brick_high[0] = brick_low[0] + brick_size
+        renko_direction[0] = 1  # Start with up brick assumption
+    
+    # Calculate Renko bricks
+    for i in range(1, n):
+        if close[i] >= brick_high[i-1]:
+            # Upward brick(s)
+            bricks = int((close[i] - brick_high[i-1]) // brick_size) + 1
+            renko_direction[i] = 1
+            brick_low[i] = brick_high[i-1]
+            brick_high[i] = brick_low[i] + bricks * brick_size
+        elif close[i] <= brick_low[i-1]:
+            # Downward brick(s)
+            bricks = int((brick_low[i-1] - close[i]) // brick_size) + 1
+            renko_direction[i] = -1
+            brick_high[i] = brick_low[i-1]
+            brick_low[i] = brick_high[i] - bricks * brick_size
+        else:
+            # Inside brick, no new brick
+            renko_direction[i] = 0
+            brick_low[i] = brick_low[i-1]
+            brick_high[i] = brick_high[i-1]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -63,8 +67,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(recent_high[i]) or np.isnan(recent_low[i])):
+        if np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -73,34 +76,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below 4h EMA20
-            if close[i] < ema_20_4h_aligned[i]:
+            # Exit: red brick forms (trend reversal)
+            if renko_direction[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above 4h EMA20
-            if close[i] > ema_20_4h_aligned[i]:
+            # Exit: green brick forms (trend reversal)
+            if renko_direction[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume spike: current volume > 2.0x average volume
-            volume_spike = volume[i] > 2.0 * avg_volume[i]
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout entries with volume confirmation
-            # Long: break above recent high with volume spike and uptrend (price > both EMAs)
-            if (close[i] > recent_high[i]) and volume_spike and \
-               (close[i] > ema_20_4h_aligned[i]) and (close[i] > ema_50_1d_aligned[i]):
+            # Renko brick entries: green brick (long) and red brick (short)
+            if renko_direction[i] == 1 and volume_ok:
                 position = 1
-                signals[i] = 0.20
-            # Short: break below recent low with volume spike and downtrend (price < both EMAs)
-            elif (close[i] < recent_low[i]) and volume_spike and \
-                 (close[i] < ema_20_4h_aligned[i]) and (close[i] < ema_50_1d_aligned[i]):
+                signals[i] = 0.25
+            elif renko_direction[i] == -1 and volume_ok:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
