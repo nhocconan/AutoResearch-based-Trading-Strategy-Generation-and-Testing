@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h fractal breakout with 1d trend and volume confirmation
-# Uses Williams Fractals for swing high/low detection, 1d EMA for trend filter, and volume spike for confirmation
+# Hypothesis: 12h Donchian breakout with 1d trend and volume confirmation
+# Uses Donchian channel (20) for breakout detection, 1d EMA for trend filter, and volume spike for confirmation
 # Designed to work in both bull and bear markets by requiring strong trend alignment and volume confirmation
 # Target: 12-37 trades/year, focused on high-probability breakouts with confirmation
-name = "12h_fractal_breakout_1d_trend_volume_v4"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -35,19 +35,9 @@ def generate_signals(prices):
     # Calculate 1d volume SMA for volume context (20-period)
     vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Williams Fractals on 12h data
-    # Bearish fractal: high[i] is highest among 5 bars (i-2, i-1, i, i+1, i+2)
-    # Bullish fractal: low[i] is lowest among 5 bars (i-2, i-1, i, i+1, i+2)
-    bearish_fractal = np.zeros(n, dtype=bool)
-    bullish_fractal = np.zeros(n, dtype=bool)
-    
-    for i in range(2, n-2):
-        if (high[i] >= high[i-1] and high[i] >= high[i-2] and 
-            high[i] >= high[i+1] and high[i] >= high[i+2]):
-            bearish_fractal[i] = True
-        if (low[i] <= low[i-1] and low[i] <= low[i-2] and 
-            low[i] <= low[i+1] and low[i] <= low[i+2]):
-            bullish_fractal[i] = True
+    # Calculate Donchian channel (20-period) on 12h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -58,7 +48,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d[i]) or np.isnan(volume_1d[i]) or 
-            np.isnan(vol_sma_1d[i])):
+            np.isnan(vol_sma_1d[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
@@ -74,27 +65,27 @@ def generate_signals(prices):
         volume_filter = volume[i] > (vol_sma_1d_aligned * 2.5)
         
         if position == 1:  # Long position
-            # Exit: bullish fractal broken OR trend reversal
-            if bullish_fractal[i] or not uptrend:
+            # Exit: price breaks below Donchian low OR trend reversal
+            if close[i] < donchian_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: bearish fractal broken OR trend reversal
-            if bearish_fractal[i] or not downtrend:
+            # Exit: price breaks above Donchian high OR trend reversal
+            if close[i] > donchian_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.30
         else:  # Flat, look for entry
-            # Long: bullish fractal forms + uptrend + volume filter
-            if bullish_fractal[i] and uptrend and volume_filter:
+            # Long: price breaks above Donchian high + uptrend + volume filter
+            if close[i] > donchian_high[i] and uptrend and volume_filter:
                 position = 1
                 signals[i] = 0.30
-            # Short: bearish fractal forms + downtrend + volume filter
-            elif bearish_fractal[i] and downtrend and volume_filter:
+            # Short: price breaks below Donchian low + downtrend + volume filter
+            elif close[i] < donchian_low[i] and downtrend and volume_filter:
                 position = -1
                 signals[i] = -0.30
     
