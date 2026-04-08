@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1d Trend Filter and Volume Confirmation
-Hypothesis: Ichimoku TK cross signals filtered by 1d EMA trend and volume spikes capture
-trend continuations in both bull and bear markets, while avoiding false signals in ranging conditions.
-Targets 12-37 trades/year with moderate turnover to balance opportunity and fee drag.
+6h Weekly Pivot Breakout with Volume Confirmation
+Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above R1 or below S1 with volume confirmation
+capture momentum moves in both bull and bear markets, while fade at R2/S2 provides mean reversion in ranging conditions.
+Targets 12-37 trades/year with controlled turnover.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_1d_filter_v1"
+name = "6h_weekly_pivot_breakout_v1"
 timeframe = "6h"
 leverage = 1.0
 
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P = (H+L+C)/3, R1=2P-L, S1=2P-H, R2=P+(H-L), S2=P-(H-L)"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    return pivot, r1, s1, r2, s2
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,101 +34,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
+        return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate weekly pivot points
+    pivot, r1, s1, r2, s2 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Align weekly pivot levels to 6h timeframe (shifted by 1 week for no look-ahead)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # For signal generation, we use current price vs Senkou Span
-    
-    # Align Ichimoku components to avoid look-ahead
-    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, prices, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
-    
-    # Volume filter: current volume > 1.5x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Volume filter: current volume > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):
+    for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Kumo (cloud) or TK cross turns bearish
-            if (close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i]) or \
-               (tenkan_aligned[i] < kijun_aligned[i]):
+            # Exit: price closes below S1 or volume drops significantly
+            if close[i] < s1_aligned[i] or volume[i] < (vol_ma[i] * 0.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Kumo (cloud) or TK cross turns bullish
-            if (close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i]) or \
-               (tenkan_aligned[i] > kijun_aligned[i]):
+            # Exit: price closes above R1 or volume drops significantly
+            if close[i] > r1_aligned[i] or volume[i] < (vol_ma[i] * 0.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter: price vs 1d EMA50
-            uptrend = close[i] > ema_50_1d_aligned[i]
-            downtrend = close[i] < ema_50_1d_aligned[i]
-            
-            # TK Cross signals
-            tk_bullish = tenkan_aligned[i] > kijun_aligned[i]
-            tk_bearish = tenkan_aligned[i] < kijun_aligned[i]
-            
-            # Cloud twist (Senkou A > Senkou B = bullish cloud, A < B = bearish cloud)
-            cloud_bullish = senkou_a_aligned[i] > senkou_b_aligned[i]
-            cloud_bearish = senkou_a_aligned[i] < senkou_b_aligned[i]
-            
-            # Long: TK bullish cross + price above cloud + uptrend + volume spike
-            if (tk_bullish and 
-                close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i] and
-                uptrend and 
-                vol_spike[i]):
+            # Long breakout: price breaks above R1 with volume spike
+            if close[i] > r1_aligned[i] and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short: TK bearish cross + price below cloud + downtrend + volume spike
-            elif (tk_bearish and 
-                  close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i] and
-                  downtrend and 
-                  vol_spike[i]):
+            # Short breakdown: price breaks below S1 with volume spike
+            elif close[i] < s1_aligned[i] and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
+            # Long mean reversion: price touches S2 and starts bouncing with volume
+            elif close[i] <= s2_aligned[i] * 1.005 and close[i] > s2_aligned[i] and vol_spike[i]:
+                # Only take if we're not in strong downtrend (price above 20-period MA)
+                ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values[i]
+                if not np.isnan(ma_20) and close[i] > ma_20:
+                    position = 1
+                    signals[i] = 0.25
+            # Short mean reversion: price touches R2 and starts reversing with volume
+            elif close[i] >= r2_aligned[i] * 0.995 and close[i] < r2_aligned[i] and vol_spike[i]:
+                # Only take if we're not in strong uptrend (price below 20-period MA)
+                ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values[i]
+                if not np.isnan(ma_20) and close[i] < ma_20:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
