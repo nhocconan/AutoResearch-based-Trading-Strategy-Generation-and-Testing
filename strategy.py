@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_weekly_pivot_breakout_v1
-Hypothesis: 6h price breaks above/below weekly pivot levels (R4/S4) with volume confirmation and weekly trend filter.
-In bull markets: buy breakouts above weekly resistance with uptrend.
-In bear markets: sell breakdowns below weekly support with downtrend.
-Weekly pivots provide strong institutional levels; volume confirms participation.
-Target: 15-30 trades/year to avoid overtrading on 6h timeframe.
+12h_donchian_breakout_volume_v1
+Hypothesis: 12h Donchian breakout with volume confirmation and 1d trend filter.
+Works in bull markets via breakouts, in bear markets via short breakdowns.
+Volume confirms institutional participation, reducing false breakouts.
+Trend filter ensures we trade with higher timeframe momentum.
+Target: 12-37 trades/year to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,50 +26,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly pivot levels (calculated from prior week)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 12h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # Volume confirmation: 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # 1d trend filter (using close vs 50 EMA)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: PP = (H+L+C)/3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    ema_50 = np.full(len(close_1d), np.nan)
+    # Use EMA with smoothing factor 2/(50+1) for efficiency
+    alpha = 2.0 / (50 + 1)
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema_50[i] = close_1d[i]
+        elif np.isnan(ema_50[i-1]):
+            ema_50[i] = close_1d[i]
+        else:
+            ema_50[i] = alpha * close_1d[i] + (1 - alpha) * ema_50[i-1]
     
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
-    r4 = weekly_high + 3 * (pp - weekly_low)
-    s4 = weekly_low - 3 * (weekly_high - pp)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    
-    # Weekly trend filter: price vs weekly EMA(13)
-    ema_13 = np.full(len(weekly_close), np.nan)
-    for i in range(13, len(weekly_close)):
-        ema_13[i] = np.mean(weekly_close[i-13:i])  # Simple MA for efficiency
-    
-    ema_13_aligned = align_htf_to_ltf(prices, df_1w, ema_13)
-    
-    # Volume confirmation: 24-period average (4 days of 6h bars)
-    vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_13_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -77,37 +73,35 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        price_above_r4 = close[i] > r4_aligned[i]
-        price_below_s4 = close[i] < s4_aligned[i]
-        weekly_uptrend = close[i] > ema_13_aligned[i]
-        weekly_downtrend = close[i] < ema_13_aligned[i]
+        trend_up = close[i] > ema_50_aligned[i]
+        trend_down = close[i] < ema_50_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price breaks below S4 or weekly trend turns down
-            if price_below_s4 or not weekly_uptrend:
+            # Exit: price breaks below Donchian low or trend turns down
+            if close[i] < lowest_low[i] or not trend_up:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above R4 or weekly trend turns up
-            if price_above_r4 or not weekly_downtrend:
+            # Exit: price breaks above Donchian high or trend turns up
+            if close[i] > highest_high[i] or not trend_down:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: breakout above R4 with volume and weekly uptrend
-            if (price_above_r4 and 
+            # Long: Donchian breakout with volume and uptrend
+            if (close[i] > highest_high[i] and 
                 vol_ratio > 1.5 and 
-                weekly_uptrend):
+                trend_up):
                 position = 1
                 signals[i] = 0.25
-            # Short: breakdown below S4 with volume and weekly downtrend
-            elif (price_below_s4 and 
+            # Short: Donchian breakdown with volume and downtrend
+            elif (close[i] < lowest_low[i] and 
                   vol_ratio > 1.5 and 
-                  weekly_downtrend):
+                  trend_down):
                 position = -1
                 signals[i] = -0.25
     
