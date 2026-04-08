@@ -1,21 +1,10 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h timeframe with 12h Donchian breakout and volume confirmation
-- Uses 12h Donchian(20) breakout as primary signal (trend following)
-- Volume > 1.5x 20-period average confirms breakout strength
-- Session filter (08-20 UTC) avoids low-volume Asian session
-- Target: 50-150 total trades over 4 years (12-37/year)
-- Position size: 0.25 (25% of capital) to manage drawdown
-- Works in both bull/bear by following breakouts in direction of trend
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,25 +18,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1-day data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 12-hour data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 20-period Donchian channels on 1-day data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Upper band: 20-period high
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Upper band: 20-day high
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-day low
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 6h timeframe (wait for 12h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align Donchian levels to 4h timeframe (wait for 1-day bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume confirmation on 6h: volume > 1.5x 20-period average
+    # Volume confirmation on 4h: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_confirm = vol_ratio > 1.5
@@ -82,7 +71,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 12-hour Donchian low (breakdown)
+            # Exit: price closes below 1-day Donchian low (breakdown)
             if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -90,18 +79,18 @@ def generate_signals(prices):
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 12-hour Donchian high (breakout)
+            # Exit: price closes above 1-day Donchian high (breakout)
             if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 12-hour Donchian high with volume
+            # Long entry: price breaks above 1-day Donchian high with volume
             if close[i] > donchian_high_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 12-hour Donchian low with volume
+            # Short entry: price breaks below 1-day Donchian low with volume
             elif close[i] < donchian_low_aligned[i]:
                 position = -1
                 signals[i] = -0.25
