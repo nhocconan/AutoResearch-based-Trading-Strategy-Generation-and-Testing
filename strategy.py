@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_fractal_breakout_1d_trend_volume_v3"
+# Hypothesis: 12h fractal breakout with 1d trend and volume confirmation
+# Uses Williams Fractals for breakout detection, 1d EMA for trend, and volume spike
+# Designed to work in both bull and bear markets by requiring strong trend alignment
+# Target: 12-37 trades/year, focused on high-probability breakouts with confirmation
+name = "12h_fractal_breakout_1d_trend_volume_v4"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -31,29 +35,40 @@ def generate_signals(prices):
     # Calculate 1d volume SMA for volume context (20-period)
     vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h Donchian channels (15-period) - standard for breakout
-    highest_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
-    lowest_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
+    # Calculate 12h Williams Fractals (5-bar window)
+    # Bullish fractal: low[n-2] < low[n-1] and low[n-2] < low[n] and low[n-2] < low[n+1] and low[n-2] < low[n+2]
+    # Bearish fractal: high[n-2] > high[n-1] and high[n-2] > high[n] and high[n-2] > high[n+1] and high[n-2] > high[n+2]
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Calculate 12h ATR for volatility filter (8-period)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).ewm(span=8, adjust=False, min_periods=8).mean().values
+    for i in range(2, n-2):
+        # Bullish fractal (support level)
+        if (low[i-2] < low[i-1] and low[i-2] < low[i] and 
+            low[i-2] < low[i+1] and low[i-2] < low[i+2]):
+            lowest_low[i] = low[i-2]
+        # Bearish fractal (resistance level)
+        if (high[i-2] > high[i-1] and high[i-2] > high[i] and 
+            high[i-2] > high[i+1] and high[i-2] > high[i+2]):
+            highest_high[i] = high[i-2]
+    
+    # Forward fill fractal levels to maintain until broken
+    for i in range(1, n):
+        if np.isnan(lowest_low[i]):
+            lowest_low[i] = lowest_low[i-1]
+        if np.isnan(highest_high[i]):
+            highest_high[i] = highest_high[i-1]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(15, 50)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d[i]) or np.isnan(volume_1d[i]) or 
             np.isnan(vol_sma_1d[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(atr[i])):
+            np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
@@ -69,7 +84,7 @@ def generate_signals(prices):
         volume_filter = volume[i] > (vol_sma_1d_aligned * 2.0)
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower band OR trend reversal
+            # Exit: price breaks below recent fractal low OR trend reversal
             if close[i] < lowest_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
@@ -77,18 +92,18 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper band OR trend reversal
+            # Exit: price breaks above recent fractal high OR trend reversal
             if close[i] > highest_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above Donchian upper band + uptrend + volume filter
+            # Long: price breaks above recent fractal high + uptrend + volume filter
             if close[i] > highest_high[i] and uptrend and volume_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian lower band + downtrend + volume filter
+            # Short: price breaks below recent fractal low + downtrend + volume filter
             elif close[i] < lowest_low[i] and downtrend and volume_filter:
                 position = -1
                 signals[i] = -0.25
