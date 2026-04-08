@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_camarilla_pivot_volume_regime_v1
-# Hypothesis: Camarilla pivot levels on 4h with volume spike and 1d regime filter on 1h timeframe.
-# Long: Price > H4 (camarilla resistance) AND volume > 1.5 * volume_ma(20) AND close > 1d EMA50
-# Short: Price < L4 (camarilla support) AND volume > 1.5 * volume_ma(20) AND close < 1d EMA50
-# Exit: Opposite signal or price reverts to Pivot Point (PP)
-# Uses 1h primary timeframe with 4h for Camarilla pivot calculation and 1d for EMA50 regime filter.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag and avoid overtrading.
+# 6h_weekly_donchian_breakout_volume_v2
+# Hypothesis: Weekly Donchian channel breakout with volume confirmation on 6h timeframe.
+# Long: Price breaks above weekly Donchian high (20-period) AND volume > 1.5x 20-period average volume
+# Short: Price breaks below weekly Donchian low (20-period) AND volume > 1.5x 20-period average volume
+# Exit: Opposite breakout or price returns to weekly Donchian midpoint
+# Uses 6h primary timeframe with 1w HTF for Donchian channels and volume average.
+# Target: 50-150 total trades over 4 years to minimize fee drag and avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_pivot_volume_regime_v1"
-timeframe = "1h"
+name = "6h_weekly_donchian_breakout_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,104 +25,165 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1w data for Donchian channels and volume average
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate Camarilla levels for each 4h bar
-    # Typical Price = (High + Low + Close) / 3
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
-    # Range = High - Low
-    range_4h = high_4h - low_4h
+    # Calculate weekly Donchian channels (20-period)
+    def rolling_max(arr, window):
+        return np.convolve(arr, np.ones(window), 'valid') / window  # placeholder, will replace with proper rolling
     
-    # Camarilla levels:
-    # H4 = Close + 1.1 * Range / 2
-    # L4 = Close - 1.1 * Range / 2
-    # PP = (High + Low + Close) / 3 (same as typical price)
-    h4_4h = close_4h + 1.1 * range_4h / 2.0
-    l4_4h = close_4h - 1.1 * range_4h / 2.0
-    pp_4h = typical_price_4h  # (High + Low + Close) / 3
+    # Proper rolling max/min with min_periods
+    high_1w_series = pd.Series(high_1w)
+    low_1w_series = pd.Series(low_1w)
+    volume_1w_series = pd.Series(volume_1w)
     
-    # Align 4h Camarilla levels to 1h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_4h, h4_4h)
-    l4_aligned = align_htf_to_ltf(prices, df_4h, l4_4h)
-    pp_aligned = align_htf_to_ltf(prices, df_4h, pp_4h)
+    donchian_high = high_1w_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1w_series.rolling(window=20, min_periods=20).min().values
+    avg_volume = volume_1w_series.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for regime filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    # Calculate EMA50 on 1d with min_periods
-    close_1d_s = pd.Series(close_1d)
-    ema50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA50 to 1h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: volume > 1.5 * volume_ma(20)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * volume_ma)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align weekly indicators to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1w, avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume_ma warmup
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(close[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(avg_volume_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+            signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            # Outside session: flatten position
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
         
         if position == 1:  # Long position
-            # Exit conditions:
-            # 1. Opposite signal (price < L4)
-            # 2. Price reverts to Pivot Point (PP)
-            if close[i] < l4_aligned[i] or abs(close[i] - pp_aligned[i]) < 0.001 * pp_aligned[i]:
+            # Exit: price returns to weekly Donchian midpoint or opposite breakout
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            if close[i] <= midpoint or (close[i] < donchian_low_aligned[i] and volume_confirmed):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions:
-            # 1. Opposite signal (price > H4)
-            # 2. Price reverts to Pivot Point (PP)
-            if close[i] > h4_aligned[i] or abs(close[i] - pp_aligned[i]) < 0.001 * pp_aligned[i]:
+            # Exit: price returns to weekly Donchian midpoint or opposite breakout
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            if close[i] >= midpoint or (close[i] > donchian_high_aligned[i] and volume_confirmed):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price > H4 AND volume confirmation AND close > 1d EMA50 (bull regime)
-            if close[i] > h4_aligned[i] and volume_confirm[i] and close[i] > ema50_1d_aligned[i]:
+            # Long entry: price breaks above weekly Donchian high with volume confirmation
+            if close[i] > donchian_high_aligned[i] and volume_confirmed:
                 position = 1
-                signals[i] = 0.20
-            # Short entry: Price < L4 AND volume confirmation AND close < 1d EMA50 (bear regime)
-            elif close[i] < l4_aligned[i] and volume_confirm[i] and close[i] < ema50_1d_aligned[i]:
+                signals[i] = 0.25
+            # Short entry: price breaks below weekly Donchian low with volume confirmation
+            elif close[i] < donchian_low_aligned[i] and volume_confirmed:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
+    
+    return signals
+
+#!/usr/bin/env python3
+# 6h_weekly_donchian_breakout_volume_v2
+# Hypothesis: Weekly Donchian channel breakout with volume confirmation on 6h timeframe.
+# Long: Price breaks above weekly Donchian high (20-period) AND volume > 1.5x 20-period average volume
+# Short: Price breaks below weekly Donchian low (20-period) AND volume > 1.5x 20-period average volume
+# Exit: Opposite breakout or price returns to weekly Donchian midpoint
+# Uses 6h primary timeframe with 1w HTF for Donchian channels and volume average.
+# Target: 50-150 total trades over 4 years to minimize fee drag and avoid overtrading.
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_weekly_donchian_breakout_volume_v2"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get 1w data for Donchian channels and volume average
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
+    
+    # Calculate weekly Donchian channels (20-period)
+    high_1w_series = pd.Series(high_1w)
+    low_1w_series = pd.Series(low_1w)
+    volume_1w_series = pd.Series(volume_1w)
+    
+    donchian_high = high_1w_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1w_series.rolling(window=20, min_periods=20).min().values
+    avg_volume = volume_1w_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align weekly indicators to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1w, avg_volume)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(20, n):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(avg_volume_aligned[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
+        
+        if position == 1:  # Long position
+            # Exit: price returns to weekly Donchian midpoint or opposite breakout
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            if close[i] <= midpoint or (close[i] < donchian_low_aligned[i] and volume_confirmed):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price returns to weekly Donchian midpoint or opposite breakout
+            midpoint = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+            if close[i] >= midpoint or (close[i] > donchian_high_aligned[i] and volume_confirmed):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat
+            # Long entry: price breaks above weekly Donchian high with volume confirmation
+            if close[i] > donchian_high_aligned[i] and volume_confirmed:
+                position = 1
+                signals[i] = 0.25
+            # Short entry: price breaks below weekly Donchian low with volume confirmation
+            elif close[i] < donchian_low_aligned[i] and volume_confirmed:
+                position = -1
+                signals[i] = -0.25
     
     return signals
