@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_volume_trend_v1
+# 12h_1d_camarilla_volume_trend_v2
 # Hypothesis: Price breaking Camarilla pivot levels (H4/L4) on 12h timeframe with volume confirmation and 1-day trend filter.
 # Long when price breaks above H4 with volume > 1.5x 20-period average and 1d close > 1d SMA(50).
 # Short when price breaks below L4 with volume > 1.5x 20-period average and 1d close < 1d SMA(50).
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_volume_trend_v1"
+name = "12h_1d_camarilla_volume_trend_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -53,6 +53,10 @@ def generate_signals(prices):
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
+    # Get 1d SMA(50) for trend filter
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
@@ -60,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(sma50[i]) or np.isnan(vol_ma_20[i]) or np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]):
+        if np.isnan(sma50[i]) or np.isnan(vol_ma_20[i]) or np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or np.isnan(sma50_1d_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
@@ -70,18 +74,6 @@ def generate_signals(prices):
         # Volume surge condition
         vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
-        # 1d trend filter: close > SMA(50) for long, close < SMA(50) for short
-        # Get 1d SMA(50) aligned to 12h timeframe
-        sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-        sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-        
-        if np.isnan(sma50_1d_aligned[i]):
-            if position != 0:
-                pass  # Hold position
-            else:
-                signals[i] = 0.0
-            continue
-            
         if position == 1:  # Long position
             # Exit: price breaks below L4 (0.875 level) or trend reverses
             if close[i] < camarilla_l4_aligned[i] or close[i] < sma50_1d_aligned[i]:
