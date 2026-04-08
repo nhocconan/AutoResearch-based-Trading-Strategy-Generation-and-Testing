@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 12h_adaptive_breakout_1d_trend_volume_v2
-# Hypothesis: Adaptive Donchian breakout on 12h with 1d EMA trend filter and volume confirmation.
-# Uses dynamic lookback period (15-25) based on volatility regime to reduce whipsaws.
-# Long when price breaks above adaptive Donchian upper band with uptrend (price > 1d EMA50) and volume > 1.3x average.
-# Short when price breaks below adaptive Donchian lower band with downtrend (price < 1d EMA50) and volume > 1.3x average.
-# Exit when price crosses back to adaptive Donchian mid band.
-# Designed to capture strong breakouts with trend alignment while minimizing false signals in choppy markets.
-# Target: 60-120 total trades over 4 years (~15-30/year).
+# 4h_donchian_breakout_1d_trend_volume_v2
+# Hypothesis: Donchian(20) breakout on 4h combined with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with uptrend (price > 1d EMA100) and volume > 1.5x average.
+# Short when price breaks below Donchian lower band with downtrend (price < 1d EMA100) and volume > 1.5x average.
+# Exit when price crosses back to Donchian middle band (mean of upper/lower).
+# Designed to capture strong breakouts with trend alignment in both bull and bear markets.
+# Target: 75-200 total trades over 4 years (~19-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_adaptive_breakout_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -29,46 +28,20 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate daily EMA50 for trend filter (shorter for better responsiveness)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Calculate volatility-adjusted Donchian channel period
-    # Use ATR-based volatility to adjust lookback: higher vol = shorter lookback, lower vol = longer lookback
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[tr1[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Normalize ATR to get volatility regime (0 to 1 range)
-    atr_max = pd.Series(atr).rolling(window=100, min_periods=100).max().values
-    atr_min = pd.Series(atr).rolling(window=100, min_periods=100).min().values
-    # Avoid division by zero
-    atr_range = atr_max - atr_min
-    vol_regime = np.where(atr_range > 0, (atr - atr_min) / atr_range, 0.5)
-    
-    # Adaptive lookback: 15 in high volatility, 25 in low volatility
-    lookback = np.round(15 + vol_regime * 10).astype(int)
-    
-    # Calculate adaptive Donchian channels
+    # Calculate Donchian channels on 4h data (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    for i in range(n):
-        lb = max(1, lookback[i]) if not np.isnan(lookback[i]) else 20
-        start_idx = max(0, i - lb + 1)
-        if start_idx <= i:
-            donchian_high[i] = np.max(high[start_idx:i+1])
-            donchian_low[i] = np.min(low[start_idx:i+1])
-    
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
     # Calculate average volume for confirmation (20-period)
@@ -78,12 +51,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -107,14 +80,14 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.3x average volume (reduced from 1.5 to increase signals slightly)
-            volume_ok = volume[i] > 1.3 * avg_volume[i]
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
             # Breakout entries: Donchian upper breakout (long) and lower breakdown (short)
-            if (close[i] > donchian_high[i]) and (close[i] > ema_50_1d_aligned[i]) and volume_ok:
+            if (close[i] > donchian_high[i]) and (close[i] > ema_100_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (close[i] < donchian_low[i]) and (close[i] < ema_50_1d_aligned[i]) and volume_ok:
+            elif (close[i] < donchian_low[i]) and (close[i] < ema_100_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
