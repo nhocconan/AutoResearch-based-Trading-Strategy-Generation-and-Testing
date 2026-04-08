@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_kumo_breakout_1d_trend
-# Hypothesis: Ichimoku cloud breakout on 6h with 1d Kumo (cloud) trend filter and volume confirmation.
-# Long when price breaks above 6h Tenkan/Kijun cross AND price above 1d Kumo (cloud top) with volume > 1.5x avg.
-# Short when price breaks below 6h Tenkan/Kijun cross AND price below 1d Kumo (cloud bottom) with volume > 1.5x avg.
-# Exit when Tenkan/Kijun cross reverses or price crosses Kumo mid-line on 6h.
-# Ichimoku provides dynamic support/resistance; Kumo filter ensures trend alignment across timeframes.
-# Target: 60-120 total trades over 4 years (~15-30/year).
+# 12h_donchian_breakout_1d_trend_volume
+# Hypothesis: Donchian(20) breakout on 12h combined with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with uptrend (price > 1d EMA100) and volume > 1.5x average.
+# Short when price breaks below Donchian lower band with downtrend (price < 1d EMA100) and volume > 1.5x average.
+# Exit when price crosses back to Donchian middle band (mean of upper/lower).
+# Designed to capture strong breakouts with trend alignment in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_kumo_breakout_1d_trend"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,74 +21,42 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Kumo (cloud) trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 for Ichimoku
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    tenkan_1d = (high_1d_series.rolling(window=9, min_periods=9).max() + 
-                 low_1d_series.rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_1d = (high_1d_series.rolling(window=26, min_periods=26).max() + 
-                low_1d_series.rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(26)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b_1d = ((high_1d_series.rolling(window=52, min_periods=52).max() + 
-                    low_1d_series.rolling(window=52, min_periods=52).min()) / 2).shift(26)
-    # Kumo (cloud) top/bottom: Senkou Span A and B
-    kumotop_1d = np.maximum(senkou_a_1d, senkou_b_1d)
-    kumobottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
+    # Calculate daily EMA100 for trend filter
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Align 1d Ichimoku components to 6h
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d.values)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d.values)
-    kumotop_1d_aligned = align_htf_to_ltf(prices, df_1d, kumotop_1d.values)
-    kumobottom_1d_aligned = align_htf_to_ltf(prices, df_1d, kumobottom_1d.values)
-    
-    # Calculate Ichimoku on 6h for entry signals
+    # Calculate Donchian channels on 12h data (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    # Tenkan-sen (9-period)
-    tenkan_6h = (high_series.rolling(window=9, min_periods=9).max() + 
-                 low_series.rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (26-period)
-    kijun_6h = (high_series.rolling(window=26, min_periods=26).max() + 
-                low_series.rolling(window=26, min_periods=26).min()) / 2
-    # Kumo (cloud) on 6h for exit
-    senkou_a_6h = ((tenkan_6h + kijun_6h) / 2).shift(26)
-    senkou_b_6h = ((high_series.rolling(window=52, min_periods=52).max() + 
-                    low_series.rolling(window=52, min_periods=52).min()) / 2).shift(26)
-    kumotop_6h = np.maximum(senkou_a_6h, senkou_b_6h)
-    kumobottom_6h = np.minimum(senkou_a_6h, senkou_b_6h)
-    kumomid_6h = (kumotop_6h + kumobottom_6h) / 2
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume confirmation (20-period average)
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup (need 52 for Ichimoku calculations)
-    start_idx = 52
+    # Start after warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(kumotop_1d_aligned[i]) or np.isnan(kumobottom_1d_aligned[i]) or
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -97,41 +65,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Tenkan/Kijun cross turns bearish OR price below Kumo mid
-            tenkan_kijun_cross = tenkan_6h[i] < kijun_6h[i]
-            price_below_kumo = close[i] < kumomid_6h[i]
-            if tenkan_kijun_cross or price_below_kumo:
+            # Exit: price crosses below Donchian middle band
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Tenkan/Kijun cross turns bullish OR price above Kumo mid
-            tenkan_kijun_cross = tenkan_6h[i] > kijun_6h[i]
-            price_above_kumo = close[i] > kumomid_6h[i]
-            if tenkan_kijun_cross or price_above_kumo:
+            # Exit: price crosses above Donchian middle band
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
+            # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Tenkan/Kijun cross on 6h
-            tenkan_kijun_cross_up = tenkan_6h[i] > kijun_6h[i]
-            tenkan_kijun_cross_down = tenkan_6h[i] < kijun_6h[i]
-            
-            # Price relative to 1d Kumo (cloud)
-            price_above_kumo = close[i] > kumotop_1d_aligned[i]
-            price_below_kumo = close[i] < kumobottom_1d_aligned[i]
-            
-            # Entry conditions
-            if (tenkan_kijun_cross_up and price_above_kumo and volume_ok):
+            # Breakout entries: Donchian upper breakout (long) and lower breakdown (short)
+            if (close[i] > donchian_high[i]) and (close[i] > ema_100_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (tenkan_kijun_cross_down and price_below_kumo and volume_ok):
+            elif (close[i] < donchian_low[i]) and (close[i] < ema_100_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
