@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 6h_1w_1d_price_action_breakout_v1
-# Hypothesis: Combining weekly price structure (higher highs/lows) with daily momentum
-# and 6-hour breakout triggers creates a trend-following strategy that works in both
-# bull and bear markets. Weekly structure filters trades to the dominant trend,
-# daily RSI filters for momentum exhaustion, and 6-hour Donchian breakouts provide
-# precise entry timing. This reduces whipsaws by requiring alignment across three
-# timeframes while keeping trade frequency low (target: 15-30 trades/year).
+# 6h_12h_pivot_volume_v1
+# Hypothesis: 6h price breaking above/below 12h pivot point resistance/support levels
+# (R1/S1) with volume confirmation creates high-probability breakout trades.
+# Uses 12h timeframe for pivot calculation (proper support/resistance levels) and
+# 6h for entry timing. Works in both bull/bear markets by trading breakouts in
+# direction of prevailing trend. Target: 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_price_action_breakout_v1"
+name = "6h_12h_pivot_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,58 +23,51 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
+    open_prices = prices['open'].values
     
-    # Get weekly data for trend structure (higher highs/lows)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 12h data for pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate weekly higher highs and higher lows
-    whh = df_1w['high'].rolling(window=2, min_periods=2).max().values  # Higher high
-    whl = df_1w['low'].rolling(window=2, min_periods=2).min().values   # Higher low
-    lhh = df_1w['high'].rolling(window=2, min_periods=2).min().values  # Lower high
-    lhl = df_1w['low'].rolling(window=2, min_periods=2).max().values   # Lower low
+    # Calculate daily pivot points from 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Weekly trend: bullish if making higher highs and higher lows
-    weekly_bullish = (whh > np.roll(whh, 1)) & (whl > np.roll(whl, 1))
-    # Weekly trend: bearish if making lower highs and lower lows
-    weekly_bearish = (lhh < np.roll(lhh, 1)) & (lhl < np.roll(lhl, 1))
+    # Pivot point = (H + L + C) / 3
+    pivot = (high_12h + low_12h + close_12h) / 3.0
+    # Resistance 1 = (2 * P) - L
+    r1 = (2 * pivot) - low_12h
+    # Support 1 = (2 * P) - H
+    s1 = (2 * pivot) - high_12h
+    # Resistance 2 = P + (H - L)
+    r2 = pivot + (high_12h - low_12h)
+    # Support 2 = P - (H - L)
+    s2 = pivot - (high_12h - low_12h)
     
-    # Align weekly trends to 6h
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2)
     
-    # Get daily data for momentum filter (RSI)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    # Calculate daily RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 6-hour Donchian breakout (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Volume confirmation: volume > 1.5x average of last 24 periods (4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = max(50, lookback)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or \
+           np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -84,31 +76,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: weekly trend turns bearish OR price breaks below Donchian low
-            if weekly_bearish_aligned[i] > 0.5 or close[i] < lowest_low[i]:
+            # Exit: price closes below S1 or loses upward momentum
+            if close[i] < s1_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: weekly trend turns bullish OR price breaks above Donchian high
-            if weekly_bullish_aligned[i] > 0.5 or close[i] > highest_high[i]:
+            # Exit: price closes above R1 or loses downward momentum
+            if close[i] > r1_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: weekly bullish, daily RSI not overbought, break above Donchian high
-            if (weekly_bullish_aligned[i] > 0.5 and 
-                rsi_1d_aligned[i] < 70 and 
-                close[i] > highest_high[i]):
+            # Long entry: price breaks above R1 with volume
+            if (close[i] > r1_12h_aligned[i] and 
+                open_prices[i] <= r1_12h_aligned[i] and  # Ensure breakout happened this bar
+                vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: weekly bearish, daily RSI not oversold, break below Donchian low
-            elif (weekly_bearish_aligned[i] > 0.5 and 
-                  rsi_1d_aligned[i] > 30 and 
-                  close[i] < lowest_low[i]):
+            # Short entry: price breaks below S1 with volume
+            elif (close[i] < s1_12h_aligned[i] and 
+                  open_prices[i] >= s1_12h_aligned[i] and  # Ensure breakdown happened this bar
+                  vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
     
