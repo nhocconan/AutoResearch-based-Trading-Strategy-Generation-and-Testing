@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_regime_v2
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and choppiness regime filter.
-# Long: Price breaks above H3 pivot with volume > 1.5x 20-period average AND chop > 61.8 (ranging market)
-# Short: Price breaks below L3 pivot with volume > 1.5x 20-period average AND chop > 61.8 (ranging market)
-# Exit: Price returns to H4/L4 levels or opposite pivot break
-# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation and choppiness filter.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# 1d_weekly_donchian_breakout_volume_regime_v1
+# Hypothesis: Daily strategy using weekly Donchian channel breakouts with volume confirmation and choppiness regime filter.
+# Long: Price breaks above weekly Donchian high (20) with volume > 1.5x 20-day average AND weekly chop > 61.8 (ranging market)
+# Short: Price breaks below weekly Donchian low (20) with volume > 1.5x 20-day average AND weekly chop > 61.8 (ranging market)
+# Exit: Price returns to weekly Donchian midpoint or opposite breakout
+# Uses 1d primary timeframe with 1w HTF for Donchian channels and choppiness filter.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_regime_v2"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,33 +29,33 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Camarilla pivots and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Donchian channels and choppiness
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (High + Low + Close) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = High - Low
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # Calculate weekly Donchian channels (20-period)
+    def calculate_donchian(high_arr, low_arr, period=20):
+        upper = np.full_like(high_arr, np.nan)
+        lower = np.full_like(low_arr, np.nan)
+        for i in range(period-1, len(high_arr)):
+            upper[i] = np.max(high_arr[i-period+1:i+1])
+            lower[i] = np.min(low_arr[i-period+1:i+1])
+        return upper, lower
     
-    # Align 1d Camarilla levels to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    donchian_high_1w, donchian_low_1w = calculate_donchian(high_1w, low_1w, 20)
+    donchian_mid_1w = (donchian_high_1w + donchian_low_1w) / 2.0
     
-    # Calculate choppiness index on 1d (14-period)
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
+    donchian_mid_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_1w)
+    
+    # Calculate weekly choppiness index (14-period)
     def calculate_chop(high_arr, low_arr, close_arr, period=14):
         atr_sum = np.zeros_like(close_arr)
         true_range = np.zeros_like(close_arr)
@@ -86,49 +86,48 @@ def generate_signals(prices):
                 chop[i] = 50  # neutral when no range
         return chop
     
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    chop_1w = calculate_chop(high_1w, low_1w, close_1w, 14)
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(donchian_high_1w_aligned[i]) or np.isnan(donchian_low_1w_aligned[i]) or 
+            np.isnan(donchian_mid_1w_aligned[i]) or np.isnan(chop_1w_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-day average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         # Choppiness regime filter: chop > 61.8 indicates ranging market (good for mean reversion)
-        chop_filter = chop_1d_aligned[i] > 61.8
+        chop_filter = chop_1w_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: Price returns to H4 level or breaks below L3 (opposite signal)
-            if close[i] <= h4_1d_aligned[i] or close[i] < l3_1d_aligned[i]:
+            # Exit: Price returns to weekly midpoint or breaks below weekly low (opposite signal)
+            if close[i] <= donchian_mid_1w_aligned[i] or close[i] < donchian_low_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to L4 level or breaks above H3 (opposite signal)
-            if close[i] >= l4_1d_aligned[i] or close[i] > h3_1d_aligned[i]:
+            # Exit: Price returns to weekly midpoint or breaks above weekly high (opposite signal)
+            if close[i] >= donchian_mid_1w_aligned[i] or close[i] > donchian_high_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H3 with volume confirmation in ranging market
-            if close[i] > h3_1d_aligned[i] and volume_confirmed and chop_filter:
+            # Long entry: Price breaks above weekly high with volume confirmation in ranging market
+            if close[i] > donchian_high_1w_aligned[i] and volume_confirmed and chop_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L3 with volume confirmation in ranging market
-            elif close[i] < l3_1d_aligned[i] and volume_confirmed and chop_filter:
+            # Short entry: Price breaks below weekly low with volume confirmation in ranging market
+            elif close[i] < donchian_low_1w_aligned[i] and volume_confirmed and chop_filter:
                 position = -1
                 signals[i] = -0.25
     
