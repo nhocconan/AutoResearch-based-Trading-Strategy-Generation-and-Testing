@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts filtered by 1d EMA trend and volume spikes capture medium-term trends.
-Works in both bull and bear markets by trading breakouts in the direction of higher timeframe trend.
-Targets 12-37 trades/year with low turnover to minimize fee drag.
+1h Bollinger Band Width Breakout with 4h Trend Filter
+Hypothesis: Low volatility contractions (BB width < 50th percentile) followed by breakouts in direction of 4h trend yield high-probability trades.
+Works in both bull and bear markets by using volatility regime + trend alignment. Targets 15-37 trades/year on 1h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "1h_bb_width_breakout_4h_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -25,66 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Bollinger Band Width percentile (50-period lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h trend filter: EMA(50)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume filter: current volume > 1.5x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(vol_spike[i])):
+    for i in range(50, n):
+        # Skip if required data is NaN
+        if (np.isnan(bb_width_percentile[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             signals[i] = 0.0
             continue
         
-        if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if (close[i] <= low_20[i] or 
-                close[i] < ema_50_1d_aligned[i]):
+        # Session filter
+        if not in_session[i]:
+            if position != 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.0
+            continue
+        
+        if position == 1:  # Long position
+            # Exit: price touches middle band or volatility expands (width > 70th percentile)
+            if (close[i] <= bb_middle[i] or 
+                bb_width_percentile[i] > 70):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if (close[i] >= high_20[i] or 
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit: price touches middle band or volatility expands
+            if (close[i] >= bb_middle[i] or 
+                bb_width_percentile[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Trend filter: price vs 1d EMA50
-            uptrend = close[i] > ema_50_1d_aligned[i]
-            downtrend = close[i] < ema_50_1d_aligned[i]
+            # Volatility contraction: BB width < 50th percentile (low volatility)
+            vol_contract = bb_width_percentile[i] < 50
             
-            # Long: price breaks above Donchian high with uptrend and volume spike
-            if (close[i] > high_20[i] and 
-                uptrend and 
-                vol_spike[i]):
+            # Trend direction
+            uptrend = close[i] > ema_50_4h_aligned[i]
+            downtrend = close[i] < ema_50_4h_aligned[i]
+            
+            # Breakout conditions
+            breakout_up = close[i] > bb_upper[i]
+            breakout_down = close[i] < bb_lower[i]
+            
+            # Long: upward breakout during low volatility + uptrend
+            if (breakout_up and 
+                vol_contract and 
+                uptrend):
                 position = 1
-                signals[i] = 0.30
-            # Short: price breaks below Donchian low with downtrend and volume spike
-            elif (close[i] < low_20[i] and 
-                  downtrend and 
-                  vol_spike[i]):
+                signals[i] = 0.20
+            # Short: downward breakout during low volatility + downtrend
+            elif (breakout_down and 
+                  vol_contract and 
+                  downtrend):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
