@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_1d_camellia_pivot_breakout_volume_v1
-# Hypothesis: Daily Camarilla pivot levels act as key support/resistance. Price breaking above R4 or below S4 with volume > 1.5x 20-period average and ADX > 25 indicates institutional breakout. Works in bull/bear by capturing strong momentum moves from key daily levels with trend filter to avoid false signals in weak trends. Target: 12-37 trades/year per symbol.
+# 4h_donchian_volume_adx_v2
+# Hypothesis: Donchian channel breakouts on 4h timeframe with volume confirmation and ADX trend filter capture strong momentum moves. Works in both bull and bear markets by requiring volume > 1.5x 20-period average and ADX > 25 to filter weak breakouts. Position size 0.25 to manage risk during drawdowns. Target: 20-50 trades/year per symbol.
 
-name = "12h_1d_camellia_pivot_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_adx_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,22 +21,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and ADX - call ONCE before loop
+    # Get 1d data for ADX filter - call ONCE before loop
     df_d = get_htf_data(prices, '1d')
     high_d = df_d['high'].values
     low_d = df_d['low'].values
     close_d = df_d['close'].values
-    volume_d = df_d['volume'].values
-    
-    # Calculate daily Camarilla pivot levels
-    # Camarilla: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
-    # Where C = (H+L+C)/3 (typical price)
-    typical_price = (high_d + low_d + close_d) / 3
-    r4 = typical_price + ((high_d - low_d) * 1.1 / 2)
-    s4 = typical_price - ((high_d - low_d) * 1.1 / 2)
-    
-    # Calculate 20-period average volume for daily timeframe
-    vol_ma_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
     
     # Calculate ADX on daily timeframe (trend strength filter)
     # True Range
@@ -64,52 +53,57 @@ def generate_signals(prices):
     adx = np.where((plus_di + minus_di) == 0, 0, adx)
     adx = np.where(np.isnan(adx) | np.isinf(adx), 0, adx)
     
+    # Calculate Donchian channels on 4h data
+    donchian_period = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Calculate 20-period average volume for 4h timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 30
+    start_idx = donchian_period
     
     for i in range(start_idx, n):
-        # Get aligned daily values for current 12h bar
-        r4_level = align_htf_to_ltf(prices, df_d, r4)[i]
-        s4_level = align_htf_to_ltf(prices, df_d, s4)[i]
-        vol_ma = align_htf_to_ltf(prices, df_d, vol_ma_d)[i]
+        # Get aligned daily ADX for current 4h bar
         adx_val = align_htf_to_ltf(prices, df_d, adx)[i]
         
         # Skip if any required data is NaN
-        if np.isnan(r4_level) or np.isnan(s4_level) or np.isnan(vol_ma) or np.isnan(adx_val) or volume[i] == 0:
+        if np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(vol_ma[i]) or np.isnan(adx_val) or volume[i] == 0:
             signals[i] = 0.0
             continue
         
         # Volume breakout condition: current volume > 1.5x 20-period average
-        vol_breakout = volume[i] > 1.5 * vol_ma
+        vol_breakout = volume[i] > 1.5 * vol_ma[i]
         
         # Strong trend condition: ADX > 25
         strong_trend = adx_val > 25
         
         if position == 1:  # Long position
-            # Exit if price breaks below S4 (breakout failed)
-            if close[i] < s4_level:
+            # Exit if price breaks below lower Donchian channel
+            if close[i] < lower_channel[i]:
                 position = 0
                 signals[i] = 0.0
             elif position == 1:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above R4 (breakout failed)
-            if close[i] > r4_level:
+            # Exit if price breaks above upper Donchian channel
+            if close[i] > upper_channel[i]:
                 position = 0
                 signals[i] = 0.0
             elif position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long above R4 with volume confirmation and strong trend
-            if high[i] >= r4_level and close[i] > r4_level and vol_breakout and strong_trend:
+            # Breakout long above upper channel with volume confirmation and strong trend
+            if high[i] >= upper_channel[i] and close[i] > upper_channel[i] and vol_breakout and strong_trend:
                 position = 1
                 signals[i] = 0.25
-            # Breakout short below S4 with volume confirmation and strong trend
-            elif low[i] <= s4_level and close[i] < s4_level and vol_breakout and strong_trend:
+            # Breakout short below lower channel with volume confirmation and strong trend
+            elif low[i] <= lower_channel[i] and close[i] < lower_channel[i] and vol_breakout and strong_trend:
                 position = -1
                 signals[i] = -0.25
     
