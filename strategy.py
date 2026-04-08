@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Price breaking above/below Donchian(20) channels indicates momentum.
-Filter trades by 1d EMA(50) trend to avoid counter-trend moves and require volume
-above 1.5x 20-period average to avoid false breakouts. Works in bull/bear by
-aligning with higher timeframe trend. Targets 20-50 trades/year on 4h timeframe.
+4h Volume-Weighted Moving Average (VWMA) Trend with 12h Trend Filter and Volume Confirmation
+Hypothesis: VWMA captures institutional price levels better than SMA/EMA. Price above/below VWMA indicates trend direction. Filtered by 12h VWMA trend to avoid counter-trend trades and volume confirmation to avoid false signals. Works in bull/bear by aligning with higher timeframe trend. Targets 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
+name = "4h_vwma_trend_12h_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,14 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h VWMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
+    vwma_num_12h = (typical_price_12h * df_12h['volume'].values)
+    vwma_den_12h = df_12h['volume'].values
+    vwma_50_12h_num = pd.Series(vwma_num_12h).rolling(window=50, min_periods=50).sum().values
+    vwma_50_12h_den = pd.Series(vwma_den_12h).rolling(window=50, min_periods=50).sum().values
+    vwma_50_12h = np.divide(vwma_50_12h_num, vwma_50_12h_den, out=np.full_like(vwma_50_12h_num, np.nan), where=vwma_50_12h_den!=0)
+    vwma_50_12h_aligned = align_htf_to_ltf(prices, df_12h, vwma_50_12h)
     
-    # Donchian Channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h VWMA(50) for entry signal
+    typical_price = (high + low + close) / 3
+    vwma_num = (typical_price * volume)
+    vwma_den = volume
+    vwma_50_num = pd.Series(vwma_num).rolling(window=50, min_periods=50).sum().values
+    vwma_50_den = pd.Series(vwma_den).rolling(window=50, min_periods=50).sum().values
+    vwma_50 = np.divide(vwma_50_num, vwma_50_den, out=np.full_like(vwma_50_num, np.nan), where=vwma_50_den!=0)
     
     # Volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,40 +48,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(vwma_50_12h_aligned[i]) or np.isnan(vwma_50[i]) or 
+            np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below lower Donchian band OR trend reverses
-            if (close[i] <= low_20[i] or 
-                close[i] < ema_50_1d_aligned[i]):
+            # Exit: price closes below VWMA OR trend turns bearish
+            if (close[i] <= vwma_50[i] or 
+                close[i] <= vwma_50_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper Donchian band OR trend reverses
-            if (close[i] >= high_20[i] or 
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit: price closes above VWMA OR trend turns bullish
+            if (close[i] >= vwma_50[i] or 
+                close[i] >= vwma_50_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above upper Donchian band, uptrend, volume
-            if (close[i] > high_20[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long: price above VWMA, uptrend, volume
+            if (close[i] > vwma_50[i] and 
+                close[i] > vwma_50_12h_aligned[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below lower Donchian band, downtrend, volume
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short: price below VWMA, downtrend, volume
+            elif (close[i] < vwma_50[i] and 
+                  close[i] < vwma_50_12h_aligned[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
