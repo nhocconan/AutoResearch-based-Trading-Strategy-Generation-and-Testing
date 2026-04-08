@@ -1,60 +1,69 @@
 #!/usr/bin/env python3
-# 1d_1w_atr_breakout_v1
-# Hypothesis: Daily ATR breakout with weekly trend filter. Long when price breaks above daily ATR-based upper band and weekly close > weekly open (bullish weekly candle). Short when price breaks below daily ATR-based lower band and weekly close < weekly open (bearish weekly candle). Exit when price re-enters the ATR band. Designed to capture trending moves with volatility-based entries and weekly trend confirmation to avoid counter-trend trades. Targets 20-50 trades per year to minimize fee drag.
+# 6h_1d_donchian_breakout_v1
+# Hypothesis: 6-hour Donchian breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above 6h Donchian(20) high, with price above 1-day EMA(50) and volume > 1.5x average volume.
+# Short when price breaks below 6h Donchian(20) low, with price below 1-day EMA(50) and volume > 1.5x average volume.
+# Exit when price crosses the 6-day EMA(50) on 6h timeframe.
+# Uses Donchian channels for breakout detection, 1-day EMA for trend filter, and volume surge for confirmation.
+# Designed to generate ~20-40 trades/year to avoid excessive fees while capturing strong momentum moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_atr_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_donchian_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:  # Need enough data for 20-period Donchian and 50-period EMA
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility-based bands
-    atr_period = 14
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR is just high-low
-    atr = np.zeros(n)
-    atr[:atr_period-1] = np.nan
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Calculate 6h Donchian channels (20-period)
+    donchian_period = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(donchian_period - 1, n):
+        donchian_high[i] = np.max(high[i - donchian_period + 1:i + 1])
+        donchian_low[i] = np.min(low[i - donchian_period + 1:i + 1])
     
-    # ATR multiplier for band width
-    atr_mult = 2.0
+    # Calculate 6h EMA(50) for exit
+    ema_period = 50
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).values
     
-    # Calculate upper and lower bands (ATR-based channels)
-    upper_band = close + atr_mult * atr
-    lower_band = close - atr_mult * atr
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly trend: bullish if close > open, bearish if close < open
-    weekly_bullish = df_1w['close'].values > df_1w['open'].values
-    weekly_bearish = df_1w['close'].values < df_1w['open'].values
+    close_1d = df_1d['close'].values
+    # Calculate 1-day EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=ema_period, adjust=False, min_periods=ema_period).values
     
-    # Align weekly trend to daily timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align 1-day EMA(50) to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate average volume for volume confirmation (20-period)
+    vol_ma_period = 20
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=vol_ma_period, min_periods=vol_ma_period).mean()
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after ATR warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if data not ready
-        if np.isnan(atr[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -62,30 +71,39 @@ def generate_signals(prices):
             continue
         
         price = close[i]
+        vol = volume[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        ema50 = ema_50[i]
+        ema50_1d = ema_50_1d_aligned[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 1:  # Long
-            # Exit: price re-enters the ATR band (price <= upper_band and price >= lower_band)
-            if price <= upper_band[i] and price >= lower_band[i]:
+            # Exit: price crosses below 6h EMA(50)
+            if price < ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price re-enters the ATR band
-            if price <= upper_band[i] and price >= lower_band[i]:
+            # Exit: price crosses above 6h EMA(50)
+            if price > ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: ATR breakout with weekly trend alignment
-            # Bullish: price breaks above upper band and weekly bullish
-            if price > upper_band[i] and weekly_bullish_aligned[i] == 1.0:
+            # Volume confirmation: current volume > 1.5x average volume
+            vol_confirm = vol > 1.5 * vol_ma_val
+            
+            # Entry conditions
+            # Bullish: price breaks above Donchian high, above 1-day EMA(50), with volume confirmation
+            if price > donch_high and price > ema50_1d and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Bearish: price breaks below lower band and weekly bearish
-            elif price < lower_band[i] and weekly_bearish_aligned[i] == 1.0:
+            # Bearish: price breaks below Donchian low, below 1-day EMA(50), with volume confirmation
+            elif price < donch_low and price < ema50_1d and vol_confirm:
                 position = -1
                 signals[i] = -0.25
     
