@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# [24873] 4h_12h_camarilla_pivot_v4
-# Hypothesis: 4-hour strategy using 12-hour Camarilla pivot levels with volume confirmation and 1-day trend filter.
-# Long when price breaks above 12h R2 with volume > 2x average and price > 1d EMA50.
-# Short when price breaks below 12h S2 with volume > 2x average and price < 1d EMA50.
-# Exit when price crosses opposite 12h level OR volume falls below 1.5x average.
-# Uses higher timeframe pivots for better signal quality in both bull and bear markets.
-# Target: 15-40 trades/year per symbol.
+# [24874] 1h_4h1d_trend_follow_v1
+# Hypothesis: 1-hour strategy using 4h trend direction (EMA25) and 1d momentum (RSI) for signal direction, with 1h RSI pullback for entry timing.
+# Long when 4h EMA25 up, 1d RSI > 50, and 1h RSI pulls back to < 40 then crosses back above 40.
+# Short when 4h EMA25 down, 1d RSI < 50, and 1h RSI > 60 then crosses back below 60.
+# Uses trend alignment to reduce whipsaw and capture momentum in both bull and bear markets.
+# Target: 15-35 trades/year per symbol (~60-140 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_pivot_v4"
-timeframe = "4h"
+name = "1h_4h1d_trend_follow_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_ema(close, period):
@@ -27,6 +26,29 @@ def calculate_ema(close, period):
         ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
     return ema
 
+def calculate_rsi(close, period):
+    """Calculate RSI with proper handling"""
+    if len(close) < period + 1:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan, dtype=float)
+    avg_loss = np.full_like(close, np.nan, dtype=float)
+    
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan, dtype=float), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -35,80 +57,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12-hour and 1-day data for context
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4-hour and 1-day data for context
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 50 or len(df_1d) < 50:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Pivot (using previous 12h bar's data)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h EMA25 for trend
+    ema_25_4h = calculate_ema(df_4h['close'].values, 25)
     
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    # 12h support/resistance levels (Camarilla S2/R2)
-    S2_12h = pivot_12h - (range_12h * 1.1 / 6)  # 12h S2
-    R2_12h = pivot_12h + (range_12h * 1.1 / 6)  # 12h R2
+    # Calculate 1d RSI(14) for momentum
+    rsi_14_1d = calculate_rsi(df_1d['close'].values, 14)
     
-    # Calculate 1d EMA for trend filter
-    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate 1h RSI(14) for entry timing
+    rsi_14_1h = calculate_rsi(close, 14)
     
-    # Align indicators to 4-hour timeframe
-    S2_12h_aligned = align_htf_to_ltf(prices, df_12h, S2_12h)
-    R2_12h_aligned = align_htf_to_ltf(prices, df_12h, R2_12h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align indicators to 1-hour timeframe
+    ema_25_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_25_4h)
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(S2_12h_aligned[i]) or np.isnan(R2_12h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_25_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(rsi_14_1h[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        price = close[i]
-        S2 = S2_12h_aligned[i]
-        R2 = R2_12h_aligned[i]
-        trend_up_1d = price > ema_50_1d_aligned[i]
+        ema_4h = ema_25_4h_aligned[i]
+        rsi_1d = rsi_14_1d_aligned[i]
+        rsi_1h = rsi_14_1h[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below 12h S2 or volume drops below 1.5x average
-            if price < S2 or vol_ratio < 1.5:
+            # Exit: 4h trend turns down OR 1d momentum weakens
+            if ema_4h < ema_25_4h_aligned[i-1] or rsi_1d < 45:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short
-            # Exit: price crosses above 12h R2 or volume drops below 1.5x average
-            if price > R2 or vol_ratio < 1.5:
+            # Exit: 4h trend turns up OR 1d momentum strengthens
+            if ema_4h > ema_25_4h_aligned[i-1] or rsi_1d > 55:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter long: price breaks above 12h R2 with volume expansion and uptrend on 1d
-            if price > R2 and vol_ratio > 2.0 and trend_up_1d:
+            # Enter long: 4h uptrend, 1d bullish momentum, 1h RSI pullback entry
+            if (ema_4h > ema_25_4h_aligned[i-1] and  # 4h EMA rising
+                rsi_1d > 50 and                     # 1d bullish momentum
+                rsi_1h < 40 and                     # 1h RSI oversold
+                i > 30 and rsi_14_1h[i-1] >= 40):   # Was above 40 previous bar (pullback complete)
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below 12h S2 with volume expansion and downtrend on 1d
-            elif price < S2 and vol_ratio > 2.0 and not trend_up_1d:
+                signals[i] = 0.20
+            # Enter short: 4h downtrend, 1d bearish momentum, 1h RSI pullback entry
+            elif (ema_4h < ema_25_4h_aligned[i-1] and  # 4h EMA falling
+                  rsi_1d < 50 and                     # 1d bearish momentum
+                  rsi_1h > 60 and                     # 1h RSI overbought
+                  i > 30 and rsi_14_1h[i-1] <= 60):   # Was below 60 previous bar (pullback complete)
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
