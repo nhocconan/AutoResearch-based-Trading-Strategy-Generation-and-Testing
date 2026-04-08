@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud with 1d trend filter and volume confirmation
-Hypothesis: Ichimoku TK cross above/below cloud on 6h, aligned with 1d Ichimoku trend (price above/below 1d cloud) and volume surge (current volume > 1.5x 20-period average) captures high-probability momentum. Works in bull/bear via cloud filter. Target: 15-30 trades/year on 6h timeframe.
+12h Camarilla pivot reversal with 1w trend filter and volume confirmation
+Hypothesis: Price rejecting Camarilla pivot levels (S3/S4 for long, R3/R4 for short) 
+in alignment with 1-week EMA(50) trend, confirmed by volume surge (current volume > 2.0x 
+20-period average), captures reversals in both bull and bear markets. Uses 1w trend filter 
+to avoid counter-trend trades and volume confirmation to ensure momentum. Target: 15-35 
+trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_reversal_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,112 +22,97 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Ichimoku components (conversion=9, base=26, span=52)
-    def ichimoku_components(high_arr, low_arr, close_arr):
-        # Conversion Line (Tenkan-sen): (9-period high + 9-period low)/2
-        high_9 = pd.Series(high_arr).rolling(window=9, min_periods=9).max()
-        low_9 = pd.Series(low_arr).rolling(window=9, min_periods=9).min()
-        tenkan = (high_9 + low_9) / 2
-        
-        # Base Line (Kijun-sen): (26-period high + 26-period low)/2
-        high_26 = pd.Series(high_arr).rolling(window=26, min_periods=26).max()
-        low_26 = pd.Series(low_arr).rolling(window=26, min_periods=26).min()
-        kijun = (high_26 + low_26) / 2
-        
-        # Leading Span A (Senkou Span A): (Conversion + Base)/2 shifted 26 ahead
-        senkou_a = ((tenkan + kijun) / 2)
-        
-        # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2 shifted 26 ahead
-        high_52 = pd.Series(high_arr).rolling(window=52, min_periods=52).max()
-        low_52 = pd.Series(low_arr).rolling(window=52, min_periods=52).min()
-        senkou_b = ((high_52 + low_52) / 2)
-        
-        # Lagging Span (Chikou Span): Close shifted 26 behind (not used for signals)
-        return tenkan.values, kijun.values, senkou_a.values, senkou_b.values
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    tenkan_6h, kijun_6h, senkou_a_6h, senkou_b_6h = ichimoku_components(high, low, close)
+    # 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 1d Ichimoku for trend filter (price relative to cloud)
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = ichimoku_components(high_1d, low_1d, close_1d)
-    
-    # Align 1d Ichimoku to 6h
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (vol_ma * 1.5)
+    vol_surge = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Need 52 periods for Senkou B
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(vol_surge[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 6h cloud top and bottom
-        cloud_top_6h = max(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom_6h = min(senkou_a_6h[i], senkou_b_6h[i])
-        
-        # Determine 1d cloud top and bottom
-        cloud_top_1d = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        cloud_bottom_1d = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        
         if position == 1:  # Long position
-            # Exit: TK cross bearish OR price below 6h cloud OR price below 1d cloud
-            tk_cross_bearish = tenkan_6h[i] < kijun_6h[i]
-            price_below_6h_cloud = close[i] < cloud_bottom_6h
-            price_below_1d_cloud = close[i] < cloud_bottom_1d
-            if tk_cross_bearish or price_below_6h_cloud or price_below_1d_cloud:
-                position = 0
-                signals[i] = 0.0
+            # Exit: trend turns bearish OR price reaches Camarilla R3 level
+            if i >= 20:  # Need 20 days for pivot calculation
+                # Calculate Camarilla levels from previous day's range
+                phigh = high[i-1]
+                plow = low[i-1]
+                pclose = close[i-1]
+                range_val = phigh - plow
+                r3 = pclose + (range_val * 1.1000 / 4)  # R3 level
+                
+                if (close[i] <= ema_50_1w_aligned[i] or 
+                    close[i] >= r3):
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                signals[i] = 0.0  # Not enough data for pivot calculation
                 
         elif position == -1:  # Short position
-            # Exit: TK cross bullish OR price above 6h cloud OR price above 1d cloud
-            tk_cross_bullish = tenkan_6h[i] > kijun_6h[i]
-            price_above_6h_cloud = close[i] > cloud_top_6h
-            price_above_1d_cloud = close[i] > cloud_top_1d
-            if tk_cross_bullish or price_above_6h_cloud or price_above_1d_cloud:
-                position = 0
-                signals[i] = 0.0
+            # Exit: trend turns bullish OR price reaches Camarilla S3 level
+            if i >= 20:
+                # Calculate Camarilla levels from previous day's range
+                phigh = high[i-1]
+                plow = low[i-1]
+                pclose = close[i-1]
+                range_val = phigh - plow
+                s3 = pclose - (range_val * 1.1000 / 4)  # S3 level
+                
+                if (close[i] >= ema_50_1w_aligned[i] or 
+                    close[i] <= s3):
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                signals[i] = 0.0  # Not enough data for pivot calculation
+                
         else:  # Flat, look for entry
-            # TK cross
-            tk_cross_bullish = tenkan_6h[i] > kijun_6h[i]
-            tk_cross_bearish = tenkan_6h[i] < kijun_6h[i]
-            
-            # Price relative to clouds
-            price_above_6h_cloud = close[i] > cloud_top_6h
-            price_below_6h_cloud = close[i] < cloud_bottom_6h
-            price_above_1d_cloud = close[i] > cloud_top_1d
-            price_below_1d_cloud = close[i] < cloud_bottom_1d
-            
-            # Long: TK cross bullish + price above both clouds + volume surge
-            if (tk_cross_bullish and price_above_6h_cloud and price_above_1d_cloud and vol_surge[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: TK cross bearish + price below both clouds + volume surge
-            elif (tk_cross_bearish and price_below_6h_cloud and price_below_1d_cloud and vol_surge[i]):
-                position = -1
-                signals[i] = -0.25
+            if i >= 20:  # Need 20 days for pivot calculation
+                # Calculate Camarilla levels from previous day's range
+                phigh = high[i-1]
+                plow = low[i-1]
+                pclose = close[i-1]
+                range_val = phigh - plow
+                
+                # Camarilla levels
+                r3 = pclose + (range_val * 1.1000 / 4)  # R3 level
+                r4 = pclose + (range_val * 1.1000 / 2)  # R4 level
+                s3 = pclose - (range_val * 1.1000 / 4)  # S3 level
+                s4 = pclose - (range_val * 1.1000 / 2)  # S4 level
+                
+                # Long: price rejects S3/S4 level + volume surge + uptrend
+                if ((close[i] <= s3 or close[i] <= s4) and
+                    close[i] > ema_50_1w_aligned[i] and
+                    vol_surge[i]):
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price rejects R3/R4 level + volume surge + downtrend
+                elif ((close[i] >= r3 or close[i] >= r4) and
+                      close[i] < ema_50_1w_aligned[i] and
+                      vol_surge[i]):
+                    position = -1
+                    signals[i] = -0.25
+            # Not enough data for pivot calculation
     
     return signals
