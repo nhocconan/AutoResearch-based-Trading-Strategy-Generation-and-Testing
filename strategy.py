@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -59,7 +59,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price closes above Donchian high OR trend reverses
@@ -68,19 +68,19 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Long breakout with trend alignment and volume
             if (close[i] > highest_high[i-1] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Short breakdown with trend alignment and volume
             elif (close[i] < lowest_low[i-1] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
