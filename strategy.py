@@ -1,34 +1,24 @@
-# [24857] 4h_12h_camarilla_pivot_v3
-# Hypothesis: 4-hour strategy using 12-hour Camarilla pivot levels with volume confirmation and 1-day trend filter.
-# Long when price breaks above 12h R2 with volume > 2x average and price > 1d EMA50.
-# Short when price breaks below 12h S2 with volume > 2x average and price < 1d EMA50.
-# Exit when price crosses opposite 12h level OR volume falls below 1.5x average.
-# Uses higher timeframe pivots for better signal quality in both bull and bear markets.
-# Target: 15-40 trades/year per symbol.
+#!/usr/bin/env python3
+"""
+Hypothesis: 4h strategy using 1-day Donchian breakout with 4-hour momentum confirmation.
+Long when price breaks above 20-period 1d high with 4h RSI > 50 and volume > 1.5x average.
+Short when price breaks below 20-period 1d low with 4h RSI < 50 and volume > 1.5x average.
+Exit when price crosses opposite Donchian level or momentum reverses.
+Focuses on strong trend continuation with volume confirmation, suitable for both bull and bear markets.
+Target: 20-40 trades/year per symbol.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_pivot_v3"
+name = "4h_1d_donchian_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
-def calculate_ema(close, period):
-    """Calculate EMA with proper handling"""
-    if len(close) < period:
-        return np.full_like(close, np.nan, dtype=float)
-    
-    ema = np.full_like(close, np.nan, dtype=float)
-    alpha = 2.0 / (period + 1)
-    ema[period-1] = np.mean(close[:period])
-    for i in range(period, len(close)):
-        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
-    return ema
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,30 +26,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour and 1-day data for context
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1-day data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Pivot (using previous 12h bar's data)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1-day Donchian channels (20-period high/low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    # 12h support/resistance levels (Camarilla S2/R2)
-    S2_12h = pivot_12h - (range_12h * 1.1 / 6)  # 12h S2
-    R2_12h = pivot_12h + (range_12h * 1.1 / 6)  # 12h R2
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
     
-    # Calculate 1d EMA for trend filter
-    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    # Align indicators to 4-hour timeframe
-    S2_12h_aligned = align_htf_to_ltf(prices, df_12h, S2_12h)
-    R2_12h_aligned = align_htf_to_ltf(prices, df_12h, R2_12h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Donchian levels to 4-hour timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Calculate 4-hour RSI for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rsi = np.full(n, np.nan)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi[i] = 100
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -71,8 +80,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(S2_12h_aligned[i]) or np.isnan(R2_12h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -81,32 +90,31 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        S2 = S2_12h_aligned[i]
-        R2 = R2_12h_aligned[i]
-        trend_up_1d = price > ema_50_1d_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price crosses below 12h S2 or volume drops below 1.5x average
-            if price < S2 or vol_ratio < 1.5:
+            # Exit: price crosses below Donchian low or RSI < 40
+            if price < lower or rsi[i] < 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above 12h R2 or volume drops below 1.5x average
-            if price > R2 or vol_ratio < 1.5:
+            # Exit: price crosses above Donchian high or RSI > 60
+            if price > upper or rsi[i] > 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above 12h R2 with volume expansion and uptrend on 1d
-            if price > R2 and vol_ratio > 2.0 and trend_up_1d:
+            # Enter long: price breaks above Donchian high with RSI > 50 and volume expansion
+            if price > upper and rsi[i] > 50 and vol_ratio > 1.5:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below 12h S2 with volume expansion and downtrend on 1d
-            elif price < S2 and vol_ratio > 2.0 and not trend_up_1d:
+            # Enter short: price breaks below Donchian low with RSI < 50 and volume expansion
+            elif price < lower and rsi[i] < 50 and vol_ratio > 1.5:
                 position = -1
                 signals[i] = -0.25
     
