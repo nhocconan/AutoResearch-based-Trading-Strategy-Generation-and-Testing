@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 6h_1d_ema_pullback_v1
-# Hypothesis: 6h trend following using 1d EMA(20) as dynamic trend filter and 6h EMA(8/21) for entry timing.
-# In bull markets: price > 1d EMA20 + 6h EMA8 crosses above EMA21 → long
-# In bear markets: price < 1d EMA20 + 6h EMA8 crosses below EMA21 → short
-# Uses 1d trend filter to avoid counter-trend trades, reducing whipsaws in both bull and bear markets.
-# Entry on EMA crossover provides timely signals while 1d EMA ensures alignment with higher timeframe trend.
+# 1d_1w_ema_crossover_volume_trend_v1
+# Hypothesis: Daily EMA crossover (21/50) with weekly EMA trend filter (200) and volume confirmation.
+# Long: daily EMA21 > EMA50 AND weekly EMA200 rising AND volume > 1.5x 20-period average
+# Short: daily EMA21 < EMA50 AND weekly EMA200 falling AND volume > 1.5x 20-period average
+# Exit: opposite crossover or volume drops below average.
+# Designed to capture strong trends with institutional alignment (weekly trend) and avoid whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ema_pullback_v1"
-timeframe = "6h"
+name = "1d_1w_ema_crossover_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(20) - trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Daily EMA21 and EMA50
+    ema21 = np.full(n, np.nan)
+    ema50 = np.full(n, np.nan)
+    
+    # Calculate EMA21
+    alpha21 = 2.0 / (21 + 1)
+    ema21[20] = close[:21].mean()
+    for i in range(21, n):
+        ema21[i] = alpha21 * close[i] + (1 - alpha21) * ema21[i-1]
+    
+    # Calculate EMA50
+    alpha50 = 2.0 / (50 + 1)
+    ema50[49] = close[:50].mean()
+    for i in range(50, n):
+        ema50[i] = alpha50 * close[i] + (1 - alpha50) * ema50[i-1]
+    
+    # Weekly EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema200_1w = np.full(len(df_1w), np.nan)
+    alpha200 = 2.0 / (200 + 1)
+    ema200_1w[199] = df_1w['close'].iloc[:200].mean()
+    for i in range(200, len(df_1w)):
+        ema200_1w[i] = alpha200 * df_1w['close'].iloc[i] + (1 - alpha200) * ema200_1w[i-1]
     
-    # 6h EMA(8) and EMA(21) for entry timing
-    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Volume filter: current volume > 1.5x 20-day average
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma20[i] = volume[i-20:i].mean()
+    
+    volume_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):
-        ema8 = ema_8[i]
-        ema21 = ema_21[i]
-        price = close[i]
-        ema20_1d = ema_20_1d_aligned[i]
+    for i in range(50, n):
+        ema21_val = ema21[i]
+        ema50_val = ema50[i]
+        ema200_val = ema200_1w_aligned[i]
+        vol_filter = volume_filter[i]
         
-        if np.isnan(ema8) or np.isnan(ema21) or np.isnan(ema20_1d):
+        if np.isnan(ema21_val) or np.isnan(ema50_val) or np.isnan(ema200_val):
             if position != 0:
                 pass  # Hold position
             else:
@@ -53,23 +77,23 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            if ema8 <= ema21 or price < ema20_1d:
+            if ema21_val <= ema50_val or ema200_val < ema200_1w_aligned[i-1] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if ema8 >= ema21 or price > ema20_1d:
+            if ema21_val >= ema50_val or ema200_val > ema200_1w_aligned[i-1] or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if ema8 > ema21 and price > ema20_1d:
+            if ema21_val > ema50_val and ema200_val > ema200_1w_aligned[i-1] and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            elif ema8 < ema21 and price < ema20_1d:
+            elif ema21_val < ema50_val and ema200_val < ema200_1w_aligned[i-1] and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
