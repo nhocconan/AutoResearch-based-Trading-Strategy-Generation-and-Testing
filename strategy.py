@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 1h_rsi_divergence_4h_trend_volume_v1
-# Hypothesis: 1h RSI divergence with 4h trend filter and volume confirmation captures reversal entries in both bull and bear markets.
-# Uses 4h EMA50 for trend direction, 1h RSI(14) for momentum, and volume spike for confirmation.
-# Target: 15-37 trades/year by requiring confluence of trend, momentum divergence, and volume spike.
+# 6d_weekly_pivot_breakout_v1
+# Hypothesis: Weekly pivot levels (calculated from prior week's OHLC) act as strong support/resistance. 
+# Breakouts above weekly R1 or below weekly S1 with volume confirmation and 1-day trend filter capture 
+# institutional breakout moves. Works in both bull and bear by following higher timeframe trend (1d EMA50).
+# Target: 15-30 trades/year (60-120 total over 4 years) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
-name = "1h_rsi_divergence_4h_trend_volume_v1"
-timeframe = "1h"
+name = "6d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,43 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot calculation
+    df_week = get_htf_data(prices, '1w')
+    if len(df_week) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    week_high = df_week['high'].values
+    week_low = df_week['low'].values
+    week_close = df_week['close'].values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (week_high + week_low + week_close) / 3.0
+    r1 = 2 * pivot - week_low
+    s1 = 2 * pivot - week_high
     
-    # 1h volume > 1.5x 20-period average
+    # Align weekly pivot levels to 6h
+    pivot_6h = align_ltf_to_htf(prices, df_week, pivot)
+    r1_6h = align_ltf_to_htf(prices, df_week, r1)
+    s1_6h = align_ltf_to_htf(prices, df_week, s1)
+    
+    # Get 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_ltf_to_htf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: 6h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # 1h price action: higher low for bullish divergence, lower high for bearish
-    # We'll use simple price comparison with lookback
-    price_low = np.minimum.accumulate(low)
-    price_high = np.maximum.accumulate(high)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(price_low[i]) or np.isnan(price_high[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(ema_50_6h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -68,33 +77,137 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 60 or price < 4h EMA50
-            if (rsi[i] > 60) or (close[i] < ema_50_4h_aligned[i]):
+            # Exit: price < pivot OR price < 1d EMA50
+            if (close[i] < pivot_6h[i]) or (close[i] < ema_50_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 40 or price > 4h EMA50
-            if (rsi[i] < 40) or (close[i] > ema_50_4h_aligned[i]):
+            # Exit: price > pivot OR price > 1d EMA50
+            if (close[i] > pivot_6h[i]) or (close[i] > ema_50_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Bullish divergence: price making higher low, RSI making lower low
-            bullish_div = (low[i] > price_low[i-1]) and (rsi[i] < rsi[i-1])
-            # Bearish divergence: price making lower high, RSI making higher high
-            bearish_div = (high[i] < price_high[i-1]) and (rsi[i] > rsi[i-1])
-            
-            # Long entry: bullish divergence + volume spike + price > 4h EMA50 (uptrend)
-            if bullish_div and volume_spike[i] and (close[i] > ema_50_4h_aligned[i]):
+            # Long entry: price > R1 + volume + price > 1d EMA50
+            if (close[i] > r1_6h[i]) and volume_filter[i] and (close[i] > ema_50_6h[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: bearish divergence + volume spike + price < 4h EMA50 (downtrend)
-            elif bearish_div and volume_spike[i] and (close[i] < ema_50_4h_aligned[i]):
+                signals[i] = 0.25
+            # Short entry: price < S1 + volume + price < 1d EMA50
+            elif (close[i] < s1_6h[i]) and volume_filter[i] and (close[i] < ema_50_6h[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
+    
+    return signals
+
+# Note: The function name in mtf_data is align_ltf_to_htf, not align_htf_to_ltf
+# Correcting the import and usage accordingly. However, based on the rules,
+# the correct function is align_htf_to_ltf. Let me fix this.
+
+#!/usr/bin/env python3
+# 6h_weekly_pivot_breakout_v1
+# Hypothesis: Weekly pivot levels (calculated from prior week's OHLC) act as strong support/resistance. 
+# Breakouts above weekly R1 or below weekly S1 with volume confirmation and 1-day trend filter capture 
+# institutional breakout moves. Works in both bull and bear by following higher timeframe trend (1d EMA50).
+# Target: 15-30 trades/year (60-120 total over 4 years) to avoid fee drag.
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_weekly_pivot_breakout_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get weekly data for pivot calculation
+    df_week = get_htf_data(prices, '1w')
+    if len(df_week) < 2:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    week_high = df_week['high'].values
+    week_low = df_week['low'].values
+    week_close = df_week['close'].values
+    
+    pivot = (week_high + week_low + week_close) / 3.0
+    r1 = 2 * pivot - week_low
+    s1 = 2 * pivot - week_high
+    
+    # Align weekly pivot levels to 6h
+    pivot_6h = align_htf_to_ltf(prices, df_week, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_week, r1)
+    s1_6h = align_htf_to_ltf(prices, df_week, s1)
+    
+    # Get 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: 6h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    # Start after warmup
+    start_idx = 60
+    
+    for i in range(start_idx, n):
+        # Skip if data not available
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(ema_50_6h[i]) or np.isnan(volume_filter[i])):
+            if position != 0:
+                # Hold position until exit conditions met
+                pass
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if position == 1:  # Long position
+            # Exit: price < pivot OR price < 1d EMA50
+            if (close[i] < pivot_6h[i]) or (close[i] < ema_50_6h[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price > pivot OR price > 1d EMA50
+            if (close[i] > pivot_6h[i]) or (close[i] > ema_50_6h[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat, look for entry
+            # Long entry: price > R1 + volume + price > 1d EMA50
+            if (close[i] > r1_6h[i]) and volume_filter[i] and (close[i] > ema_50_6h[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: price < S1 + volume + price < 1d EMA50
+            elif (close[i] < s1_6h[i]) and volume_filter[i] and (close[i] < ema_50_6h[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
