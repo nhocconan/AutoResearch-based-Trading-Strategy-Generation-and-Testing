@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# 12h_market_regime_adaptive_v1
-# Hypothesis: Adaptive strategy using regime detection (ADX) with dual logic - trend following in strong trends, mean reversion in chop.
-# Uses 12h price action with 1w regime filter to reduce whipsaw. Target: 12-37 trades/year for low fee drift.
+# 4h_volatility_breakout_v2
+# Hypothesis: Volatility breakout strategy using ATR-based channels. Trades breakouts of dynamic ATR channels during high volatility periods.
+# Uses ATR(14) to set upper/lower bands around EMA(20). Enters on breakout with volume confirmation.
+# Designed to work in both bull and bear markets by capturing volatility expansion phases.
+# Target: 20-30 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_market_regime_adaptive_v1"
-timeframe = "12h"
+name = "4h_volatility_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,63 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w regime filter (ADX) - load once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily trend filter (1d EMA200) - load once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX on 1w data
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate EMA200 on daily data
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    tr_smoothed = wilders_smooth(tr, 14)
-    plus_dm_smoothed = wilders_smooth(plus_dm, 14)
-    minus_dm_smoothed = wilders_smooth(minus_dm, 14)
-    
-    plus_di = np.where(tr_smoothed != 0, 100 * plus_dm_smoothed / tr_smoothed, 0)
-    minus_di = np.where(tr_smoothed != 0, 100 * minus_dm_smoothed / tr_smoothed, 0)
-    
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_1w = wilders_smooth(dx, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # 12h indicators
-    # EMA20 for dynamic support/resistance
+    # 4h indicators
+    # EMA20 for dynamic center line
     ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # RSI14 for mean reversion signals
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain = np.concatenate([[np.nan], gain])
-    loss = np.concatenate([[np.nan], loss])
+    # ATR(14) for volatility bands
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Upper and lower bands (EMA20 ± 2*ATR)
+    upper_band = ema20 + 2.0 * atr
+    lower_band = ema20 - 2.0 * atr
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,72 +53,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 30  # Need indicators warmed up
+    start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(adx_1w_aligned[i]):
+        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Regime detection: ADX > 25 = trending, ADX < 20 = ranging
-        adx_val = adx_1w_aligned[i]
-        is_trending = adx_val > 25
-        is_ranging = adx_val < 20
+        # Daily trend filter
+        daily_uptrend = close[i] > ema200_1d_aligned[i]
+        daily_downtrend = close[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit conditions
-            if is_trending:
-                # In trend: exit on close below EMA20
-                if close[i] < ema20[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit conditions: close below EMA20 or volatility contraction
+            if close[i] < ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+                position = 0
+                signals[i] = 0.0
             else:
-                # In range: exit on RSI overbought or mean reversion
-                if rsi[i] > 70:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit conditions
-            if is_trending:
-                # In trend: exit on close above EMA20
-                if close[i] > ema20[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit conditions: close above EMA20 or volatility contraction
+            if close[i] > ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+                position = 0
+                signals[i] = 0.0
             else:
-                # In range: exit on RSI oversold or mean reversion
-                if rsi[i] < 30:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            volume_ok = volume[i] > 1.3 * avg_volume[i]
             
-            if is_trending:
-                # Trend following: enter on breakouts with volume
-                if close[i] > ema20[i] and volume_ok:
+            # Breakout conditions
+            if volume_ok:
+                # Long breakout: price crosses above upper band in uptrend
+                if daily_uptrend and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < ema20[i] and volume_ok:
-                    position = -1
-                    signals[i] = -0.25
-            elif is_ranging:
-                # Mean reversion: enter on RSI extremes with volume
-                if rsi[i] < 30 and volume_ok:
-                    position = 1
-                    signals[i] = 0.25
-                elif rsi[i] > 70 and volume_ok:
+                # Short breakdown: price crosses below lower band in downtrend
+                elif daily_downtrend and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
                     position = -1
                     signals[i] = -0.25
     
