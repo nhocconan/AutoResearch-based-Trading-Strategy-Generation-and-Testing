@@ -1,9 +1,3 @@
-# 12h fractal breakout with 1d trend filter, volume confirmation, and volatility filter
-# Strategy targets breakouts in the direction of the daily trend with volume confirmation
-# Designed to work in both bull and bear markets by following the higher timeframe trend
-# Uses fractal patterns for entry timing and volatility filter to avoid choppy markets
-# Target: 20-50 trades per year (80-200 over 4 years) to minimize fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
