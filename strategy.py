@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 12h_1d_1w_pivot_breakout_volume_v2
+# 12h_daily_camarilla_pivot_volume_regime_v2
 # Hypothesis: 12h Camarilla pivot breakouts with volume confirmation and 1d/1w trend filter.
 # Long: price breaks above R4 (1d) with volume > 2.0x 20-period average AND 1d close > 1w VWAP (bullish regime)
 # Short: price breaks below S4 (1d) with volume > 2.0x 20-period average AND 1d close < 1w VWAP (bearish regime)
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_pivot_breakout_volume_v2"
+name = "12h_daily_camarilla_pivot_volume_regime_v2"
 timeframe = "12h"
 leverage = 1.0
 
