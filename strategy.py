@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 12h strategies based on daily Camarilla pivot levels with volume spike confirmation work in both bull and bear markets.
+# 4h_daily_camarilla_pivot_volume_spike_v2
+# Hypothesis: 4h strategies based on daily Camarilla pivot levels with volume spike confirmation work in both bull and bear markets.
 # Long: price touches or breaks above Camarilla H3 level with volume > 2.0x 20-period average
 # Short: price touches or breaks below Camarilla L3 level with volume > 2.0x 20-period average
 # Exit: price reverts to Camarilla Pivot (midpoint) level or ATR-based stoploss (1.5x ATR)
-# Uses 12h primary timeframe with 1d HTF for Camarilla pivot calculation.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -65,7 +65,7 @@ def generate_signals(prices):
         camarilla_h4[i] = camarilla_p[i] + diff * 1.1 / 2.0
         camarilla_l4[i] = camarilla_p[i] - diff * 1.1 / 2.0
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
