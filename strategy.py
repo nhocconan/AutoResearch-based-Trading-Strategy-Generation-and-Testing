@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1h_fractal_breakout_1d_trend_volume_v2
+# 1h_fractal_breakout_1d_trend_volume_v3
 # Hypothesis: Use daily timeframe for trend (EMA20) and fractal structure (Williams Fractals with 2-bar confirmation), 
-# and 1h for entry timing with volume confirmation (>3x average). Target 15-30 trades/year by requiring 
-# confluence of trend, fractal breakout, volume, and momentum (RSI 40-60 for pullback entries). 
+# and 1h for entry timing with volume confirmation (>2x average) and RSI filter (40-60). 
+# Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.20.
+# Target: 15-30 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
 # Works in bull/bear via trend filter and avoids chop with RSI range filter.
-# Uses session filter (08-20 UTC) to reduce noise trades. Position size fixed at 0.20.
 
-name = "1h_fractal_breakout_1d_trend_volume_v2"
+name = "1h_fractal_breakout_1d_trend_volume_v3"
 timeframe = "1h"
 leverage = 1.0
 
@@ -113,8 +113,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 3.0x 20-period average
-        vol_breakout = volume[i] > 3.0 * vol_ma_val
+        # Volume breakout condition: current volume > 2.0x 20-period average
+        vol_breakout = volume[i] > 2.0 * vol_ma_val
         
         # Trend filter: price above/below daily EMA20
         uptrend = close[i] > ema20_val
