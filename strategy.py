@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend and Volume Confirmation v2
-Hypothesis: Price breaks above/below 20-period Donchian channels on 4h, 
+12h Fractal Breakout with 1d Trend and Volume Confirmation v1
+Hypothesis: Price breaks above/below Williams fractal levels on 12h, 
 aligned with strong daily trend (ADX>25) and volume spikes (>2x 20-period average),
 captures momentum moves while avoiding false breakouts. Works in bull/bear by 
-requiring trend alignment. Target: 20-50 trades/year per symbol.
+requiring trend alignment. Target: 12-37 trades/year per symbol.
 """
 
-name = "4h_donchian_1d_trend_volume_v2"
-timeframe = "4h"
+name = "12h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,6 +31,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 14-period ADX for 1d
     # True Range
@@ -60,9 +61,11 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # 4h Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams fractals on 12h price
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high, low)
+    # Fractals need 2 extra 12h bars for confirmation (center + 2 right bars)
+    bearish_fractal_aligned = align_ltf_to_htf(prices, bearish_fractal)
+    bullish_fractal_aligned = align_ltf_to_htf(prices, bullish_fractal)
     
     # Volume spike detector: current volume > 2 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,43 +75,43 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 35
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d ADX for current 4h bar
+        # Get aligned 1d ADX for current 12h bar
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
         # Regime filter: only trade in strong trending markets on 1d
         strong_trend_1d = adx_1d_aligned > 25
         
         if position == 1:  # Long position
-            # Exit: trend weakens OR price closes below Donchian low
-            if not strong_trend_1d or close[i] < donch_low[i]:
+            # Exit: trend weakens OR price closes below bullish fractal
+            if not strong_trend_1d or close[i] < bullish_fractal_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend weakens OR price closes above Donchian high
-            if not strong_trend_1d or close[i] > donch_high[i]:
+            # Exit: trend weakens OR price closes above bearish fractal
+            if not strong_trend_1d or close[i] > bearish_fractal_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Only trade with volume spike and strong 1d trend
-            # Breakout conditions: price breaks Donchian levels
-            if volume_spike[i] and strong_trend_1d and close[i] > donch_high[i]:
+            # Breakout conditions: price breaks fractal levels
+            if volume_spike[i] and strong_trend_1d and close[i] > bullish_fractal_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            elif volume_spike[i] and strong_trend_1d and close[i] < donch_low[i]:
+            elif volume_spike[i] and strong_trend_1d and close[i] < bearish_fractal_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
