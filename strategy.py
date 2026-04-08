@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_pivot_breakout_1d_trend_volume_v7"
+name = "4h_ichimoku_cloud_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -18,79 +18,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for pivot calculation
+    # 1d data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (previous day's values)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Ichimoku components (based on 1d data)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2.0
     
-    # Align pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2.0
     
-    # 4h trend: 34-period EMA
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2.0
+    
+    # Align Ichimoku components to 4h timeframe (with shift(1) for completed bars)
+    tenkan_4h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_4h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_4h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_4h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_4h, senkou_b_4h)
+    cloud_bottom = np.minimum(senkou_a_4h, senkou_b_4h)
+    
+    # 4h trend filter: 50-period EMA
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
-    
-    # Trend strength: ADX-like using EMA difference (simpler, fewer calculations)
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    # Strong trend when short EMA is significantly above/below long EMA
-    trend_strength = np.abs(ema_12 - ema_26) / (ema_12 + ema_26 + 1e-10)
-    strong_trend = trend_strength > 0.01  # At least 1% separation
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(34, n):
+    for i in range(52, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34[i]) or np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i]) or np.isnan(vol_filter[i]) or np.isnan(strong_trend[i])):
+        if (np.isnan(tenkan_4h[i]) or np.isnan(kijun_4h[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < S1 or trend fails
-            if close[i] < s1_4h[i] or close[i] < ema_34[i]:
+            # Exit: price below cloud or trend fails
+            if close[i] < cloud_bottom[i] or close[i] < ema_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > R1 or trend fails
-            if close[i] > r1_4h[i] or close[i] > ema_34[i]:
+            # Exit: price above cloud or trend fails
+            if close[i] > cloud_top[i] or close[i] > ema_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_34[i]
-            bearish = close[i] < ema_34[i]
+            bullish = close[i] > ema_50[i]
+            bearish = close[i] < ema_50[i]
             
-            # Strong trend filter to avoid choppy markets
-            if strong_trend[i]:
-                # Long: price > R1 + bullish trend + volume
-                if (close[i] > r1_4h[i] and 
-                    bullish and 
-                    vol_filter[i]):
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price < S1 + bearish trend + volume
-                elif (close[i] < s1_4h[i] and 
-                      bearish and 
-                      vol_filter[i]):
-                    position = -1
-                    signals[i] = -0.25
+            # Long: price above cloud + bullish trend + volume
+            if (close[i] > cloud_top[i] and 
+                bullish and 
+                vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short: price below cloud + bearish trend + volume
+            elif (close[i] < cloud_bottom[i] and 
+                  bearish and 
+                  vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
     
     return signals
