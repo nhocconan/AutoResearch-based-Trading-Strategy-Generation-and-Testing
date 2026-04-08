@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_daily_trend_volume_v1
-# Hypothesis: Uses Camarilla pivot levels from 1d for entry/exit with 1w trend filter and volume confirmation.
-# Goes long when price retraces to L3 support in uptrend (price > 1w EMA50) with volume surge.
-# Goes short when price retraces to H3 resistance in downtrend (price < 1w EMA50) with volume surge.
+# 6h_camarilla_pivot_1d_trend_volume_v1
+# Hypothesis: Uses Camarilla pivot levels from 1d with 12h trend filter and volume confirmation.
+# Goes long at S3 bounce in uptrend (price > 12h EMA50) with volume surge.
+# Goes short at R3 rejection in downtrend (price < 12h EMA50) with volume surge.
 # Designed for low trade frequency (12-37/year) to avoid fee drag, works in bull/bear via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_daily_trend_volume_v1"
-timeframe = "12h"
+name = "6h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -30,34 +30,30 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly trend filter: EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
     # Calculate Camarilla pivot levels from previous day
-    # Camarilla: range = (high - low), then levels based on close
-    # L3 = close - (high - low) * 1.1/4
-    # H3 = close + (high - low) * 1.1/4
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
+    # Camarilla levels
+    r3_1d = pivot_1d + (range_1d * 1.1)
+    s3_1d = pivot_1d - (range_1d * 1.1)
+    r4_1d = pivot_1d + (range_1d * 1.5)
+    s4_1d = pivot_1d - (range_1d * 1.5)
     
-    # First day has no previous, use same day
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Align Camarilla levels to 6h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    camarilla_range = prev_high - prev_low
-    l3 = prev_close - camarilla_range * 1.1 / 4
-    h3 = prev_close + camarilla_range * 1.1 / 4
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Align Camarilla levels to 12h timeframe
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    # 12h trend filter: EMA50
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Volume confirmation (20-period average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,10 +61,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
@@ -76,35 +72,35 @@ def generate_signals(prices):
             continue
         
         # Trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        daily_uptrend = close[i] > ema50_12h_aligned[i]
+        daily_downtrend = close[i] < ema50_12h_aligned[i]
         
         # Volume confirmation
         volume_ok = volume[i] > 1.8 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price moves below L3 or trend changes
-            if close[i] < l3_aligned[i] or not weekly_uptrend:
+            # Exit: price breaks below S3 or trend changes
+            if close[i] < s3_1d_aligned[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves above H3 or trend changes
-            if close[i] > h3_aligned[i] or not weekly_downtrend:
+            # Exit: price breaks above R3 or trend changes
+            if close[i] > r3_1d_aligned[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if volume_ok:
-                # Long entry: price near L3 support in uptrend (within 0.5% of L3)
-                if weekly_uptrend and abs(close[i] - l3_aligned[i]) / l3_aligned[i] < 0.005:
+                # Long entry: bounce at S3 in uptrend
+                if daily_uptrend and close[i] > s3_1d_aligned[i] and close[i-1] <= s3_1d_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price near H3 resistance in downtrend (within 0.5% of H3)
-                elif weekly_downtrend and abs(close[i] - h3_aligned[i]) / h3_aligned[i] < 0.005:
+                # Short entry: rejection at R3 in downtrend
+                elif daily_downtrend and close[i] < r3_1d_aligned[i] and close[i-1] >= r3_1d_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
