@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v3
-# Hypothesis: Use Williams Fractal breakouts on 4h in direction of 1d EMA trend, filtered by volume spikes.
-# Williams Fractals identify potential reversal/continuation points; breakouts above/below recent fractals
-# with volume confirmation and 1d trend alignment capture momentum moves. Works in bull/bear by following
-# higher timeframe trend. Target: 20-50 trades/year to minimize fee drag.
+# 4h_fractal_breakout_1d_trend_volume_v4
+# Hypothesis: Williams Fractal breakouts on 4h with 1d EMA trend filter and volume confirmation.
+# Works in bull/bear by following higher timeframe trend. Target: 20-50 trades/year to minimize fee drag.
 
-name = "4h_fractal_breakout_1d_trend_volume_v3"
+name = "4h_fractal_breakout_1d_trend_volume_v4"
 timeframe = "4h"
 leverage = 1.0
 
