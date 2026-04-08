@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 4h_momentum_follow_v1
-# Hypothesis: Momentum-following strategy using EMA crossover with volume and momentum confirmation.
-# Uses EMA(21) and EMA(55) crossover for trend direction, confirmed by volume spike and ROC(10) momentum.
-# Designed to work in both bull and bear markets by filtering trades with volume and momentum.
-# Target: 20-30 trades/year for low fee drag.
+# 1d_1w_trend_follow_v1
+# Hypothesis: Weekly trend-following strategy using EMA21 crossover with volume confirmation on 1d timeframe.
+# Captures strong multi-week trends in both bull and bear markets. Uses weekly EMA21 as trend filter and
+# daily EMA55 crossover for entry timing with volume spike confirmation. Designed for low trade frequency
+# (target: 10-25 trades/year) to minimize fee drag while capturing major trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_momentum_follow_v1"
-timeframe = "4h"
+name = "1d_1w_trend_follow_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -24,54 +24,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter (1d EMA200) - load once before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly trend filter (EMA21) - load once before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA200 on daily data
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate EMA21 on weekly data
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # 4h indicators
-    # EMA21 and EMA55 for crossover
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily indicators
+    # EMA55 for entry signal
     ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # ROC(10) for momentum
-    roc = np.zeros(n)
-    roc[10:] = (close[10:] - close[:-10]) / close[:-10] * 100
-    
     # Volume confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    avg_volume = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 55  # Need indicators warmed up
+    start_idx = 100  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema21[i]) or np.isnan(ema55[i]) or np.isnan(roc[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
+        if np.isnan(ema55[i]) or np.isnan(avg_volume[i]) or np.isnan(ema21_1w_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Daily trend filter
-        daily_uptrend = close[i] > ema200_1d_aligned[i]
-        daily_downtrend = close[i] < ema200_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema21_1w_aligned[i]
+        weekly_downtrend = close[i] < ema21_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: EMA21 crosses below EMA55 or momentum fails
-            if ema21[i] < ema55[i] or roc[i] < 0:
+            # Exit: weekly trend turns down OR price crosses below EMA55
+            if weekly_downtrend or close[i] < ema55[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA21 crosses above EMA55 or momentum fails
-            if ema21[i] > ema55[i] or roc[i] > 0:
+            # Exit: weekly trend turns up OR price crosses above EMA55
+            if weekly_uptrend or close[i] > ema55[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,14 +75,14 @@ def generate_signals(prices):
             # Volume confirmation
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Entry conditions
+            # Entry conditions with volume confirmation
             if volume_ok:
-                # Bullish crossover: EMA21 crosses above EMA55 in uptrend with positive momentum
-                if ema21[i] > ema55[i] and ema21[i-1] <= ema55[i-1] and daily_uptrend and roc[i] > 0:
+                # Long entry: price crosses above EMA55 in weekly uptrend
+                if weekly_uptrend and close[i] > ema55[i] and close[i-1] <= ema55[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Bearish crossover: EMA21 crosses below EMA55 in downtrend with negative momentum
-                elif ema21[i] < ema55[i] and ema21[i-1] >= ema55[i-1] and daily_downtrend and roc[i] < 0:
+                # Short entry: price crosses below EMA55 in weekly downtrend
+                elif weekly_downtrend and close[i] < ema55[i] and close[i-1] >= ema55[i-1]:
                     position = -1
                     signals[i] = -0.25
     
