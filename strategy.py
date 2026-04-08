@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_volatility_breakout_1w_trend_volume_v1"
-timeframe = "12h"
+name = "6h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,78 +18,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend (EMA40)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
-    
-    # 1d data for volatility (ATR14)
+    # 1d data for trend and fractal detection
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ATR(14) on daily
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate Williams Fractals (1d)
+    # Bearish fractal: high[n] is highest of [n-2, n-1, n, n+1, n+2]
+    # Bullish fractal: low[n] is lowest of [n-2, n-1, n, n+1, n+2]
+    n1 = len(high_1d)
+    bearish_fractal = np.zeros(n1, dtype=bool)
+    bullish_fractal = np.zeros(n1, dtype=bool)
     
-    # 12h Donchian channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    for i in range(2, n1 - 2):
+        if (high_1d[i] >= high_1d[i-1] and high_1d[i] >= high_1d[i-2] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = True
+        if (low_1d[i] <= low_1d[i-1] and low_1d[i] <= low_1d[i-2] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # Volume filter: volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Align fractal signals to 6h timeframe
+    bearish_fractal_6h = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float))
+    bullish_fractal_6h = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float))
+    
+    # 1d trend: 34-period EMA (responsive trend)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: 6h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_40_1w_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_6h[i]) or np.isnan(bearish_fractal_6h[i]) or 
+            np.isnan(bullish_fractal_6h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price < Donchian low or trend fails
-            if close[i] < donch_low[i] or close[i] < ema_40_1w_aligned[i]:
+            # Exit: bearish fractal or trend fails
+            if bearish_fractal_6h[i] == 1.0 or close[i] < ema_34_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high or trend fails
-            if close[i] > donch_high[i] or close[i] > ema_40_1w_aligned[i]:
+            # Exit: bullish fractal or trend fails
+            if bullish_fractal_6h[i] == 1.0 or close[i] > ema_34_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volatility filter: avoid low volatility environments
-            vol_filter_ok = atr_14_1d_aligned[i] > np.nanmedian(atr_14_1d_aligned[max(0, i-50):i+1])
-            
             # Trend filter
-            bullish = close[i] > ema_40_1w_aligned[i]
-            bearish = close[i] < ema_40_1w_aligned[i]
+            bullish = close[i] > ema_34_6h[i]
+            bearish = close[i] < ema_34_6h[i]
             
-            # Long: price > Donchian high + bullish trend + volume + volatility
-            if (close[i] > donch_high[i] and 
+            # Long: bullish fractal + bullish trend + volume
+            if (bullish_fractal_6h[i] == 1.0 and 
                 bullish and 
-                vol_filter[i] and
-                vol_filter_ok):
+                vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price < Donchian low + bearish trend + volume + volatility
-            elif (close[i] < donch_low[i] and 
+            # Short: bearish fractal + bearish trend + volume
+            elif (bearish_fractal_6h[i] == 1.0 and 
                   bearish and 
-                  vol_filter[i] and
-                  vol_filter_ok):
+                  vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
     
