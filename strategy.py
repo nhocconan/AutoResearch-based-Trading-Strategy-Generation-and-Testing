@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_camarilla_breakout_volume_v2
-Hypothesis: Use 12h trend via EMA(21), 1d Camarilla pivot levels for support/resistance, and 4h breakout with volume confirmation.
-Works in bull (buy breaks above resistance in uptrend) and bear (sell breaks below support in downtrend).
-Target: 20-40 trades/year per symbol (80-160 total over 4 years).
+1d_1w_bollinger_squeeze_breakout
+Hypothesis: Use 1d Bollinger Band squeeze for volatility compression, breakout with 1w trend filter.
+Long when price breaks above upper BB during 1w uptrend, short when breaks below lower BB during 1w downtrend.
+Volatility squeeze reduces false breakouts. Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend).
+Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "1d_1w_bollinger_squeeze_breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,53 +26,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # 1w EMA(21) for trend
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 12h EMA(21) for trend
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1d Bollinger Bands (20, 2)
+    bb_window = 20
+    bb_std = 2
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=bb_window, min_periods=bb_window).mean().values
+    bb_std_dev = close_series.rolling(window=bb_window, min_periods=bb_window).std().values
+    bb_upper = bb_middle + (bb_std_dev * bb_std)
+    bb_lower = bb_middle - (bb_std_dev * bb_std)
     
-    # 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    
-    # Camarilla levels
-    r4 = close_1d + range_ * 1.1 / 2
-    r3 = close_1d + range_ * 1.1 / 4
-    r2 = close_1d + range_ * 1.1 / 6
-    r1 = close_1d + range_ * 1.1 / 12
-    s1 = close_1d - range_ * 1.1 / 12
-    s2 = close_1d - range_ * 1.1 / 6
-    s3 = close_1d - range_ * 1.1 / 4
-    s4 = close_1d - range_ * 1.1 / 2
-    
-    # Align Camarilla levels to 4h
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume > 1.5x average of last 24 periods
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    # Bollinger Band width for squeeze detection
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
+    squeeze_condition = bb_width < bb_width_ma * 0.8  # Bollinger Band squeeze
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -81,7 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(squeeze_condition[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -90,31 +68,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below S1 or trend changes
-            if close[i] < s1_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Exit: price closes below middle band or trend changes to downtrend
+            if close[i] < bb_middle[i] or ema_1w_aligned[i] < ema_1w_aligned[max(0, i-5)]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above R1 or trend changes
-            if close[i] > r1_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Exit: price closes above middle band or trend changes to uptrend
+            if close[i] > bb_middle[i] or ema_1w_aligned[i] > ema_1w_aligned[max(0, i-5)]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above R1 with volume and uptrend
-            if (close[i] > r1_aligned[i] and 
-                ema_12h_aligned[i] > ema_12h_aligned[max(0, i-3)] and  # Uptrend confirmation
-                vol_confirm[i]):
+            # Long entry: price breaks above upper BB during squeeze and 1w uptrend
+            if (close[i] > bb_upper[i] and 
+                squeeze_condition[i] and 
+                ema_1w_aligned[i] > ema_1w_aligned[max(0, i-5)]):  # Uptrend confirmation
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below S1 with volume and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  ema_12h_aligned[i] < ema_12h_aligned[max(0, i-3)] and  # Downtrend confirmation
-                  vol_confirm[i]):
+            # Short entry: price breaks below lower BB during squeeze and 1w downtrend
+            elif (close[i] < bb_lower[i] and 
+                  squeeze_condition[i] and 
+                  ema_1w_aligned[i] < ema_1w_aligned[max(0, i-5)]):  # Downtrend confirmation
                 position = -1
                 signals[i] = -0.25
     
