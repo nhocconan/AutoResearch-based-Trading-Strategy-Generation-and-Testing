@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# [24901] 4h_1d_donchian_volume_v3
-# Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and 1-day trend filter.
+# [24902] 12h_1d_donchian_volume_v2
+# Hypothesis: 12-hour Donchian(20) breakout with volume confirmation and 1-day trend filter.
 # Long when price breaks above 20-period Donchian high with volume > 1.8x average and price > 1-day EMA50.
 # Short when price breaks below 20-period Donchian low with volume > 1.8x average and price < 1-day EMA50.
 # Exit when price crosses the opposite Donchian boundary or volume falls below 1.3x average.
-# Uses tighter entry conditions (volume > 1.8x) to limit trades (~15-25/year) and reduce fee drag.
 # Designed to work in both bull and bear markets by combining breakout momentum with trend filter.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_v3"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,7 +39,7 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
     
-    # Calculate 4-hour Donchian channels (20-period)
+    # Calculate 12-hour Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -51,7 +51,7 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1-day EMA50 to 4-hour timeframe
+    # Align 1-day EMA50 to 12-hour timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
