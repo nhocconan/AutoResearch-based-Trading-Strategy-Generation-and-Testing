@@ -1,19 +1,16 @@
-#!/usr/bin/env python3
-"""
-6h_1w_1d_camarilla_breakout_volume_v1
-Hypothesis: Use weekly pivot levels for long-term bias and daily Camarilla levels for precise entry/exit with volume confirmation. 
-Long when 6h price breaks above daily R3 with volume and weekly bias up. 
-Short when 6h price breaks below daily S3 with volume and weekly bias down.
-Designed to work in both bull (breakouts) and bear (reversals at key levels) markets.
-Target: 12-37 trades/year per symbol (48-148 total over 4 years).
-"""
+# [EXPERIMENT #22976] 12h_1d_camarilla_breakout_volume_v2
+# Hypothesis: Use daily Camarilla levels for entry and weekly trend for bias on 12h timeframe.
+# Long when price breaks above daily R3 with volume confirmation and weekly uptrend.
+# Short when price breaks below daily S3 with volume confirmation and weekly downtrend.
+# Designed to capture breakouts in trending markets and reversals at key levels in ranging markets.
+# Target: 12-37 trades/year per symbol (48-148 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,7 +52,7 @@ def generate_signals(prices):
     r4 = close_1d + range_1d * 1.1 / 2
     s4 = close_1d - range_1d * 1.1 / 2
     
-    # Align daily Camarilla levels to 6h timeframe
+    # Align daily Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -88,7 +85,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below daily S3 or weekly bias turns down
+            # Exit: price breaks below daily S3 or weekly trend turns down
             if close[i] < s3_aligned[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -96,18 +93,18 @@ def generate_signals(prices):
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above daily R3 or weekly bias turns up
+            # Exit: price breaks above daily R3 or weekly trend turns up
             if close[i] > r3_aligned[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above daily R3 with volume and weekly bias up
+            # Long entry: price breaks above daily R3 with volume and weekly uptrend
             if close[i] > r3_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below daily S3 with volume and weekly bias down
+            # Short entry: price breaks below daily S3 with volume and weekly downtrend
             elif close[i] < s3_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
