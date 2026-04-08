@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h Williams Fractal breakout with 1d trend filter and volume confirmation
+# 4h Williams Fractal Breakout with 1d Trend Filter and Volume Confirmation
 # Uses Williams Fractals on 4h data to identify potential turning points.
 # Filters by 1d ADX > 25 for strong trend and volume > 1.5x 20-period average.
 # Only takes long positions on bullish fractal breaks in uptrends and short positions on bearish fractal breaks in downtrends.
@@ -13,6 +8,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 name = "4h_fractal_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
