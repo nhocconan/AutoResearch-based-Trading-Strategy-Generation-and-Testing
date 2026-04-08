@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_williams_alligator_1d_trend_volume_v1
-# Hypothesis: Williams Alligator on 4h (Jaws=13, Teeth=8, Lips=5) with 1d EMA(50) trend filter and volume confirmation.
-# In bull markets: Go long when Lips cross above Teeth and Jaws (bullish alignment) with volume > 1.5x avg and price above 1d EMA.
-# In bear markets: Go short when Lips cross below Teeth and Jaws (bearish alignment) with volume > 1.5x avg and price below 1d EMA.
-# Uses Williams Alligator to capture trend changes and avoids choppy markets via strict alignment conditions.
-# Target: 20-40 trades/year to avoid fee decay while capturing sustained moves.
+# 12h_keltner_breakout_1d_trend_volume_v1
+# Hypothesis: Keltner Channel breakout with 1d EMA trend filter and volume confirmation.
+# Enter long when price breaks above upper Keltner (EMA + 2*ATR) with volume > 1.5x average and price above 1d EMA(50).
+# Enter short when price breaks below lower Keltner (EMA - 2*ATR) with volume > 1.5x average and price below 1d EMA(50).
+# Exit on opposite signal or when price crosses back through the EMA middle line.
+# Designed for 12h timeframe to capture multi-day trends while avoiding whipsaws.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_williams_alligator_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_keltner_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,36 +36,21 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator on 4h: SMMA (Smoothed Moving Average)
-    # Jaws: SMA(13) shifted 8 bars forward
-    # Teeth: SMA(8) shifted 5 bars forward  
-    # Lips: SMA(5) shifted 3 bars forward
-    def smma(data, period):
-        """Smoothed Moving Average - similar to Wilder's smoothing"""
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    # Calculate Alligator lines
-    jaws = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)   # Red line
-    lips = smma(close, 5)    # Green line
-    
-    # Shift the lines as per Williams Alligator specification
-    jaws_shifted = np.roll(jaws, 8)   # Shift 8 bars forward
-    teeth_shifted = np.roll(teeth, 5) # Shift 5 bars forward
-    lips_shifted = np.roll(lips, 3)   # Shift 3 bars forward
-    
-    # Set NaN for shifted positions that don't have data
-    jaws_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Keltner Channel components on 12h
+    # Middle line: EMA(20)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR(10) for channel width
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Upper and lower bands
+    upper_keltner = ema_20 + 2 * atr
+    lower_keltner = ema_20 - 2 * atr
     
     # Volume confirmation: 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,13 +58,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup (need enough data for all indicators)
-    start_idx = max(50, 13 + 8)  # Ensure we have data for shifted jaws
+    # Start after warmup
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(lips_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or np.isnan(jaws_shifted[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
             np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -88,24 +74,24 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Bearish Alligator alignment (Lips < Teeth < Jaws) or opposite signal with volume
-            bearish_alignment = (lips_shifted[i] < teeth_shifted[i] < jaws_shifted[i])
-            opposite_signal = (lips_shifted[i] < teeth_shifted[i] and 
+            # Exit: price crosses below EMA middle or opposite signal with volume
+            ema_cross = close[i] < ema_20[i]
+            opposite_signal = (close[i] < lower_keltner[i] and 
                              volume[i] > 1.5 * avg_volume[i] and 
                              close[i] < ema_50_1d_aligned[i])
-            if bearish_alignment or opposite_signal:
+            if ema_cross or opposite_signal:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bullish Alligator alignment (Lips > Teeth > Jaws) or opposite signal with volume
-            bullish_alignment = (lips_shifted[i] > teeth_shifted[i] > jaws_shifted[i])
-            opposite_signal = (lips_shifted[i] > teeth_shifted[i] and 
+            # Exit: price crosses above EMA middle or opposite signal with volume
+            ema_cross = close[i] > ema_20[i]
+            opposite_signal = (close[i] > upper_keltner[i] and 
                              volume[i] > 1.5 * avg_volume[i] and 
                              close[i] > ema_50_1d_aligned[i])
-            if bullish_alignment or opposite_signal:
+            if ema_cross or opposite_signal:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,17 +100,12 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Bullish Alligator alignment: Lips > Teeth > Jaws
-            bullish_alignment = (lips_shifted[i] > teeth_shifted[i] > jaws_shifted[i])
-            # Bearish Alligator alignment: Lips < Teeth < Jaws  
-            bearish_alignment = (lips_shifted[i] < teeth_shifted[i] < jaws_shifted[i])
-            
-            # Long entry: Bullish alignment with volume and 1d uptrend
-            if bullish_alignment and volume_ok and close[i] > ema_50_1d_aligned[i]:
+            # Long entry: price breaks above upper Keltner with volume and 1d uptrend
+            if close[i] > upper_keltner[i] and volume_ok and close[i] > ema_50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bearish alignment with volume and 1d downtrend
-            elif bearish_alignment and volume_ok and close[i] < ema_50_1d_aligned[i]:
+            # Short entry: price breaks below lower Keltner with volume and 1d downtrend
+            elif close[i] < lower_keltner[i] and volume_ok and close[i] < ema_50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
