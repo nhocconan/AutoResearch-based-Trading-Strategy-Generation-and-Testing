@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_ema_crossover_v4
-Hypothesis: Trend following with EMA crossovers on multiple timeframes.
-- Primary: 4h EMA(21) vs EMA(50) for entry/exit
-- Trend filter: 12h EMA(50) direction (bullish if close > EMA, bearish if close < EMA)
-- Higher timeframe filter: 1d EMA(50) to avoid counter-trend trades in strong trends
-- Volume confirmation: 4h volume > 1.5x 20-period average to avoid false breakouts
-- Position sizing: 0.25 for long, -0.25 for short
-- Target: 20-50 trades/year (80-200 total over 4 years)
+1h_4h_1d_rsi_mean_reversion_v1
+Hypothesis: Mean reversion strategy for 1h timeframe using RSI extremes with multi-timeframe trend filters.
+- RSI(14) < 30 for long entry, > 70 for short entry on 1h
+- Trend filter: 4h close > EMA(50) for long, < EMA(50) for short
+- Higher timeframe filter: 1d close > EMA(50) for long, < EMA(50) for short
+- Session filter: 08-20 UTC to avoid low liquidity periods
+- Position sizing: 0.20 for both long and short
+- Target: 15-30 trades/year (60-120 total over 4 years) to avoid fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_ema_crossover_v4"
-timeframe = "4h"
+name = "1h_4h_1d_rsi_mean_reversion_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,26 +29,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1h RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema_50_12h
-    trend_12h_down = close_12h < ema_50_12h
+    # 4h EMA(50) for trend
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = close_4h > ema_50_4h
+    trend_4h_down = close_4h < ema_50_4h
     
     # Forward fill trend
-    trend_12h_up_series = pd.Series(trend_12h_up)
-    trend_12h_down_series = pd.Series(trend_12h_down)
-    trend_12h_up_ffilled = trend_12h_up_series.ffill().values
-    trend_12h_down_ffilled = trend_12h_down_series.ffill().values
+    trend_4h_up_series = pd.Series(trend_4h_up)
+    trend_4h_down_series = pd.Series(trend_4h_down)
+    trend_4h_up_ffilled = trend_4h_up_series.ffill().values
+    trend_4h_down_ffilled = trend_4h_down_series.ffill().values
     
-    # Align 12h trend to 4h
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up_ffilled)
-    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down_ffilled)
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up_ffilled)
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down_ffilled)
     
     # Get 1d data for higher timeframe filter
     df_1d = get_htf_data(prices, '1d')
@@ -67,29 +76,25 @@ def generate_signals(prices):
     trend_1d_up_ffilled = trend_1d_up_series.ffill().values
     trend_1d_down_ffilled = trend_1d_down_series.ffill().values
     
-    # Align 1d trend to 4h
+    # Align 1d trend to 1h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
     
-    # 4h EMA crossovers
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if data not available
-        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+        # Skip if data not available or outside session
+        if (np.isnan(rsi[i]) or np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(volume_filter[i])):
+            not session_filter[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -98,28 +103,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: EMA cross down OR 12h trend turns down OR 1d trend turns down
-            if (ema_21[i] < ema_50[i]) or trend_12h_down_aligned[i] or trend_1d_down_aligned[i]:
+            # Exit: RSI > 50 (mean reversion complete) OR trend changes
+            if rsi[i] > 50 or trend_4h_down_aligned[i] or trend_1d_down_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Position size
+                signals[i] = 0.20  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: EMA cross up OR 12h trend turns up OR 1d trend turns up
-            if (ema_21[i] > ema_50[i]) or trend_12h_up_aligned[i] or trend_1d_up_aligned[i]:
+            # Exit: RSI < 50 (mean reversion complete) OR trend changes
+            if rsi[i] < 50 or trend_4h_up_aligned[i] or trend_1d_up_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Position size
+                signals[i] = -0.20  # Position size
         else:  # Flat, look for entry
-            # Long entry: EMA cross up + 12h uptrend + 1d uptrend + volume
-            if (ema_21[i] > ema_50[i]) and trend_12h_up_aligned[i] and trend_1d_up_aligned[i] and volume_filter[i]:
+            # Long entry: RSI < 30 (oversold) + 4h uptrend + 1d uptrend + session
+            if (rsi[i] < 30) and trend_4h_up_aligned[i] and trend_1d_up_aligned[i]:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: EMA cross down + 12h downtrend + 1d downtrend + volume
-            elif (ema_21[i] < ema_50[i]) and trend_12h_down_aligned[i] and trend_1d_down_aligned[i] and volume_filter[i]:
+                signals[i] = 0.20
+            # Short entry: RSI > 70 (overbought) + 4h downtrend + 1d downtrend + session
+            elif (rsi[i] > 70) and trend_4h_down_aligned[i] and trend_1d_down_aligned[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
