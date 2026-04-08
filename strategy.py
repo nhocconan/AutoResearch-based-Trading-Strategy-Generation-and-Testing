@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_trend_volume_breakout_12h
-# Hypothesis: On 4h timeframe, enter long when price breaks above 20-period Donchian high with 12h EMA50 uptrend and volume > 1.5x average.
-# Enter short when price breaks below 20-period Donchian low with 12h EMA50 downtrend and volume > 1.5x average.
-# Exit when price crosses the 12-period EMA (4h) or Donchian middle band.
-# Uses volume confirmation and trend filter to reduce false breakouts.
-# Target: 20-50 trades per year per symbol (~80-200 total over 4 years).
+# 1d_cci_breakout_1w_trend_volume
+# Hypothesis: CCI breakout from weekly timeframe combined with daily trend filter and volume confirmation.
+# Long when daily close breaks above weekly CCI +100 with uptrend (price > daily EMA50) and volume > 1.5x average.
+# Short when daily close breaks below weekly CCI -100 with downtrend (price < daily EMA50) and volume > 1.5x average.
+# Uses weekly CCI for trend direction to reduce whipsaw in ranging markets.
+# Target: 30-100 total trades over 4 years (7-25/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_trend_volume_breakout_12h"
-timeframe = "4h"
+name = "1d_cci_breakout_1w_trend_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,24 +25,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for CCI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate weekly CCI(20)
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
+    sma_tp = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # Avoid division by zero
+    mad = np.where(mad == 0, 1e-10, mad)
+    cci_20 = (tp_1w - sma_tp) / (0.015 * mad)
+    cci_20_aligned = align_htf_to_ltf(prices, df_1w, cci_20)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate 4h EMA12 for exit
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,12 +59,11 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_12[i]) or 
+        if (np.isnan(cci_20_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -66,16 +73,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA12 OR Donchian middle band
-            if (close[i] < ema_12[i]) or (close[i] < donchian_mid[i]):
+            # Exit: CCI falls below zero OR trend turns against us
+            if (cci_20_aligned[i] < 0) or (close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA12 OR Donchian middle band
-            if (close[i] > ema_12[i]) or (close[i] > donchian_mid[i]):
+            # Exit: CCI rises above zero OR trend turns against us
+            if (cci_20_aligned[i] > 0) or (close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,11 +91,11 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Breakout entries
-            if (close[i] > donchian_high[i]) and (close[i] > ema_50_12h_aligned[i]) and volume_ok:
+            # Breakout entries: CCI > +100 (long) and CCI < -100 (short)
+            if (cci_20_aligned[i] > 100) and (close[i] > ema_50_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (close[i] < donchian_low[i]) and (close[i] < ema_50_12h_aligned[i]) and volume_ok:
+            elif (cci_20_aligned[i] < -100) and (close[i] < ema_50_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
