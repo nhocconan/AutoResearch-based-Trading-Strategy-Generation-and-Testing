@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_volume"
-timeframe = "1d"
+name = "6h_12h_1d_ema_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,44 +18,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channel and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channel on weekly high/low
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    upper_channel = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 50-period EMA on 12h close for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align to daily timeframe (already delayed for completed weekly bars)
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
-    
-    # Get daily data for volume confirmation
+    # Get 1d data for volume baseline
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period average volume
+    # Calculate 20-period average volume on 1d
     volume_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Volume threshold: 2x average volume
-    vol_threshold = vol_avg_aligned * 2.0
-    vol_confirm = volume > vol_threshold
+    # Volume confirmation: 6h volume > 1.5x 1d average volume (scaled to 6h)
+    # 1d volume represents 4x 6h periods, so divide by 4 for per-period comparison
+    vol_threshold = vol_avg_1d_aligned / 4.0
+    vol_confirm = volume > vol_threshold * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = max(20, 20) + 1
+    start_idx = max(50, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if Donchian or volume average not available
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(vol_avg_aligned[i]):
+        # Skip if EMA or volume average not available
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -64,27 +60,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below lower Donchian channel
-            if close[i] < lower_aligned[i]:
+            # Exit: price closes below 12h EMA (trend change)
+            if close[i] < ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper Donchian channel
-            if close[i] > upper_aligned[i]:
+            # Exit: price closes above 12h EMA (trend change)
+            if close[i] > ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper Donchian with volume confirmation
-            if close[i] > upper_aligned[i] and vol_confirm[i]:
+            # Long entry: price above 12h EMA with volume confirmation (uptrend)
+            if close[i] > ema_50_12h_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower Donchian with volume confirmation
-            elif close[i] < lower_aligned[i] and vol_confirm[i]:
+            # Short entry: price below 12h EMA with volume confirmation (downtrend)
+            elif close[i] < ema_50_12h_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
