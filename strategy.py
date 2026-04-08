@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_volume_weighted_momentum_v1
-# Hypothesis: 6-hour momentum filtered by 12h/1d volume-weighted average price (VWAP) and volume confirmation.
+# 6h_12h_1d_volume_weighted_momentum_v2
+# Hypothesis: 6-hour momentum filtered by 12h VWAP and volume confirmation.
 # Long: price > 6h momentum > 0 AND price > 12h VWAP AND volume > 1.3x 20-period average volume.
 # Short: price < 6h momentum < 0 AND price < 12h VWAP AND volume > 1.3x 20-period average volume.
 # Exit: momentum reverses or price crosses 12h VWAP.
 # Designed to capture institutional flow in both bull and bear markets with volume confirmation.
+# Uses discrete position sizing (0.25) to minimize churn and manages risk via VWAP/momentum exits.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_volume_weighted_momentum_v1"
+name = "6h_12h_1d_volume_weighted_momentum_v2"
 timeframe = "6h"
 leverage = 1.0
 
