@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_trend_vol
-# Hypothesis: Uses daily Camarilla pivot levels with 1d trend filter and volume confirmation on 12h timeframe.
+# 4h_camarilla_pivot_daily_trend_volume_v2
+# Hypothesis: Uses daily Camarilla pivot levels with 1d trend filter and volume confirmation on 4h timeframe.
 # Goes long when price rebounds from S3/S4 in daily uptrend with volume confirmation.
 # Goes short when price rebounds from R3/R4 in daily downtrend with volume confirmation.
-# Uses 12h candles to reduce trade frequency and avoid fee drag. Target: 15-30 trades/year.
+# Uses 4h candles to balance trade frequency and avoid excessive fees. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_trend_vol"
-timeframe = "12h"
+name = "4h_camarilla_pivot_daily_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,14 +44,14 @@ def generate_signals(prices):
     # Daily trend filter: EMA50
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily data to 12h timeframe
+    # Align daily data to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation on 12h
+    # Volume confirmation on 4h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
