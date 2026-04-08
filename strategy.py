@@ -1,43 +1,101 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_rsi_ema_v1
-Hypothesis: 1-hour strategy using 4-hour RSI(14) and 1-day EMA(50) for trend direction,
-with 1-hour RSI pullback entries. Long when 4h RSI > 50, price > 1d EMA50, and 1h RSI < 40
-pullback from oversold. Short when 4h RSI < 50, price < 1d EMA50, and 1h RSI > 60 pullback
-from overbought. Uses higher timeframe for signal direction to reduce whipsaw, lower timeframe
-for precise entry timing. Target: 15-35 trades/year per symbol.
+6h_1w_1d_adx_alligator_v1
+Hypothesis: 6-hour strategy combining weekly ADX trend strength with daily Alligator for entry timing.
+Long when weekly ADX > 25 (trending) + price above Alligator teeth (green).
+Short when weekly ADX > 25 + price below Alligator teeth (red).
+Uses weekly trend filter to avoid whipsaws and daily Alligator for precise entries.
+Target: 20-50 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_rsi_ema_v1"
-timeframe = "1h"
+name = "6h_1w_1d_adx_alligator_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_rsi(close, period=14):
-    """Calculate RSI with proper handling"""
-    if len(close) < period + 1:
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX with proper smoothing"""
+    if len(high) < period + 1:
         return np.full_like(close, np.nan, dtype=float)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    avg_gain = np.full_like(close, np.nan, dtype=float)
-    avg_loss = np.full_like(close, np.nan, dtype=float)
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
+    # Smoothed values
+    atr = np.full_like(tr, np.nan)
+    dm_plus_smooth = np.full_like(dm_plus, np.nan)
+    dm_minus_smooth = np.full_like(dm_minus, np.nan)
     
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    # Initial values
+    atr[period] = np.nanmean(tr[1:period+1])
+    dm_plus_smooth[period] = np.nanmean(dm_plus[1:period+1])
+    dm_minus_smooth[period] = np.nanmean(dm_minus[1:period+1])
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    # Wilder smoothing
+    for i in range(period + 1, len(tr)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
+    
+    # DI values
+    di_plus = np.full_like(close, np.nan)
+    di_minus = np.full_like(close, np.nan)
+    dx = np.full_like(close, np.nan)
+    
+    valid = atr > 0
+    di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
+    di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
+    
+    dx_valid = (di_plus + di_minus) > 0
+    dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
+    
+    # ADX (smoothed DX)
+    adx = np.full_like(close, np.nan)
+    if len(dx) >= 2 * period:
+        adx[2*period-1] = np.nanmean(dx[period:2*period])
+        for i in range(2*period, len(dx)):
+            adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx
+
+def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Calculate Alligator (Smoothed Medians)"""
+    if len(close) < jaw_period:
+        return np.full_like(close, np.nan), np.full_like(close, np.nan), np.full_like(close, np.nan)
+    
+    # Median price
+    median = (high + low) / 2.0
+    
+    # Smoothed medians (SMMA)
+    def smma(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period - 1) + data[i]) / period
+        return result
+    
+    jaw = smma(median, jaw_period)
+    teeth = smma(median, teeth_period)
+    lips = smma(median, lips_period)
+    
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
@@ -47,73 +105,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4-hour and 1-day data for context
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly and daily data for context
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h RSI(14)
-    rsi_4h = calculate_rsi(df_4h['close'].values, 14)
+    # Calculate weekly ADX for trend strength
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Calculate 1d EMA(50)
-    ema_50_1d = np.full_like(df_1d['close'].values, np.nan, dtype=float)
-    if len(df_1d) >= 50:
-        alpha = 2.0 / (50 + 1)
-        ema_50_1d[49] = np.mean(df_1d['close'].values[:50])
-        for i in range(50, len(df_1d)):
-            ema_50_1d[i] = alpha * df_1d['close'].values[i] + (1 - alpha) * ema_50_1d[i-1]
+    # Calculate daily Alligator for entry timing
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    jaw_1d, teeth_1d, lips_1d = calculate_alligator(high_1d, low_1d, close_1d)
     
-    # Calculate 1h RSI(14) for entry timing
-    rsi_1h = calculate_rsi(close, 14)
-    
-    # Align indicators to 1-hour timeframe
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align indicators to 6-hour timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_1h[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        rsi4 = rsi_4h_aligned[i]
-        ema1d = ema_50_1d_aligned[i]
-        rsi1 = rsi_1h[i]
+        adx = adx_1w_aligned[i]
+        teeth = teeth_1d_aligned[i]
+        lips = lips_1d_aligned[i]
         price = close[i]
         
+        # Determine Alligator state: green (lips > teeth) = bullish, red (lips < teeth) = bearish
+        is_green = lips > teeth
+        is_red = lips < teeth
+        
         if position == 1:  # Long
-            # Exit: 4h RSI < 40 or price < 1d EMA50
-            if rsi4 < 40 or price < ema1d:
+            # Exit: trend weakens (ADX < 20) or Alligator turns red
+            if adx < 20 or is_red:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: 4h RSI > 60 or price > 1d EMA50
-            if rsi4 > 60 or price > ema1d:
+            # Exit: trend weakens (ADX < 20) or Alligator turns green
+            if adx < 20 or is_green:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Enter long: 4h RSI > 50 (uptrend), price > 1d EMA50, and 1h RSI < 40 pullback
-            if rsi4 > 50 and price > ema1d and rsi1 < 40:
+            # Enter long: strong trend (ADX > 25) + Alligator green
+            if adx > 25 and is_green:
                 position = 1
-                signals[i] = 0.20
-            # Enter short: 4h RSI < 50 (downtrend), price < 1d EMA50, and 1h RSI > 60 pullback
-            elif rsi4 < 50 and price < ema1d and rsi1 > 60:
+                signals[i] = 0.25
+            # Enter short: strong trend (ADX > 25) + Alligator red
+            elif adx > 25 and is_red:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
