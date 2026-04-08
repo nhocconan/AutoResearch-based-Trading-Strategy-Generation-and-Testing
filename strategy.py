@@ -1,41 +1,34 @@
 #!/usr/bin/env python3
 """
-12h_1w1d_camarilla_volume_trend_v1
-Hypothesis: Use weekly and daily trend filters with 12-hour Camarilla pivot levels to capture trend continuation moves with volume confirmation. Designed for low trade frequency (15-35/year) to minimize fee drag while capturing significant market moves in both bull and bear regimes. Weekly trend avoids counter-trend trades, daily trend provides intermediate filter, and 12h Camarilla levels provide precise entry/exit points.
+1d_williams_alligator_v1
+Hypothesis: Williams Alligator on 1-day chart with 1-week trend filter and volume confirmation.
+- Long when Alligator jaws (13-period SMMA) crosses above teeth (8-period SMMA) with price above both, 
+  weekly uptrend (price > weekly SMA50), and volume expansion
+- Short when jaws crosses below teeth with price below both, weekly downtrend, and volume expansion
+- Uses Williams Alligator's smoothed moving averages to reduce whipsaw in ranging markets
+- Weekly trend filter ensures alignment with higher timeframe momentum
+- Designed for low trade frequency (10-30/year) to minimize fee drift
+- Works in bull/bear via weekly trend filter and volume confirmation requirement
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w1d_camarilla_volume_trend_v1"
-timeframe = "12h"
+name = "1d_williams_alligator_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    if len(high) < 1:
-        return np.full(len(high), np.nan), np.full(len(high), np.nan)
+def smma(data, period):
+    """Smoothed Moving Average (SMMA) - Williams Alligator uses SMMA"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=float)
     
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    H3 = pivot + (range_val * 1.1 / 4)
-    L3 = pivot - (range_val * 1.1 / 4)
-    
-    return H3, L3
-
-def calculate_ema(close, period):
-    """Calculate EMA with proper handling"""
-    if len(close) < period:
-        return np.full_like(close, np.nan, dtype=float)
-    
-    ema = np.full_like(close, np.nan, dtype=float)
-    alpha = 2.0 / (period + 1)
-    ema[period-1] = np.mean(close[:period])
-    for i in range(period, len(close)):
-        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
-    return ema
+    smma = np.full_like(data, np.nan, dtype=float)
+    smma[period-1] = np.mean(data[:period])
+    for i in range(period, len(data)):
+        smma[i] = (smma[i-1] * (period-1) + data[i]) / period
+    return smma
 
 def generate_signals(prices):
     n = len(prices)
@@ -47,55 +40,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for primary trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for intermediate trend filter
+    # Get 1-day data for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 12-hour data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
+    # Calculate Williams Alligator on 1-day
+    # Jaws: 13-period SMMA of median price
+    median_price = (high + low) / 2.0
+    median_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        median_1d[i] = (df_1d['high'].iloc[i] + df_1d['low'].iloc[i]) / 2.0
+    
+    jaws = smma(median_1d, 13)  # Blue line
+    teeth = smma(median_1d, 8)   # Red line
+    lips = smma(median_1d, 5)    # Green line (not used in signals)
+    
+    # Weekly trend filter: price > weekly SMA50 for uptrend
     close_1w = df_1w['close'].values
-    ema_50_1w = calculate_ema(close_1w, 50)
+    sma_50_1w = np.full_like(close_1w, np.nan, dtype=float)
+    for i in range(50, len(close_1w)):
+        sma_50_1w[i] = np.mean(close_1w[i-50:i])
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = calculate_ema(close_1d, 50)
+    # Align indicators to daily timeframe
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Calculate 12-hour Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    camarilla_H3_12h, camarilla_L3_12h = calculate_camarilla(high_12h, low_12h, close_12h)
-    
-    # Align indicators to 12-hour timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    camarilla_H3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H3_12h)
-    camarilla_L3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L3_12h)
-    
-    # Volume confirmation: 50-period average
+    # Volume confirmation: 20-day average
     vol_ma = np.full(n, np.nan)
-    for i in range(50, n):
-        vol_ma[i] = np.mean(volume[i-50:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(camarilla_H3_12h_aligned[i]) or np.isnan(camarilla_L3_12h_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(sma_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -104,33 +92,32 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        weekly_trend_up = price > ema_50_1w_aligned[i]
-        daily_trend_up = price > ema_50_1d_aligned[i]
-        H3 = camarilla_H3_12h_aligned[i]
-        L3 = camarilla_L3_12h_aligned[i]
+        jaw = jaws_aligned[i]
+        tooth = teeth_aligned[i]
+        weekly_uptrend = price > sma_50_1w_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price closes below L3 or trend turns against position
-            if price < L3 or not (weekly_trend_up and daily_trend_up):
+            # Exit: jaws crosses below teeth OR volume drops significantly
+            if jaw < tooth or vol_ratio < 1.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price closes above H3 or trend turns against position
-            if price > H3 or not (not weekly_trend_up and not daily_trend_up):
+            # Exit: jaws crosses above teeth OR volume drops significantly
+            if jaw > tooth or vol_ratio < 1.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches/crosses above H3 with volume expansion and both trends up
-            if price >= H3 and vol_ratio > 2.0 and weekly_trend_up and daily_trend_up:
+            # Enter long: jaws crosses above teeth with price above both, weekly uptrend, volume expansion
+            if jaw > tooth and price > jaw and price > tooth and weekly_uptrend and vol_ratio > 1.8:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches/crosses below L3 with volume expansion and both trends down
-            elif price <= L3 and vol_ratio > 2.0 and not weekly_trend_up and not daily_trend_up:
+            # Enter short: jaws crosses below teeth with price below both, weekly downtrend, volume expansion
+            elif jaw < tooth and price < jaw and price < tooth and not weekly_uptrend and vol_ratio > 1.8:
                 position = -1
                 signals[i] = -0.25
     
