@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture breakout momentum. Filtered by 1d EMA(50) trend to avoid counter-trend trades and volume confirmation (>1.5x 20-period average) to avoid false breakouts. Works in bull/bear by aligning with higher timeframe trend. Targets 20-40 trades/year on 6h timeframe.
+12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Price breakouts above/below 20-period Donchian channels on 12h timeframe capture significant trends. Filtered by 1d EMA trend to avoid counter-trend trades and volume confirmation to avoid false signals. Works in bull/bear by aligning with higher timeframe trend. Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -28,9 +28,11 @@ def generate_signals(prices):
     ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period high/low)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h Donchian Channel (20-period)
+    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = period20_high
+    donchian_low = period20_low
     
     # Volume filter (>1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -39,7 +41,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(vol_filter[i])):
