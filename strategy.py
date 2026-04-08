@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_price_action_v1
-Hypothesis: Weekly pivot direction (from previous week) filters 60-minute breakouts.
-- Uses weekly open/close to determine bull/bear bias
-- Daily high/low as dynamic support/resistance
-- Enter on 6h breakout of daily levels in direction of weekly bias
+4h_1w_1d_price_action_v2
+Hypothesis: Weekly bias (from previous week close vs open) filters daily breakouts on 4h timeframe.
+- Weekly bullish bias: weekly close > open → only look for long entries
+- Weekly bearish bias: weekly close < open → only look for short entries  
+- Daily high/low as dynamic support/resistance levels
+- Enter on 4h breakout of daily levels in direction of weekly bias
 - Exit on opposite daily level touch or weekly bias reversal
 - Works in bull/bear via weekly filter; avoids counter-trend trades
-Target: 15-30 trades/year
+Target: 20-40 trades/year
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_price_action_v1"
-timeframe = "6h"
+name = "4h_1w_1d_price_action_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +44,7 @@ def generate_signals(prices):
     weekly_bullish_ffilled = weekly_bullish_series.ffill().values
     weekly_bearish_ffilled = weekly_bearish_series.ffill().values
     
-    # Align weekly bias to 6h
+    # Align weekly bias to 4h
     weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_ffilled)
     weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish_ffilled)
     
@@ -62,7 +63,7 @@ def generate_signals(prices):
     daily_high_ffilled = daily_high_series.ffill().values
     daily_low_ffilled = daily_low_series.ffill().values
     
-    # Align daily levels to 6h
+    # Align daily levels to 4h
     daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high_ffilled)
     daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low_ffilled)
     
