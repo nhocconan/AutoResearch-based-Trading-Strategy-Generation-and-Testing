@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
-"""
-Experiment #24869: 4h Donchian breakout with 1d trend filter and volume confirmation
-Hypothesis: Breakouts above 4h Donchian channel highs/lows with 1d EMA trend filter and volume spikes capture strong momentum moves in both bull and bear markets. 
-Uses tight entry conditions (10-25 trades/year) to avoid fee drag while capturing significant trends.
-"""
+# [24873] 4h_12h_camarilla_pivot_v4
+# Hypothesis: 4-hour strategy using 12-hour Camarilla pivot levels with volume confirmation and 1-day trend filter.
+# Long when price breaks above 12h R2 with volume > 2x average and price > 1d EMA50.
+# Short when price breaks below 12h S2 with volume > 2x average and price < 1d EMA50.
+# Exit when price crosses opposite 12h level OR volume falls below 1.5x average.
+# Uses higher timeframe pivots for better signal quality in both bull and bear markets.
+# Target: 15-40 trades/year per symbol.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1d_trend_volume_v1"
+name = "4h_12h_camarilla_pivot_v4"
 timeframe = "4h"
 leverage = 1.0
 
+def calculate_ema(close, period):
+    """Calculate EMA with proper handling"""
+    if len(close) < period:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    ema = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    return ema
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,44 +37,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 12-hour and 1-day data for context
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_12h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = np.full_like(close_1d, np.nan, dtype=float)
-    if len(close_1d) >= 200:
-        alpha = 2.0 / (200 + 1)
-        ema_200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_200_1d[i-1]
+    # Calculate 12h Pivot (using previous 12h bar's data)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_len = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    # 12h support/resistance levels (Camarilla S2/R2)
+    S2_12h = pivot_12h - (range_12h * 1.1 / 6)  # 12h S2
+    R2_12h = pivot_12h + (range_12h * 1.1 / 6)  # 12h R2
     
-    for i in range(donchian_len, n):
-        upper[i] = np.max(high[i-donchian_len:i])
-        lower[i] = np.min(low[i-donchian_len:i])
+    # Calculate 1d EMA for trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    
+    # Align indicators to 4-hour timeframe
+    S2_12h_aligned = align_htf_to_ltf(prices, df_12h, S2_12h)
+    R2_12h_aligned = align_htf_to_ltf(prices, df_12h, R2_12h)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1d EMA200 to 4h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(S2_12h_aligned[i]) or np.isnan(R2_12h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -69,30 +82,32 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        trend_up = price > ema_200_1d_aligned[i]
+        S2 = S2_12h_aligned[i]
+        R2 = R2_12h_aligned[i]
+        trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price breaks below Donchian lower OR volume drops below 1.5x
-            if price < lower[i] or vol_ratio < 1.5:
+            # Exit: price crosses below 12h S2 or volume drops below 1.5x average
+            if price < S2 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above Donchian upper OR volume drops below 1.5x
-            if price > upper[i] or vol_ratio < 1.5:
+            # Exit: price crosses above 12h R2 or volume drops below 1.5x average
+            if price > R2 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian upper with volume expansion and uptrend
-            if price > upper[i] and vol_ratio > 2.0 and trend_up:
+            # Enter long: price breaks above 12h R2 with volume expansion and uptrend on 1d
+            if price > R2 and vol_ratio > 2.0 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian lower with volume expansion and downtrend
-            elif price < lower[i] and vol_ratio > 2.0 and not trend_up:
+            # Enter short: price breaks below 12h S2 with volume expansion and downtrend on 1d
+            elif price < S2 and vol_ratio > 2.0 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
