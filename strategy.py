@@ -1,32 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_Williams_Alligator_Filtered_v1
-Hypothesis: Williams Alligator (3 SMAs) identifies trend direction; enter on pullback to median SMA with volume confirmation in 4h timeframe.
-- Jaw (13-period), Teeth (8-period), Lips (5-period) SMAs on median price
-- Bullish when Lips > Teeth > Jaw; Bearish when Lips < Teeth < Jaw
-- Entry on pullback to Teeth (8 SMA) with volume > 1.5x average volume
-- Exit on opposite Alligator alignment or volume drop
-- Williams Alligator works in both trending and ranging markets by showing convergence/divergence
-- Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+6h_1w_1d_vwap_reversion_v1
+Hypothesis: Mean reversion to VWAP on 6h timeframe with weekly bias filter.
+- Calculate 1d VWAP from daily data
+- Use weekly trend (1w close vs open) as bias filter
+- Enter long when price < VWAP and weekly bullish, short when price > VWAP and weekly bearish
+- Exit when price crosses VWAP or weekly bias reverses
+- VWAP acts as dynamic equilibrium price in ranging markets
+- Weekly bias prevents counter-trend trades in strong trends
+Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Williams_Alligator_Filtered_v1"
-timeframe = "4h"
+name = "6h_1w_1d_vwap_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_sma(arr, period):
-    """Calculate simple moving average with proper handling of NaN"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan, dtype=float)
-    
-    sma = np.full_like(arr, np.nan, dtype=float)
-    for i in range(period - 1, len(arr)):
-        sma[i] = np.mean(arr[i - period + 1:i + 1])
-    return sma
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,41 +30,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate median price (typical price)
-    median_price = (high + low + close) / 3.0
+    # Get weekly data for bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Williams Alligator components: Smoothed SMAs of median price
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
+    # Weekly bias: bullish if weekly close > open, bearish if close < open
+    weekly_bullish = df_1w['close'].values > df_1w['open'].values
+    weekly_bearish = df_1w['close'].values < df_1w['open'].values
     
-    jaw = calculate_sma(median_price, jaw_period)
-    teeth = calculate_sma(median_price, teeth_period)
-    lips = calculate_sma(median_price, lips_period)
+    # Forward fill weekly bias to get current week's bias
+    weekly_bullish_series = pd.Series(weekly_bullish)
+    weekly_bearish_series = pd.Series(weekly_bearish)
+    weekly_bullish_ffilled = weekly_bullish_series.ffill().values
+    weekly_bearish_ffilled = weekly_bearish_series.ffill().values
     
-    # Alligator alignment: Bullish when Lips > Teeth > Jaw, Bearish when Lips < Teeth < Jaw
-    bullish_alignment = (lips > teeth) & (teeth > jaw)
-    bearish_alignment = (lips < teeth) & (teeth < jaw)
+    # Align weekly bias to 6h
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_ffilled)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish_ffilled)
     
-    # Volume confirmation: current volume > 1.5x average volume over 20 periods
-    vol_ma = calculate_sma(volume, 20)
-    volume_confirmation = volume > (vol_ma * 1.5)
+    # Get daily data for VWAP
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Pullback to Teeth (8 SMA) with tolerance
-    pullback_tolerance = 0.001  # 0.1% tolerance
-    lips_above_teeth = lips > teeth * (1 - pullback_tolerance)
-    lips_below_teeth = lips < teeth * (1 + pullback_tolerance)
+    # Calculate daily VWAP: typical price * volume / cumulative volume
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    pv = typical_price * df_1d['volume'].values
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(df_1d['volume'].values)
+    # Avoid division by zero
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    
+    # Forward fill VWAP
+    vwap_series = pd.Series(vwap)
+    vwap_ffilled = vwap_series.ffill().values
+    
+    # Align VWAP to 6h
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_ffilled)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = max(jaw_period, teeth_period, lips_period, 20) + 5
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(vwap_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -82,31 +87,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: bearish alignment or volume drops below average
-            if bearish_alignment[i] or volume[i] <= vol_ma[i]:
+            # Exit: price crosses above VWAP or weekly bias turns bearish
+            if close[i] >= vwap_aligned[i] or weekly_bearish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: bullish alignment or volume drops below average
-            if bullish_alignment[i] or volume[i] <= vol_ma[i]:
+            # Exit: price crosses below VWAP or weekly bias turns bullish
+            if close[i] <= vwap_aligned[i] or weekly_bullish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: bullish alignment + pullback to teeth + volume confirmation
-            if (bullish_alignment[i] and 
-                lips_below_teeth[i] and 
-                volume_confirmation[i]):
+            # Long entry: price below VWAP with weekly bullish bias
+            if close[i] < vwap_aligned[i] and weekly_bullish_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish alignment + pullback to teeth + volume confirmation
-            elif (bearish_alignment[i] and 
-                  lips_above_teeth[i] and 
-                  volume_confirmation[i]):
+            # Short entry: price above VWAP with weekly bearish bias
+            elif close[i] > vwap_aligned[i] and weekly_bearish_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
