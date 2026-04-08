@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_ema_crossover_volume_v2
-Hypothesis: Use 1-week EMA(13) for long-term bias and 1-day EMA(8/21) for medium-term trend alignment, with volume confirmation on 12h breaks. Enter long when 12h close > 1-day EMA(8) with volume > 1.5x average and 1-week EMA rising; short when 12h close < 1-day EMA(21) with volume confirmation and 1-week EMA falling. Designed to capture trends in bull markets and reversals in bear markets by aligning with higher timeframe momentum.
-Target: 15-35 trades/year per symbol (60-140 total over 4 years).
+4h_1w_1d_camarilla_breakout_volume_v2
+Hypothesis: Use weekly EMA for long-term bias and daily Camarilla levels for entry with volume confirmation.
+Long when price breaks above daily R3 with volume and weekly bias up. Short when price breaks below daily S3 with volume and weekly bias down.
+Designed to work in both bull (breakouts) and bear (reversals at key levels) markets.
+Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_ema_crossover_volume_v2"
-timeframe = "12h"
+name = "4h_1w_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,33 +22,48 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA calculation
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Get weekly data for bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA(8) and EMA(21)
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema8_1d = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align daily EMA to 12h timeframe
-    ema8_1d_aligned = align_htf_to_ltf(prices, df_1d, ema8_1d)
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
+    # Previous day's close for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_close[0] = close_1d[0]  # First value
     
-    # Weekly bias using EMA(13) - check if rising/falling
+    # Daily range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
+    r4 = close_1d + range_1d * 1.1 / 2
+    s4 = close_1d - range_1d * 1.1 / 2
+    
+    # Align daily Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Weekly bias using EMA (13-period)
     close_1w = df_1w['close'].values
-    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
-    # Calculate slope of weekly EMA (rising if current > previous)
-    ema13_1w_slope = np.diff(ema13_1w_aligned, prepend=ema13_1w_aligned[0])
+    ema_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema8_1d_aligned[i]) or np.isnan(ema21_1d_aligned[i]) or 
-            np.isnan(ema13_1w_aligned[i]) or np.isnan(ema13_1w_slope[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -70,27 +87,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below daily EMA(21) or weekly EMA turns down
-            if close[i] < ema21_1d_aligned[i] or ema13_1w_slope[i] <= 0:
+            # Exit: price breaks below daily S3 or weekly bias turns down
+            if close[i] < s3_aligned[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above daily EMA(8) or weekly EMA turns up
-            if close[i] > ema8_1d_aligned[i] or ema13_1w_slope[i] >= 0:
+            # Exit: price breaks above daily R3 or weekly bias turns up
+            if close[i] > r3_aligned[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price crosses above daily EMA(8) with volume and weekly EMA rising
-            if close[i] > ema8_1d_aligned[i] and vol_confirm[i] and ema13_1w_slope[i] > 0:
+            # Long entry: price breaks above daily R3 with volume and weekly bias up
+            if close[i] > r3_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price crosses below daily EMA(21) with volume and weekly EMA falling
-            elif close[i] < ema21_1d_aligned[i] and vol_confirm[i] and ema13_1w_slope[i] < 0:
+            # Short entry: price breaks below daily S3 with volume and weekly bias down
+            elif close[i] < s3_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
