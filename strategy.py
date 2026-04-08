@@ -1,34 +1,46 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_pivot_v1
-Hypothesis: 12-hour timeframe with 1-day HTF filter using Camarilla pivot levels (H3/L3).
-- Long when price closes above 12h H3 with volume > 2x average and price > 1d EMA50
-- Short when price closes below 12h L3 with volume > 2x average and price < 1d EMA50
-- Exit when price closes below/above opposite level or volume drops below average
-- Uses discrete position sizing (0.25) to minimize churn and target ~25 trades/year
-- Designed to work in both bull (trend follow) and bear (mean reversion at extremes) markets
+6h_1w21d_fib_ext_v1
+Hypothesis: Use weekly Fibonacci extensions from weekly swing points with 21-day EMA filter for 6h timeframe.
+- Long when price breaks above weekly 1.618 extension with volume > 1.8x average and price > 21-day EMA
+- Short when price breaks below weekly 0.618 extension with volume > 1.8x average and price < 21-day EMA
+- Exit when price crosses back below/above the weekly VWAP or volume drops below average
+- Uses discrete position sizing (0.25) to minimize churn
+- Designed for 15-30 trades/year to avoid fee drag in 6h timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "6h_1w21d_fib_ext_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    if len(high) < 1:
+def calculate_fib_extension(high, low, close):
+    """Calculate weekly Fibonacci extension levels (0.618 and 1.618)"""
+    if len(high) < 2:
         return np.full(len(high), np.nan), np.full(len(high), np.nan)
     
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
+    # Find swing high and low (simplified: use max/min of period)
+    period_high = np.max(high)
+    period_low = np.min(low)
+    diff = period_high - period_low
     
-    H3 = pivot + (range_val * 1.1 / 4)
-    L3 = pivot - (range_val * 1.1 / 4)
+    # Fibonacci extension levels
+    fib_0618 = period_low + diff * 0.618  # Retracement level for shorts
+    fib_1618 = period_high + diff * 0.618  # Extension level for longs
     
-    return H3, L3
+    return np.full(len(high), fib_1618), np.full(len(high), fib_0618)
+
+def calculate_vwap(high, low, close, volume):
+    """Calculate VWAP"""
+    if len(volume) == 0 or np.sum(volume) == 0:
+        return np.full(len(close), np.nan)
+    
+    typical_price = (high + low + close) / 3.0
+    vwap = np.cumsum(typical_price * volume) / np.cumsum(volume)
+    return vwap
 
 def calculate_ema(close, period):
     """Calculate EMA with proper handling"""
@@ -44,7 +56,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -52,31 +64,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12-hour data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for Fibonacci levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1-day data for trend filter
+    # Get daily data for VWAP and EMA filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Calculate 12-hour Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly Fibonacci extension levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    camarilla_H3_12h, camarilla_L3_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    fib_ext_1618, fib_ext_0618 = calculate_fib_extension(high_1w, low_1w, close_1w)
     
-    # Calculate 1-day EMA for trend filter
+    # Calculate daily VWAP
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = calculate_ema(close_1d, 50)
+    volume_1d = df_1d['volume'].values
     
-    # Align indicators to 12-hour timeframe
-    camarilla_H3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H3_12h)
-    camarilla_L3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L3_12h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vwap_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d)
+    
+    # Calculate daily 21-period EMA for trend filter
+    ema_21_1d = calculate_ema(close_1d, 21)
+    
+    # Align indicators to 6-hour timeframe
+    fib_ext_1618_aligned = align_htf_to_ltf(prices, df_1w, fib_ext_1618)
+    fib_ext_0618_aligned = align_htf_to_ltf(prices, df_1w, fib_ext_0618)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
     # Volume confirmation: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -86,10 +106,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(camarilla_H3_12h_aligned[i]) or np.isnan(camarilla_L3_12h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(fib_ext_1618_aligned[i]) or np.isnan(fib_ext_0618_aligned[i]) or
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema_21_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -98,32 +118,33 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        H3 = camarilla_H3_12h_aligned[i]
-        L3 = camarilla_L3_12h_aligned[i]
-        trend_up_1d = price > ema_50_1d_aligned[i]
+        fib_up = fib_ext_1618_aligned[i]
+        fib_down = fib_ext_0618_aligned[i]
+        vwap = vwap_1d_aligned[i]
+        ema_21 = ema_21_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price closes below L3 or volume drops below average
-            if price < L3 or vol_ratio < 1.0:
+            # Exit: price crosses below VWAP or volume drops below average
+            if price < vwap or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price closes above H3 or volume drops below average
-            if price > H3 or vol_ratio < 1.0:
+            # Exit: price crosses above VWAP or volume drops below average
+            if price > vwap or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above H3 with volume expansion and uptrend on 1d
-            if price > H3 and vol_ratio > 2.0 and trend_up_1d:
+            # Enter long: price breaks above weekly 1.618 extension with volume expansion and above 21-day EMA
+            if price > fib_up and vol_ratio > 1.8 and price > ema_21:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below L3 with volume expansion and downtrend on 1d
-            elif price < L3 and vol_ratio > 2.0 and not trend_up_1d:
+            # Enter short: price breaks below weekly 0.618 extension with volume expansion and below 21-day EMA
+            elif price < fib_down and vol_ratio > 1.8 and price < ema_21:
                 position = -1
                 signals[i] = -0.25
     
