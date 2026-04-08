@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-12h_donchian_breakout_volume_v1
-Hypothesis: Breakouts above/below Donchian channels with volume confirmation and ADX trend filter.
-- Long: Price breaks above Donchian upper channel + volume > 1.5x avg + ADX > 25
-- Short: Price breaks below Donchian lower channel + volume > 1.5x avg + ADX > 25
-- Exit: Price crosses opposite Donchian channel
-- Uses 1d trend filter: only trade long when price > 1d EMA50, short when price < 1d EMA50
-- Target: 15-30 trades/year to avoid overtrading on 12h timeframe
+1d_keltner_rsi_reversion_v1
+Hypothesis: Mean reversion on daily timeframe using Keltner Channel + RSI.
+- Uses 20-day EMA with ATR(10) bands (Keltner Channel)
+- Long when price touches lower band and RSI < 30 (oversold)
+- Short when price touches upper band and RSI > 70 (overbought)
+- Exit when price crosses back to EMA or RSI normalizes
+- Weekly trend filter: only take long if weekly close > weekly EMA(50), short if < weekly EMA(50)
+- Designed for low trade frequency (<20/year) to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "1d_keltner_rsi_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,124 +26,56 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # === DAILY INDICATORS ===
+    # EMA(20) for Keltner middle
+    close_s = pd.Series(close)
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # ATR(10) for Keltner width
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # first bar has no previous close
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Volume average (20-period)
-    vol_ma = np.full(n, np.nan)
-    vol_sum = 0.0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= lookback:
-            vol_sum -= volume[i - lookback]
-        if i >= lookback - 1:
-            vol_ma[i] = vol_sum / lookback
+    # Keltner Bands
+    keltner_upper = ema_20 + 2 * atr_10
+    keltner_lower = ema_20 - 2 * atr_10
     
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        n = len(high)
-        tr = np.zeros(n)
-        plus_dm = np.zeros(n)
-        minus_dm = np.zeros(n)
-        
-        for i in range(1, n):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-            
-            if high_diff > low_diff and high_diff > 0:
-                plus_dm[i] = high_diff
-            else:
-                plus_dm[i] = 0
-                
-            if low_diff > high_diff and low_diff > 0:
-                minus_dm[i] = low_diff
-            else:
-                minus_dm[i] = 0
-        
-        # Smooth TR, +DM, -DM
-        atr = np.zeros(n)
-        plus_di = np.zeros(n)
-        minus_di = np.zeros(n)
-        
-        # Initial average
-        if n >= period:
-            atr[period-1] = np.mean(tr[1:period])
-            plus_dm_avg = np.mean(plus_dm[1:period])
-            minus_dm_avg = np.mean(minus_dm[1:period])
-            
-            if atr[period-1] != 0:
-                plus_di[period-1] = (plus_dm_avg / atr[period-1]) * 100
-                minus_di[period-1] = (minus_dm_avg / atr[period-1]) * 100
-            
-            # Wilder smoothing
-            for i in range(period, n):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_dm_avg = (plus_dm_avg * (period-1) + plus_dm[i]) / period
-                minus_dm_avg = (minus_dm_avg * (period-1) + minus_dm[i]) / period
-                
-                if atr[i] != 0:
-                    plus_di[i] = (plus_dm_avg / atr[i]) * 100
-                    minus_di[i] = (minus_dm_avg / atr[i]) * 100
-        
-        # Calculate DX and ADX
-        dx = np.zeros(n)
-        adx = np.zeros(n)
-        
-        for i in range(period, n):
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100
-        
-        # Smooth DX to get ADX
-        if n >= 2*period-1:
-            adx[2*period-2] = np.mean(dx[period:2*period-1])
-            for i in range(2*period-1, n):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    adx = calculate_adx(high, low, close, 14)
-    
-    # 1d trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50 = np.full(len(close_1d), np.nan)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_bullish = close_1w > ema_50_1w
+    weekly_bearish = close_1w < ema_50_1w
     
-    # Calculate EMA50
-    alpha = 2.0 / (50 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_50[i] = close_1d[i]
-        elif np.isnan(ema_50[i-1]):
-            ema_50[i] = close_1d[i]
-        else:
-            ema_50[i] = alpha * close_1d[i] + (1 - alpha) * ema_50[i-1]
+    # Align weekly trend to daily
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
+    # === SIGNAL LOGIC ===
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after EMA warmup
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(rsi[i]) or np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -150,35 +83,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long
-            # Exit: price crosses below lower Donchian channel
-            if close[i] < lowest_low[i]:
+            # Exit: price crosses above EMA(20) or RSI > 50
+            if close[i] > ema_20[i] or rsi[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above upper Donchian channel
-            if close[i] > highest_high[i]:
+            # Exit: price crosses below EMA(20) or RSI < 50
+            if close[i] < ema_20[i] or rsi[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long conditions
-            long_breakout = close[i] > highest_high[i]
-            long_volume = volume[i] > 1.5 * vol_ma[i]
-            long_adx = adx[i] > 25
-            long_trend = close[i] > ema_50_aligned[i]
-            
-            if long_breakout and long_volume and long_adx and long_trend:
+            # Long: price touches lower band + RSI oversold + weekly bullish
+            if (low[i] <= keltner_lower[i] and 
+                rsi[i] < 30 and 
+                weekly_bullish_aligned[i] > 0.5):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions
-            elif (close[i] < lowest_low[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  adx[i] > 25 and 
-                  close[i] < ema_50_aligned[i]):
+            # Short: price touches upper band + RSI overbought + weekly bearish
+            elif (high[i] >= keltner_upper[i] and 
+                  rsi[i] > 70 and 
+                  weekly_bearish_aligned[i] > 0.5):
                 position = -1
                 signals[i] = -0.25
     
