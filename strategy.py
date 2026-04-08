@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_fractal_breakout_1d_trend_volume_v8"
+name = "12h_fractal_breakout_1d_trend_volume_v9"
 timeframe = "12h"
 leverage = 1.0
 
@@ -68,10 +68,10 @@ def generate_signals(prices):
         
         # Volatility filter: avoid extremely low volatility (choppy) conditions
         # Use 50-period SMA of ATR to normalize
-        volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.5)  # Only trade when volatility is above 50% of average
+        volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.7)  # Only trade when volatility is above 70% of average
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmation = volume[i] > (avg_volume_12[i] * 1.5)
+        # Volume confirmation: current volume > 2.0x average volume (stricter)
+        volume_confirmation = volume[i] > (avg_volume_12[i] * 2.0)
         
         # Trend filter: price above/below 50 EMA on 1d
         uptrend = close[i] > ema_1d_aligned
