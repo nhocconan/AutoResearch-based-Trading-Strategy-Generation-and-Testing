@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "1d_1w_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,47 +18,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 34-period EMA on 1w close for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Vectorized Donchian calculation with min_periods
-    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate KAMA on daily close
+    # Efficiency ratio
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    # Pad ER array to match close length
+    er_full = np.full_like(close, np.nan, dtype=float)
+    er_full[10:] = er
+    # Smoothing constants
+    sc = (er_full * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Initialize
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Donchian levels to 12h timeframe
-    upper_12h = align_htf_to_ltf(prices, df_12h, high_20)
-    lower_12h = align_htf_to_ltf(prices, df_12h, low_20)
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad RSI array
+    rsi_full = np.full_like(close, np.nan)
+    rsi_full[14:] = rsi
     
-    # Get 1d data for volume baseline
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate Choppiness Index on daily data
+    atr = np.zeros_like(close)
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.insert(tr, 0, 0)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period average volume on 1d
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Volume confirmation: 12h volume > 1.5x 1d average volume (scaled to 12h)
-    # 1d volume represents 2x 12h periods, so divide by 2 for per-period comparison
-    vol_threshold = vol_avg_1d_aligned / 2.0
-    vol_confirm = volume > vol_threshold * 1.5
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    chop = np.zeros_like(close)
+    mask = (range_hl != 0) & (atr != 0) & (~np.isnan(atr))
+    chop[mask] = 100 * np.log10(np.sum(tr[np.arange(len(tr))[:, None] & np.arange(14)[None, :] >= np.arange(14)[:, None]], axis=1) / 
+                                (atr * 14)) / np.log10(14)
+    chop = np.where(chop > 0, chop, 50)  # Default to middle if invalid
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = max(20, 20) + 1
+    start_idx = max(34, 14, 10) + 1
     
     for i in range(start_idx, n):
-        # Skip if Donchian or volume average not available
-        if np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or np.isnan(vol_avg_1d_aligned[i]):
+        # Skip if any required data not available
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi_full[i]) or np.isnan(chop[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -67,27 +98,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 12h Donchian lower band
-            if close[i] < lower_12h[i]:
+            # Exit: price crosses below KAMA (trend change)
+            if close[i] < kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 12h Donchian upper band
-            if close[i] > upper_12h[i]:
+            # Exit: price crosses above KAMA (trend change)
+            if close[i] > kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 12h Donchian upper band with volume confirmation
-            if close[i] > upper_12h[i] and vol_confirm[i]:
+            # Long entry: price above KAMA, RSI < 40, Chop > 61.8 (trend in chop)
+            if (close[i] > kama[i] and rsi_full[i] < 40 and chop[i] > 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 12h Donchian lower band with volume confirmation
-            elif close[i] < lower_12h[i] and vol_confirm[i]:
+            # Short entry: price below KAMA, RSI > 60, Chop > 61.8 (trend in chop)
+            elif (close[i] < kama[i] and rsi_full[i] > 60 and chop[i] > 61.8):
                 position = -1
                 signals[i] = -0.25
     
