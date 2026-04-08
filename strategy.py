@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_volume_breakout_1d_trend_v1
-# Hypothesis: 4h volume breakout (volume > 2x 20-period average) in direction of daily trend (price above/below daily EMA50).
-# Works in bull markets by capturing continuation breakouts and in bear markets by capturing breakdowns.
-# Volume filter ensures participation, trend filter avoids counter-trend trades.
-# Target: 20-40 trades/year with ~0.25 position size to minimize fee drag.
+# 12h_camarilla_pivot_volume_spike_v1
+# Hypothesis: 12h Camarilla pivot level touch with volume spike and daily trend filter.
+# Works in bull markets by buying dips to support in uptrend and selling rallies to resistance in downtrend.
+# In bear markets, captures mean-reversion at extreme levels when price reverts to mean from overbought/oversold.
+# Uses Camarilla levels (H3/L3) from daily timeframe for institutional support/resistance.
+# Volume spike confirms institutional participation. Target: 15-25 trades/year with ~0.25 position size.
 
-name = "4h_volume_breakout_1d_trend_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_volume_spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,18 +30,30 @@ def generate_signals(prices):
     vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
     vol_ma[:19] = vol_ma[19]
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla levels
     df_daily = get_htf_data(prices, '1d')
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
+    
+    # Calculate Camarilla levels for each day
+    # H3/L3 are the key levels for intraday trading
+    # H3 = Close + 1.1 * (High - Low) / 2
+    # L3 = Close - 1.1 * (High - Low) / 2
+    camarilla_h3 = close_daily + 1.1 * (high_daily - low_daily) / 2
+    camarilla_l3 = close_daily - 1.1 * (high_daily - low_daily) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_l3)
     
     # Daily EMA (50-period) for trend filter
     ema_period = 50
     ema_daily = np.zeros_like(close_daily)
-    ema_daily[ema_period-1] = np.mean(close_daily[:ema_period])
-    for i in range(ema_period, len(close_daily)):
-        ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
-    
-    # Align daily EMA to 4h timeframe
+    if len(close_daily) >= ema_period:
+        ema_daily[ema_period-1] = np.mean(close_daily[:ema_period])
+        for i in range(ema_period, len(close_daily)):
+            ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Pre-compute session filter (08-20 UTC)
@@ -61,39 +74,40 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(vol_ma[i]) or volume[i] == 0 or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
             np.isnan(ema_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period average
-        volume_filter = volume[i] > 2.0 * vol_ma[i]
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > 1.8 * vol_ma[i]
         
-        # Higher timeframe trend filter: price above/below daily EMA
+        # Daily trend filter
         uptrend_htf = close[i] > ema_daily_aligned[i]
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if trend reverses or volume fails
-            if not uptrend_htf or not volume_filter:
+            # Exit if price reaches H3 (resistance) or trend fails
+            if close[i] >= camarilla_h3_aligned[i] or not uptrend_htf or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if trend reverses or volume fails
-            if not downtrend_htf or not volume_filter:
+            # Exit if price reaches L3 (support) or trend fails
+            if close[i] <= camarilla_l3_aligned[i] or not downtrend_htf or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: volume breakout and daily uptrend
-            if volume_filter and uptrend_htf:
+            # Long entry: price near L3 support with volume spike and uptrend
+            if (close[i] <= camarilla_l3_aligned[i] * 1.005) and volume_filter and uptrend_htf:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: volume breakout and daily downtrend
-            elif volume_filter and downtrend_htf:
+            # Short entry: price near H3 resistance with volume spike and downtrend
+            elif (close[i] >= camarilla_h3_aligned[i] * 0.995) and volume_filter and downtrend_htf:
                 position = -1
                 signals[i] = -0.25
     
