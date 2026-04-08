@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_v3
-# Hypothesis: Breakout of 4h Donchian channels with 1d EMA trend filter and volume confirmation works in both bull and bear markets by capturing momentum bursts while avoiding countertrend trades. 4h timeframe limits overtrading; volume and trend filters reduce false breakouts. Adjusted to reduce trade frequency and improve win rate.
+# 6h_1d_camarilla_pivot_volume_v1
+# Hypothesis: Camarilla pivot levels on 1d provide reliable support/resistance. Fade at R3/S3 levels with volume exhaustion signals, breakout continuation at R4/S4 with volume expansion. Works in both bull/bear markets by fading overextensions in ranging markets and capturing breakouts in trending markets. 6h timeframe reduces overtrading vs lower timeframes.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_v3"
-timeframe = "4h"
+name = "6h_1d_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -21,34 +21,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian(20) on 4h high/low
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    # Align to 4h timeframe (no additional delay needed for Donchian)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Calculate EMA50 on 1d close
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    # Align to 4h timeframe (no additional delay needed for EMA)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: 4h volume > 1.5x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    # Previous day's values (shift by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # First day has no previous data
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla calculations
+    range_ = prev_high - prev_low
+    camarilla_h4 = prev_close + range_ * 1.1 / 2
+    camarilla_l4 = prev_close - range_ * 1.1 / 2
+    camarilla_h3 = prev_close + range_ * 1.1 / 4
+    camarilla_l3 = prev_close - range_ * 1.1 / 4
+    camarilla_h2 = prev_close + range_ * 1.1 / 6
+    camarilla_l2 = prev_close - range_ * 1.1 / 6
+    camarilla_h1 = prev_close + range_ * 1.1 / 12
+    camarilla_l1 = prev_close - range_ * 1.1 / 12
+    
+    # Align Camarilla levels to 6h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume exhaustion: current volume < 0.7x average of last 6 periods
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    vol_exhaustion = volume < vol_ma * 0.7
+    
+    # Volume expansion: current volume > 1.8x average of last 6 periods
+    vol_expansion = volume > vol_ma * 1.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -57,8 +71,8 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if data not available
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if Camarilla data not available
+        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -67,28 +81,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian low
-            if close[i] < donchian_low_aligned[i]:
+            # Exit: price closes below L3 or reaches L4 (target)
+            if close[i] < l3_aligned[i] or close[i] <= l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian high
-            if close[i] > donchian_high_aligned[i]:
+            # Exit: price closes above H3 or reaches H4 (target)
+            if close[i] > h3_aligned[i] or close[i] >= h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 4h Donchian high, above 1d EMA50, with volume confirmation
-            if close[i] > donchian_high_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_confirm[i]:
-                position = 1
+            # Fade at R3/S3 with volume exhaustion (mean reversion)
+            if close[i] > h3_aligned[i] and vol_exhaustion[i]:
+                position = -1  # Short at R3
+                signals[i] = -0.25
+            elif close[i] < l3_aligned[i] and vol_exhaustion[i]:
+                position = 1   # Long at S3
                 signals[i] = 0.25
-            # Short entry: price breaks below 4h Donchian low, below 1d EMA50, with volume confirmation
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_confirm[i]:
-                position = -1
+            # Breakout continuation at R4/S4 with volume expansion
+            elif close[i] > h4_aligned[i] and vol_expansion[i]:
+                position = 1   # Long breakout
+                signals[i] = 0.25
+            elif close[i] < l4_aligned[i] and vol_expansion[i]:
+                position = -1  # Short breakdown
                 signals[i] = -0.25
     
     return signals
