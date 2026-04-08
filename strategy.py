@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Weekly Donchian Breakout + Trend + Volume
-Hypothesis: Weekly Donchian channels capture long-term trends. Breakouts above/below
-weekly high/low with daily trend alignment and volume surge capture sustained moves.
-Works in bull (breakouts) and bear (breakdowns) markets. Target: 15-25 trades/year.
+6h Donchian Breakout + Weekly Trend + Volume Confirmation v1
+Hypothesis: Donchian(20) breakouts on 6h timeframe, filtered by weekly trend direction
+(1w EMA) and volume spikes, capture strong momentum moves while avoiding false breakouts.
+Weekly trend filter ensures we only trade in the direction of the dominant trend,
+improving performance in both bull and bear markets. Target: 12-37 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_breakout_trend_volume_v1"
-timeframe = "1d"
+name = "6h_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,60 +26,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channels and EMA
+    # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Weekly Donchian channels (20-period)
-    high_20 = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
-    
     # Weekly EMA(21) for trend filter
-    ema_21 = df_1w['close'].ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21w = df_1w['close'].ewm(span=21, adjust=False, min_periods=21).mean()
+    ema_21w_6h = align_htf_to_ltf(prices, df_1w, ema_21w.values)
     
-    # Align to daily timeframe
-    high_20_d = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_d = align_htf_to_ltf(prices, df_1w, low_20)
-    ema_21_d = align_htf_to_ltf(prices, df_1w, ema_21)
+    # Donchian channel (20-period) on 6h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter (>1.8x 20-period average)
+    # Volume filter (>1.5x 20-period average on 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.8)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20_d[i]) or np.isnan(low_20_d[i]) or 
-            np.isnan(ema_21_d[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_21w_6h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly low or trend reverses
-            if close[i] <= low_20_d[i] or close[i] < ema_21_d[i]:
+            # Exit: price closes below Donchian lower band or trend reverses
+            if close[i] <= low_20[i] or close[i] < ema_21w_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly high or trend reverses
-            if close[i] >= high_20_d[i] or close[i] > ema_21_d[i]:
+            # Exit: price closes above Donchian upper band or trend reverses
+            if close[i] >= high_20[i] or close[i] > ema_21w_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long above weekly high with trend and volume
-            if (close[i] >= high_20_d[i] and 
-                close[i] > ema_21_d[i] and 
+            # Long breakout with trend alignment
+            if (close[i] >= high_20[i] and 
+                close[i] > ema_21w_6h[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Breakdown short below weekly low with trend and volume
-            elif (close[i] <= low_20_d[i] and 
-                  close[i] < ema_21_d[i] and 
+            # Short breakout with trend alignment
+            elif (close[i] <= low_20[i] and 
+                  close[i] < ema_21w_6h[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
