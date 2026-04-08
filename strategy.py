@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 6h_pivot_breakout_volume_v1
-# Hypothesis: Use daily pivot points (support/resistance) on 6h timeframe with volume confirmation.
-# Go long when price breaks above R1 with above-average volume, short when breaks below S1.
-# Use weekly trend filter: only take longs when price > weekly EMA50, shorts when price < weekly EMA50.
-# Works in bull/bear by following higher timeframe trend. Low trade frequency (~15-25/year) minimizes fee drag.
+# 12h_camarilla_pivot_1w_trend_volume_v1
+# Hypothesis: Use daily Camarilla pivot points on 12h timeframe with volume confirmation and weekly trend filter.
+# Long when price breaks above H4 with volume > 20-period average and price > weekly EMA50.
+# Short when price breaks below L4 with volume > 20-period average and price < weekly EMA50.
+# Weekly trend filter ensures alignment with higher timeframe direction, reducing whipsaw.
+# Target: 15-30 trades/year on 12h to stay within fee limits.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,27 +25,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for Camarilla pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot points (using previous day's data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point calculations (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Calculate Camarilla pivot levels (using previous day's data)
+    # Camarilla formulas: 
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    # H3 = Close + 1.25 * (High - Low)
+    # L3 = Close - 1.25 * (High - Low)
+    # We'll use H4/L4 for breakouts
+    daily_range = high_1d - low_1d
+    h4 = close_1d + 1.5 * daily_range
+    l4 = close_1d - 1.5 * daily_range
     
-    # Align pivot levels to 6h timeframe (using previous day's values)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 12h timeframe (using previous day's values)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -66,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
             np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -76,27 +79,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below pivot OR weekly trend turns against us
-            if (close[i] < pivot_aligned[i]) or (close[i] < ema_50_1w_aligned[i]):
+            # Exit: price crosses below H4 OR weekly trend turns against us
+            if (close[i] < h4_aligned[i]) or (close[i] < ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above pivot OR weekly trend turns against us
-            if (close[i] > pivot_aligned[i]) or (close[i] > ema_50_1w_aligned[i]):
+            # Exit: price crosses above L4 OR weekly trend turns against us
+            if (close[i] > l4_aligned[i]) or (close[i] > ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above R1 with volume confirmation AND weekly uptrend
-            if (close[i] > r1_aligned[i]) and (volume[i] > vol_ma[i]) and (close[i] > ema_50_1w_aligned[i]):
+            # Long entry: price breaks above H4 with volume confirmation AND weekly uptrend
+            if (close[i] > h4_aligned[i]) and (volume[i] > vol_ma[i]) and (close[i] > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below S1 with volume confirmation AND weekly downtrend
-            elif (close[i] < s1_aligned[i]) and (volume[i] > vol_ma[i]) and (close[i] < ema_50_1w_aligned[i]):
+            # Short entry: price breaks below L4 with volume confirmation AND weekly downtrend
+            elif (close[i] < l4_aligned[i]) and (volume[i] > vol_ma[i]) and (close[i] < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
