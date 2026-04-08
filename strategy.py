@@ -1,10 +1,14 @@
-#!/usr/bin/env python3
+# ANALYST: Starting analysis of experiment #23052
+# Hypothesis: Combine 12h trend (EMA21) with 1d Williams fractal breakouts and volume confirmation.
+# Williams fractals identify key support/resistance levels. Breakouts in direction of 12h trend with volume
+# capture institutional moves. Works in bull/bear via trend filter. Target: 15-30 trades/year.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_supertrend_1d_hlc3_v1"
-timeframe = "6h"
+name = "12h_fractal_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,58 +22,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HLC3 and Supertrend
+    # Get 12h data for trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # 12h EMA(21) for trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Get 1d data for Williams fractals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate HLC3 for 1d
-    hlc3 = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    # Williams fractals: need 5 bars (2 left, center, 2 right)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Supertrend on 1d: ATR(10) * 3
-    atr_period = 10
-    multiplier = 3
+    # Bearish fractal: high[n] is highest of [n-2, n-1, n, n+1, n+2]
+    bearish = np.zeros(len(high_1d), dtype=bool)
+    for i in range(2, len(high_1d)-2):
+        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish[i] = True
     
-    # Calculate ATR
-    tr1 = df_1d['high'].values - df_1d['low'].values
-    tr2 = np.abs(df_1d['high'].values - df_1d['close'].shift(1).values)
-    tr3 = np.abs(df_1d['low'].values - df_1d['close'].shift(1).values)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Bullish fractal: low[n] is lowest of [n-2, n-1, n, n+1, n+2]
+    bullish = np.zeros(len(low_1d), dtype=bool)
+    for i in range(2, len(low_1d)-2):
+        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish[i] = True
     
-    # Basic upper and lower bands
-    basic_ub = (df_1d['high'].values + df_1d['low'].values) / 2 + multiplier * atr
-    basic_lb = (df_1d['high'].values + df_1d['low'].values) / 2 - multiplier * atr
+    # Convert to price levels (use the fractal high/low as resistance/support)
+    bearish_level = np.where(bearish, high_1d, np.nan)
+    bullish_level = np.where(bullish, low_1d, np.nan)
     
-    # Initialize Supertrend components
-    final_ub = basic_ub.copy()
-    final_lb = basic_lb.copy()
-    supertrend = np.zeros(len(hlc3))
-    direction = np.ones(len(hlc3))  # 1 for uptrend, -1 for downtrend
+    # Forward fill to get the most recent fractal level
+    bearish_series = pd.Series(bearish_level)
+    bullish_series = pd.Series(bullish_level)
+    bearish_ffilled = bearish_series.ffill().values
+    bullish_ffilled = bullish_series.ffill().values
     
-    # Calculate Supertrend
-    for i in range(1, len(hlc3)):
-        if hlc3[i-1] > final_ub[i-1]:
-            direction[i] = -1
-        elif hlc3[i-1] < final_lb[i-1]:
-            direction[i] = 1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = max(final_lb[i], final_lb[i-1])
-            supertrend[i] = final_lb[i]
-        else:
-            final_ub[i] = min(final_ub[i], final_ub[i-1])
-            final_lb[i] = basic_lb[i]
-            supertrend[i] = final_ub[i]
+    # Align to 12h with 2-bar delay for fractal confirmation (needs 2 future 1d bars)
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_ffilled, additional_delay_bars=2)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_ffilled, additional_delay_bars=2)
     
-    # Align Supertrend direction and value to 6h
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    
-    # Volume confirmation: volume > 1.5x average of last 12 periods (12*6h = 3 days)
+    # Volume confirmation: volume > 1.5x average of last 12 periods (12*12h = 6 days)
     vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     vol_confirm = volume > vol_ma * 1.5
     
@@ -80,39 +80,41 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(direction_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
+        # Skip if data not available
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
+                # Hold position until exit conditions met
                 pass
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Supertrend or trend changes to down
-            if close[i] < supertrend_aligned[i] or direction_aligned[i] == -1:
+            # Exit: price returns to bullish fractal support or trend changes
+            if close[i] <= bullish_aligned[i] or ema_12h_aligned[i] < ema_12h_aligned[max(0, i-1)]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Supertrend or trend changes to up
-            if close[i] > supertrend_aligned[i] or direction_aligned[i] == 1:
+            # Exit: price returns to bearish fractal resistance or trend changes
+            if close[i] >= bearish_aligned[i] or ema_12h_aligned[i] > ema_12h_aligned[max(0, i-1)]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price above Supertrend, uptrend, volume confirmation
-            if (close[i] > supertrend_aligned[i] and 
-                direction_aligned[i] == 1 and 
+            # Long entry: price breaks above bearish fractal resistance with volume and 12h uptrend
+            if (not np.isnan(bearish_aligned[i]) and close[i] > bearish_aligned[i] and 
+                ema_12h_aligned[i] > ema_12h_aligned[max(0, i-1)] and  # Uptrend confirmation
                 vol_confirm[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price below Supertrend, downtrend, volume confirmation
-            elif (close[i] < supertrend_aligned[i] and 
-                  direction_aligned[i] == -1 and 
+            # Short entry: price breaks below bullish fractal support with volume and 12h downtrend
+            elif (not np.isnan(bullish_aligned[i]) and close[i] < bullish_aligned[i] and 
+                  ema_12h_aligned[i] < ema_12h_aligned[max(0, i-1)] and  # Downtrend confirmation
                   vol_confirm[i]):
                 position = -1
                 signals[i] = -0.25
