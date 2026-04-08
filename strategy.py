@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# [24986] 4h_1d_donchian_volume_trend_v1
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day trend filter (price > EMA50) and volume confirmation.
-# Long when price breaks above 20-period high with volume > 2.0x average and price > 1-day EMA50.
-# Short when price breaks below 20-period low with volume > 2.0x average and price < 1-day EMA50.
+# [24987] 6h_1d_1w_donchian_breakout_with_pivot_trend_v1
+# Hypothesis: 6-hour Donchian(20) breakout with 1-day and 1-week pivot trend filter.
+# Long when price breaks above 20-period high with volume > 1.5x average and price > daily pivot and above weekly pivot.
+# Short when price breaks below 20-period low with volume > 1.5x average and price < daily pivot and below weekly pivot.
 # Exit when price returns to 10-period moving average.
-# Uses 1-day EMA50 for trend bias, effective in both trending and ranging markets.
-# Designed to generate ~20-50 trades/year to avoid fee drag while capturing strong trends.
+# Uses daily and weekly pivots for trend bias, effective in both trending and ranging markets.
+# Designed to generate ~15-40 trades/year to avoid fee drag while capturing strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_trend_v1"
-timeframe = "4h"
+name = "6h_1d_1w_donchian_breakout_with_pivot_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +25,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for EMA50 trend filter
+    # Get 1-day data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50
+    # Calculate daily pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema = np.zeros(len(close_1d))
-        ema[0] = close_1d[0]
-        alpha = 2.0 / (50 + 1)
-        for i in range(1, len(close_1d)):
-            ema[i] = alpha * close_1d[i] + (1 - alpha) * ema[i-1]
-        ema50_1d[49:] = ema[49:]
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Get 1-week data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     
     # Calculate Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
@@ -58,8 +64,9 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1-day EMA50 to 4-hour timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align daily and weekly pivots to 6-hour timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -67,7 +74,8 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after warmup
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
+            np.isnan(ma_10[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -93,12 +101,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and above EMA50
-            if price > donchian_high[i] and vol_ratio > 2.0 and price > ema50_1d_aligned[i]:
+            # Enter long: price breaks above Donchian high with volume expansion and above both pivots
+            if price > donchian_high[i] and vol_ratio > 1.5 and price > pivot_1d_aligned[i] and price > pivot_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and below EMA50
-            elif price < donchian_low[i] and vol_ratio > 2.0 and price < ema50_1d_aligned[i]:
+            # Enter short: price breaks below Donchian low with volume expansion and below both pivots
+            elif price < donchian_low[i] and vol_ratio > 1.5 and price < pivot_1d_aligned[i] and price < pivot_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
