@@ -1,11 +1,12 @@
-# 4h_volatility_breakout_volume_v1
-# Hypothesis: 4h Bollinger Band volatility breakout with volume confirmation.
-# In bull markets, volatility expands during uptrends; in bear markets, volatility spikes during breakdowns.
-# Volume confirmation ensures institutional participation, reducing false breakouts.
-# Target: 25-40 trades/year via volatility breakout + volume filter.
+#!/usr/bin/env python3
+# 1d_1w_price_channel_volume_v1
+# Hypothesis: Daily price channel (Donchian 20) breakout with weekly trend filter and volume confirmation.
+# Works in bull markets by buying breakouts above channel, in bear markets by selling breakdowns below channel.
+# Volume filter ensures institutional participation, reducing false signals.
+# Target: 10-25 trades/year via Donchian breakouts + weekly trend + volume confirmation.
 
-name = "4h_volatility_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_price_channel_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,47 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20-period, 2.0 std)
-    bb_period = 20
-    bb_std = 2.0
+    # Donchian Channel (20-period)
+    period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Calculate SMA and std
-    sma = np.zeros_like(close)
-    bb_std_dev = np.zeros_like(close)
+    for i in range(period-1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     
-    for i in range(bb_period - 1, len(close)):
-        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
-        bb_std_dev[i] = np.std(close[i - bb_period + 1:i + 1])
+    # Weekly trend filter (EWMA 50)
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    upper_band = sma + bb_std * bb_std_dev
-    lower_band = sma - bb_std * bb_std_dev
-    
-    # Volatility expansion: current band width > 1.5x 20-period average width
-    bb_width = upper_band - lower_band
-    bb_width_ma = np.zeros_like(bb_width)
-    for i in range(bb_period - 1, len(bb_width)):
-        bb_width_ma[i] = np.mean(bb_width[i - bb_period + 1:i + 1])
-    
-    volatility_expansion = bb_width > 1.5 * bb_width_ma
-    
-    # Volume filter: current volume > 2.0x 20-period average volume
-    vol_ma = np.zeros_like(volume)
-    for i in range(19, len(volume)):
-        vol_ma[i] = np.mean(volume[i - 19:i + 1])
-    volume_filter = volume > 2.0 * vol_ma
-    
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    close_daily = df_daily['close'].values
-    
-    # Daily EMA (50-period) for higher timeframe trend
+    # EMA 50 on weekly
     ema_period = 50
-    ema_daily = np.zeros_like(close_daily)
-    for i in range(ema_period - 1, len(close_daily)):
-        ema_daily[i] = np.mean(close_daily[i - ema_period + 1:i + 1])
+    ema_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= ema_period:
+        ema_weekly[ema_period-1] = np.mean(close_weekly[:ema_period])
+        for i in range(ema_period, len(close_weekly)):
+            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Align daily EMA to 4h timeframe
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Align weekly EMA to daily
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    
+    # Volume filter: 20-day average volume
+    vol_ma = np.full(n, np.nan)
+    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
+    vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -73,7 +61,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(bb_period, ema_period) + 5
+    start_idx = max(period, ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -82,37 +70,40 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(sma[i]) or np.isnan(bb_std_dev[i]) or 
-            np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_weekly_aligned[i]
+        weekly_downtrend = close[i] < ema_weekly_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit if price closes below middle band (mean reversion)
-            if close[i] < sma[i]:
+            # Exit if price breaks below lower channel or trend reverses
+            if close[i] < lower[i] or not weekly_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price closes above middle band (mean reversion)
-            if close[i] > sma[i]:
+            # Exit if price breaks above upper channel or trend reverses
+            if close[i] > upper[i] or not weekly_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band with volatility expansion and volume
-            if (close[i] > upper_band[i] and 
-                volatility_expansion[i] and 
-                volume_filter[i]):
+            # Long entry: price breaks above upper channel, volume, weekly uptrend
+            if close[i] > upper[i] and volume_filter and weekly_uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower band with volatility expansion and volume
-            elif (close[i] < lower_band[i] and 
-                  volatility_expansion[i] and 
-                  volume_filter[i]):
+            # Short entry: price breaks below lower channel, volume, weekly downtrend
+            elif close[i] < lower[i] and volume_filter and weekly_downtrend:
                 position = -1
                 signals[i] = -0.25
     
