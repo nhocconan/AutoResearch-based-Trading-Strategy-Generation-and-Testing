@@ -1,21 +1,16 @@
+#22693 [   keep] 12h_1d_donchian_breakout_volume_v1
 #!/usr/bin/env python3
-# 12h_1d_donchian_breakout_volume_v2
-# Hypothesis: Breakout of 1-day Donchian channels with volume confirmation on 12h timeframe.
-# Uses tighter volume filter (2.0x average) and stricter session (09-19 UTC) to reduce overtrading.
-# Targets 50-150 total trades over 4 years (12-37/year) by increasing entry threshold.
-# Works in both bull and bear markets by following higher timeframe structure.
-
-name = "12h_1d_donchian_breakout_volume_v2"
-timeframe = "12h"
-leverage = 1.0
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
+leverage = 1.0
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -42,14 +37,14 @@ def generate_signals(prices):
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume confirmation on 12h: volume > 2.0x 20-period average (tighter filter)
+    # Volume confirmation on 12h: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
-    vol_confirm = vol_ratio > 2.0
+    vol_confirm = vol_ratio > 1.5
     
-    # Session filter: 09-19 UTC (avoid low-volume Asian and late US sessions)
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 9) & (hours <= 19)
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
