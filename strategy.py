@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_rsi_volatility_breakout_v2"
-timeframe = "1d"
+name = "12h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,72 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend and RSI
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    # 1d data for trend and fractal detection
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly RSI (14-period)
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate Williams Fractals (1d)
+    n1 = len(high_1d)
+    bearish_fractal = np.zeros(n1, dtype=bool)
+    bullish_fractal = np.zeros(n1, dtype=bool)
     
-    # Weekly trend: 34-period EMA
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    for i in range(2, n1 - 2):
+        if (high_1d[i] >= high_1d[i-1] and high_1d[i] >= high_1d[i-2] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = True
+        if (low_1d[i] <= low_1d[i-1] and low_1d[i] <= low_1d[i-2] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # Daily volatility filter: volume > 2x 20-day average
+    # Align fractal signals to 12h timeframe
+    bearish_fractal_12h = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float))
+    bullish_fractal_12h = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float))
+    
+    # 1d trend: 34-period EMA (responsive trend)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 2.0)
+    vol_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_12h[i]) or np.isnan(bearish_fractal_12h[i]) or 
+            np.isnan(bullish_fractal_12h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI overbought or trend fails
-            if rsi_1w_aligned[i] > 70 or close[i] < ema_34_1w_aligned[i]:
+            # Exit: bearish fractal or trend fails
+            if bearish_fractal_12h[i] == 1.0 or close[i] < ema_34_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: RSI oversold or trend fails
-            if rsi_1w_aligned[i] < 30 or close[i] > ema_34_1w_aligned[i]:
+            # Exit: bullish fractal or trend fails
+            if bullish_fractal_12h[i] == 1.0 or close[i] > ema_34_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_34_1w_aligned[i]
-            bearish = close[i] < ema_34_1w_aligned[i]
+            bullish = close[i] > ema_34_12h[i]
+            bearish = close[i] < ema_34_12h[i]
             
-            # Long: RSI oversold + bullish trend + volatility spike
-            if (rsi_1w_aligned[i] < 30 and 
+            # Long: bullish fractal + bullish trend + volume
+            if (bullish_fractal_12h[i] == 1.0 and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short: RSI overbought + bearish trend + volatility spike
-            elif (rsi_1w_aligned[i] > 70 and 
+                signals[i] = 0.30
+            # Short: bearish fractal + bearish trend + volume
+            elif (bearish_fractal_12h[i] == 1.0 and 
                   bearish and 
                   vol_filter[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
