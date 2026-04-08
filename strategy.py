@@ -1,137 +1,150 @@
 #!/usr/bin/env python3
-# 6h_1d_ichimoku_cloud_trend_v1
-# Hypothesis: 6h Ichimoku cloud strategy with 1d trend filter for BTC/ETH/SOL.
-# Long: price > 6h cloud AND Tenkan > Kijun (bullish momentum) AND 1d close > 1d Senkou Span A (bullish regime)
-# Short: price < 6h cloud AND Tenkan < Kijun (bearish momentum) AND 1d close < 1d Senkou Span A (bearish regime)
-# Exit: price crosses opposite 6h cloud boundary (Tenkan/Kijun average) OR momentum reverses
-# Uses 6h primary timeframe with 1d HTF for regime filter.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# 12h_1d_1w_camarilla_pivot_breakout_volume_v1
+# Hypothesis: 12h Camarilla pivot (R4/S4) breakouts with volume confirmation (>2.0x 20-period average) and 1d/1w VWAP regime filter.
+# Long: price > R4(1d) AND volume > 2.0x vol_MA20 AND VWAP_1d > VWAP_1w (bullish regime)
+# Short: price < S4(1d) AND volume > 2.0x vol_MA20 AND VWAP_1d < VWAP_1w (bearish regime)
+# Exit: price returns to VWAP_1d (mean reversion) OR breaks R3/S3 with volume confirmation
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Works in bull/bear via regime filter (1d vs 1w VWAP) and pivot structure.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_cloud_trend_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2
+    # Volume ratio: current vs 20-period SMA (min_periods=20)
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((high_senkou_b + low_senkou_b) / 2)
-    
-    # Get 1d data for regime filter (1d Ichimoku cloud)
+    # Get 1d data for Camarilla pivots and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Ichimoku components for regime filter
-    high_tenkan_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_tenkan_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_tenkan_1d + low_tenkan_1d) / 2
+    # Camarilla levels from previous day
+    camarilla_r4 = np.full(len(df_1d), np.nan)
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
+    camarilla_s4 = np.full(len(df_1d), np.nan)
+    vwap_1d = np.full(len(df_1d), np.nan)
     
-    high_kijun_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_kijun_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_kijun_1d + low_kijun_1d) / 2
+    cum_vol = 0
+    cum_pv = 0
+    for i in range(len(df_1d)):
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        cum_pv += typical_price * volume[i]
+        cum_vol += volume[i]
+        vwap_1d[i] = cum_pv / cum_vol if cum_vol > 0 else typical_price
+        
+        if i > 0:
+            prev_close = close_1d[i-1]
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            range_val = prev_high - prev_low
+            
+            camarilla_r4[i] = prev_close + range_val * 1.1 / 2.0
+            camarilla_r3[i] = prev_close + range_val * 1.1 / 4.0
+            camarilla_s3[i] = prev_close - range_val * 1.1 / 4.0
+            camarilla_s4[i] = prev_close - range_val * 1.1 / 2.0
     
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    # Get 1w data for VWAP regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    high_senkou_b_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_senkou_b_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = ((high_senkou_b_1d + low_senkou_b_1d) / 2)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Align 1d indicators to 6h timeframe
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    vwap_1w = np.full(len(df_1w), np.nan)
+    cum_vol_w = 0
+    cum_pv_w = 0
+    for i in range(len(df_1w)):
+        typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+        cum_pv_w += typical_price * volume_1w[i]
+        cum_vol_w += volume_1w[i]
+        vwap_1w[i] = cum_pv_w / cum_vol_w if cum_vol_w > 0 else typical_price
+    
+    # Align 1d indicators to 12h
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Align 1w VWAP to 12h
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
-        # Skip if any required values are NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i])):
+    for i in range(50, n):
+        vol_r = vol_ratio[i]
+        price = close[i]
+        
+        if np.isnan(vol_r):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        price = close[i]
+        r4 = camarilla_r4_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        s4 = camarilla_s4_aligned[i]
+        vwap1d = vwap_1d_aligned[i]
+        vwap1w = vwap_1w_aligned[i]
         
-        # 6h Ichimoku cloud boundaries (using Senkou Span A and B)
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        if np.isnan(r4) or np.isnan(r3) or np.isnan(s3) or np.isnan(s4) or np.isnan(vwap1d) or np.isnan(vwap1w):
+            if position != 0:
+                pass  # Hold position
+            else:
+                signals[i] = 0.0
+            continue
         
-        # 6h momentum: Tenkan vs Kijun
-        tenkan_above_kijun = tenkan[i] > kijun[i]
-        tenkan_below_kijun = tenkan[i] < kijun[i]
-        
-        # 1d regime filter: price vs 1d cloud
-        price_1d = close_1d[min(i // 4, len(close_1d)-1)]  # Approximate 1d close for regime
-        # Better: use the actual aligned 1d close from HTF data
-        # We'll use the 1d close price aligned to 6f for regime check
-        
-        # Get aligned 1d close for regime (we need to extract it from df_1d)
-        # Since we don't have it pre-aligned, we'll use Senkou spans as proxy for regime
-        # Bullish regime: 1d Senkou Span A > Senkou Span B (cloud bullish)
-        # Bearish regime: 1d Senkou Span A < Senkou Span B (cloud bearish)
-        cloud_bullish_1d = senkou_a_1d_aligned[i] > senkou_b_1d_aligned[i]
-        cloud_bearish_1d = senkou_a_1d_aligned[i] < senkou_b_1d_aligned[i]
-        
-        if position == 1:  # Long position
-            # Exit: price crosses below cloud OR momentum turns bearish
-            if price < cloud_bottom or not tenkan_above_kijun:
+        if position == 1:  # Long
+            # Exit: price returns to VWAP_1d OR breaks below R3 with volume
+            if price <= vwap1d or (price < r3 and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
-        elif position == -1:  # Short position
-            # Exit: price crosses above cloud OR momentum turns bullish
-            if price > cloud_top or not tenkan_below_kijun:
+        elif position == -1:  # Short
+            # Exit: price returns to VWAP_1d OR breaks above S3 with volume
+            if price >= vwap1d or (price > s3 and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price above 6h cloud AND bullish momentum AND bullish 1d regime
-            if price > cloud_top and tenkan_above_kijun and cloud_bullish_1d:
+            # Long: break above R4 with volume AND bullish regime (VWAP_1d > VWAP_1w)
+            if price > r4 and vol_r > 2.0 and vwap1d > vwap1w:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price below 6h cloud AND bearish momentum AND bearish 1d regime
-            elif price < cloud_bottom and tenkan_below_kijun and cloud_bearish_1d:
+            # Short: break below S4 with volume AND bearish regime (VWAP_1d < VWAP_1w)
+            elif price < s4 and vol_r > 2.0 and vwap1d < vwap1w:
                 position = -1
                 signals[i] = -0.25
     
