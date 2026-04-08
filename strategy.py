@@ -1,21 +1,50 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_cloud_1d_trend_volume_v1
-# Hypothesis: Ichimoku cloud from daily timeframe provides trend direction and support/resistance,
-# while Tenkan-Kijun cross on 6h gives entry signals with volume confirmation.
-# Works in bull/bear by following higher timeframe trend (cloud color) and using
-# momentum crosses for entries. Targets 50-150 total trades over 4 years.
+# 1d_camarilla_pivot_1w_trend_volume_v1
+# Hypothesis: Camarilla pivot levels on 1d with volume confirmation and weekly trend filter
+# captures mean-reversion bounces off strong support/resistance in both bull and bear markets.
+# Weekly trend filter (EMA20) ensures we only take long in uptrend and short in downtrend.
+# Volume spike confirms institutional interest at pivot levels.
+# Target: 50-80 total trades over 4 years (~12-20/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_1d_trend_volume_v1"
-timeframe = "6h"
+name = "1d_camarilla_pivot_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close arrays"""
+    # Typical price
+    typical = (high + low + close) / 3
+    # Range
+    range_val = high - low
+    
+    # Camarilla levels
+    # L4 = close - range * 1.1/2
+    # L3 = close - range * 1.1/4
+    # L2 = close - range * 1.1/6
+    # L1 = close - range * 1.1/12
+    # H1 = close + range * 1.1/12
+    # H2 = close + range * 1.1/6
+    # H3 = close + range * 1.1/4
+    # H4 = close + range * 1.1/2
+    
+    l4 = close - (range_val * 1.1 / 2)
+    l3 = close - (range_val * 1.1 / 4)
+    l2 = close - (range_val * 1.1 / 6)
+    l1 = close - (range_val * 1.1 / 12)
+    h1 = close + (range_val * 1.1 / 12)
+    h2 = close + (range_val * 1.1 / 6)
+    h3 = close + (range_val * 1.1 / 4)
+    h4 = close + (range_val * 1.1 / 2)
+    
+    return l4, l3, l2, l1, h1, h2, h3, h4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -24,75 +53,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate Camarilla levels for each day
+    l4, l3, l2, l1, h1, h2, h3, h4 = calculate_camarilla(high, low, close)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Chikou Span (Lagging Span): close shifted 26 periods behind
-    # Not used for signals to avoid look-ahead
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Determine cloud color (trend direction)
-    # Green bullish cloud when Senkou A > Senkou B
-    # Red bearish cloud when Senkou A < Senkou B
-    cloud_green = senkou_a_aligned > senkou_b_aligned
-    
-    # Tenkan-Kijun cross on 6h
-    # Tenkan-sen (9-period) on 6h
-    tenkan_sen_6h = (pd.Series(high).rolling(window=9, min_periods=9).max().values + 
-                     pd.Series(low).rolling(window=9, min_periods=9).min().values) / 2
-    # Kijun-sen (26-period) on 6h
-    kijun_sen_6h = (pd.Series(high).rolling(window=26, min_periods=26).max().values + 
-                    pd.Series(low).rolling(window=26, min_periods=26).min().values) / 2
-    
-    # TK cross signals
-    tk_cross_up = (tenkan_sen_6h > kijun_sen_6h) & (np.roll(tenkan_sen_6h, 1) <= np.roll(kijun_sen_6h, 1))
-    tk_cross_down = (tenkan_sen_6h < kijun_sen_6h) & (np.roll(tenkan_sen_6h, 1) >= np.roll(kijun_sen_6h, 1))
-    
-    # Volume filter: 6h volume > 1.5x 20-period average
+    # Volume filter: today's volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup (need 52 periods for Ichimoku)
-    start_idx = 60
+    # Start after warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+        if (np.isnan(l1[i]) or np.isnan(h1[i]) or np.isnan(ema_20_1w_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
@@ -102,57 +87,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: TK cross down OR price enters cloud from above (cloud acts as support/resistance)
-            if tk_cross_down[i] or (
-                (close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i]) or
-                (close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i])
-            ):
-                # Check if we've crossed into the cloud (trend change)
-                if (close[i] >= senkou_a_aligned[i] and close[i] >= senkou_b_aligned[i]) or \
-                   (close[i] <= senkou_a_aligned[i] and close[i] <= senkou_b_aligned[i]):
-                    price_in_cloud = True
-                else:
-                    price_in_cloud = False
-                
-                if tk_cross_down[i] or price_in_cloud:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit: price reaches H3 (strong resistance) or breaks below L1 (support broken)
+            if (close[i] >= h3[i]) or (close[i] <= l1[i]):
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TK cross up OR price enters cloud from below
-            if tk_cross_up[i] or (
-                (close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i]) or
-                (close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i])
-            ):
-                # Check if we've crossed into the cloud (trend change)
-                if (close[i] >= senkou_a_aligned[i] and close[i] >= senkou_b_aligned[i]) or \
-                   (close[i] <= senkou_a_aligned[i] and close[i] <= senkou_b_aligned[i]):
-                    price_in_cloud = True
-                else:
-                    price_in_cloud = False
-                
-                if tk_cross_up[i] or price_in_cloud:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit: price reaches L3 (strong support) or breaks above H1 (resistance broken)
+            if (close[i] <= l3[i]) or (close[i] >= h1[i]):
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: TK cross up + price above cloud (bullish) + volume
-            if (tk_cross_up[i] and 
-                close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i] and
-                cloud_green[i] and volume_filter[i]):
+            # Only take long in weekly uptrend, short in weekly downtrend
+            weekly_uptrend = close[i] > ema_20_1w_aligned[i]
+            weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+            
+            # Long entry: price touches L3 (strong support) with volume in uptrend
+            if weekly_uptrend and volume_filter[i] and (low[i] <= l3[i]) and (close[i] > l3[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: TK cross down + price below cloud (bearish) + volume
-            elif (tk_cross_down[i] and 
-                  close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i] and
-                  not cloud_green[i] and volume_filter[i]):
+            # Short entry: price touches H3 (strong resistance) with volume in downtrend
+            elif weekly_downtrend and volume_filter[i] and (high[i] >= h3[i]) and (close[i] < h3[i]):
                 position = -1
                 signals[i] = -0.25
     
