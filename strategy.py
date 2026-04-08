@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # 12h_donchian_breakout_daily_trend_volume_v1
 # Hypothesis: Uses 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
-# Enters long on Donchian breakout above in daily uptrend with volume spike; short on breakdown in downtrend with volume spike.
-# Exits on opposite Donchian break or trend reversal. Designed for low trade frequency (~15-35/year) to minimize fee drift.
+# Enters long on Donchian breakout above in uptrend with volume spike; short on breakdown in downtrend with volume spike.
+# Exits on opposite Donchian break or trend reversal. Designed for low trade frequency (~12-37/year) to minimize fee drift.
 # Uses 1-day EMA for stronger trend filter to reduce whipsaw and improve performance in both bull and bear markets.
 
 import numpy as np
