@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_fractal_breakout_1d_trend_volume_v1"
+name = "4h_fractal_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -31,23 +31,23 @@ def generate_signals(prices):
     # Calculate 1d volume SMA for volume context (20-period)
     vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian channels (15-period) - tighter for fewer trades
+    highest_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
+    lowest_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
     
-    # Calculate 4h ATR for volatility filter (14-period)
+    # Calculate 4h ATR for volatility filter (10-period)
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(20, 50)
+    start_idx = max(15, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -65,8 +65,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned
         downtrend = close[i] < ema_1d_aligned
         
-        # Volume filter: current volume above 1.5x 1d average volume
-        volume_filter = volume[i] > (vol_sma_1d_aligned * 1.5)
+        # Volume filter: current volume above 2.0x 1d average volume (stricter)
+        volume_filter = volume[i] > (vol_sma_1d_aligned * 2.0)
         
         if position == 1:  # Long position
             # Exit: price breaks below Donchian lower band OR trend reversal
@@ -74,7 +74,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit: price breaks above Donchian upper band OR trend reversal
@@ -82,15 +82,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
             # Long: price breaks above Donchian upper band + uptrend + volume filter
             if close[i] > highest_high[i] and uptrend and volume_filter:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             # Short: price breaks below Donchian lower band + downtrend + volume filter
             elif close[i] < lowest_low[i] and downtrend and volume_filter:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
