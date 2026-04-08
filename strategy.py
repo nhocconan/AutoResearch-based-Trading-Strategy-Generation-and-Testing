@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-# 1d_trix_volume_sr_1w_trend
-# Hypothesis: TRIX momentum on 1d filtered by 1w EMA trend and volume confirmation. 
-# Long when TRIX crosses above zero with uptrend (price > 1w EMA40) and volume > 1.5x average.
-# Short when TRIX crosses below zero with downtrend (price < 1w EMA40) and volume > 1.5x average.
-# Designed to capture momentum shifts in both bull and bear markets with low trade frequency.
-# Target: 10-25 trades/year (~40-100 total over 4 years).
+# 12h_ema_cross_1d_trend_volume
+# Hypothesis: EMA(9)/EMA(21) crossover on 12h for trend change, filtered by 1d EMA50 trend and volume confirmation (>1.5x average volume).
+# Long when fast EMA crosses above slow EMA with uptrend (price > 1d EMA50) and volume confirmation.
+# Short when fast EMA crosses below slow EMA with downtrend (price < 1d EMA50) and volume confirmation.
+# Designed to capture trend changes with confirmation to reduce whipsaw. Target: 20-40 trades/year (~80-160 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_trix_volume_sr_1w_trend"
-timeframe = "1d"
+name = "12h_ema_cross_1d_trend_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,21 +24,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate TRIX (15-period EMA applied 3 times)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
+    # Calculate EMAs (9 and 21)
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,8 +48,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trix[i]) or np.isnan(ema_40_1w_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,16 +58,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: TRIX crosses below zero OR trend turns against us
-            if (trix[i] < 0) or (close[i] < ema_40_1w_aligned[i]):
+            # Exit: EMA cross down OR trend turns against us
+            if (ema_fast[i] < ema_slow[i]) or (close[i] < ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TRIX crosses above zero OR trend turns against us
-            if (trix[i] > 0) or (close[i] > ema_40_1w_aligned[i]):
+            # Exit: EMA cross up OR trend turns against us
+            if (ema_fast[i] > ema_slow[i]) or (close[i] > ema_50_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,12 +76,14 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: TRIX crosses above zero with uptrend and volume confirmation
-            if (trix[i] > 0) and (close[i] > ema_40_1w_aligned[i]) and volume_ok:
+            # Long entry: fast EMA crosses above slow EMA with uptrend and volume confirmation
+            if (ema_fast[i] > ema_slow[i]) and (ema_fast[i-1] <= ema_slow[i-1]) and \
+               (close[i] > ema_50_1d_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: TRIX crosses below zero with downtrend and volume confirmation
-            elif (trix[i] < 0) and (close[i] < ema_40_1w_aligned[i]) and volume_ok:
+            # Short entry: fast EMA crosses below slow EMA with downtrend and volume confirmation
+            elif (ema_fast[i] < ema_slow[i]) and (ema_fast[i-1] >= ema_slow[i-1]) and \
+                 (close[i] < ema_50_1d_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
