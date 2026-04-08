@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 4h_rsi_adaptive_volume_filter_v1
-# Hypothesis: RSI-based mean reversion with volume confirmation and volatility filter. 
-# Uses RSI(14) extremes (30/70) for entries, volume > 1.5x average for confirmation, 
-# and ATR-based volatility filter to avoid choppy markets. Designed for low trade frequency
-# (target: 20-30 trades/year) to minimize fee drag in both bull and bear markets.
+# 12h_camarilla_pivot_daily_trend_volume_v1
+# Hypothesis: Uses Camarilla pivot levels from 1-day timeframe with volume confirmation and trend filter. 
+# Long when price breaks above resistance level (H4) with volume, short when breaks below support (L4).
+# Includes trend filter (price vs daily EMA200) to avoid counter-trend trades. Designed for low frequency (12-37 trades/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_adaptive_volume_filter_v1"
-timeframe = "4h"
+name = "12h_camarilla_pivot_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,70 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI calculation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain = np.concatenate([[np.nan], gain])
-    loss = np.concatenate([[np.nan], loss])
+    # Daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels (based on previous day)
+    # Typical price = (H + L + C) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    H4 = typical_price + 1.1 * (high_1d - low_1d) / 2
+    L4 = typical_price - 1.1 * (high_1d - low_1d) / 2
+    H3 = typical_price + 1.1 * (high_1d - low_1d) / 4
+    L3 = typical_price - 1.1 * (high_1d - low_1d) / 4
     
-    # Average volume for confirmation
+    # Align Camarilla levels to 12h timeframe (wait for daily close)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Volume confirmation (20-period average)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 30  # Need indicators warmed up
+    start_idx = 200  # Need EMA200 warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(atr[i]):
+        if np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely low volatility (chop) and extreme volatility
-        atr_ratio = atr[i] / np.mean(atr[max(0, i-50):i+1]) if i >= 50 else 1.0
-        vol_filter = 0.5 <= atr_ratio <= 2.0  # Trade only in moderate volatility regimes
+        # Volume confirmation
+        volume_ok = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit on RSI overbought or volatility breakdown
-            if rsi[i] > 70 or not vol_filter:
+            # Exit conditions: price below L3 or trend reversal
+            if close[i] < L3_aligned[i] or close[i] < ema200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on RSI oversold or volatility breakdown
-            if rsi[i] < 30 or not vol_filter:
+            # Exit conditions: price above H3 or trend reversal
+            if close[i] > H3_aligned[i] or close[i] > ema200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
-            # Mean reversion entries with volume and volatility filter
-            if rsi[i] < 30 and volume_ok and vol_filter:
-                position = 1
-                signals[i] = 0.25
-            elif rsi[i] > 70 and volume_ok and vol_filter:
-                position = -1
-                signals[i] = -0.25
+            # Only trade in direction of daily trend
+            if close[i] > ema200_1d_aligned[i]:  # Uptrend
+                # Long breakout above H4 with volume
+                if close[i] > H4_aligned[i] and volume_ok:
+                    position = 1
+                    signals[i] = 0.25
+            else:  # Downtrend
+                # Short breakdown below L4 with volume
+                if close[i] < L4_aligned[i] and volume_ok:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
