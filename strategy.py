@@ -1,12 +1,9 @@
-# 4h_1d_donchian_breakout_volume_v1
-# Hypothesis: Breakout of 1h Donchian channels with 1d EMA trend filter and volume confirmation works in both bull and bear markets by capturing momentum bursts while avoiding countertrend trades. 4h timeframe limits overtrading; volume and trend filters reduce false breakouts.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_v1"
+name = "4h_12h_donchian_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,9 +18,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for entry timing
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -31,14 +28,14 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian(20) on 1h high/low
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    donchian_high = pd.Series(high_1h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1h).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian(20) on 12h high/low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     # Align to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1h, donchian_low)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
     # Calculate EMA50 on 1d close
     close_1d = df_1d['close'].values
@@ -67,7 +64,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 1h Donchian low
+            # Exit: price closes below 12h Donchian low
             if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -75,18 +72,18 @@ def generate_signals(prices):
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 1h Donchian high
+            # Exit: price closes above 12h Donchian high
             if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 1h Donchian high, above 1d EMA50, with volume confirmation
+            # Long entry: price breaks above 12h Donchian high, above 1d EMA50, with volume confirmation
             if close[i] > donchian_high_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 1h Donchian low, below 1d EMA50, with volume confirmation
+            # Short entry: price breaks below 12h Donchian low, below 1d EMA50, with volume confirmation
             elif close[i] < donchian_low_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
