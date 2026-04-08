@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_daily_elder_ray_regime_v3
-# Hypothesis: Elder Ray (Bull Power/Bear Power) with 1d regime filter on 6h timeframe.
-# Long: Bull Power > 0 AND Bear Power < 0 AND close > 1d EMA50 (bull regime)
-# Short: Bear Power < 0 AND Bull Power > 0 AND close < 1d EMA50 (bear regime)
-# Exit: Opposite signal or Elder Power divergence (Bull Power makes lower high while price makes higher high for longs, vice versa for shorts)
-# Uses 6h primary timeframe with 1d HTF for EMA50 regime filter.
-# Target: 50-150 total trades over 4 years to minimize fee drag and avoid overtrading.
+# 4h_daily_camarilla_pivot_volume_spike_v4
+# Hypothesis: Camarilla pivot levels from 1d timeframe act as strong support/resistance on 4h.
+# Long when price touches L3 level with volume spike (>1.5x avg volume) in bullish regime (close > 1d EMA50).
+# Short when price touches H3 level with volume spike in bearish regime (close < 1d EMA50).
+# Exit on opposite pivot touch or regime change.
+# Uses 4h primary timeframe with 1d HTF for pivot levels and regime filter.
+# Target: 75-200 total trades over 4 years to balance opportunity and fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_daily_elder_ray_regime_v3"
-timeframe = "6h"
+name = "4h_daily_camarilla_pivot_volume_spike_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,57 +23,57 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray power with min_periods
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate average volume for spike detection (20-period)
+    vol_s = pd.Series(volume)
+    avg_volume = vol_s.rolling(window=20, min_periods=20).mean().values
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
-    
-    # Get 1d data for regime filter (EMA50)
+    # Get 1d data for Camarilla pivots and regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate EMA50 on 1d with min_periods
+    
+    # Calculate Camarilla pivot levels for 1d
+    # Range = high - low
+    # L3 = close - (high - low) * 1.1/4
+    # H3 = close + (high - low) * 1.1/4
+    range_1d = high_1d - low_1d
+    L3 = close_1d - (range_1d * 1.1 / 4)
+    H3 = close_1d + (range_1d * 1.1 / 4)
+    
+    # Calculate 1d EMA50 for regime filter
     close_1d_s = pd.Series(close_1d)
     ema50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h timeframe
+    # Align 1d indicators to 4h timeframe
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Track previous Bull Power and Bear Power for divergence detection
-    prev_bull_power = bull_power[0] if not np.isnan(bull_power[0]) else 0
-    prev_bear_power = bear_power[0] if not np.isnan(bear_power[0]) else 0
-    
-    for i in range(13, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(L3_aligned[i]) or np.isnan(H3_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i]) or
+            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-            # Update previous values for next iteration
-            if not np.isnan(bull_power[i]):
-                prev_bull_power = bull_power[i]
-            if not np.isnan(bear_power[i]):
-                prev_bear_power = bear_power[i]
             continue
+        
+        # Volume spike condition: current volume > 1.5x average volume
+        volume_spike = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
             # Exit conditions:
-            # 1. Opposite signal (Bear Power > 0 AND Bull Power < 0) - regime change
-            # 2. Bearish divergence: Bull Power makes lower high while price makes higher high
-            bull_divergence = (bull_power[i] < prev_bull_power and 
-                              close[i] > close[i-1] and 
-                              prev_bull_power > 0)  # Only when previously bullish
-            
-            if (bear_power[i] > 0 and bull_power[i] < 0) or bull_divergence:
+            # 1. Price touches or crosses H3 level (short signal)
+            # 2. Regime change: close < 1d EMA50 (bearish regime)
+            if (high[i] >= H3_aligned[i] and volume_spike) or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -81,29 +81,23 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions:
-            # 1. Opposite signal (Bull Power > 0 AND Bear Power < 0) - regime change
-            # 2. Bullish divergence: Bear Power makes higher low while price makes lower low
-            bear_divergence = (bear_power[i] > prev_bear_power and 
-                              close[i] < close[i-1] and 
-                              prev_bear_power < 0)  # Only when previously bearish
-            
-            if (bull_power[i] > 0 and bear_power[i] < 0) or bear_divergence:
+            # 1. Price touches or crosses L3 level (long signal)
+            # 2. Regime change: close > 1d EMA50 (bullish regime)
+            if (low[i] <= L3_aligned[i] and volume_spike) or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Bull Power > 0 AND Bear Power < 0 AND close > 1d EMA50 (bull regime)
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema50_1d_aligned[i]:
+            # Long entry: Price touches L3 level with volume spike AND bullish regime (close > 1d EMA50)
+            if (low[i] <= L3_aligned[i] and volume_spike and 
+                close[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bear Power < 0 AND Bull Power > 0 AND close < 1d EMA50 (bear regime)
-            elif bear_power[i] < 0 and bull_power[i] > 0 and close[i] < ema50_1d_aligned[i]:
+            # Short entry: Price touches H3 level with volume spike AND bearish regime (close < 1d EMA50)
+            elif (high[i] >= H3_aligned[i] and volume_spike and 
+                  close[i] < ema50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
-        
-        # Update previous values for next iteration
-        prev_bull_power = bull_power[i]
-        prev_bear_power = bear_power[i]
     
     return signals
