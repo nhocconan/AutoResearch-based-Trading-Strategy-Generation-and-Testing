@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + 1d EMA Trend + Volume + ATR Stop
-Hypothesis: Donchian breakouts on 12h capture strong trends with lower frequency.
-Filter by 1d EMA trend (more stable than shorter timeframes) and volume confirmation.
-ATS-based stop manages risk. Works in bull/bear by using volatility-adjusted stops
-and trend alignment. Targets 12-37 trades/year on 12h timeframe.
+4h Donchian Breakout + 1d EMA Trend + Volume + ATR Stop v4
+Hypothesis: Donchian breakouts capture strong trends. Filter by 1d EMA trend (more stable than 12h) and volume confirmation. ATR-based stop manages risk. Works in bull/bear by using volatility-adjusted stops and trend alignment. Targets 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,12 +28,12 @@ def generate_signals(prices):
     ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h ATR(20) for stop loss
+    # 4h ATR(20) for stop loss
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # 12h Donchian Channel (20-period)
+    # 4h Donchian Channel (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
