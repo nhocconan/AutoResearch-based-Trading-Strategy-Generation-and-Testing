@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_momentum"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,48 +18,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for RSI momentum filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for Donchian channels and volume baseline
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on 1w close
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 20-period Donchian channels on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Get 1d data for RSI and volume
-    if len(prices) < 14:
-        return np.zeros(n)
+    # Donchian upper: highest high over last 20 days
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian lower: lowest low over last 20 days
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 14-period RSI on 1d close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Align Donchian levels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Volume confirmation: current volume > 1.5x 20-day average volume
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_avg_20 * 1.5)
+    # Calculate 20-period average volume on 1d
+    volume_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # Volume confirmation: 12h volume > 1.5x daily average volume (scaled)
+    # 1d volume represents 2x 12h periods, so divide by 2 for per-period comparison
+    vol_threshold = vol_avg_1d_aligned / 2.0
+    vol_confirm = volume > vol_threshold * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = max(14, 20) + 1
+    start_idx = 20  # Need 20 days for Donchian calculation
     
     for i in range(start_idx, n):
-        # Skip if RSI not available
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_1d[i]) or np.isnan(vol_avg_20[i]):
+        # Skip if Donchian levels or volume average not available
+        if np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -68,31 +63,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI overbought or momentum weakens
-            if rsi_1d[i] > 70 or rsi_1w_aligned[i] < 50:
+            # Exit: price closes below Donchian lower (breakdown)
+            if close[i] < donch_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI oversold or momentum weakens
-            if rsi_1d[i] < 30 or rsi_1w_aligned[i] > 50:
+            # Exit: price closes above Donchian upper (breakout)
+            if close[i] > donch_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: RSI oversold on 1d, bullish momentum on 1w, with volume confirmation
-            if (rsi_1d[i] < 30 and 
-                rsi_1w_aligned[i] > 50 and 
-                vol_confirm[i]):
+            # Long entry: price breaks above Donchian upper with volume confirmation
+            if close[i] > donch_high_aligned[i] and vol_confirm[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI overbought on 1d, bearish momentum on 1w, with volume confirmation
-            elif (rsi_1d[i] > 70 and 
-                  rsi_1w_aligned[i] < 50 and 
-                  vol_confirm[i]):
+            # Short entry: price breaks below Donchian lower with volume confirmation
+            elif close[i] < donch_low_aligned[i] and vol_confirm[i]:
                 position = -1
                 signals[i] = -0.25
     
