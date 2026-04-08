@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h Daily Pivot Breakout with Volume Confirmation and Choppiness Regime
-# Hypothesis: Daily pivot points act as key institutional support/resistance.
-# Breakouts above R1 or below S1 with volume > 1.3x 20-period average and in trending markets (Choppiness Index < 40) indicate institutional participation.
-# Works in bull/bear markets by capturing breakouts from key levels with regime filter to avoid chop.
-# Target: 15-35 trades/year per symbol.
+# 12h Bollinger Band Squeeze Breakout with Volume Confirmation and 1d Trend Filter
+# Hypothesis: Bollinger Band squeezes on 12h chart precede explosive moves.
+# Breakouts above upper band with volume > 1.5x 20-period average and in 1d uptrend (close > EMA50) capture bullish momentum.
+# Breakdowns below lower band with volume > 1.5x 20-period average and in 1d downtrend (close < EMA50) capture bearish momentum.
+# Works in bull/bear markets by trading breakouts from low volatility regimes with trend alignment to avoid false signals.
+# Target: 15-30 trades/year per symbol.
 
-name = "12h_daily_pivot_breakout_volume_chop_v1"
+name = "12h_bb_squeeze_breakout_1d_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,90 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and volume filter - call ONCE before loop
+    # Get daily data for trend filter
     df_d = get_htf_data(prices, '1d')
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
     close_d = df_d['close'].values
-    volume_d = df_d['volume'].values
     
-    # Calculate daily pivot points (standard floor trader pivots)
-    pp_d = (high_d + low_d + close_d) / 3
-    r1_d = 2 * pp_d - low_d  # R1 = (2*P) - L
-    s1_d = 2 * pp_d - high_d # S1 = (2*P) - H
+    # Calculate 12h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (bb_std * std)
+    lower = sma - (bb_std * std)
     
-    # Calculate 20-period average volume for daily timeframe
-    vol_ma_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Bollinger Band Width for squeeze detection
+    bb_width = (upper - lower) / sma
+    bb_width = np.where(sma == 0, 0, bb_width)
     
-    # Calculate Choppiness Index on daily timeframe (trending vs ranging filter)
-    # True Range
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Sum of True Range over 14 periods
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh14 = pd.Series(high_d).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low_d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(ATR14 / (HH14 - LL14)) / log10(14)
-    # Add small epsilon to avoid division by zero
-    range14 = hh14 - ll14
-    range14 = np.where(range14 == 0, 1e-10, range14)
-    chop = 100 * np.log10(atr14 / range14) / np.log10(14)
-    # Handle any remaining invalid values
-    chop = np.where(np.isnan(chop) | np.isinf(chop), 50, chop)
+    # Calculate 1d EMA50 for trend filter
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Get aligned daily values for current 12h bar
-        r1 = align_htf_to_ltf(prices, df_d, r1_d)[i]
-        s1 = align_htf_to_ltf(prices, df_d, s1_d)[i]
-        vol_ma = align_htf_to_ltf(prices, df_d, vol_ma_d)[i]
-        chop_val = align_htf_to_ltf(prices, df_d, chop)[i]
+        # Get aligned daily EMA50 for current 12h bar
+        ema50 = align_htf_to_ltf(prices, df_d, ema50_d)[i]
         
         # Skip if any required data is NaN
-        if np.isnan(r1) or np.isnan(s1) or np.isnan(vol_ma) or np.isnan(chop_val) or volume[i] == 0:
+        if np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(vol_ma[i]) or np.isnan(ema50):
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 1.3x 20-period average
-        vol_breakout = volume[i] > 1.3 * vol_ma
+        # Volume breakout condition: current volume > 1.5x 20-period average
+        vol_breakout = volume[i] > 1.5 * vol_ma[i]
         
-        # Trending market condition: Choppiness Index < 40 (lower = more trending)
-        trending_market = chop_val < 40
+        # Bollinger Band squeeze condition: BB width < 0.05 (5%)
+        squeeze = bb_width[i] < 0.05
         
         if position == 1:  # Long position
-            # Exit if price breaks below S1 (failed breakout)
-            if close[i] < s1:
+            # Exit if price closes below middle Bollinger Band (mean reversion)
+            if close[i] < sma[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == 1:
+            else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above R1 (failed breakout)
-            if close[i] > r1:
+            # Exit if price closes above middle Bollinger Band (mean reversion)
+            if close[i] > sma[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1:
+            else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long above R1 with volume confirmation and trending market
-            if close[i] > r1 and vol_breakout and trending_market:
+            # Breakout long above upper band with volume confirmation and 1d uptrend
+            if close[i] > upper[i] and vol_breakout and squeeze and close_d[i] > ema50[i]:
                 position = 1
                 signals[i] = 0.25
-            # Breakout short below S1 with volume confirmation and trending market
-            elif close[i] < s1 and vol_breakout and trending_market:
+            # Breakdown short below lower band with volume confirmation and 1d downtrend
+            elif close[i] < lower[i] and vol_breakout and squeeze and close_d[i] < ema50[i]:
                 position = -1
                 signals[i] = -0.25
     
