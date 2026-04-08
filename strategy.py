@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_12h_trend_volume_v1
-# Hypothesis: 4h Donchian channel breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with 12h uptrend and volume > 1.5x average.
-# Short when price breaks below Donchian(20) low with 12h downtrend and volume > 1.5x average.
-# Uses volume filter to reduce false signals and trend filter to avoid counter-trend trades.
-# Target: 20-50 trades/year per symbol to minimize fee drag.
+# 1h_momentum_reversal_4h1d_trend_v1
+# Hypothesis: 1h momentum reversal with 4h/1d trend filter.
+# Long when 1h RSI crosses above 30 and price above 4h EMA20 and 1d EMA50.
+# Short when 1h RSI crosses below 70 and price below 4h EMA20 and 1d EMA50.
+# Uses session filter (08-20 UTC) and volume confirmation to reduce false signals.
+# Targets 15-37 trades/year by requiring multi-timeframe alignment.
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_momentum_reversal_4h1d_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,35 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    lookback = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # 1h RSI (14-period)
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(prices)
+        avg_loss = np.zeros_like(prices)
+        
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    for i in range(lookback - 1, n):
-        donchian_high[i] = np.max(high[i - lookback + 1:i + 1])
-        donchian_low[i] = np.min(low[i - lookback + 1:i + 1])
+    rsi = calculate_rsi(close, 14)
     
-    # Volume average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i - 19:i + 1])
+    # 1h volume moving average (20-period)
+    vol_ma = np.zeros_like(volume)
+    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
+    vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for EMA20
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # 12h EMA (34-period) for trend
-    ema_period = 34
-    ema_12h = np.full(len(close_12h), np.nan)
-    for i in range(ema_period - 1, len(close_12h)):
-        if i == ema_period - 1:
-            ema_12h[i] = np.mean(close_12h[:ema_period])
-        else:
-            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * (ema_period - 1)) / (ema_period + 1)
+    # 4h EMA (20-period)
+    ema_period_4h = 20
+    ema_4h = np.zeros_like(close_4h)
+    ema_4h[ema_period_4h-1] = np.mean(close_4h[:ema_period_4h])
+    for i in range(ema_period_4h, len(close_4h)):
+        ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * (ema_period_4h - 1)) / (ema_period_4h + 1)
     
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align 4h EMA to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get 1d data for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # 1d EMA (50-period)
+    ema_period_1d = 50
+    ema_1d = np.zeros_like(close_1d)
+    ema_1d[ema_period_1d-1] = np.mean(close_1d[:ema_period_1d])
+    for i in range(ema_period_1d, len(close_1d)):
+        ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * (ema_period_1d - 1)) / (ema_period_1d + 1)
+    
+    # Align 1d EMA to 1h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -63,7 +88,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(lookback, 19, ema_period) + 5
+    start_idx = max(14, 19, 20, 50) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -72,45 +97,46 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma[i]
+        # Volume filter: current volume > 1.3x 20-period average
+        volume_filter = volume[i] > 1.3 * vol_ma[i]
         
-        # 12h trend filter
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
+        # Trend filters: price above/both EMAs
+        above_both_emas = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
+        below_both_emas = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
+        
+        # RSI crossover signals
+        rsi_cross_above_30 = rsi[i-1] <= 30 and rsi[i] > 30
+        rsi_cross_below_70 = rsi[i-1] >= 70 and rsi[i] < 70
         
         if position == 1:  # Long position
-            # Exit if price breaks below Donchian low or trend fails
-            if close[i] < donchian_low[i] or not uptrend_12h:
+            # Exit if RSI crosses below 70 or trend fails or volume fails
+            if rsi_cross_below_70 or not above_both_emas or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above Donchian high or trend fails
-            if close[i] > donchian_high[i] or not downtrend_12h:
+            # Exit if RSI crosses above 30 or trend fails or volume fails
+            if rsi_cross_above_30 or not below_both_emas or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: break above Donchian high, volume confirmation, 12h uptrend
-            if (close[i] > donchian_high[i] and 
-                volume_filter and 
-                uptrend_12h):
+            # Long entry: RSI crosses above 30, price above both EMAs, volume confirmation
+            if rsi_cross_above_30 and above_both_emas and volume_filter:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: break below Donchian low, volume confirmation, 12h downtrend
-            elif (close[i] < donchian_low[i] and 
-                  volume_filter and 
-                  downtrend_12h):
+                signals[i] = 0.20
+            # Short entry: RSI crosses below 70, price below both EMAs, volume confirmation
+            elif rsi_cross_below_70 and below_both_emas and volume_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
