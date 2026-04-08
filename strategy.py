@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 
-# 1d_1w_volatility_breakout
-# Hypothesis: Daily volatility breakout with weekly trend filter, volume confirmation, and ATR-based exit.
-# Designed to work in both bull and bear markets by capturing volatility expansion phases.
-# Target: 10-20 trades/year for low fee drag.
+# 6h_ichimoku_cloud_trend_v1
+# Hypothesis: Ichimoku-based trend-following strategy on 6h timeframe with 1d trend filter.
+# Uses Ichimoku cloud (Tenkan-sen, Kijun-sen, Senkou Span A/B) to identify trend direction and momentum.
+# Enters long when price is above cloud and Tenkan > Kijun, with 1d trend confirmation.
+# Enters short when price is below cloud and Tenkan < Kijun, with 1d trend confirmation.
+# Exits when price crosses back through Kijun-sen or cloud direction changes.
+# Designed to work in both bull and bear markets by capturing strong trends while avoiding whipsaws in ranging markets.
+# Target: 15-30 trades/year for low fee drift (60-120 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_volatility_breakout"
-timeframe = "1d"
+name = "6h_ichimoku_cloud_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,82 +23,100 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter (1w EMA50) - load once before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Daily trend filter (1d EMA50) - load once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate EMA50 on weekly data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Daily indicators
-    # EMA20 for dynamic center line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # ATR(14) for volatility bands
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Upper and lower bands (EMA20 ± 2*ATR)
-    upper_band = ema20 + 2.0 * atr
-    lower_band = ema20 - 2.0 * atr
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # Volume confirmation (20-day average)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Cloud (Kumo) top and bottom
+    # For cloud ahead, we shift Senkou spans by 26 periods
+    senkou_a_leading = np.roll(senkou_a, 26)
+    senkou_b_leading = np.roll(senkou_b, 26)
+    # Fill leading values with NaN for first 26 periods
+    senkou_a_leading[:26] = np.nan
+    senkou_b_leading[:26] = np.nan
+    
+    # Cloud top is the higher of Senkou A and B
+    cloud_top = np.where(~np.isnan(senkou_a_leading) & ~np.isnan(senkou_b_leading),
+                         np.maximum(senkou_a_leading, senkou_b_leading), np.nan)
+    # Cloud bottom is the lower of Senkou A and B
+    cloud_bottom = np.where(~np.isnan(senkou_a_leading) & ~np.isnan(senkou_b_leading),
+                            np.minimum(senkou_a_leading, senkou_b_leading), np.nan)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Need indicators warmed up
+    start_idx = 100  # Need indicators warmed up (52 + 26 for Senkou shift)
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Price relative to cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        
+        # Tenkan-Kijun relationship
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
         
         if position == 1:  # Long position
-            # Exit conditions: close below EMA20 or volatility contraction
-            if close[i] < ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+            # Exit conditions: price drops below Kijun or cloud turns bearish (price below cloud)
+            if close[i] < kijun[i] or not price_above_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: close above EMA20 or volatility contraction
-            if close[i] > ema20[i] or atr[i] < atr[i-1] * 0.8:  # Volatility dropping
+            # Exit conditions: price rises above Kijun or cloud turns bullish (price above cloud)
+            if close[i] > kijun[i] or not price_below_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
-            volume_ok = volume[i] > 1.3 * avg_volume[i]
-            
-            # Breakout conditions
-            if volume_ok:
-                # Long breakout: price crosses above upper band in uptrend
-                if weekly_uptrend and close[i] > upper_band[i] and close[i-1] <= upper_band[i-1]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short breakdown: price crosses below lower band in downtrend
-                elif weekly_downtrend and close[i] < lower_band[i] and close[i-1] >= lower_band[i-1]:
-                    position = -1
-                    signals[i] = -0.25
+            # Entry conditions with daily trend filter
+            # Long: price above cloud, Tenkan > Kijun, and daily uptrend
+            if price_above_cloud and tenkan_above_kijun and daily_uptrend:
+                position = 1
+                signals[i] = 0.25
+            # Short: price below cloud, Tenkan < Kijun, and daily downtrend
+            elif price_below_cloud and tenkan_below_kijun and daily_downtrend:
+                position = -1
+                signals[i] = -0.25
     
     return signals
