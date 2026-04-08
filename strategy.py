@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_breakout
-# Hypothesis: Breakout strategy using weekly pivot levels (from 1w data) with 6h price action and volume confirmation.
-# In both bull and bear markets, price tends to respect weekly support/resistance levels.
-# Breakouts above weekly R3 or below S3 with volume indicate strong momentum.
-# Uses 12h trend filter to avoid counter-trend trades.
-# Target: 15-30 trades/year for low fee drag.
+# 12h_camarilla_pivot_daily_trend_volume_v2
+# Hypothesis: Camarilla pivot levels from daily timeframe combined with daily trend filter and volume confirmation on 12h timeframe.
+# Works in bull markets by buying dips to S3/S4 in uptrend, and in bear markets by selling rallies to R3/R4 in downtrend.
+# Uses volume spike to confirm institutional interest at key levels.
+# Target: 15-25 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout"
-timeframe = "6h"
+name = "12h_camarilla_pivot_daily_trend_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,83 +24,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points (1w) - load once before loop
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pp_1w - low_1w
-    s1_1w = 2 * pp_1w - high_1w
-    r2_1w = pp_1w + (high_1w - low_1w)
-    s2_1w = pp_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pp_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pp_1w)
+    # Calculate Camarilla pivot levels from previous day
+    # Typical price = (H + L + C) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels based on previous day's range
+    range_1d = high_1d - low_1d
+    # Resistance levels
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    r2 = close_1d + (range_1d * 1.1 / 6)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    r4 = close_1d + (range_1d * 1.1 / 2)
+    # Support levels
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    s2 = close_1d - (range_1d * 1.1 / 6)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Align weekly pivots to 6h timeframe
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Daily trend filter: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 12h trend filter - load once before loop
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align all daily data to 12h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 6h indicators
-    # EMA20 for dynamic reference
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume confirmation
+    # Volume confirmation on 12h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Need indicators warmed up
+    start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_12h_aligned[i]) or \
-           np.isnan(pp_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # 12h trend filter
-        trend_up = close[i] > ema50_12h_aligned[i]
-        trend_down = close[i] < ema50_12h_aligned[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Volume confirmation
+        volume_ok = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: close below EMA20 or reversal below weekly pivot
-            if close[i] < ema20[i] or close[i] < pp_1w_aligned[i]:
+            # Exit: price reaches S1 or trend changes
+            if close[i] <= s1_aligned[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: close above EMA20 or reversal above weekly pivot
-            if close[i] > ema20[i] or close[i] > pp_1w_aligned[i]:
+            # Exit: price reaches R1 or trend changes
+            if close[i] >= r1_aligned[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
             if volume_ok:
-                # Long breakout: price crosses above weekly R3 in uptrend
-                if trend_up and close[i] > r3_1w_aligned[i] and close[i-1] <= r3_1w_aligned[i-1]:
+                # Long entry: price touches S3/S4 in uptrend (buy the dip)
+                if daily_uptrend and (close[i] <= s3_aligned[i] or close[i] <= s4_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short breakdown: price crosses below weekly S3 in downtrend
-                elif trend_down and close[i] < s3_1w_aligned[i] and close[i-1] >= s3_1w_aligned[i-1]:
+                # Short entry: price touches R3/R4 in downtrend (sell the rally)
+                elif daily_downtrend and (close[i] >= r3_aligned[i] or close[i] >= r4_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
