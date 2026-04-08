@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v6
-# Hypothesis: Use daily timeframe for trend (EMA20) and fractal structure (Williams Fractals with 2-bar confirmation), 
+# 4h_fractal_breakout_1d_trend_volume_v7
+# Hypothesis: Focus on high-probability breakouts using daily timeframe for trend (EMA20) and fractal structure (Williams Fractals with 2-bar confirmation),
 # and 4h for entry with volume confirmation (>2x average) and RSI filter (40-60). 
 # Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.25.
 # Target: 20-50 trades/year by requiring confluence of trend, fractal breakout, volume, and momentum.
 # Works in bull/bear via trend filter and avoids chop with RSI range filter.
 
-name = "4h_fractal_breakout_1d_trend_volume_v6"
+name = "4h_fractal_breakout_1d_trend_volume_v7"
 timeframe = "4h"
 leverage = 1.0
 
