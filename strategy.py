@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 4h Camarilla pivot breakouts with volume spike and 1d trend filter.
-# Long: price breaks above R4 (1d) with volume > 2.0x 20-period average AND 1d close > 1d open (bullish regime)
-# Short: price breaks below S4 (1d) with volume > 2.0x 20-period average AND 1d close < 1d open (bearish regime)
-# Exit: price returns to 1d VWAP or opposite pivot level (R3/S3) with volume confirmation
-# Uses 4h primary timeframe with 1d HTF for pivot levels and regime filter.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# 1d_weekly_donchian_breakout_volume_chop_v1
+# Hypothesis: Daily Donchian channel breakouts with volume confirmation and weekly choppiness regime filter.
+# Long: Price breaks above 20-day Donchian upper band with volume > 1.8x 20-day average AND weekly chop > 61.8 (ranging/mean-reversion favorable for breakouts)
+# Short: Price breaks below 20-day Donchian lower band with volume > 1.8x 20-day average AND weekly chop > 61.8
+# Exit: Price returns to 20-day Donchian midpoint OR opposite band touch with volume confirmation
+# Uses 1d primary timeframe with 1w HTF for choppiness regime filter.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,59 +25,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 20-day Donchian channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2.0
+    
+    # Calculate volume ratio (current vs 20-day average)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
     vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Get 1d data for Camarilla pivot levels and VWAP
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for choppiness regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
+    # Calculate weekly choppiness index (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    camarilla_r4 = np.full(len(df_1d), np.nan)
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
-    camarilla_s4 = np.full(len(df_1d), np.nan)
-    vwap_1d = np.full(len(df_1d), np.nan)
+    atr_1w = np.zeros(len(df_1w))
+    tr_1w = np.zeros(len(df_1w))
+    for i in range(1, len(df_1w)):
+        tr_1w[i] = max(high_1w[i] - low_1w[i], 
+                       abs(high_1w[i] - close_1w[i-1]), 
+                       abs(low_1w[i] - close_1w[i-1]))
     
-    for i in range(len(df_1d)):
-        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
-        if i == 0:
-            vwap_1d[i] = typical_price
+    for i in range(1, len(df_1w)):
+        atr_1w[i] = 0.9 * atr_1w[i-1] + 0.1 * tr_1w[i] if i > 1 else tr_1w[i]
+    
+    chop_1w = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        sum_atr = np.sum(atr_1w[i-13:i+1])
+        highest_high = np.max(high_1w[i-13:i+1])
+        lowest_low = np.min(low_1w[i-13:i+1])
+        if highest_high > lowest_low:
+            chop_1w[i] = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14)
         else:
-            # Use cumulative volume from 1d data for VWAP calculation
-            vol_sum = np.sum(df_1d['volume'].values[:i]) if i > 0 else 0
-            vwap_1d[i] = (vwap_1d[i-1] * vol_sum + typical_price * df_1d['volume'].values[i]) / (vol_sum + df_1d['volume'].values[i])
-        
-        if i > 0:
-            prev_close = close_1d[i-1]
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            range_val = prev_high - prev_low
-            
-            camarilla_r4[i] = prev_close + range_val * 1.1 / 2.0
-            camarilla_r3[i] = prev_close + range_val * 1.1 / 4.0
-            camarilla_s3[i] = prev_close - range_val * 1.1 / 4.0
-            camarilla_s4[i] = prev_close - range_val * 1.1 / 2.0
+            chop_1w[i] = 50.0  # neutral when no range
     
-    # Calculate 1d bullish/bearish regime (close > open = bullish)
-    bullish_regime = close_1d > open_1d
-    
-    # Align 1d indicators to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    bullish_regime_aligned = align_htf_to_ltf(prices, df_1d, bullish_regime.astype(float))
+    # Align 1d indicators (already aligned as we're in 1d timeframe)
+    # Align 1w choppiness to 1d timeframe
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -93,14 +89,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r4 = camarilla_r4_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        s4 = camarilla_s4_aligned[i]
-        vwap1d = vwap_1d_aligned[i]
-        bullish = bullish_regime_aligned[i] > 0.5  # Convert back to boolean
+        dh = donchian_high[i]
+        dl = donchian_low[i]
+        dm = donchian_mid[i]
+        chop = chop_1w_aligned[i]
         
-        if np.isnan(r4) or np.isnan(r3) or np.isnan(s3) or np.isnan(s4) or np.isnan(vwap1d):
+        if np.isnan(dh) or np.isnan(dl) or np.isnan(dm) or np.isnan(chop):
             if position != 0:
                 pass  # Hold position
             else:
@@ -108,27 +102,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to 1d VWAP or breaks below R3 with volume
-            if price <= vwap1d or (price < r3 and vol_r > 1.5):
+            # Exit: price returns to midpoint or touches lower band with volume
+            if price <= dm or (price < dl and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to 1d VWAP or breaks above S3 with volume
-            if price >= vwap1d or (price > s3 and vol_r > 1.5):
+            # Exit: price returns to midpoint or touches upper band with volume
+            if price >= dm or (price > dh and vol_r > 1.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price breaks above R4 with volume AND bullish 1d regime
-            if price > r4 and vol_r > 2.0 and bullish:
+            # Long entry: price breaks above upper band with volume AND weekly chop > 61.8 (ranging market)
+            if price > dh and vol_r > 1.8 and chop > 61.8:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below S4 with volume AND bearish 1d regime
-            elif price < s4 and vol_r > 2.0 and not bullish:
+            # Short entry: price breaks below lower band with volume AND weekly chop > 61.8 (ranging market)
+            elif price < dl and vol_r > 1.8 and chop > 61.8:
                 position = -1
                 signals[i] = -0.25
     
