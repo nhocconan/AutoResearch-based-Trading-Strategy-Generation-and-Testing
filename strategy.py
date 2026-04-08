@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-# 4h_volume_price_action_v2
-# Hypothesis: Price action with volume confirmation on 4h timeframe.
-# Long when price closes above prior swing high with volume > 1.5x average.
-# Short when price closes below prior swing low with volume > 1.5x average.
-# Exit on opposite signal or when volume drops below average.
-# Uses swing points to capture momentum with volume confirmation to reduce whipsaw.
-# Target: 75-150 total trades over 4 years (~19-38/year).
+# 6h_weekly_pivot_breakout_volume_v1
+# Hypothesis: Breakout trades in direction of weekly pivot trend with volume confirmation.
+# Long when price breaks above weekly R1 with volume > 1.5x average and price > weekly pivot.
+# Short when price breaks below weekly S1 with volume > 1.5x average and price < weekly pivot.
+# Uses weekly pivot levels for trend direction and 6h price action for entry timing.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_price_action_v2"
-timeframe = "4h"
+name = "6h_weekly_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,34 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate swing highs and lows (5-period lookback)
-    swing_high = np.full(n, np.nan)
-    swing_low = np.full(n, np.nan)
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) == 0:
+        return np.zeros(n)
     
-    for i in range(5, n-5):
-        # Swing high: highest high in 5 bars before and after
-        if high[i] == np.max(high[i-5:i+6]):
-            swing_high[i] = high[i]
-        # Swing low: lowest low in 5 bars before and after
-        if low[i] == np.min(low[i-5:i+6]):
-            swing_low[i] = low[i]
+    # Calculate weekly pivot points (using previous week's OHLC)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    weekly_open = df_weekly['open'].values
     
-    # Forward fill swing levels for comparison
-    swing_high = pd.Series(swing_high).ffill().bfill().values
-    swing_low = pd.Series(swing_low).ffill().bfill().values
+    # Pivot point = (H + L + C) / 3
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # R1 = (2 * PP) - L
+    r1 = (2 * pp) - weekly_low
+    # S1 = (2 * PP) - H
+    s1 = (2 * pp) - weekly_high
     
-    # Average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    
+    # Average volume for confirmation (24-period = 4 days on 6h)
+    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 10
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(swing_high[i]) or np.isnan(swing_low[i]) or np.isnan(avg_volume[i]):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,16 +69,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below swing low or volume drops below average
-            if close[i] < swing_low[i] or volume[i] < avg_volume[i]:
+            # Exit: price closes below weekly pivot or volume drops below average
+            if close[i] < pp_aligned[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above swing high or volume drops below average
-            if close[i] > swing_high[i] or volume[i] < avg_volume[i]:
+            # Exit: price closes above weekly pivot or volume drops below average
+            if close[i] > pp_aligned[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,15 +87,15 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Price action entries
-            if close[i] > swing_high[i] and volume_ok:
-                # Additional confirmation: previous close was at or below swing high
-                if i > 0 and close[i-1] <= swing_high[i-1]:
+            # Breakout entries in direction of weekly pivot trend
+            if close[i] > r1_aligned[i] and close[i] > pp_aligned[i] and volume_ok:
+                # Additional confirmation: previous close was at or below R1
+                if i > 0 and close[i-1] <= r1_aligned[i-1]:
                     position = 1
                     signals[i] = 0.25
-            elif close[i] < swing_low[i] and volume_ok:
-                # Additional confirmation: previous close was at or above swing low
-                if i > 0 and close[i-1] >= swing_low[i-1]:
+            elif close[i] < s1_aligned[i] and close[i] < pp_aligned[i] and volume_ok:
+                # Additional confirmation: previous close was at or above S1
+                if i > 0 and close[i-1] >= s1_aligned[i-1]:
                     position = -1
                     signals[i] = -0.25
     
