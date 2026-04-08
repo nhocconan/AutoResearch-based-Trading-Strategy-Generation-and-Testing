@@ -1,178 +1,113 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_adx_alligator_v1
-Hypothesis: 6-hour strategy combining weekly ADX trend strength with daily Alligator (SMAs) for trend-following entries.
-Long when weekly ADX > 25 (strong trend) and price > daily Alligator Jaw (13-period SMA shifted 8 bars) with bullish alignment (Teeth > Lips).
-Short when weekly ADX > 25 and price < daily Alligator Jaw with bearish alignment (Teeth < Lips).
-Exit when ADX weakens (<20) or Alligator alignment reverses.
-Uses weekly trend filter to avoid whipsaws in sideways markets and Alligator for precise entry timing.
-Designed for low trade frequency (12-37/year) to minimize fee impact in 6h timeframe.
+12h_1d_camarilla_pivot_v3
+Hypothesis: 12-hour strategy using daily Camarilla pivot with volume confirmation and trend filter.
+Long when price breaks above daily R1 with volume > 2.0x average and price > daily EMA50.
+Short when price breaks below daily S1 with volume > 2.0x average and price < daily EMA50.
+Exit when price crosses opposite daily level OR volume falls below 1.5x average.
+Designed for low trade frequency (12-37/year) to avoid fee drag and work in both bull/bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_adx_alligator_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_v3"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_sma(arr, period):
-    """Calculate Simple Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan, dtype=float)
-    sma = np.full_like(arr, np.nan, dtype=float)
-    for i in range(period-1, len(arr)):
-        sma[i] = np.mean(arr[i-(period-1):i+1])
-    return sma
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index"""
-    if len(high) < period + 1:
+def calculate_ema(close, period):
+    """Calculate EMA with proper handling"""
+    if len(close) < period:
         return np.full_like(close, np.nan, dtype=float)
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    atr = np.zeros_like(close)
-    plus_di = np.zeros_like(close)
-    minus_di = np.zeros_like(close)
-    
-    # Initial values
-    atr[period-1] = np.mean(tr[:period])
-    plus_dm_sum = np.sum(plus_dm[:period])
-    minus_dm_sum = np.sum(minus_dm[:period])
-    
+    ema = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
     for i in range(period, len(close)):
-        # Wilder smoothing
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
-        minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
-        
-        if atr[i] != 0:
-            plus_di[i] = 100 * plus_dm_sum / atr[i]
-            minus_di[i] = 100 * minus_dm_sum / atr[i]
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
-    
-    # DX and ADX
-    dx = np.zeros_like(close)
-    for i in range(len(close)):
-        if plus_di[i] + minus_di[i] != 0:
-            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        else:
-            dx[i] = 0
-    
-    adx = np.full_like(close, np.nan, dtype=float)
-    adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-    for i in range(2*period-1, len(close)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    return adx
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter (ADX)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for Alligator (SMAs)
+    # Get daily data for context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly ADX for trend strength
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Daily Alligator components (SMAs with specific shifts)
+    # Calculate daily Pivot (using previous daily bar's data)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Jaw: 13-period SMA shifted 8 bars
-    jaw_1d = calculate_sma(close_1d, 13)
-    jaw_1d = np.roll(jaw_1d, 8)  # Shift forward 8 bars
-    jaw_1d[:8] = np.nan  # First 8 values invalid after shift
-    # Teeth: 8-period SMA shifted 5 bars
-    teeth_1d = calculate_sma(close_1d, 8)
-    teeth_1d = np.roll(teeth_1d, 5)  # Shift forward 5 bars
-    teeth_1d[:5] = np.nan
-    # Lips: 5-period SMA shifted 3 bars
-    lips_1d = calculate_sma(close_1d, 5)
-    lips_1d = np.roll(lips_1d, 3)  # Shift forward 3 bars
-    lips_1d[:3] = np.nan
     
-    # Align Alligator to 6h timeframe
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    # Daily support/resistance levels (Standard Camarilla S1/R1)
+    S1_1d = pivot_1d - (range_1d * 1.1 / 12)  # daily S1
+    R1_1d = pivot_1d + (range_1d * 1.1 / 12)  # daily R1
+    
+    # Calculate daily EMA for trend filter
+    ema_50_1d = calculate_ema(close_1d, 50)
+    
+    # Align indicators to 12-hour timeframe
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(jaw_1d_aligned[i]) or 
-            np.isnan(teeth_1d_aligned[i]) or np.isnan(lips_1d_aligned[i])):
+        if (np.isnan(S1_1d_aligned[i]) or np.isnan(R1_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        adx = adx_1w_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        jaw = jaw_1d_aligned[i]
-        teeth = teeth_1d_aligned[i]
-        lips = lips_1d_aligned[i]
-        
-        # Alligator alignment signals
-        bullish_alignment = teeth > lips  # Teeth above Lips = bullish
-        bearish_alignment = teeth < lips  # Teeth below Lips = bearish
+        S1 = S1_1d_aligned[i]
+        R1 = R1_1d_aligned[i]
+        trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: ADX weakens (<20) or Alligator alignment turns bearish
-            if adx < 20.0 or not bullish_alignment:
+            # Exit: price crosses below daily S1 or volume drops below 1.5x average
+            if price < S1 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: ADX weakens (<20) or Alligator alignment turns bullish
-            if adx < 20.0 or not bearish_alignment:
+            # Exit: price crosses above daily R1 or volume drops below 1.5x average
+            if price > R1 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: Strong trend (ADX > 25) + price above Jaw + bullish alignment
-            if adx > 25.0 and price > jaw and bullish_alignment:
+            # Enter long: price breaks above daily R1 with volume expansion and uptrend on daily
+            if price > R1 and vol_ratio > 2.0 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: Strong trend (ADX > 25) + price below Jaw + bearish alignment
-            elif adx > 25.0 and price < jaw and bearish_alignment:
+            # Enter short: price breaks below daily S1 with volume expansion and downtrend on daily
+            elif price < S1 and vol_ratio > 2.0 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
