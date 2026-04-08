@@ -1,12 +1,14 @@
-# 4h_fractal_breakout_1d_trend_volume_v1
-# Hypothesis: Williams Fractal breakout with 1d trend filter and volume confirmation.
-# Uses daily Williams Fractals to identify key support/resistance levels.
-# Breaks above/below fractal levels trigger entries with volume confirmation (>1.5x average) and daily trend filter.
-# Works in bull markets by catching breakouts above resistance and in bear markets by catching breakdowns below support.
-# Fractal breakouts provide high-probability entries with clear structure, targeting 20-40 trades/year.
+#!/usr/bin/env python3
+# 1d_weekly_fractal_breakout_volume_v2
+# Hypothesis: Weekly Williams fractal breakout with volume confirmation and daily trend filter.
+# Uses weekly bearish/bullish fractal breaks for entry, volume > 1.5x average for confirmation,
+# and daily EMA trend filter to avoid counter-trend trades. Works in bull markets by catching
+# uptrend continuations and in bear markets by catching downtrend continuations.
+# Fractals provide high-probability breakout points, volume filter reduces false signals,
+# targeting 20-40 trades/year.
 
-name = "4h_fractal_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_fractal_breakout_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,17 +26,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Fractals and trend filter
-    df_daily = get_htf_data(prices, '1d')
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Get weekly data for fractals
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # Williams Fractals (need 2 extra bars for confirmation)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_daily, low_daily)
-    # Align fractals with 2-bar additional delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_daily, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_daily, bullish_fractal, additional_delay_bars=2)
+    # Calculate Williams fractals on weekly data
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_weekly, low_weekly)
+    # Fractals need 2 extra weekly bars for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_weekly, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_weekly, bullish_fractal, additional_delay_bars=2)
+    
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    close_daily = df_daily['close'].values
     
     # Daily EMA (50-period) for higher timeframe trend
     ema_period = 50
@@ -43,8 +48,8 @@ def generate_signals(prices):
     for i in range(ema_period, len(close_daily)):
         ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Align daily EMA to 4h timeframe
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Align daily EMA to daily timeframe (no shift needed as it's same timeframe)
+    ema_daily_aligned = ema_daily  # Already on daily timeframe
     
     # Volume filter: 20-period average volume
     vol_ma = np.zeros_like(volume)
@@ -59,7 +64,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(ema_period) + 5
+    start_idx = 50 + 5  # EMA period + buffer
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -81,28 +86,28 @@ def generate_signals(prices):
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if price breaks below bullish fractal (support) or volume fails
-            if close[i] < bullish_fractal_aligned[i] or not volume_filter:
+            # Exit if trend reverses or volume fails
+            if not uptrend_htf or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above bearish fractal (resistance) or volume fails
-            if close[i] > bearish_fractal_aligned[i] or not volume_filter:
+            # Exit if trend reverses or volume fails
+            if not downtrend_htf or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above bullish fractal (resistance becomes support), volume confirmation, and daily uptrend
+            # Long entry: price breaks above weekly bullish fractal, volume confirmation, and daily uptrend
             if (close[i] > bullish_fractal_aligned[i] and 
                 volume_filter and 
                 uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below bearish fractal (support becomes resistance), volume confirmation, and daily downtrend
+            # Short entry: price breaks below weekly bearish fractal, volume confirmation, and daily downtrend
             elif (close[i] < bearish_fractal_aligned[i] and 
                   volume_filter and 
                   downtrend_htf):
