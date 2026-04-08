@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4H Donchian Breakout + Daily Trend + Volume Confirmation v6
-Hypothesis: Donchian(20) breakouts from daily timeframe capture strong momentum.
+4H Donchian Breakout + Daily Trend + Volume Confirmation v7
+Hypothesis: Donchian(20) breakouts from daily timeframe capture strong momentum with reduced false signals.
 Breakouts above 20-day high or below 20-day low with daily EMA trend alignment and volume confirmation.
-Designed for 4h timeframe to balance trade frequency and signal quality in both bull and bear markets.
-Target: 25-60 trades/year per signal.
+Added EMA crossover filter to reduce whipsaws and improve win rate in both bull and bear markets.
+Target: 20-50 trades/year per signal.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_daily_trend_volume_v6"
+name = "4h_donchian_breakout_daily_trend_volume_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,13 +33,15 @@ def generate_signals(prices):
     donchian_high = df_1d['high'].rolling(window=20, min_periods=20).max().shift(1)
     donchian_low = df_1d['low'].rolling(window=20, min_periods=20).min().shift(1)
     
-    # Daily EMA(21) for trend filter
+    # Daily EMA(21) and EMA(55) for trend filter
     ema_21 = df_1d['close'].ewm(span=21, adjust=False, min_periods=21).mean()
+    ema_55 = df_1d['close'].ewm(span=55, adjust=False, min_periods=55).mean()
     
     # Align to 4h timeframe
     donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high.values)
     donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low.values)
     ema_21_4h = align_htf_to_ltf(prices, df_1d, ema_21.values)
+    ema_55_4h = align_htf_to_ltf(prices, df_1d, ema_55.values)
     
     # Volume filter (>1.5x 20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,35 +53,35 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
-            np.isnan(ema_21_4h[i]) or np.isnan(vol_filter[i])):
+            np.isnan(ema_21_4h[i]) or np.isnan(ema_55_4h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if close[i] <= donchian_low_4h[i] or close[i] < ema_21_4h[i]:
+            # Exit: price closes below Donchian low or trend reverses (EMA21 < EMA55)
+            if close[i] <= donchian_low_4h[i] or ema_21_4h[i] < ema_55_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if close[i] >= donchian_high_4h[i] or close[i] > ema_21_4h[i]:
+            # Exit: price closes above Donchian high or trend reverses (EMA21 > EMA55)
+            if close[i] >= donchian_high_4h[i] or ema_21_4h[i] > ema_55_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long at Donchian high with trend alignment
+            # Breakout long at Donchian high with trend alignment (EMA21 > EMA55)
             if (close[i] >= donchian_high_4h[i] and 
-                close[i] > ema_21_4h[i] and 
+                ema_21_4h[i] > ema_55_4h[i] and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Breakout short at Donchian low with trend alignment
+            # Breakout short at Donchian low with trend alignment (EMA21 < EMA55)
             elif (close[i] <= donchian_low_4h[i] and 
-                  close[i] < ema_21_4h[i] and 
+                  ema_21_4h[i] < ema_55_4h[i] and 
                   vol_filter[i]):
                 position = -1
                 signals[i] = -0.25
