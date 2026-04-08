@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 
-# 4h_volatility_breakout_v3
-# Hypothesis: Volatility breakout strategy using ATR-based channels with improved filters.
-# Uses ATR(14) to set upper/lower bands around EMA(20). Enters on breakout with volume confirmation and trend filter.
-# Designed to work in both bull and bear markets by capturing volatility expansion phases.
+# 4h_volume_breakout_trend_v1
+# Hypothesis: Volume-confirmed breakout from EMA-based channels with trend filter.
+# Uses EMA(20) as center, ATR(14) for dynamic bands (2x ATR). Enters on breakout with volume > 1.5x average.
+# Trend filter: price above/below daily EMA(50) to align with higher timeframe trend.
+# Designed to capture momentum moves in both bull and bear markets with low trade frequency.
 # Target: 20-30 trades/year for low fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_v3"
+name = "4h_volume_breakout_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,13 +26,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter (1d EMA200) - load once before loop
+    # Daily trend filter (daily EMA50) - load once before loop
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA200 on daily data
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate EMA50 on daily data
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # 4h indicators
     # EMA20 for dynamic center line
@@ -48,7 +49,7 @@ def generate_signals(prices):
     upper_band = ema20 + 2.0 * atr
     lower_band = ema20 - 2.0 * atr
     
-    # Volume confirmation
+    # Volume confirmation - 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,7 +58,7 @@ def generate_signals(prices):
     start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
+        if np.isnan(ema20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 pass
             else:
@@ -65,8 +66,8 @@ def generate_signals(prices):
             continue
         
         # Daily trend filter
-        daily_uptrend = close[i] > ema200_1d_aligned[i]
-        daily_downtrend = close[i] < ema200_1d_aligned[i]
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions: close below EMA20 or volatility contraction
@@ -85,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.3 * avg_volume[i]
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
             
             # Breakout conditions
             if volume_ok:
