@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_pivot_breakout_1d_trend_volume_v6"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v7"
 timeframe = "4h"
 leverage = 1.0
 
