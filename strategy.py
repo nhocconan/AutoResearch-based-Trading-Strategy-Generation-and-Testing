@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_wkly_camarilla_volume_v1
-# Hypothesis: 12-hour Camarilla pivot reversal with volume spike and weekly trend filter.
-# Long: price touches S3 (1.1 level) AND volume > 2x 24-period average AND price > weekly EMA50.
-# Short: price touches R3 (3.1 level) AND volume > 2x 24-period average AND price < weekly EMA50.
-# Exit: price crosses H4/L4 levels or opposite Camarilla touch with volume.
-# Designed for mean reversion in ranging markets and breakout in trending markets with strict entry to limit trades.
+# 1h_4h1d_rsi_pullback_v1
+# Hypothesis: 1-hour RSI pullback strategy with 4-hour trend filter and 1-day volume confirmation.
+# Long: RSI(14) < 30 (oversold pullback) AND 4h EMA(21) up-trend AND 1-day volume > 1.5x 20-day average volume.
+# Short: RSI(14) > 70 (overbought bounce) AND 4h EMA(21) down-trend AND 1-day volume > 1.5x 20-day average volume.
+# Exit: RSI crosses back above 50 (long) or below 50 (short).
+# Designed to capture mean-reversion within the trend during both bull and bear markets with volume confirmation to avoid false signals.
+# Target: 15-37 trades/year (60-150 over 4 years) using strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_wkly_camarilla_volume_v1"
-timeframe = "12h"
+name = "1h_4h1d_rsi_pullback_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,95 +25,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate typical price for pivot (typical price = (H+L+C)/3)
-    typical_price = (high + low + close) / 3
+    # 1-hour RSI(14)
+    rsi = np.full(n, np.nan)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 1-day pivot levels (using previous day's data)
-    pivot = np.full(n, np.nan)
-    s1 = np.full(n, np.nan)
-    s2 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
-    r1 = np.full(n, np.nan)
-    r2 = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    for i in range(1, n):
-        # Use previous bar's data for pivot calculation
-        ph = high[i-1]
-        pl = low[i-1]
-        pc = close[i-1]
-        pp = (ph + pl + pc) / 3
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
         
-        pivot[i] = pp
-        s1[i] = 2*pp - ph
-        s2[i] = pp - (ph - pl)
-        s3[i] = pl - 2*(ph - pl)
-        r1[i] = 2*pp - pl
-        r2[i] = pp + (ph - pl)
-        r3[i] = ph + 2*(ph - pl)
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi[i] = 100
     
-    # Weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 4-hour EMA(21) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w_50 = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_1w_50[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_1w_50[i] = close_1w[i] * (2/51) + ema_1w_50[i-1] * (49/51)
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
     
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    if len(close_4h) >= 21:
+        ema_4h[20] = np.mean(close_4h[:21])
+        for i in range(21, len(close_4h)):
+            ema_4h[i] = close_4h[i] * (2/22) + ema_4h[i-1] * (20/22)
     
-    # 24-period average volume (2 days of 12h data)
-    avg_volume = np.full(n, np.nan)
-    for i in range(24, n):
-        avg_volume[i] = np.mean(volume[i-24:i])
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1-day volume average (20-period) for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    avg_volume_1d = np.full(len(volume_1d), np.nan)
+    
+    for i in range(20, len(volume_1d)):
+        avg_volume_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
-        price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        s3_level = s3[i]
-        r3_level = r3[i]
-        s4_level = s2[i]  # S2 acts as stop/reverse for longs
-        r4_level = r2[i]  # R2 acts as stop/reverse for shorts
-        ema_1w = ema_1w_50_aligned[i]
-        
-        if np.isnan(s3_level) or np.isnan(r3_level) or np.isnan(avg_vol) or np.isnan(ema_1w):
+    for i in range(50, n):
+        # Skip if outside trading session
+        if not (8 <= hours[i] <= 20):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        vol_surge = vol > 2.0 * avg_vol
+        rsi_val = rsi[i]
+        ema_4h_val = ema_4h_aligned[i]
+        avg_vol_1d_val = avg_volume_1d_aligned[i]
+        vol_1d_idx = i // 24  # Approximate 1h to 1d index for volume check
+        
+        # Get current 1-day volume (approximate)
+        if vol_1d_idx < len(df_1d):
+            vol_1d = df_1d['volume'].iloc[vol_1d_idx] if hasattr(df_1d, 'iloc') else volume_1d[vol_1d_idx]
+        else:
+            vol_1d = 0
+        
+        if np.isnan(rsi_val) or np.isnan(ema_4h_val) or np.isnan(avg_vol_1d_val):
+            if position != 0:
+                pass  # Hold position
+            else:
+                signals[i] = 0.0
+            continue
+        
+        vol_surge = vol_1d > 1.5 * avg_vol_1d_val
         
         if position == 1:  # Long position
-            if price < s4_level or (price > r3_level and vol_surge):
+            if rsi_val > 50:  # Exit when RSI crosses above 50
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            if price > r4_level or (price < s3_level and vol_surge):
+            if rsi_val < 50:  # Exit when RSI crosses below 50
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Long: price touches S3 with volume surge and above weekly EMA
-            if abs(price - s3_level) < 0.001 * price and vol_surge and price > ema_1w:
+            # Long setup: RSI oversold + 4h uptrend + volume surge
+            if rsi_val < 30 and ema_4h_val > ema_4h_aligned[i-1] and vol_surge:
                 position = 1
-                signals[i] = 0.25
-            # Short: price touches R3 with volume surge and below weekly EMA
-            elif abs(price - r3_level) < 0.001 * price and vol_surge and price < ema_1w:
+                signals[i] = 0.20
+            # Short setup: RSI overbought + 4h downtrend + volume surge
+            elif rsi_val > 70 and ema_4h_val < ema_4h_aligned[i-1] and vol_surge:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
