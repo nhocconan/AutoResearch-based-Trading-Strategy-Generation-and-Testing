@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_triple_confirmation_v1
-# Hypothesis: Uses Donchian(20) breakout with volume confirmation and 1d trend filter.
-# Goes long when price breaks above Donchian high in uptrend (price > 1d EMA50) with volume surge.
-# Goes short when price breaks below Donchian low in downtrend (price < 1d EMA50) with volume surge.
-# Designed for low trade frequency (20-50/year) to avoid fee drift, works in bull/bear via trend filter.
+# 12h_keltner_channel_v1
+# Hypothesis: 12h Keltner Channel breakout with weekly RSI filter and volume confirmation.
+# Goes long when price closes above upper Keltner band in weekly uptrend (RSI > 50) with volume surge.
+# Goes short when price closes below lower Keltner band in weekly downtrend (RSI < 50) with volume surge.
+# Designed for low trade frequency (12-37/year) to avoid fee drag, works in bull/bear via weekly trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_triple_confirmation_v1"
-timeframe = "4h"
+name = "12h_keltner_channel_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,17 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Daily trend filter: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly trend filter: RSI(14)
+    delta = pd.Series(close_1w).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w = rsi_1w.values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Keltner Channel (20-period, ATR multiplier 2.0)
+    atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean()
+    atr[:13] = np.nan  # Handle first values
+    ema_middle = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_middle + 2.0 * atr.values
+    lower_keltner = ema_middle - 2.0 * atr.values
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,47 +55,47 @@ def generate_signals(prices):
     start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(rsi_1w_aligned[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend filter
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = rsi_1w_aligned[i] > 50
+        weekly_downtrend = rsi_1w_aligned[i] < 50
         
-        # Donchian breakout signals
-        breakout_high = close[i] > donchian_high[i-1]
-        breakout_low = close[i] < donchian_low[i-1]
+        # Keltner breakout signals
+        breakout_up = close[i] > upper_keltner[i]
+        breakout_down = close[i] < lower_keltner[i]
         
         # Volume confirmation
         volume_ok = volume[i] > 1.8 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: Donchian breakdown or trend change
-            if close[i] < donchian_low[i] or not daily_uptrend:
+            # Exit: Close below middle line or trend change
+            if close[i] < ema_middle[i] or not weekly_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Donchian breakout or trend change
-            if close[i] > donchian_high[i] or not daily_downtrend:
+            # Exit: Close above middle line or trend change
+            if close[i] > ema_middle[i] or not weekly_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             if volume_ok:
-                # Long entry: Donchian breakout in uptrend
-                if daily_uptrend and breakout_high:
+                # Long entry: Close above upper Keltner in weekly uptrend
+                if weekly_uptrend and breakout_up:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: Donchian breakdown in downtrend
-                elif daily_downtrend and breakout_low:
+                # Short entry: Close below lower Keltner in weekly downtrend
+                elif weekly_downtrend and breakout_down:
                     position = -1
                     signals[i] = -0.25
     
