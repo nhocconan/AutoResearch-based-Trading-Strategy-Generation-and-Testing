@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-# 6h_12h_1d_consecutive_high_low_breakout_v1
-# Hypothesis: Consecutive higher highs and lower lows on 12h and 1d timeframes define trend direction.
-# On 6t, enter long when price breaks above recent high with volume confirmation during uptrend (higher highs/lows on 12h and 1d).
-# Enter short when price breaks below recent low with volume confirmation during downtrend (lower highs/lows on 12h and 1d).
-# Volume filter ensures institutional participation, reducing false breakouts.
-# Works in both regimes by requiring alignment of higher timeframe structure.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothetical Strategy: 4h_1d_VWAP_Crossover_with_Volume_Confirmation
+# Hypothesis: Price crossing above/below the 1-day VWAP with volume confirmation on 4h timeframe captures institutional
+#   flow at key daily value areas. Long when price crosses above 1-day VWAP with above-average volume; short when
+#   price crosses below 1-day VWAP with above-average volume. Exit on opposite VWAP cross. This strategy works in
+#   both bull and bear markets by following the daily value area, and volume confirmation reduces false signals.
+#   Target: 20-50 trades per year (~80-200 total over 4 years) to minimize fee drag.
 
-name = "6h_12h_1d_consecutive_high_low_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_VWAP_Crossover_with_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,84 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend structure
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Get 1d data for trend structure
+    # Get 1-day data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate consecutive higher highs and higher lows (uptrend) on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate typical price and VWAP for each 1-day bar
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    vwap_numerator = (typical_price_1d * df_1d['volume'].values)
+    vwap_denominator = df_1d['volume'].values
     
-    # Higher high: current high > previous high
-    hh_12h = np.zeros(len(df_12h), dtype=bool)
-    hh_12h[1:] = high_12h[1:] > high_12h[:-1]
+    # Cumulative sums for VWAP (resets each day)
+    # We compute VWAP as cumulative typical price * volume / cumulative volume
+    # Since we only need the VWAP value at the close of each day, we can compute:
+    # VWAP = sum(typical_price * volume) / sum(volume) for the day
+    # But for simplicity and to match the 1-day VWAP indicator, we'll use the close-of-day VWAP
+    # which is the same as the above for the full day.
+    # However, to avoid look-ahead, we need the VWAP value that was known at the close of the previous day.
+    # Since VWAP is a cumulative indicator within the day, we cannot know the day's VWAP until the day ends.
+    # Therefore, we use the previous day's VWAP value as the reference for the current day.
+    # Compute the VWAP for each completed day (using all data up to that day's close)
+    cum_sum = np.cumsum(vwap_numerator)
+    cum_vol = np.cumsum(vwap_denominator)
+    # Avoid division by zero
+    vwap_1d = np.where(cum_vol > 0, cum_sum / cum_vol, np.nan)
+    # The VWAP value for a day is only known at the close of that day.
+    # For signaling on the 4h chart, we want to use the VWAP of the previous completed day.
+    # So we shift the VWAP array by 1 to use the prior day's VWAP.
+    vwap_1d_prev = np.roll(vwap_1d, 1)
+    vwap_1d_prev[0] = np.nan  # First day has no previous day
     
-    # Higher low: current low > previous low
-    hl_12h = np.zeros(len(df_12h), dtype=bool)
-    hl_12h[1:] = low_12h[1:] > low_12h[:-1]
+    # Align the previous day's VWAP to 4h timeframe (wait for 1-day bar to close)
+    vwap_1d_prev_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_prev)
     
-    # Uptrend: both higher high and higher low
-    uptrend_12h = hh_12h & hl_12h
-    
-    # Calculate consecutive lower highs and lower lows (downtrend) on 12h
-    # Lower high: current high < previous high
-    lh_12h = np.zeros(len(df_12h), dtype=bool)
-    lh_12h[1:] = high_12h[1:] < high_12h[:-1]
-    
-    # Lower low: current low < previous low
-    ll_12h = np.zeros(len(df_12h), dtype=bool)
-    ll_12h[1:] = low_12h[1:] < low_12h[:-1]
-    
-    # Downtrend: both lower high and lower low
-    downtrend_12h = lh_12h & ll_12h
-    
-    # Calculate consecutive higher highs and higher lows (uptrend) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Higher high: current high > previous high
-    hh_1d = np.zeros(len(df_1d), dtype=bool)
-    hh_1d[1:] = high_1d[1:] > high_1d[:-1]
-    
-    # Higher low: current low > previous low
-    hl_1d = np.zeros(len(df_1d), dtype=bool)
-    hl_1d[1:] = low_1d[1:] > low_1d[:-1]
-    
-    # Uptrend: both higher high and higher low
-    uptrend_1d = hh_1d & hl_1d
-    
-    # Calculate consecutive lower highs and lower lows (downtrend) on 1d
-    # Lower high: current high < previous high
-    lh_1d = np.zeros(len(df_1d), dtype=bool)
-    lh_1d[1:] = high_1d[1:] < high_1d[:-1]
-    
-    # Lower low: current low < previous low
-    ll_1d = np.zeros(len(df_1d), dtype=bool)
-    ll_1d[1:] = low_1d[1:] < low_1d[:-1]
-    
-    # Downtrend: both lower high and lower low
-    downtrend_1d = lh_1d & ll_1d
-    
-    # Align trend indicators to 6h timeframe (wait for 12h/1d bar to close)
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
-    
-    # Recent high/low for breakout on 6h: 5-period lookback
-    high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
-    low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
-    
-    # Volume confirmation on 6h: volume > 1.5x 20-period average
+    # Volume confirmation on 4h: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
-    vol_confirm = vol_ratio > 1.5
+    vol_confirm = vol_ratio > 1.3
     
     # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -112,13 +69,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup period
-    start_idx = max(5, 20) + 1
+    # Start after warmup period: need VWAP and volume MA
+    start_idx = max(20, 1) + 1  # at least 20 for volume MA, 1 for VWAP (but shifted)
     
     for i in range(start_idx, n):
-        # Skip if trend data is not available
-        if (np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i]) or
-            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i])):
+        # Skip if VWAP is not available
+        if np.isnan(vwap_1d_prev_aligned[i]):
             if position != 0:
                 # Hold position until exit
                 pass
@@ -136,33 +92,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 5-period low
-            if close[i] < low_5[i]:
+            # Exit: price crosses below 1-day VWAP (previous day's VWAP)
+            if close[i] < vwap_1d_prev_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 5-period high
-            if close[i] > high_5[i]:
+            # Exit: price crosses above 1-day VWAP (previous day's VWAP)
+            if close[i] > vwap_1d_prev_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 5-period high with volume
-            # Require uptrend on both 12h and 1d
-            if (close[i] > high_5[i] and 
-                uptrend_12h_aligned[i] > 0.5 and 
-                uptrend_1d_aligned[i] > 0.5):
+            # Long entry: price crosses above 1-day VWAP with volume confirmation
+            if close[i] > vwap_1d_prev_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 5-period low with volume
-            # Require downtrend on both 12h and 1d
-            elif (close[i] < low_5[i] and 
-                  downtrend_12h_aligned[i] > 0.5 and 
-                  downtrend_1d_aligned[i] > 0.5):
+            # Short entry: price crosses below 1-day VWAP with volume confirmation
+            elif close[i] < vwap_1d_prev_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
