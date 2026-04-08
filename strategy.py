@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
 """
-6h_1d_williams_fractal_breakout_v1
-Hypothesis: Williams Fractals on 1d identify support/resistance; breakouts with volume continuation work in both bull and bear markets.
-- Bullish fractal (lowest low with higher lows on both sides) = support
-- Bearish fractal (highest high with lower highs on both sides) = resistance
-- Breakout above bearish fractal resistance with volume > 1.5x average = long
-- Breakdown below bullish fractal support with volume > 1.5x average = short
-- Volume filter reduces false breakouts; fractals provide structure in ranging markets
-Target: 50-150 total trades over 4 years = 12-37/year
+4h_Williams_Alligator_Filtered_v1
+Hypothesis: Williams Alligator (3 SMAs) identifies trend direction; enter on pullback to median SMA with volume confirmation in 4h timeframe.
+- Jaw (13-period), Teeth (8-period), Lips (5-period) SMAs on median price
+- Bullish when Lips > Teeth > Jaw; Bearish when Lips < Teeth < Jaw
+- Entry on pullback to Teeth (8 SMA) with volume > 1.5x average volume
+- Exit on opposite Alligator alignment or volume drop
+- Williams Alligator works in both trending and ranging markets by showing convergence/divergence
+- Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_williams_fractal_breakout_v1"
-timeframe = "6h"
+name = "4h_Williams_Alligator_Filtered_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_sma(arr, period):
+    """Calculate simple moving average with proper handling of NaN"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    
+    sma = np.full_like(arr, np.nan, dtype=float)
+    for i in range(period - 1, len(arr)):
+        sma[i] = np.mean(arr[i - period + 1:i + 1])
+    return sma
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -29,70 +39,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Fractals
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:  # Need at least 5 days for fractals
-        return np.zeros(n)
+    # Calculate median price (typical price)
+    median_price = (high + low + close) / 3.0
     
-    # Calculate Williams Fractals on 1d
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values
-    )
+    # Williams Alligator components: Smoothed SMAs of median price
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    # Williams fractals need 2 extra 1d bars after center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    jaw = calculate_sma(median_price, jaw_period)
+    teeth = calculate_sma(median_price, teeth_period)
+    lips = calculate_sma(median_price, lips_period)
     
-    # Volume average (20-period) for confirmation
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Alligator alignment: Bullish when Lips > Teeth > Jaw, Bearish when Lips < Teeth < Jaw
+    bullish_alignment = (lips > teeth) & (teeth > jaw)
+    bearish_alignment = (lips < teeth) & (teeth < jaw)
+    
+    # Volume confirmation: current volume > 1.5x average volume over 20 periods
+    vol_ma = calculate_sma(volume, 20)
+    volume_confirmation = volume > (vol_ma * 1.5)
+    
+    # Pullback to Teeth (8 SMA) with tolerance
+    pullback_tolerance = 0.001  # 0.1% tolerance
+    lips_above_teeth = lips > teeth * (1 - pullback_tolerance)
+    lips_below_teeth = lips < teeth * (1 + pullback_tolerance)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = max(jaw_period, teeth_period, lips_period, 20) + 5
     
     for i in range(start_idx, n):
-        # Skip if fractal data not available
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(volume_avg[i])):
+        # Skip if data not available
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
-                # Hold position
+                # Hold position until exit conditions met
                 pass
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below bullish fractal (support)
-            if close[i] < bullish_fractal_aligned[i]:
+            # Exit: bearish alignment or volume drops below average
+            if bearish_alignment[i] or volume[i] <= vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: price closes above bearish fractal (resistance)
-            if close[i] > bearish_fractal_aligned[i]:
+            # Exit: bullish alignment or volume drops below average
+            if bullish_alignment[i] or volume[i] <= vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average
-            vol_confirm = volume[i] > 1.5 * volume_avg[i]
-            
-            # Long entry: price closes above bearish fractal (resistance) with volume
-            if close[i] > bearish_fractal_aligned[i] and vol_confirm:
+            # Long entry: bullish alignment + pullback to teeth + volume confirmation
+            if (bullish_alignment[i] and 
+                lips_below_teeth[i] and 
+                volume_confirmation[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price closes below bullish fractal (support) with volume
-            elif close[i] < bullish_fractal_aligned[i] and vol_confirm:
+            # Short entry: bearish alignment + pullback to teeth + volume confirmation
+            elif (bearish_alignment[i] and 
+                  lips_above_teeth[i] and 
+                  volume_confirmation[i]):
                 position = -1
                 signals[i] = -0.25
     
