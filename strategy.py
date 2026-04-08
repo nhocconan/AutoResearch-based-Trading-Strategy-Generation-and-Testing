@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_1w_trend_filter_v1
-# Hypothesis: Uses Donchian(20) breakout on 4h with 1-week EMA50 trend filter to capture sustained trends in both bull and bear markets. Volume confirmation reduces false breakouts. Designed for ~25-40 trades/year on 4h to avoid fee drag.
+# 12h_donchian_breakout_1d_trend_volume_v1
+# Hypothesis: Uses 12h Donchian breakout (20-period) with 1d trend filter (price > SMA50) and volume confirmation (volume > 1.5x 20-period average).
+# Works in bull via breakout continuation and bear via short breakdowns. Volume ensures breakout validity, trend filter avoids counter-trend trades.
+# Designed for 15-30 trades/year on 12h to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1w_trend_filter_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,77 +23,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4-hour data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1-week data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 12-period SMA for volume average
+    volume_sma = np.zeros(n)
+    volume_sum = 0.0
+    for i in range(n):
+        volume_sum += volume[i]
+        if i >= 20:
+            volume_sum -= volume[i-20]
+        if i < 19:
+            volume_sma[i] = np.nan
+        else:
+            volume_sma[i] = volume_sum / 20.0
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full_like(high_4h, np.nan)
-    donchian_low = np.full_like(low_4h, np.nan)
+    # Donchian channels (20-period) on 12h
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
+    for i in range(n):
+        if i < 19:
+            continue
+        start_idx = max(0, i-19)
+        high_max[i] = np.max(high[start_idx:i+1])
+        low_min[i] = np.min(low[start_idx:i+1])
     
-    for i in range(20, len(high_4h)):
-        donchian_high[i] = np.max(high_4h[i-20:i])
-        donchian_low[i] = np.min(low_4h[i-20:i])
+    # 1-day SMA50 trend filter
+    sma50_1d = np.full(len(close_1d), np.nan)
+    sma_sum = 0.0
+    for i in range(len(close_1d)):
+        sma_sum += close_1d[i]
+        if i >= 49:
+            sma_sum -= close_1d[i-49]
+        if i < 49:
+            sma50_1d[i] = np.nan
+        else:
+            sma50_1d[i] = sma_sum / 50.0
     
-    # Calculate 1-week EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 4-period average volume for confirmation
-    avg_vol_4 = np.full_like(volume, np.nan)
-    for i in range(4, len(volume)):
-        avg_vol_4[i] = np.mean(volume[i-4:i])
-    
-    # Align indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    avg_vol_4_aligned = align_htf_to_ltf(prices, df_4h, avg_vol_4)
+    # Align 1d SMA50 to 12h
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 49  # Ensure SMA50 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
-           np.isnan(ema50_1w_aligned[i]) or np.isnan(avg_vol_4_aligned[i]) or np.isnan(volume[i]):
+        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(sma50_1d_aligned[i]) or np.isnan(volume_sma[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = volume[i] > 1.5 * avg_vol_4_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * volume_sma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or below 1w EMA50
-            if close[i] < donchian_low_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit: price closes below lower Donchian or trend fails
+            if close[i] < low_min[i] or close[i] <= sma50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or above 1w EMA50
-            if close[i] > donchian_high_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit: price closes above upper Donchian or trend fails
+            if close[i] > high_max[i] or close[i] >= sma50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price closes above Donchian high with volume confirmation and above 1w EMA50
-            if close[i] > donchian_high_aligned[i] and volume_confirm and close[i] > ema50_1w_aligned[i]:
+            # Long entry: price breaks above upper Donchian with volume and uptrend
+            if close[i] > high_max[i] and vol_confirm and close[i] > sma50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price closes below Donchian low with volume confirmation and below 1w EMA50
-            elif close[i] < donchian_low_aligned[i] and volume_confirm and close[i] < ema50_1w_aligned[i]:
+            # Short entry: price breaks below lower Donchian with volume and downtrend
+            elif close[i] < low_min[i] and vol_confirm and close[i] < sma50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
