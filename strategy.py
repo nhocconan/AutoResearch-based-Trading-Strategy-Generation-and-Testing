@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_1d_trend_volume_atr_stop
-Hypothesis: Donchian breakout in direction of 1d trend with volume confirmation and ATR trailing stop.
-- Primary: 4h Donchian breakout (20-period) for entry
-- Trend filter: 1d EMA(50) - only long when price > EMA, short when price < EMA
-- Volume confirmation: 4h volume > 1.5x 20-period average volume
-- Exit: ATR trailing stop (2.0) or Donchian breakout in opposite direction
-- Position sizing: 0.25 for long, -0.25 for short
-Target: 20-50 trades/year (80-200 total over 4 years)
+12h_1d_1w_camarilla_volume
+Hypothesis: Camarilla pivot levels on daily chart provide strong support/resistance.
+Breakouts above/below H4/L4 levels with volume confirmation and 1w trend filter.
+Works in both bull/bear markets: breakouts capture momentum, trend filter avoids counter-trend trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_atr_stop"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_volume"
+timeframe = "12h"
 leverage = 1.0
+
+def camarilla_pivot(high, low, close):
+    """
+    Calculate Camarilla pivot levels for given high, low, close.
+    Returns: H4, H3, H2, H1, L1, L2, L3, L4
+    """
+    typical = (high + low + close) / 3
+    range_val = high - low
+    H4 = close + range_val * 1.1 / 2
+    H3 = close + range_val * 1.1 / 4
+    H2 = close + range_val * 1.1 / 6
+    H1 = close + range_val * 1.1 / 12
+    L1 = close - range_val * 1.1 / 12
+    L2 = close - range_val * 1.1 / 6
+    L3 = close - range_val * 1.1 / 4
+    L4 = close - range_val * 1.1 / 2
+    return H4, H3, H2, H1, L1, L2, L3, L4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -29,47 +42,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend
+    # Calculate Camarilla levels for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Initialize arrays for Camarilla levels
+    H4 = np.full_like(close_1d, np.nan)
+    H3 = np.full_like(close_1d, np.nan)
+    H2 = np.full_like(close_1d, np.nan)
+    H1 = np.full_like(close_1d, np.nan)
+    L1 = np.full_like(close_1d, np.nan)
+    L2 = np.full_like(close_1d, np.nan)
+    L3 = np.full_like(close_1d, np.nan)
+    L4 = np.full_like(close_1d, np.nan)
     
-    # Volume filter: 20-period average volume
+    # Calculate pivots for each day
+    for i in range(len(close_1d)):
+        if i >= 1:  # Need previous day's data
+            H4[i], H3[i], H2[i], H1[i], L1[i], L2[i], L3[i], L4[i] = camarilla_pivot(
+                high_1d[i-1], low_1d[i-1], close_1d[i-1]
+            )
+    
+    # Forward fill the levels (they remain valid until next day's calculation)
+    H4_series = pd.Series(H4)
+    H3_series = pd.Series(H3)
+    H2_series = pd.Series(H2)
+    H1_series = pd.Series(H1)
+    L1_series = pd.Series(L1)
+    L2_series = pd.Series(L2)
+    L3_series = pd.Series(L3)
+    L4_series = pd.Series(L4)
+    
+    H4_ffilled = H4_series.ffill().values
+    H3_ffilled = H3_series.ffill().values
+    H2_ffilled = H2_series.ffill().values
+    H1_ffilled = H1_series.ffill().values
+    L1_ffilled = L1_series.ffill().values
+    L2_ffilled = L2_series.ffill().values
+    L3_ffilled = L3_series.ffill().values
+    L4_ffilled = L4_series.ffill().values
+    
+    # Align 1d Camarilla levels to 12h
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4_ffilled)
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3_ffilled)
+    H2_12h = align_htf_to_ltf(prices, df_1d, H2_ffilled)
+    H1_12h = align_htf_to_ltf(prices, df_1d, H1_ffilled)
+    L1_12h = align_htf_to_ltf(prices, df_1d, L1_ffilled)
+    L2_12h = align_htf_to_ltf(prices, df_1d, L2_ffilled)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3_ffilled)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4_ffilled)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # 1w EMA(20) for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_1w_up = close_1w > ema_20_1w
+    trend_1w_down = close_1w < ema_20_1w
+    
+    # Forward fill trend
+    trend_1w_up_series = pd.Series(trend_1w_up)
+    trend_1w_down_series = pd.Series(trend_1w_down)
+    trend_1w_up_ffilled = trend_1w_up_series.ffill().values
+    trend_1w_down_ffilled = trend_1w_down_series.ffill().values
+    
+    # Align 1w trend to 12h
+    trend_1w_up_12h = align_htf_to_ltf(prices, df_1w, trend_1w_up_ffilled)
+    trend_1w_down_12h = align_htf_to_ltf(prices, df_1w, trend_1w_down_ffilled)
+    
+    # Volume filter: 12h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR (14-period) for stop loss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Parameters
-    position_size = 0.25
-    atr_multiple = 2.0
-    volume_multiple = 1.5
-    
-    # Start after warmup (max of Donchian, ATR, EMA periods)
-    start_idx = 50
+    # Start after warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or
+            np.isnan(trend_1w_up_12h[i]) or np.isnan(trend_1w_down_12h[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -78,48 +142,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            if high[i] > highest_since_entry:
-                highest_since_entry = high[i]
-            
-            # Exit conditions
-            if (close[i] < (highest_since_entry - atr_multiple * atr[i])) or \
-               (close[i] < donchian_low[i]) or \
-               (close[i] < trend_1d_aligned[i]):
+            # Exit: price crosses below H3 OR 1w trend turns down
+            if (close[i] < H3_12h[i]) or trend_1w_down_12h[i]:
                 position = 0
-                highest_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = position_size
+                signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if low[i] < lowest_since_entry:
-                lowest_since_entry = low[i]
-            
-            # Exit conditions
-            if (close[i] > (lowest_since_entry + atr_multiple * atr[i])) or \
-               (close[i] > donchian_high[i]) or \
-               (close[i] > trend_1d_aligned[i]):
+            # Exit: price crosses above L3 OR 1w trend turns up
+            if (close[i] > L3_12h[i]) or trend_1w_up_12h[i]:
                 position = 0
-                lowest_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: Donchian breakout up + 1d uptrend + volume spike
-            if (close[i] > donchian_high[i]) and \
-               (close[i] > trend_1d_aligned[i]) and \
-               (volume[i] > vol_ma[i] * volume_multiple):
+            # Long entry: price breaks above H4 with volume + 1w uptrend
+            if (close[i] > H4_12h[i]) and volume_filter[i] and trend_1w_up_12h[i]:
                 position = 1
-                highest_since_entry = high[i]
-                signals[i] = position_size
-            # Short entry: Donchian breakdown down + 1d downtrend + volume spike
-            elif (close[i] < donchian_low[i]) and \
-                 (close[i] < trend_1d_aligned[i]) and \
-                 (volume[i] > vol_ma[i] * volume_multiple):
+                signals[i] = 0.25
+            # Short entry: price breaks below L4 with volume + 1w downtrend
+            elif (close[i] < L4_12h[i]) and volume_filter[i] and trend_1w_down_12h[i]:
                 position = -1
-                lowest_since_entry = low[i]
-                signals[i] = -position_size
+                signals[i] = -0.25
     
     return signals
