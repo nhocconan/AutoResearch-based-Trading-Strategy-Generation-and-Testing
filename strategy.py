@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-4h Daily Pivot Breakout with Volume and Momentum Confirmation
+4h Daily Pivot Breakout with Volume and Momentum Confirmation v2
 Hypothesis: Price breaking above/below daily pivot levels on 4h timeframe,
 filtered by 1d trend direction and volume spikes, captures strong momentum moves
 while avoiding false breakouts. Daily pivots provide strong support/resistance
 levels that work in both bull (breakouts above daily resistance) and bear 
-(breakdowns below daily support). Target: 18-48 trades/year (75-200 total over 4 years).
+(breakdowns below daily support). Reduced frequency to avoid overtrading.
+Target: 18-48 trades/year (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_pivot_breakout_1d_trend_volume_v1"
+name = "4h_daily_pivot_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,7 +35,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Daily pivot points (using prior day's data)
-    # Calculate daily high/low/close from 1d data (already daily)
     daily_high = high_1d
     daily_low = low_1d
     daily_close = close_1d
@@ -70,9 +70,9 @@ def generate_signals(prices):
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     vol_filter = atr > atr_ma
     
-    # Volume filter: current volume > 1.8x 24-period average
+    # Volume filter: current volume > 2.0x 24-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
