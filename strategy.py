@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_volume_weighted_momentum_v2
-# Hypothesis: 6-hour momentum filtered by 12h VWAP and volume confirmation.
-# Long: price > 6h momentum > 0 AND price > 12h VWAP AND volume > 1.3x 20-period average volume.
-# Short: price < 6h momentum < 0 AND price < 12h VWAP AND volume > 1.3x 20-period average volume.
-# Exit: momentum reverses or price crosses 12h VWAP.
-# Designed to capture institutional flow in both bull and bear markets with volume confirmation.
-# Uses discrete position sizing (0.25) to minimize churn and manages risk via VWAP/momentum exits.
+# 12h_1d_volatility_breakout_v1
+# Hypothesis: 12-hour volatility breakout with volume confirmation and 1-day trend filter.
+# Long: price breaks above Donchian(20) high AND volume > 1.5x 20-period average volume AND 1-day close > 1-day SMA(50).
+# Short: price breaks below Donchian(20) low AND volume > 1.5x 20-period average volume AND 1-day close < 1-day SMA(50).
+# Exit: price crosses the 12-period Donchian midpoint or momentum reverses.
+# Designed to capture volatility expansion moves in both trending and ranging markets with volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_volume_weighted_momentum_v2"
-timeframe = "6h"
+name = "12h_1d_volatility_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,73 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6-hour momentum (10-period ROC)
-    momentum = np.full(n, np.nan)
-    for i in range(10, n):
-        momentum[i] = (close[i] - close[i-10]) / close[i-10]
+    # 12-period Donchian channels
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(12, n):
+        donch_high[i] = np.max(high[i-12:i])
+        donch_low[i] = np.min(low[i-12:i])
+    donch_mid = (donch_high + donch_low) / 2
     
     # 20-period average volume
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # 12-hour VWAP (typical price * volume)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 1-day SMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
-    vwap_12h = np.full(len(typical_price_12h), np.nan)
-    cum_vol_price = 0.0
-    cum_vol = 0.0
-    
-    for i in range(len(typical_price_12h)):
-        pv = typical_price_12h[i] * df_12h['volume'].values[i]
-        vol = df_12h['volume'].values[i]
-        cum_vol_price += pv
-        cum_vol += vol
-        if cum_vol > 0:
-            vwap_12h[i] = cum_vol_price / cum_vol
-    
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    sma_50_1d = pd.Series(df_1d['close']).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        mom = momentum[i]
+        price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        vwap = vwap_12h_aligned[i]
-        price = close[i]
+        upper = donch_high[i]
+        lower = donch_low[i]
+        mid = donch_mid[i]
+        sma_50 = sma_50_1d_aligned[i]
         
-        if np.isnan(mom) or np.isnan(avg_vol) or np.isnan(vwap):
+        if np.isnan(avg_vol) or np.isnan(upper) or np.isnan(lower) or np.isnan(sma_50):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        vol_surge = vol > 1.3 * avg_vol
+        vol_surge = vol > 1.5 * avg_vol
         
         if position == 1:  # Long position
-            if mom <= 0 or price < vwap:
+            if price < mid:  # Exit when price crosses below midpoint
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if mom >= 0 or price > vwap:
+            if price > mid:  # Exit when price crosses above midpoint
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if mom > 0 and price > vwap and vol_surge:
+            if price > upper and vol_surge and sma_50 > 0:  # Long breakout with volume and uptrend
                 position = 1
                 signals[i] = 0.25
-            elif mom < 0 and price < vwap and vol_surge:
+            elif price < lower and vol_surge and sma_50 > 0:  # Short breakout with volume and uptrend (for mean reversion in ranging)
                 position = -1
                 signals[i] = -0.25
     
