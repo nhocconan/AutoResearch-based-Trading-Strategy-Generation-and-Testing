@@ -1,20 +1,59 @@
 #!/usr/bin/env python3
-# 6h_1d_pullback_reversal_v1
-# Hypothesis: On 6b, enter pullbacks in the direction of the 1d trend using RSI(2) for entry timing and volume confirmation.
-# Works in bull/bear by aligning with higher timeframe trend. Uses RSI(2) to catch deep pullbacks in strong trends.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 4h_12h_Camarilla_Volume_Chop_v1
+# Hypothesis: Use 12h Camarilla pivot levels with 4h volume confirmation and 12h Choppiness index regime filter.
+# Long when price touches L3 with bullish 12h regime and volume spike, short when price touches H3 with bearish 12h regime and volume spike.
+# Works in bull/bear by fading extremes in ranging markets and avoiding trending regimes.
+# Target: 80-150 total trades over 4 years (20-38/year).
 
-name = "6h_1d_pullback_reversal_v1"
-timeframe = "6h"
+name = "4h_12h_Camarilla_Volume_Chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    h4 = pivot + (range_val * 1.1 / 2)
+    h3 = pivot + (range_val * 1.1 / 4)
+    l3 = pivot - (range_val * 1.1 / 4)
+    l4 = pivot - (range_val * 1.1 / 2)
+    return h3, l3
+
+def calculate_chop(high, low, close, period=14):
+    """Calculate Choppiness Index"""
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # First TR uses previous close, handle index 0
+    tr[0] = high[0] - low[0]
+    
+    atr = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < period:
+            atr[i] = np.mean(tr[max(0, i-period+1):i+1])
+        else:
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    # Sum of TR over period
+    tr_sum = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < period:
+            tr_sum[i] = np.sum(tr[max(0, i-period+1):i+1])
+        else:
+            tr_sum[i] = tr_sum[i-1] - tr[i-period] + tr[i]
+    
+    # Chop = 100 * log10(tr_sum / (atr * period)) / log10(period)
+    chop = 100 * np.log10(tr_sum / (atr * period)) / np.log10(period)
+    return chop
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -23,96 +62,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for Camarilla and Chop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h Camarilla levels
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1d trend direction: 1 if close > EMA50, -1 if close < EMA50
-    trend_1d = np.where(close_1d > ema50_1d, 1, -1)
+    h3_12h, l3_12h = calculate_camarilla(high_12h, low_12h, close_12h)
     
-    # Align 1d trend to 6h
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate 12h Choppiness Index
+    chop_12h = calculate_chop(high_12h, low_12h, close_12h)
     
-    # RSI(2) for entry timing
-    def calculate_rsi(close, period=2):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period-1] = np.mean(gain[1:period]) if period < len(gain) else np.nan
-        avg_loss[period-1] = np.mean(loss[1:period]) if period < len(loss) else np.nan
-        
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Align 12h indicators to 4h
+    h3_12h_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
+    l3_12h_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
     
-    rsi2 = calculate_rsi(close)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # 4h volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(50, 20) + 1
+    start_idx = max(20, 20) + 1  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(rsi2[i]) or 
-            np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        if (np.isnan(h3_12h_aligned[i]) or np.isnan(l3_12h_aligned[i]) or 
+            np.isnan(chop_12h_aligned[i]) or np.isnan(vol_ma[i])):
             continue
         
-        # Only trade in session and with volume confirmation
-        if not (in_session[i] and vol_confirm[i]):
-            if position != 0:
-                # Hold position until exit signal
-                pass
-            else:
-                signals[i] = 0.0
-                continue
+        # Regime filter: Chop > 61.8 = ranging (good for mean reversion)
+        # Chop < 38.2 = trending (avoid)
+        if chop_12h_aligned[i] < 38.2:  # Trending regime - avoid
+            continue
         
-        if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) or trend changes
-            if rsi2[i] > 70 or trend_1d_aligned[i] == -1:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) or trend changes
-            if rsi2[i] < 30 or trend_1d_aligned[i] == 1:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat, look for entry
-            # Enter pullback in direction of 1d trend
-            if trend_1d_aligned[i] == 1:  # 1d uptrend
-                # Long on RSI(2) < 10 (deep pullback)
-                if rsi2[i] < 10:
-                    position = 1
-                    signals[i] = 0.25
-            elif trend_1d_aligned[i] == -1:  # 1d downtrend
-                # Short on RSI(2) > 90 (strong pullback)
-                if rsi2[i] > 90:
-                    position = -1
-                    signals[i] = -0.25
+        # Long setup: price touches L3 with volume spike in ranging market
+        if low[i] <= l3_12h_aligned[i] and vol_spike[i]:
+            signals[i] = 0.25
+        
+        # Short setup: price touches H3 with volume spike in ranging market
+        elif high[i] >= h3_12h_aligned[i] and vol_spike[i]:
+            signals[i] = -0.25
     
     return signals
