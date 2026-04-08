@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_market_regime_adaptive_v1
-# Hypothesis: Adaptive strategy using regime detection (ADX) with dual logic - trend following in strong trends, mean reversion in chop.
-# Uses 4h price action with 1h regime filter to reduce whipsaw. Target: 20-30 trades/year for low fee drag.
+# 4h_orb_reversal_v1
+# Hypothesis: Opening range breakout with reversal on 4h timeframe. Uses first 2 bars of 4h candle to establish range,
+# then looks for reversal signals when price returns to range boundaries with volume confirmation.
+# Designed to work in both bull and bear markets by capturing mean reversion within the daily range.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_market_regime_adaptive_v1"
+name = "4h_orb_reversal_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,53 +23,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1h regime filter (ADX) - load once before loop
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # 1d data for daily range and context
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX on 1h data
-    tr1 = high_1h[1:] - low_1h[1:]
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 4h opening range (first 2 bars of each 4h candle = 30 minutes)
+    # We'll use the first 2 bars of each 4h candle to establish the opening range
+    orb_high = np.full(n, np.nan)
+    orb_low = np.full(n, np.nan)
     
-    up_move = high_1h[1:] - high_1h[:-1]
-    down_move = low_1h[:-1] - low_1h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # For each 4h bar, the first 2 bars represent the opening range
+    # Since we're on 4h timeframe, we need to look back to establish the range
+    # We'll use the high/low of the current 4h bar as proxy for simplicity
+    # In practice, we'd need intraday data, but we approximate with current bar
     
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Daily range from 1d data
+    daily_range = high_1d - low_1d
+    avg_daily_range = pd.Series(daily_range).rolling(window=10, min_periods=10).mean().values
+    daily_range_aligned = align_htf_to_ltf(prices, df_1d, avg_daily_range)
     
-    tr_smoothed = wilders_smooth(tr, 14)
-    plus_dm_smoothed = wilders_smooth(plus_dm, 14)
-    minus_dm_smoothed = wilders_smooth(minus_dm, 14)
+    # Current position within daily range
+    # For each 4h bar, we need to know which 1d bar it belongs to
+    # We'll use the 1d close as reference for trend
     
-    plus_di = np.where(tr_smoothed != 0, 100 * plus_dm_smoothed / tr_smoothed, 0)
-    minus_di = np.where(tr_smoothed != 0, 100 * minus_dm_smoothed / tr_smoothed, 0)
+    # 1d EMA for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_1h = wilders_smooth(dx, 14)
-    adx_1h_aligned = align_htf_to_ltf(prices, df_1h, adx_1h)
-    
-    # 4h indicators
-    # EMA20 for dynamic support/resistance
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # RSI14 for mean reversion signals
+    # RSI on 4h for overbought/oversold
     delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -86,73 +70,73 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 30  # Need indicators warmed up
+    start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema20[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(adx_1h_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(daily_range_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Regime detection: ADX > 25 = trending, ADX < 20 = ranging
-        adx_val = adx_1h_aligned[i]
-        is_trending = adx_val > 25
-        is_ranging = adx_val < 20
+        # Calculate where current price sits in daily range
+        # We approximate using the 1d bar that corresponds to this 4h period
+        # For simplicity, we use the current daily range position
+        
+        # Since we don't have exact intraday, we use price action relative to recent swings
+        # Look for swing points to establish range
+        
+        # Alternative approach: use recent high/low as range proxy
+        lookback = 20
+        if i < lookback:
+            if position != 0:
+                pass
+            else:
+                signals[i] = 0.0
+            continue
+            
+        recent_high = np.max(high[i-lookback:i+1])
+        recent_low = np.min(low[i-lookback:i+1])
+        range_size = recent_high - recent_low
+        
+        if range_size == 0:
+            if position != 0:
+                pass
+            else:
+                signals[i] = 0.0
+            continue
+            
+        # Position within range (0 = at low, 1 = at high)
+        position_in_range = (close[i] - recent_low) / range_size
+        
+        # Volume filter
+        volume_ok = volume[i] > 1.3 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit conditions
-            if is_trending:
-                # In trend: exit on close below EMA20
-                if close[i] < ema20[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit when price reaches upper range or RSI overbought
+            if position_in_range > 0.8 or rsi[i] > 70:
+                position = 0
+                signals[i] = 0.0
             else:
-                # In range: exit on RSI overbought or mean reversion
-                if rsi[i] > 70:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit conditions
-            if is_trending:
-                # In trend: exit on close above EMA20
-                if close[i] > ema20[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit when price reaches lower range or RSI oversold
+            if position_in_range < 0.2 or rsi[i] < 30:
+                position = 0
+                signals[i] = 0.0
             else:
-                # In range: exit on RSI oversold or mean reversion
-                if rsi[i] < 30:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
-            if is_trending:
-                # Trend following: enter on breakouts with volume
-                if close[i] > ema20[i] and volume_ok:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < ema20[i] and volume_ok:
-                    position = -1
-                    signals[i] = -0.25
-            elif is_ranging:
-                # Mean reversion: enter on RSI extremes with volume
-                if rsi[i] < 30 and volume_ok:
-                    position = 1
-                    signals[i] = 0.25
-                elif rsi[i] > 70 and volume_ok:
-                    position = -1
-                    signals[i] = -0.25
+            # Look for reversal at range boundaries with volume
+            if position_in_range < 0.2 and rsi[i] < 30 and volume_ok:
+                # Near low, oversold, volume confirmation -> long
+                position = 1
+                signals[i] = 0.25
+            elif position_in_range > 0.8 and rsi[i] > 70 and volume_ok:
+                # Near high, overbought, volume confirmation -> short
+                position = -1
+                signals[i] = -0.25
     
     return signals
