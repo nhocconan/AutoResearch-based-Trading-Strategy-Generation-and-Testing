@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_1d_trend_follow
-# Hypothesis: Ichimoku cloud filter from daily timeframe combined with Tenkan/Kijun crossover on 6h.
-# Long when price is above daily Ichimoku cloud AND Tenkan crosses above Kijun on 6h.
-# Short when price is below daily Ichimoku cloud AND Tenkan crosses below Kijun on 6h.
-# Uses daily Ichimoku for trend filter (avoiding counter-trend trades) and 6h for entry timing.
-# Target: 12-30 trades/year with strict confluence to avoid overtrading.
+# 4h_donchian_breakout_volume_regime
+# Hypothesis: Donchian channel breakout with volume confirmation and 1d regime filter.
+# Long when price breaks above 4h Donchian(20) upper + volume > 1.5x 20-period avg + 1d ADX < 30 (range).
+# Short when price breaks below 4h Donchian(20) lower + volume > 1.5x 20-period avg + 1d ADX < 30 (range).
+# Exit when price returns to Donchian middle or ADX rises above 40 (trending).
+# Uses discrete position sizing (0.25) to limit turnover.
+# Target: 20-50 trades/year per symbol.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_1d_trend_follow"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,84 +23,109 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily Ichimoku data (HTF)
+    # 4h Donchian Channel (20)
+    dc_period = 20
+    dc_upper = np.full(n, np.nan)
+    dc_lower = np.full(n, np.nan)
+    for i in range(dc_period-1, n):
+        dc_upper[i] = np.max(high[i-dc_period+1:i+1])
+        dc_lower[i] = np.min(low[i-dc_period+1:i+1])
+    dc_middle = (dc_upper + dc_lower) / 2
+    
+    # Volume filter: 1.5x 20-period average
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    vol_surge = volume > 1.5 * vol_ma
+    
+    # 1d ADX regime filter (trending vs ranging)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # Calculate True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
+    # Smooth TR, +DM, -DM (Wilder smoothing = EMA with alpha=1/period)
+    adx_period = 14
+    alpha = 1.0 / adx_period
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    atr = np.full(len(tr), np.nan)
+    plus_di = np.full(len(tr), np.nan)
+    minus_di = np.full(len(tr), np.nan)
     
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for cloud)
+    # Initialize first values
+    if not np.isnan(tr[adx_period]):
+        atr[adx_period] = np.nanmean(tr[1:adx_period+1])
+        plus_dm_avg = np.nanmean(plus_dm[1:adx_period+1])
+        minus_dm_avg = np.nanmean(minus_dm[1:adx_period+1])
+        if atr[adx_period] > 0:
+            plus_di[adx_period] = 100 * plus_dm_avg / atr[adx_period]
+            minus_di[adx_period] = 100 * minus_dm_avg / atr[adx_period]
     
-    # Align Ichimoku components to 6h timeframe (with proper delay for forward-looking elements)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)
+    # Wilder smoothing
+    for i in range(adx_period+1, len(tr)):
+        atr[i] = (atr[i-1] * (adx_period-1) + tr[i]) / adx_period
+        plus_dm_avg = (plus_dm_avg * (adx_period-1) + plus_dm[i]) / adx_period
+        minus_dm_avg = (minus_dm_avg * (adx_period-1) + minus_dm[i]) / adx_period
+        if atr[i] > 0:
+            plus_di[i] = 100 * plus_dm_avg / atr[i]
+            minus_di[i] = 100 * minus_dm_avg / atr[i]
     
-    # Calculate 6h Tenkan/Kijun for crossover signals
-    period_tenkan_6h = 9
-    period_kijun_6h = 26
-    max_high_tenkan_6h = pd.Series(high).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).max().values
-    min_low_tenkan_6h = pd.Series(low).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).min().values
-    tenkan_6h_cross = (max_high_tenkan_6h + min_low_tenkan_6h) / 2
+    # Calculate DX and ADX
+    dx = np.full(len(tr), np.nan)
+    adx = np.full(len(tr), np.nan)
     
-    max_high_kijun_6h = pd.Series(high).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).max().values
-    min_low_kijun_6h = pd.Series(low).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).min().values
-    kijun_6h_cross = (max_high_kijun_6h + min_low_kijun_6h) / 2
+    for i in range(adx_period*2, len(tr)):
+        if not np.isnan(plus_di[i]) and not np.isnan(minus_di[i]):
+            di_sum = plus_di[i] + minus_di[i]
+            if di_sum > 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
     
-    # Determine trend from daily Ichimoku cloud
-    # Price above cloud: bullish, Price below cloud: bearish
-    above_cloud = (close > senkou_a_6h) & (close > senkou_b_6h)
-    below_cloud = (close < senkou_a_6h) & (close < senkou_b_6h)
+    # ADX is EMA of DX
+    for i in range(adx_period*2+1, len(tr)):
+        if not np.isnan(dx[i]):
+            if np.isnan(adx[i-1]):
+                adx[i] = np.nanmean(dx[adx_period*2:i+1])
+            else:
+                adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
     
-    # Calculate Tenkan/Kijun crossover on 6h
-    tenkan_cross_above = (tenkan_6h_cross > kijun_6h_cross) & (tenkan_6h_cross <= kijun_6h_cross + 1e-10)  # Avoid exact equality issues
-    tenkan_cross_below = (tenkan_6h_cross < kijun_6h_cross) & (tenkan_6h_cross >= kijun_6h_cross - 1e-10)
+    # Align ADX to 4h timeframe (range condition: ADX < 30)
+    adx_1d = adx
+    adx_4h_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # More reliable crossover detection using previous bar
-    tenkan_prev = np.roll(tenkan_6h_cross, 1)
-    kijun_prev = np.roll(kijun_6h_cross, 1)
-    tenkan_prev[0] = tenkan_6h_cross[0]
-    kijun_prev[0] = kijun_6h_cross[0]
-    
-    tenkan_cross_above = (tenkan_6h_cross > kijun_6h_cross) & (tenkan_prev <= kijun_prev)
-    tenkan_cross_below = (tenkan_6h_cross < kijun_6h_cross) & (tenkan_prev >= kijun_prev)
+    # Regime: ranging market (ADX < 30) for mean reversion breakouts
+    ranging = adx_4h_aligned < 30
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(26, 52) + 10  # Ensure sufficient data for all components
+    start_idx = max(dc_period, vol_ma_period, adx_period*2) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
-            np.isnan(tenkan_6h_cross[i]) or np.isnan(kijun_6h_cross[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+            np.isnan(dc_middle[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(adx_4h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -107,28 +133,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price breaks below cloud OR Tenkan crosses below Kijun
-            if below_cloud[i] or tenkan_cross_below[i]:
+            # Exit: Price below Donchian middle OR ADX > 40 (trending)
+            if close[i] < dc_middle[i] or adx_4h_aligned[i] > 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price breaks above cloud OR Tenkan crosses above Kijun
-            if above_cloud[i] or tenkan_cross_above[i]:
+            # Exit: Price above Donchian middle OR ADX > 40 (trending)
+            if close[i] > dc_middle[i] or adx_4h_aligned[i] > 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above cloud AND Tenkan crosses above Kijun
-            if above_cloud[i] and tenkan_cross_above[i]:
-                position = 1
-                signals[i] = 0.25
-            # Short entry: Price below cloud AND Tenkan crosses below Kijun
-            elif below_cloud[i] and tenkan_cross_below[i]:
-                position = -1
-                signals[i] = -0.25
+            # Only trade in ranging markets (ADX < 30)
+            if ranging[i]:
+                # Long entry: Price above upper Donchian with volume surge
+                if close[i] > dc_upper[i] and vol_surge[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: Price below lower Donchian with volume surge
+                elif close[i] < dc_lower[i] and vol_surge[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
