@@ -1,121 +1,109 @@
 #!/usr/bin/env python3
-# 6h_1d_ichimoku_kumo_twist_v1
-# Hypothesis: 6-hour Ichimoku with daily Kumo twist filter. Long when price above Kumo (1d) and TK cross bullish (6h), short when price below Kumo and TK cross bearish.
-# Uses daily Kumo as macro trend filter and 6h TK cross for entry timing to avoid whipsaw.
-# Target: 20-40 trades/year to minimize fee drag while capturing sustained trends.
+# 4h_1d_donchian_volume_breakout_v3
+# Hypothesis: 4-hour Donchian channel breakout with volume confirmation and daily trend filter.
+# Long when: price breaks above Donchian(20) high + volume > 1.5x average + price > daily EMA50.
+# Short when: price breaks below Donchian(20) low + volume > 1.5x average + price < daily EMA50.
+# Exit when price crosses the midline (10-period average of high/low).
+# Designed for low frequency (target: 20-40 trades/year) to minimize fee drag.
+# Works in bull markets via breakouts and bear via short breakdowns with trend filter.
 
 import numpy as np
 import pandas as pd
+from mtrand import seed
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_kumo_twist_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_breakout_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # Calculate average volume for confirmation
+    vol_avg = np.zeros(n)
+    vol_avg[19] = np.mean(volume[:20])
+    for i in range(20, n):
+        vol_avg[i] = (vol_avg[i-1] * 19 + volume[i]) / 20
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Donchian channels (20-period)
+    donch_high = np.zeros(n)
+    donch_low = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            donch_high[i] = np.max(high[:i+1]) if i >= 0 else np.nan
+            donch_low[i] = np.min(low[:i+1]) if i >= 0 else np.nan
+        else:
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Midline for exit (10-period average of high/low)
+    midline = np.zeros(n)
+    for i in range(n):
+        if i < 10:
+            midline[i] = (np.mean(high[:i+1]) + np.mean(low[:i+1])) / 2 if i >= 0 else np.nan
+        else:
+            midline[i] = (np.mean(high[i-9:i+1]) + np.mean(low[i-9:i+1])) / 2
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
-    
-    # Get 1d data for Kumo (cloud)
+    # Daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    ema_1d_50 = np.zeros(len(close_1d))
+    ema_1d_50[:] = np.nan
+    if len(close_1d) >= 50:
+        ema_1d_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d_50[i] = close_1d[i] * 0.0377 + ema_1d_50[i-1] * 0.9623
     
-    # Daily Tenkan-sen (9-period)
-    max_high_tenkan_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    min_low_tenkan_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (max_high_tenkan_1d + min_low_tenkan_1d) / 2
-    
-    # Daily Kijun-sen (26-period)
-    max_high_kijun_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    min_low_kijun_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (max_high_kijun_1d + min_low_kijun_1d) / 2
-    
-    # Daily Senkou Span A
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
-    
-    # Daily Senkou Span B (52-period)
-    max_high_senkou_b_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    min_low_senkou_b_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = (max_high_senkou_b_1d + min_low_senkou_b_1d) / 2
-    
-    # Align daily Kumo to 6h timeframe
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Need enough data for Senkou B
+    for i in range(50, n):
         # Skip if any values are NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i])):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(volume[i]) or np.isnan(vol_avg[i]) or np.isnan(midline[i]) or np.isnan(ema_1d_50_aligned[i]):
             if position != 0:
-                pass  # Hold position
+                pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        # Kumo (cloud) boundaries from daily
-        upper_kumo = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        lower_kumo = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        
-        # TK Cross signals
-        tk_cross_bullish = tenkan[i] > kijun[i]
-        tk_cross_bearish = tenkan[i] < kijun[i]
-        
         if position == 1:  # Long
-            # Exit: price below Kumo OR TK cross bearish
-            if close[i] < lower_kumo or tk_cross_bearish:
+            # Exit: price crosses below midline
+            if close[i] < midline[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price above Kumo OR TK cross bullish
-            if close[i] > upper_kumo or tk_cross_bullish:
+            # Exit: price crosses above midline
+            if close[i] > midline[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry: price above Kumo AND TK cross bullish (long)
-            # Entry: price below Kumo AND TK cross bearish (short)
-            if close[i] > upper_kumo and tk_cross_bullish:
+            # Long entry: break above Donchian high + volume confirmation + above daily EMA50
+            if (close[i] > donch_high[i] and 
+                volume[i] > 1.5 * vol_avg[i] and 
+                close[i] > ema_1d_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < lower_kumo and tk_cross_bearish:
+            # Short entry: break below Donchian low + volume confirmation + below daily EMA50
+            elif (close[i] < donch_low[i] and 
+                  volume[i] > 1.5 * vol_avg[i] and 
+                  close[i] < ema_1d_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
