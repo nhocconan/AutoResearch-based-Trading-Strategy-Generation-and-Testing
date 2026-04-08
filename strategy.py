@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-# 4h_triple_confluence_breakout_v1
-# Hypothesis: Combines Donchian breakout (trend), volume confirmation (conviction), and 12h RSI filter (momentum) to capture strong moves while avoiding false breakouts.
-# Works in bull/bear: Donchian catches breakouts, volume filters low-conviction moves, RSI avoids overextended entries.
-# Target: 20-40 trades/year with strict 3-condition entry.
+# 1h_donchian_breakout_volume_4h1d
+# Hypothesis: Breakout strategy using 4h Donchian channels for direction and 1h volume + Donchian breakout for entry, filtered by 1d trend (price > SMA50). 
+# Long when 1h price breaks above 4h Donchian upper (20) with volume > 1.5x average and price > 1d SMA50.
+# Short when 1h price breaks below 4h Donchian lower (20) with volume > 1.5x average and price < 1d SMA50.
+# Exit when price returns to 4h Donchian middle or volume drops below average.
+# Uses 4h for trend direction, 1h for entry timing, 1d for regime filter.
+# Target: 15-30 trades/year with strict multi-timeframe confluence.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_triple_confluence_breakout_v1"
-timeframe = "4h"
+name = "1h_donchian_breakout_volume_4h1d"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,71 +25,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period) on 4h
+    # 4h Donchian Channel (20) for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     donch_period = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=donch_period, min_periods=donch_period).max().values
-    donch_low = low_series.rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Volume confirmation: 1.5x 20-period average
-    vol_ma_period = 20
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=vol_ma_period, min_periods=vol_ma_period).mean().values
-    vol_surge = volume > 1.5 * vol_ma
+    # Calculate 4h Donchian bands
+    high_series_4h = pd.Series(high_4h)
+    low_series_4h = pd.Series(low_4h)
+    donch_upper_4h = high_series_4h.rolling(window=donch_period, min_periods=donch_period).max().values
+    donch_lower_4h = low_series_4h.rolling(window=donch_period, min_periods=donch_period).min().values
+    donch_middle_4h = (donch_upper_4h + donch_lower_4h) / 2
     
-    # 12h RSI filter (momentum/overbought/oversold)
-    df_12h = get_htf_data(prices, '12h')
-    rsi_period = 14
-    close_12h = pd.Series(df_12h['close'].values)
-    delta = close_12h.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_values = rsi_12h.values
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h_values)
+    # Align 4h Donchian to 1h timeframe
+    donch_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_upper_4h)
+    donch_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_lower_4h)
+    donch_middle_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_middle_4h)
+    
+    # 1d SMA50 for regime filter (bull/bear)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    sma_period = 50
+    sma_1d = pd.Series(close_1d).rolling(window=sma_period, min_periods=sma_period).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    
+    # 1h volume filter: 1.5x 24-period average (1 day)
+    vol_ma_period = 24
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
+    
+    # Session filter: 8-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donch_period, vol_ma_period) + 1
+    start_idx = max(donch_period, vol_ma_period, sma_period) + 10
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(rsi_12h_aligned[i])):
+        if (np.isnan(donch_upper_4h_aligned[i]) or np.isnan(donch_lower_4h_aligned[i]) or 
+            np.isnan(donch_middle_4h_aligned[i]) or np.isnan(sma_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            if position != 0:
+                pass  # Hold position outside session
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: Price below Donchian low or RSI overbought (>70)
-            if close[i] < donch_low[i] or rsi_12h_aligned[i] > 70:
+            # Exit: Price below 4h Donchian middle or volume drops below average
+            if close[i] < donch_middle_4h_aligned[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: Price above Donchian high or RSI oversold (<30)
-            if close[i] > donch_high[i] or rsi_12h_aligned[i] < 30:
+            # Exit: Price above 4h Donchian middle or volume drops below average
+            if close[i] > donch_middle_4h_aligned[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: Price above Donchian high + volume surge + RSI not overbought (<70)
-            if (close[i] > donch_high[i] and vol_surge[i] and rsi_12h_aligned[i] < 70):
+            # Long entry: Price above 4h Donchian upper with volume surge and price > 1d SMA50
+            if (close[i] > donch_upper_4h_aligned[i] and vol_surge[i] and 
+                close[i] > sma_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Price below Donchian low + volume surge + RSI not oversold (>30)
-            elif (close[i] < donch_low[i] and vol_surge[i] and rsi_12h_aligned[i] > 30):
+                signals[i] = 0.20
+            # Short entry: Price below 4h Donchian lower with volume surge and price < 1d SMA50
+            elif (close[i] < donch_lower_4h_aligned[i] and vol_surge[i] and 
+                  close[i] < sma_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
