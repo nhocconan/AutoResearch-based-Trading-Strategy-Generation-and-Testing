@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_regime_v1
-# Hypothesis: 12h Camarilla pivot reversals with daily volume confirmation and 1d regime filter.
-# Long: price touches Camarilla L3 support with volume > 1.8x 20-period average AND 1d close > 1d EMA50 (bullish regime)
-# Short: price touches Camarilla H3 resistance with volume > 1.8x 20-period average AND 1d close < 1d EMA50 (bearish regime)
-# Exit: price crosses Camarilla H4/L4 levels or ATR-based stoploss (2x ATR)
-# Uses 12h primary timeframe with 1d HTF for EMA regime filter.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# 4h_daily_camarilla_pivot_volume_spike_v1
+# Hypothesis: 4h strategies based on daily Camarilla pivot levels with volume spike confirmation work in both bull and bear markets.
+# Long: price touches or breaks above Camarilla H3 level with volume > 2.0x 20-period average
+# Short: price touches or breaks below Camarilla L3 level with volume > 2.0x 20-period average
+# Exit: price reverts to Camarilla Pivot (midpoint) level or ATR-based stoploss (1.5x ATR)
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_regime_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,24 +39,38 @@ def generate_signals(prices):
         vol_sma[i] = np.mean(volume[i-20:i])
     vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Get 1d data for HTF regime filter
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d for regime filter
-    ema_50_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(df_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 / (50 + 1)) + (ema_50_1d[i-1] * (49 / (50 + 1)))
+    # Calculate Camarilla pivot levels for each 1d bar
+    camarilla_p = np.full(len(df_1d), np.nan)
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
     
-    # Align 1d EMA to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    for i in range(len(df_1d)):
+        if i == 0 or np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        diff = high_1d[i] - low_1d[i]
+        camarilla_p[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        camarilla_h3[i] = camarilla_p[i] + diff * 1.1 / 4.0
+        camarilla_l3[i] = camarilla_p[i] - diff * 1.1 / 4.0
+        camarilla_h4[i] = camarilla_p[i] + diff * 1.1 / 2.0
+        camarilla_l4[i] = camarilla_p[i] - diff * 1.1 / 2.0
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -67,56 +81,37 @@ def generate_signals(prices):
         vol_r = vol_ratio[i]
         price = close[i]
         
-        if np.isnan(vol_r) or np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(vol_r) or np.isnan(camarilla_p_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        regime_bullish = close[i] > ema_50_1d_aligned[i]
-        regime_bearish = close[i] < ema_50_1d_aligned[i]
-        
-        # Calculate Camarilla pivot levels using previous 12h bar's OHLC
-        if i >= 1:
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-            pivot = (prev_high + prev_low + prev_close) / 3.0
-            range_hl = prev_high - prev_low
-            
-            # Camarilla levels
-            h4 = pivot + range_hl * 1.1 / 2
-            h3 = pivot + range_hl * 1.1 / 4
-            l3 = pivot - range_hl * 1.1 / 4
-            l4 = pivot - range_hl * 1.1 / 2
-        else:
-            h4 = h3 = l3 = l4 = np.nan
-        
         if position == 1:  # Long position
-            # Exit: price crosses H4 OR stoploss hit (2x ATR below entry)
-            if price >= h4 or price <= entry_price - 2.0 * atr_stop:
+            # Exit: price reverts to pivot OR stoploss hit (1.5x ATR below entry)
+            if price <= camarilla_p_aligned[i] or price <= entry_price - 1.5 * atr_stop:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses L4 OR stoploss hit (2x ATR above entry)
-            if price <= l4 or price >= entry_price + 2.0 * atr_stop:
+            # Exit: price reverts to pivot OR stoploss hit (1.5x ATR above entry)
+            if price >= camarilla_p_aligned[i] or price >= entry_price + 1.5 * atr_stop:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price touches L3 support with volume AND bullish regime
-            if price <= l3 and vol_r > 1.8 and regime_bullish:
+            # Long entry: price touches/breaks above H3 with volume spike
+            if price >= camarilla_h3_aligned[i] and vol_r > 2.0:
                 position = 1
                 entry_price = price
                 atr_stop = atr[i]
                 signals[i] = 0.25
-            # Short entry: price touches H3 resistance with volume AND bearish regime
-            elif price >= h3 and vol_r > 1.8 and regime_bearish:
+            # Short entry: price touches/breaks below L3 with volume spike
+            elif price <= camarilla_l3_aligned[i] and vol_r > 2.0:
                 position = -1
                 entry_price = price
                 atr_stop = atr[i]
