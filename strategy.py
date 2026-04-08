@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 4h_12h_donchian_volume_chop_v2
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h chop regime filter.
-# Long: price breaks above 20-period high with volume > 1.8x average AND 12h chop < 61.8 (trending)
-# Short: price breaks below 20-period low with volume > 1.8x average AND 12h chop < 61.8 (trending)
+# 1d_weekly_donchian_volume_chop_v1
+# Hypothesis: Daily Donchian(20) breakout with volume confirmation and weekly chop regime filter.
+# Long: price breaks above 20-period daily high with volume > 1.8x average AND weekly chop < 61.8 (trending)
+# Short: price breaks below 20-period daily low with volume > 1.8x average AND weekly chop < 61.8 (trending)
 # Exit: price reverses to 10-period opposite Donchian level or chop > 61.8 (ranging)
-# Uses 4h primary timeframe with 12h HTF for regime filter to reduce overtrading.
-# Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag.
-# Improved: Added proper min_periods and vectorized calculations for performance.
+# Uses 1d primary timeframe with 1w HTF for regime filter to reduce overtrading.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_volume_chop_v2"
-timeframe = "4h"
+name = "1d_weekly_donchian_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,58 +25,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period) using pandas rolling for efficiency
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
-    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian channels (20-period)
+    highest_20 = np.full(n, np.nan)
+    lowest_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_20[i] = np.max(high[i-20:i])
+        lowest_20[i] = np.min(low[i-20:i])
     
-    # Calculate 4h Donchian exit channels (10-period)
-    highest_10 = high_series.rolling(window=10, min_periods=10).max().values
-    lowest_10 = low_series.rolling(window=10, min_periods=10).min().values
+    # Calculate daily Donchian exit channels (10-period)
+    highest_10 = np.full(n, np.nan)
+    lowest_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        highest_10[i] = np.max(high[i-10:i])
+        lowest_10[i] = np.min(low[i-10:i])
     
     # Calculate volume ratio (current vs 20-period average)
-    vol_series = pd.Series(volume)
-    vol_sma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
     vol_ratio = np.where(vol_sma > 0, volume / vol_sma, 0)
     
-    # Get 12h data for chop regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get weekly data for chop regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Chopiness Index on 12h data (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range calculation
-    tr = np.zeros(len(df_12h))
-    tr[0] = high_12h[0] - low_12h[0]
-    for i in range(1, len(df_12h)):
-        hl = high_12h[i] - low_12h[i]
-        hc = abs(high_12h[i] - close_12h[i-1])
-        lc = abs(low_12h[i] - close_12h[i-1])
-        tr[i] = max(hl, hc, lc)
-    
-    # ATR calculation
-    atr_12h = np.full(len(df_12h), np.nan)
-    for i in range(13, len(df_12h)):  # min_periods=14
-        atr_12h[i] = np.mean(tr[i-13:i+1])
-    
-    # Chop calculation
-    chop_12h = np.full(len(df_12h), np.nan)
-    for i in range(13, len(df_12h)):
-        atr_sum = np.sum(tr[i-13:i+1])
-        max_high = np.max(high_12h[i-13:i+1])
-        min_low = np.min(low_12h[i-13:i+1])
+    # Calculate Chopiness Index on weekly data (14-period)
+    chop_1w = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        atr_sum = 0
+        for j in range(i-13, i+1):
+            tr = max(df_1w['high'].iloc[j] - df_1w['low'].iloc[j],
+                     abs(df_1w['high'].iloc[j] - df_1w['close'].iloc[j-1]),
+                     abs(df_1w['low'].iloc[j] - df_1w['close'].iloc[j-1]))
+            atr_sum += tr
+        atr = atr_sum / 14
+        max_high = np.max(df_1w['high'].iloc[i-13:i+1].values)
+        min_low = np.min(df_1w['low'].iloc[i-13:i+1].values)
         if max_high != min_low:
-            chop_12h[i] = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+            chop_1w[i] = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
         else:
-            chop_12h[i] = 50  # neutral when no range
+            chop_1w[i] = 50  # neutral when no range
     
-    # Align 12h chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    # Align weekly chop to daily timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -99,7 +90,7 @@ def generate_signals(prices):
         exit_high = highest_10[i]
         exit_low = lowest_10[i]
         
-        if np.isnan(highest) or np.isnan(lowest) or np.isnan(exit_high) or np.isnan(exit_low):
+        if np.isnan(highest) or np.isnan(lowest):
             if position != 0:
                 pass  # Hold position
             else:
