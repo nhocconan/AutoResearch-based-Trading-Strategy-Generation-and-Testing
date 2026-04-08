@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_pivot_breakout_volume_trend_v1
-# Hypothesis: Daily pivot points provide robust support/resistance levels that work in both bull and bear markets.
-# Breakouts above R1 (resistance) or below S1 (support) with volume > 3x average and aligned with daily EMA50 trend.
-# Target: 20-35 trades/year by requiring strict confluence of pivot breakout + volume surge + trend alignment.
-# Position size: 0.25 to manage drawdown. Max holding period: 8 bars (32 hours) to avoid overtrading.
+# 4h_pivot_breakout_volume_trend_v2
+# Hypothesis: Daily pivot points (R1, S1) act as strong support/resistance. Breakouts with volume > 3x average and aligned with daily EMA50 trend capture momentum in both bull and bear markets.
+# Using tighter filters: volume > 3.5x average, ATR volatility filter (ATR < 1.2x average), and max holding period of 6 bars to reduce trade frequency and avoid overtrading.
+# Target: 20-35 trades/year by requiring strict confluence of pivot breakout + volume surge + trend alignment + volatility filter.
+# Position size: 0.25 to manage drawdown.
 
-name = "4h_pivot_breakout_volume_trend_v1"
+name = "4h_pivot_breakout_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -92,11 +92,11 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
         
-        # Volatility filter: current ATR < 1.5x 20-period average ATR (avoid choppy markets)
-        vol_filter = atr_val < 1.5 * atr_ma_val
+        # Volatility filter: current ATR < 1.2x 20-period average ATR (avoid choppy markets)
+        vol_filter = atr_val < 1.2 * atr_ma_val
         
-        # Volume breakout condition: current volume > 3.0x 20-period average
-        vol_breakout = volume[i] > 3.0 * vol_ma_val
+        # Volume breakout condition: current volume > 3.5x 20-period average (stricter)
+        vol_breakout = volume[i] > 3.5 * vol_ma_val
         
         # Trend filter: price above/below daily EMA50
         uptrend = close[i] > ema50_val
@@ -105,7 +105,7 @@ def generate_signals(prices):
         if position == 1:  # Long position
             bars_since_entry += 1
             # Exit if price breaks below pivot (support) OR maximum holding period reached
-            if (not np.isnan(pivot_val) and close[i] < pivot_val) or bars_since_entry >= 8:
+            if (not np.isnan(pivot_val) and close[i] < pivot_val) or bars_since_entry >= 6:
                 position = 0
                 signals[i] = 0.0
                 bars_since_entry = 0
@@ -115,7 +115,7 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             bars_since_entry += 1
             # Exit if price breaks above pivot (resistance) OR maximum holding period reached
-            if (not np.isnan(pivot_val) and close[i] > pivot_val) or bars_since_entry >= 8:
+            if (not np.isnan(pivot_val) and close[i] > pivot_val) or bars_since_entry >= 6:
                 position = 0
                 signals[i] = 0.0
                 bars_since_entry = 0
