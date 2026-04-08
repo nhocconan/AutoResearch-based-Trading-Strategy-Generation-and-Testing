@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-# 1d_rsi_reversion_1w_trend_volume
-# Hypothesis: Mean reversion on daily timeframe using RSI(14) with weekly trend filter and volume confirmation.
-# Long when RSI < 30 (oversold) and price > weekly EMA50 (uptrend) and volume > 1.5x average.
-# Short when RSI > 70 (overbought) and price < weekly EMA50 (downtrend) and volume > 1.5x average.
-# Exit when RSI crosses back to 50 (mean reversion complete).
-# Target: 50-100 total trades over 4 years (~12-25/year).
+# 12h_camarilla_pivot_1d_volume
+# Hypothesis: Camarilla pivot levels from 1-day timeframe combined with volume spike confirmation.
+# Long when price touches or breaks above S1 level with volume > 1.5x average.
+# Short when price touches or breaks below R1 level with volume > 1.5x average.
+# Exit when price crosses back to the pivot point (P).
+# Camarilla levels are effective in ranging markets and work well during breakouts.
+# Volume confirmation reduces false signals. Designed for 12h timeframe to limit trades.
+# Target: 50-150 total trades over 4 years (~12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_rsi_reversion_1w_trend_volume"
-timeframe = "1d"
+name = "12h_camarilla_pivot_1d_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,26 +27,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla pivot levels for each day
+    # P = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Calculate RSI(14) on daily data
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values  # Fill NaN with 50 (neutral)
+    # Align to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,12 +56,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 34  # Need 14 for RSI + 20 for volume
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(rsi_values[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -67,16 +70,16 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 (mean reversion complete)
-            if rsi_values[i] > 50:
+            # Exit: price crosses below pivot point
+            if close[i] < pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (mean reversion complete)
-            if rsi_values[i] < 50:
+            # Exit: price crosses above pivot point
+            if close[i] > pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,11 +88,13 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Mean reversion entries: RSI oversold (long) and overbought (short)
-            if (rsi_values[i] < 30) and (close[i] > ema_50_1w_aligned[i]) and volume_ok:
+            # Entry conditions
+            # Long: price touches or breaks above S1
+            if (close[i] >= s1_aligned[i]) and volume_ok:
                 position = 1
                 signals[i] = 0.25
-            elif (rsi_values[i] > 70) and (close[i] < ema_50_1w_aligned[i]) and volume_ok:
+            # Short: price touches or breaks below R1
+            elif (close[i] <= r1_aligned[i]) and volume_ok:
                 position = -1
                 signals[i] = -0.25
     
