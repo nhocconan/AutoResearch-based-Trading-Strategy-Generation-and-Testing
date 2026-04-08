@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1d_volume
-# Hypothesis: Camarilla pivot levels from 1-day timeframe combined with volume spike confirmation.
-# Long when price touches or breaks above S1 level with volume > 1.5x average.
-# Short when price touches or breaks below R1 level with volume > 1.5x average.
-# Exit when price crosses back to the pivot point (P).
-# Camarilla levels are effective in ranging markets and work well during breakouts.
-# Volume confirmation reduces false signals. Designed for 12h timeframe to limit trades.
-# Target: 50-150 total trades over 4 years (~12-37/year).
+# 4h_rsi_divergence_macd_12h_trend
+# Hypothesis: RSI divergence combined with MACD crossover on 4h, filtered by 12h EMA trend.
+# Long when bullish RSI divergence + MACD bullish crossover + price > 12h EMA50.
+# Short when bearish RSI divergence + MACD bearish crossover + price < 12h EMA50.
+# Exit when RSI crosses opposite extreme (50) or MACD reverses.
+# Designed to capture momentum reversals with trend alignment in both bull and bear markets.
+# Target: 80-150 total trades over 4 years (~20-38/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume"
-timeframe = "12h"
+name = "4h_rsi_divergence_macd_12h_trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,43 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # P = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate RSI (14-period) for divergence detection
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate MACD (12,26,9)
+    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_hist = macd_line - signal_line
+    macd_line = macd_line.values
+    signal_line = signal_line.values
+    macd_hist = macd_hist.values
+    
+    # Detect RSI divergence (lookback 5 periods)
+    rsi_divergence_bull = np.zeros(n, dtype=bool)
+    rsi_divergence_bear = np.zeros(n, dtype=bool)
+    
+    for i in range(5, n):
+        if np.isnan(rsi[i]) or np.isnan(rsi[i-5]) or np.isnan(close[i]) or np.isnan(close[i-5]):
+            continue
+        
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        if close[i] < close[i-5] and rsi[i] > rsi[i-5]:
+            # Check if recent low is significant
+            if low[i] <= np.min(low[i-4:i+1]) and low[i-5] <= np.min(low[i-9:i-4]):
+                rsi_divergence_bull[i] = True
+        
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        if close[i] > close[i-5] and rsi[i] < rsi[i-5]:
+            # Check if recent high is significant
+            if high[i] >= np.max(high[i-4:i+1]) and high[i-5] >= np.max(high[i-9:i-4]):
+                rsi_divergence_bear[i] = True
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(macd_line[i]) or np.isnan(signal_line[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -70,31 +94,33 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below pivot point
-            if close[i] < pivot_aligned[i]:
+            # Exit: RSI crosses below 50 or MACD bearish crossover
+            if rsi[i] < 50 or (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above pivot point
-            if close[i] > pivot_aligned[i]:
+            # Exit: RSI crosses above 50 or MACD bullish crossover
+            if rsi[i] > 50 or (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Volume confirmation: current volume > 1.5x average volume
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
-            
             # Entry conditions
-            # Long: price touches or breaks above S1
-            if (close[i] >= s1_aligned[i]) and volume_ok:
+            macd_bullish = macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1]
+            macd_bearish = macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1]
+            
+            # Long: bullish RSI divergence + MACD bullish crossover + uptrend
+            if (rsi_divergence_bull[i] and macd_bullish and 
+                close[i] > ema_50_12h_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches or breaks below R1
-            elif (close[i] <= r1_aligned[i]) and volume_ok:
+            # Short: bearish RSI divergence + MACD bearish crossover + downtrend
+            elif (rsi_divergence_bear[i] and macd_bearish and 
+                  close[i] < ema_50_12h_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
