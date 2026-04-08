@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h Weekly Pivot Reversal with Volume Confirmation and ADX Trend Filter
-# Hypothesis: Weekly pivot points act as major institutional support/resistance.
-# Price rejecting at weekly R3/S3 with volume > 1.5x 20-period average and ADX > 25 indicates institutional defense of levels.
-# Works in bull/bear markets by capturing reversals from key weekly levels with trend filter to avoid false signals in weak trends.
-# Target: 15-35 trades/year per symbol.
+# 6h Monthly Pivot Bounce with Volume and Trend Filter
+# Hypothesis: Monthly pivot points act as stronger institutional support/resistance than weekly.
+# Price bouncing off monthly S1/S2/R1/R2 with volume > 1.3x 20-period average and ADX > 20
+# captures institutional defense of key levels. Works in bull/bear by trading reversals
+# from strong monthly levels with trend filter to avoid whipsaws in weak trends.
+# Target: 10-25 trades/year per symbol.
 
-name = "6h_weekly_pivot_reversal_volume_adx_v1"
+name = "6h_monthly_pivot_bounce_volume_adx_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,32 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points and ADX - call ONCE before loop
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
-    volume_w = df_w['volume'].values
+    # Get monthly data for pivot points and ADX - call ONCE before loop
+    df_m = get_htf_data(prices, '1M')
+    high_m = df_m['high'].values
+    low_m = df_m['low'].values
+    close_m = df_m['close'].values
+    volume_m = df_m['volume'].values
     
-    # Calculate weekly pivot points (standard floor trader pivots)
-    pp_w = (high_w + low_w + close_w) / 3
-    r3_w = pp_w + 2 * (high_w - low_w)  # R3 = P + 2*(H-L)
-    s3_w = pp_w - 2 * (high_w - low_w)  # S3 = P - 2*(H-L)
+    # Calculate monthly pivot points (standard floor trader pivots)
+    pp_m = (high_m + low_m + close_m) / 3
+    r1_m = 2 * pp_m - low_m
+    s1_m = 2 * pp_m - high_m
+    r2_m = pp_m + (high_m - low_m)
+    s2_m = pp_m - (high_m - low_m)
     
-    # Calculate 20-period average volume for weekly timeframe
-    vol_ma_w = pd.Series(volume_w).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period average volume for monthly timeframe
+    vol_ma_m = pd.Series(volume_m).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ADX on weekly timeframe (trend strength filter)
+    # Calculate ADX on monthly timeframe (trend strength filter)
     # True Range
-    tr1 = high_w - low_w
-    tr2 = np.abs(high_w - np.roll(close_w, 1))
-    tr3 = np.abs(low_w - np.roll(close_w, 1))
+    tr1 = high_m - low_m
+    tr2 = np.abs(high_m - np.roll(close_m, 1))
+    tr3 = np.abs(low_m - np.roll(close_m, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
     
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_w - np.roll(high_w, 1)
-    down_move = np.roll(low_w, 1) - low_w
+    up_move = high_m - np.roll(high_m, 1)
+    down_move = np.roll(low_m, 1) - low_m
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     plus_dm[0] = 0
@@ -72,45 +75,47 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        # Get aligned weekly values for current 6h bar
-        r3 = align_htf_to_ltf(prices, df_w, r3_w)[i]
-        s3 = align_htf_to_ltf(prices, df_w, s3_w)[i]
-        vol_ma = align_htf_to_ltf(prices, df_w, vol_ma_w)[i]
-        adx_val = align_htf_to_ltf(prices, df_w, adx)[i]
+        # Get aligned monthly values for current 6h bar
+        r1 = align_htf_to_ltf(prices, df_m, r1_m)[i]
+        s1 = align_htf_to_ltf(prices, df_m, s1_m)[i]
+        r2 = align_htf_to_ltf(prices, df_m, r2_m)[i]
+        s2 = align_htf_to_ltf(prices, df_m, s2_m)[i]
+        vol_ma = align_htf_to_ltf(prices, df_m, vol_ma_m)[i]
+        adx_val = align_htf_to_ltf(prices, df_m, adx)[i]
         
         # Skip if any required data is NaN
-        if np.isnan(r3) or np.isnan(s3) or np.isnan(vol_ma) or np.isnan(adx_val) or volume[i] == 0:
+        if np.isnan(r1) or np.isnan(s1) or np.isnan(r2) or np.isnan(s2) or np.isnan(vol_ma) or np.isnan(adx_val) or volume[i] == 0:
             signals[i] = 0.0
             continue
         
-        # Volume rejection condition: current volume > 1.5x 20-period average
-        vol_rejection = volume[i] > 1.5 * vol_ma
+        # Volume condition: current volume > 1.3x 20-period average
+        vol_condition = volume[i] > 1.3 * vol_ma
         
-        # Strong trend condition: ADX > 25
-        strong_trend = adx_val > 25
+        # Trend condition: ADX > 20
+        trend_condition = adx_val > 20
         
         if position == 1:  # Long position
-            # Exit if price breaks below S3 (rejection failed)
-            if close[i] < s3:
+            # Exit if price breaks below S2 (bounce failed)
+            if close[i] < s2:
                 position = 0
                 signals[i] = 0.0
             elif position == 1:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above R3 (rejection failed)
-            if close[i] > r3:
+            # Exit if price breaks above R2 (bounce failed)
+            if close[i] > r2:
                 position = 0
                 signals[i] = 0.0
             elif position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Rejection long at S3 with volume confirmation and strong trend
-            if low[i] <= s3 and close[i] > s3 and vol_rejection and strong_trend:
+            # Bounce long at S1/S2 with volume and trend confirmation
+            if ((low[i] <= s1 and close[i] > s1) or (low[i] <= s2 and close[i] > s2)) and vol_condition and trend_condition:
                 position = 1
                 signals[i] = 0.25
-            # Rejection short at R3 with volume confirmation and strong trend
-            elif high[i] >= r3 and close[i] < r3 and vol_rejection and strong_trend:
+            # Bounce short at R1/R2 with volume and trend confirmation
+            elif ((high[i] >= r1 and close[i] < r1) or (high[i] >= r2 and close[i] < r2)) and vol_condition and trend_condition:
                 position = -1
                 signals[i] = -0.25
     
