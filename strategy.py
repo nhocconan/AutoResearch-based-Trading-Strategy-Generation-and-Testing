@@ -1,27 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Breakout with Volume Confirmation
-Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above R1 or below S1 with volume confirmation
-capture momentum moves in both bull and bear markets, while fade at R2/S2 provides mean reversion in ranging conditions.
-Targets 12-37 trades/year with controlled turnover.
+1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
+Hypothesis: Donchian(20) breakouts filtered by 1w EMA trend and volume spikes capture
+major trend moves while avoiding false breakouts in ranging markets.
+Targets 15-25 trades/year with low turnover to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout_v1"
-timeframe = "6h"
+name = "1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_pivot_points(high, low, close):
-    """Calculate standard pivot points: P = (H+L+C)/3, R1=2P-L, S1=2P-H, R2=P+(H-L), S2=P-(H-L)"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, s1, r2, s2
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,76 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        return np.zeros(n)
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate weekly pivot points
-    pivot, r1, s1, r2, s2 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivot levels to 6h timeframe (shifted by 1 week for no look-ahead)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.8)
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S1 or volume drops significantly
-            if close[i] < s1_aligned[i] or volume[i] < (vol_ma[i] * 0.5):
+            # Exit: price closes below 20-day low or trend turns bearish
+            if close[i] < low_20[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R1 or volume drops significantly
-            if close[i] > r1_aligned[i] or volume[i] < (vol_ma[i] * 0.5):
+            # Exit: price closes above 20-day high or trend turns bullish
+            if close[i] > high_20[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long breakout: price breaks above R1 with volume spike
-            if close[i] > r1_aligned[i] and vol_spike[i]:
+            # Trend filter: price vs 1w EMA50
+            uptrend = close[i] > ema_50_1w_aligned[i]
+            downtrend = close[i] < ema_50_1w_aligned[i]
+            
+            # Long: break above 20-day high + uptrend + volume spike
+            if close[i] > high_20[i] and uptrend and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown: price breaks below S1 with volume spike
-            elif close[i] < s1_aligned[i] and vol_spike[i]:
+            # Short: break below 20-day low + downtrend + volume spike
+            elif close[i] < low_20[i] and downtrend and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
-            # Long mean reversion: price touches S2 and starts bouncing with volume
-            elif close[i] <= s2_aligned[i] * 1.005 and close[i] > s2_aligned[i] and vol_spike[i]:
-                # Only take if we're not in strong downtrend (price above 20-period MA)
-                ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values[i]
-                if not np.isnan(ma_20) and close[i] > ma_20:
-                    position = 1
-                    signals[i] = 0.25
-            # Short mean reversion: price touches R2 and starts reversing with volume
-            elif close[i] >= r2_aligned[i] * 0.995 and close[i] < r2_aligned[i] and vol_spike[i]:
-                # Only take if we're not in strong uptrend (price below 20-period MA)
-                ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values[i]
-                if not np.isnan(ma_20) and close[i] < ma_20:
-                    position = -1
-                    signals[i] = -0.25
     
     return signals
