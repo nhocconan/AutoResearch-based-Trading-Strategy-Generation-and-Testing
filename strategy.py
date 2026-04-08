@@ -1,81 +1,90 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_rsi_momentum_v1
-Hypothesis: Use 4h RSI for momentum direction and 1d RSI for regime filter, with 1h for precise entry timing.
-Enter long when 4h RSI > 50 (bullish momentum) and 1d RSI > 40 (not oversold) and 1h RSI crosses above 50.
-Enter short when 4h RSI < 50 (bearish momentum) and 1d RSI < 60 (not overbought) and 1h RSI crosses below 50.
-Exit when momentum reverses or RSI reaches extreme levels.
-Designed for ~20-30 trades/year to avoid fee drag, works in bull/bear via momentum filter.
+6h_1w_vwap_deviation_mean_reversion_v1
+Hypothesis: Price tends to revert to weekly VWAP after significant deviations (>1.5 sigma), 
+with mean reversion strongest when weekly trend is sideways (low ADX). Works in bull/bear 
+because it fades extremes rather than following trends. Target: 20-40 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_rsi_momentum_v1"
-timeframe = "1h"
+name = "6h_1w_vwap_deviation_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for momentum
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data for VWAP and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h RSI(14) for momentum direction
-    close_4h = df_4h['close'].values
-    delta_4h = np.diff(close_4h, prepend=close_4h[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Calculate VWAP for each week
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap = (typical_price * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap_values = vwap.values
     
-    # Get 1d data for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Standard deviation of price from VWAP (using typical price)
+    price_dev = typical_price - vwap
+    std_dev = pd.Series(price_dev).rolling(window=20, min_periods=20).std().values
     
-    # 1d RSI(14) for regime filter
-    close_1d = df_1d['close'].values
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # ADX for trend filter (low ADX = ranging market, good for mean reversion)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1h RSI for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align to 6h
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap_values)
+    std_dev_aligned = align_htf_to_ltf(prices, df_1w, std_dev)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(std_dev_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -83,33 +92,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Skip if no deviation data (std_dev = 0)
+        if std_dev_aligned[i] <= 0:
+            if position != 0:
+                pass
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Deviation from VWAP in sigma units
+        deviation = (close[i] - vwap_aligned[i]) / std_dev_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: momentum turns bearish or RSI overbought
-            if rsi_4h_aligned[i] < 50 or rsi[i] >= 70:
+            # Exit: price returns to VWAP or ADX increases (trending market)
+            if deviation <= 0.2 or adx_aligned[i] > 25:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Maintain long position
+                signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: momentum turns bullish or RSI oversold
-            if rsi_4h_aligned[i] > 50 or rsi[i] <= 30:
+            # Exit: price returns to VWAP or ADX increases (trending market)
+            if deviation >= -0.2 or adx_aligned[i] > 25:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Maintain short position
+                signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: 4h bullish momentum, 1d not oversold, 1h RSI crosses above 50
-            if (rsi_4h_aligned[i] > 50 and 
-                rsi_1d_aligned[i] > 40 and 
-                rsi[i] > 50 and rsi[max(0, i-1)] <= 50):
-                position = 1
-                signals[i] = 0.20
-            # Short entry: 4h bearish momentum, 1d not overbought, 1h RSI crosses below 50
-            elif (rsi_4h_aligned[i] < 50 and 
-                  rsi_1d_aligned[i] < 60 and 
-                  rsi[i] < 50 and rsi[max(0, i-1)] >= 50):
-                position = -1
-                signals[i] = -0.20
+            # Only trade in low ADX (ranging) markets
+            if adx_aligned[i] < 20:
+                # Long entry: price significantly below VWAP
+                if deviation < -1.5:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: price significantly above VWAP
+                elif deviation > 1.5:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
