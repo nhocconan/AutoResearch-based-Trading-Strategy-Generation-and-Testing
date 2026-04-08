@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_donchian20_weekly_pivot_direction_v1
-# Hypothesis: Donchian breakout with weekly pivot direction filter on 6h timeframe.
-# Long when price breaks above Donchian(20) high and weekly pivot is bullish (close > pivot).
-# Short when price breaks below Donchian(20) low and weekly pivot is bearish (close < pivot).
-# Exit when price crosses the opposite Donchian level (20-period low for longs, high for shorts).
-# Weekly pivot provides directional bias to avoid counter-trend trades.
-# Target: 20-40 trades/year with strict entry conditions.
+# 12h_camilla_pivot_breakout_volume_v1
+# Hypothesis: Camarilla pivot breakouts with volume confirmation on 12h timeframe.
+# Long when price breaks above R4 with volume > 1.5x average.
+# Short when price breaks below S4 with volume > 1.5x average.
+# Exit when price crosses the opposite pivot level (S3/R3) or volume drops below average.
+# Uses Camarilla levels from 1d timeframe for structure, volume for confirmation.
+# Target: 12-37 trades/year with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_weekly_pivot_direction_v1"
-timeframe = "6h"
+name = "12h_camilla_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,40 +23,53 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot direction (calculate once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla pivots (calculate once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot point: P = (H + L + C) / 3
-    # Using previous week's OHLC
-    prev_weekly_high = df_1w['high'].values
-    prev_weekly_low = df_1w['low'].values
-    prev_weekly_close = df_1w['close'].values
-    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
+    # Calculate Camarilla levels from previous day's OHLC
+    # Using typical formula: R4 = C + ((H-L)*1.1/2), S4 = C - ((H-L)*1.1/2)
+    # where C, H, L are from previous day
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # Align weekly pivot to 6h timeframe (wait for weekly bar to close)
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate pivot levels
+    camarilla_r4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    camarilla_s4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Calculate Donchian channels (20-period) on 6h data
-    donchian_period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Align to 12h timeframe (wait for 1d bar to close)
+    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    for i in range(donchian_period-1, n):
-        donchian_high[i] = np.max(high[i-donchian_period+1:i+1])
-        donchian_low[i] = np.min(low[i-donchian_period+1:i+1])
+    # Volume filter: 1.5x 20-period average
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donchian_period, 1)  # Need at least one weekly pivot value
+    start_idx = vol_ma_period + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_6h[i])):
+        if (np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or 
+            np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -64,27 +77,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit: Price below S3 or volume drops below average
+            if close[i] < s3_12h[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit: Price above R3 or volume drops below average
+            if close[i] > r3_12h[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price above Donchian high and weekly pivot bullish (close > pivot)
-            if (close[i] > donchian_high[i] and close[i] > weekly_pivot_6h[i]):
+            # Long entry: Price above R4 with volume surge
+            if (close[i] > r4_12h[i] and vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below Donchian low and weekly pivot bearish (close < pivot)
-            elif (close[i] < donchian_low[i] and close[i] < weekly_pivot_6h[i]):
+            # Short entry: Price below S4 with volume surge
+            elif (close[i] < s4_12h[i] and vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
