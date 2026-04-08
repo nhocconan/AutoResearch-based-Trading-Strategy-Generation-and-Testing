@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_atr_breakout_v2
-# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-# Long when: price breaks above Donchian(20) high AND price > 1d EMA50 AND volume > 1.5x 20-period average volume.
-# Short when: price breaks below Donchian(20) low AND price < 1d EMA50 AND volume > 1.5x 20-period average volume.
-# Exit when: price crosses back through Donchian(20) middle (mean of high/low) OR opposite breakout occurs.
-# Uses 1d for trend direction and 4h for entry/exit with volume confirmation to filter false breakouts.
-# Target: 20-50 trades/year to minimize fee dust while capturing true breakouts.
+# daily_ema_rsi_weekly_v1
+# Hypothesis: 1-day EMA200 trend filter with RSI(14) mean reversion and weekly trend confirmation.
+# Long when: price > EMA200 AND RSI < 30 AND weekly close > weekly EMA50
+# Short when: price < EMA200 AND RSI > 70 AND weekly close < weekly EMA50
+# Exit when: price crosses EMA200 OR RSI crosses back above 50 (long) or below 50 (short)
+# Uses daily for entry/exit and weekly for trend filter to avoid counter-trend trades.
+# Target: 10-25 trades/year to minimize fee drag while capturing high-probability mean reversions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_atr_breakout_v2"
-timeframe = "4h"
+name = "daily_ema_rsi_weekly_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,81 +23,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
+    # Calculate daily EMA200 for trend filter
+    ema200 = np.full(n, np.nan)
+    ema200[199] = np.mean(close[:200])
+    for i in range(200, n):
+        ema200[i] = close[i] * 0.00995 + ema200[i-1] * 0.99005
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 20-period average volume
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Get 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    for i in range(14, n):
+        avg_gain[i] = (gain[i] * 1/14 + avg_gain[i-1] * 13/14)
+        avg_loss[i] = (loss[i] * 1/14 + avg_loss[i-1] * 13/14)
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_1d_50 = np.zeros(len(close_1d))
-    ema_1d_50[:] = np.nan
-    ema_1d_50[49] = np.mean(close_1d[:50])
-    for i in range(50, len(close_1d)):
-        ema_1d_50[i] = close_1d[i] * 0.0377 + ema_1d_50[i-1] * 0.9623
+    close_1w = df_1w['close'].values
+    # Calculate weekly EMA50
+    ema_1w_50 = np.zeros(len(close_1w))
+    ema_1w_50[:] = np.nan
+    ema_1w_50[49] = np.mean(close_1w[:50])
+    for i in range(50, len(close_1w)):
+        ema_1w_50[i] = close_1w[i] * 0.0377 + ema_1w_50[i-1] * 0.9623
     
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    # Align both weekly close and weekly EMA50 to daily timeframe
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        d_high = donchian_high[i]
-        d_low = donchian_low[i]
-        d_mid = donchian_mid[i]
-        ema_1d = ema_1d_50_aligned[i]
+        ema = ema200[i]
+        rsi_val = rsi[i]
+        weekly_close = close_1w_aligned[i]
+        weekly_ema = ema_1w_50_aligned[i]
         
-        if np.isnan(d_high) or np.isnan(d_low) or np.isnan(d_mid) or np.isnan(avg_vol) or np.isnan(ema_1d):
+        if np.isnan(ema) or np.isnan(rsi_val) or np.isnan(weekly_close) or np.isnan(weekly_ema):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_surge = vol > 1.5 * avg_vol if not np.isnan(avg_vol) else False
-        
         if position == 1:  # Long
-            # Exit: price below Donchian mid OR opposite breakout with volume
-            if price < d_mid or (price < d_low and vol_surge):
+            # Exit: price below EMA200 OR RSI > 50
+            if price < ema or rsi_val > 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price above Donchian mid OR opposite breakout with volume
-            if price > d_mid or (price > d_high and vol_surge):
+            # Exit: price above EMA200 OR RSI < 50
+            if price > ema or rsi_val < 50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Entry: bullish breakout with volume and trend alignment
-            if price > d_high and vol_surge and price > ema_1d:
+            # Entry: long setup
+            if price > ema and rsi_val < 30 and weekly_close > weekly_ema:
                 position = 1
-                signals[i] = 0.30
-            # Entry: bearish breakout with volume and trend alignment
-            elif price < d_low and vol_surge and price < ema_1d:
+                signals[i] = 0.25
+            # Entry: short setup
+            elif price < ema and rsi_val > 70 and weekly_close < weekly_ema:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
