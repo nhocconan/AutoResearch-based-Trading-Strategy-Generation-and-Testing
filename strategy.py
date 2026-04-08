@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_trend_follow_volume_v1
-# Hypothesis: Follow the 4h trend using EMA crossover and ADX strength, with 1d regime filter to avoid sideways markets.
-# Enter on 1h pullbacks in the direction of the 4h trend with volume confirmation. Works in bull/bear by aligning with higher timeframe trend.
+# 1h_4h_1d_trend_follow_volume_v2
+# Hypothesis: Follow the 4h trend using EMA21/50 cross and ADX > 25, with 1d regime filter (price > SMA50).
+# Enter on 1h breakouts above/below 4h EMA21 with volume confirmation. Works in bull/bear by aligning with higher timeframe trend.
 # Uses volume spike to confirm institutional participation and reduce false signals.
 # Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "1h_4h_1d_trend_follow_volume_v1"
+name = "1h_4h_1d_trend_follow_volume_v2"
 timeframe = "1h"
 leverage = 1.0
 
@@ -91,6 +91,9 @@ def generate_signals(prices):
     regime_1d = np.where(close_1d > sma50_1d, 1, -1)
     regime_1d_aligned = align_htf_to_ltf(prices, df_1d, regime_1d)
     
+    # 4h EMA21 aligned to 1h for entry timing
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    
     # Volume spike detection on 1h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
@@ -108,7 +111,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(trend_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]) or 
-            np.isnan(regime_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(regime_1d_aligned[i]) or np.isnan(ema21_4h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -139,21 +143,13 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Need strong trend (ADX > 25) and favorable regime
             if adx_4h_aligned[i] > 25 and regime_1d_aligned[i] == trend_4h_aligned[i]:
-                # Long: 4h bullish trend + price above 4h EMA21 (pullback entry)
-                if trend_4h_aligned[i] == 1 and close[i] > ema21_4h[-1] if len(ema21_4h) > 0 else False:
-                    # Need to get the actual 4h EMA21 value at this point
-                    # Since we aligned, we can't directly access - find the corresponding 4h bar
-                    # Simplified: enter on pullback to EMA21 in direction of trend
-                    # We'll use price > EMA21 as approximate pullback end
-                    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-                    if not np.isnan(ema21_4h_aligned[i]) and close[i] > ema21_4h_aligned[i]:
-                        position = 1
-                        signals[i] = 0.20
+                # Long: 4h bullish trend + price above 4h EMA21 (breakout entry)
+                if trend_4h_aligned[i] == 1 and close[i] > ema21_4h_aligned[i]:
+                    position = 1
+                    signals[i] = 0.20
                 # Short: 4h bearish trend + price below 4h EMA21
-                elif trend_4h_aligned[i] == -1 and close[i] < ema21_4h[-1] if len(ema21_4h) > 0 else False:
-                    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-                    if not np.isnan(ema21_4h_aligned[i]) and close[i] < ema21_4h_aligned[i]:
-                        position = -1
-                        signals[i] = -0.20
+                elif trend_4h_aligned[i] == -1 and close[i] < ema21_4h_aligned[i]:
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
