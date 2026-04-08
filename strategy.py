@@ -1,91 +1,94 @@
 #!/usr/bin/env python3
 """
-1-day Williams %R mean reversion with 1-week trend filter and volume confirmation
-Hypothesis: Williams %R extreme readings (-80/-20) signal mean reversion opportunities
-when aligned with the weekly trend direction, confirmed by volume spikes. The weekly
-trend filter prevents counter-trend trades in strong trends, while Williams %R
-captures reversals in both bull and bear markets. Designed for low trade frequency
-(10-30 trades/year) to minimize fee drag.
+6h Adaptive Keltner Channel with 12h Trend Filter
+Hypothesis: In trending markets (12h EMA25 > EMA50), price tends to respect the 2xATR Keltner Channel.
+Buy near lower band (1.01x) in uptrend, sell near upper band (0.99x) in downtrend.
+The adaptive channel width (ATR-based) handles volatility regimes, reducing whipsaws in chop.
+Designed for 15-35 trades/year to minimize fee drag while capturing trend persistence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_williams_r_mean_reversion_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_adaptive_keltner_12h_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 12h EMA25 and EMA50 for trend filter
+    ema_25_12h = pd.Series(close_12h).ewm(span=25, min_periods=25, adjust=False).mean().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Williams %R (14-period) - measures overbought/oversold
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    # ATR(20) for Keltner Channel width
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Volume filter: current volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Keltner Channel: 2 * ATR around EMA22
+    ema22 = pd.Series(close).ewm(span=22, min_periods=22, adjust=False).mean().values
+    kc_upper = ema22 + 2.0 * atr
+    kc_lower = ema22 - 2.0 * atr
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema_25_12h_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(kc_upper[i]) or
+            np.isnan(kc_lower[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend: 1=up (EMA25 > EMA50), -1=down (EMA25 < EMA50)
+        if ema_25_12h_aligned[i] > ema_50_12h_aligned[i]:
+            trend = 1
+        elif ema_25_12h_aligned[i] < ema_50_12h_aligned[i]:
+            trend = -1
+        else:
+            trend = 0
+        
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -20 (overbought) OR trend turns bearish
-            if (williams_r[i] >= -20 or 
-                close[i] < ema_20_1w_aligned[i]):
+            # Exit: trend turns down OR price reaches upper band
+            if trend == -1 or close[i] >= kc_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -80 (oversold) OR trend turns bullish
-            if (williams_r[i] <= -80 or 
-                close[i] > ema_20_1w_aligned[i]):
+            # Exit: trend turns up OR price reaches lower band
+            if trend == 1 or close[i] <= kc_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: Williams %R below -80 (oversold) + volume spike + weekly uptrend
-            if (williams_r[i] < -80 and
-                vol_spike[i] and
-                close[i] > ema_20_1w_aligned[i]):
+            # Long: price near lower band in uptrend
+            if trend == 1 and close[i] <= kc_lower[i] * 1.01:
                 position = 1
                 signals[i] = 0.25
-            # Short: Williams %R above -20 (overbought) + volume spike + weekly downtrend
-            elif (williams_r[i] > -20 and
-                  vol_spike[i] and
-                  close[i] < ema_20_1w_aligned[i]):
+            # Short: price near upper band in downtrend
+            elif trend == -1 and close[i] >= kc_upper[i] * 0.99:
                 position = -1
                 signals[i] = -0.25
     
