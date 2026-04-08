@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 6h_12h_donchian_pivot_v1
-# Hypothesis: 6-hour Donchian(15) breakout with 12-hour pivot filter and volume confirmation.
-# Long when price breaks above 15-period high, volume > 1.3x average, and price above 12h daily pivot (R1).
-# Short when price breaks below 15-period low, volume > 1.3x average, and price below 12h daily pivot (S1).
-# Exit when price returns to 6-period EMA.
-# Uses 12h daily pivot levels for trend bias to avoid counter-trend trades.
-# Designed to generate ~15-30 trades/year to avoid fee decay while capturing strong trends.
+# 4h_1d_atr_breakout_v2
+# Hypothesis: 4-hour ATR-based breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above ATR(14) upper band, volume > 1.2x average, and price above EMA50(1d).
+# Short when price breaks below ATR(14) lower band, volume > 1.2x average, and price below EMA50(1d).
+# Exit when price returns to ATR(14) midline.
+# Designed to generate ~25-35 trades/year with strong risk-reward to avoid fee decay.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_donchian_pivot_v1"
-timeframe = "6h"
+name = "4h_1d_atr_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,56 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    # ATR(14) calculation
+    atr = np.full(n, np.nan)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Calculate 12h daily pivot points
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    atr_sum = 0.0
+    for i in range(n):
+        if i < 14:
+            atr_sum += tr[i]
+            if i == 13:
+                atr[i] = atr_sum / 14
+        else:
+            atr_sum = atr_sum - atr_sum/14 + tr[i]
+            atr[i] = atr_sum / 14
     
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    r1 = 2 * pivot - low_12h
-    s1 = 2 * pivot - high_12h
+    # ATR bands
+    atr_upper = np.full(n, np.nan)
+    atr_lower = np.full(n, np.nan)
+    atr_mid = np.full(n, np.nan)
+    for i in range(14, n):
+        atr_upper[i] = close[i-1] + 1.5 * atr[i]
+        atr_lower[i] = close[i-1] - 1.5 * atr[i]
+        atr_mid[i] = close[i-1]
     
-    # Calculate Donchian channels (15-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(15, n):
-        donchian_high[i] = np.max(high[i-15:i])
-        donchian_low[i] = np.min(low[i-15:i])
-    
-    # Calculate 6-period EMA for exit
-    ema_6 = np.full(n, np.nan)
-    if n >= 6:
-        ema_6[5] = np.mean(close[:6])
-        alpha = 2.0 / (6 + 1)
-        for i in range(6, n):
-            ema_6[i] = alpha * close[i] + (1 - alpha) * ema_6[i-1]
-    
-    # Calculate volume moving average (20-period)
+    # Volume MA(20)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 12h pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Get 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2.0 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
-        # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_6[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+    for i in range(20, n):
+        if (np.isnan(atr_upper[i]) or np.isnan(atr_lower[i]) or np.isnan(atr_mid[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
-                pass  # Hold
+                pass
             else:
                 signals[i] = 0.0
             continue
@@ -82,28 +85,23 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
         
-        if position == 1:  # Long
-            # Exit: price returns to 6-period EMA
-            if price <= ema_6[i]:
+        if position == 1:
+            if price <= atr_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
-                
-        elif position == -1:  # Short
-            # Exit: price returns to 6-period EMA
-            if price >= ema_6[i]:
+        elif position == -1:
+            if price >= atr_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat
-            # Enter long: price breaks above Donchian high with volume expansion and above 12h R1
-            if price > donchian_high[i] and vol_ratio > 1.3 and price > r1_aligned[i]:
+        else:
+            if price > atr_upper[i] and vol_ratio > 1.2 and price > ema50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume expansion and below 12h S1
-            elif price < donchian_low[i] and vol_ratio > 1.3 and price < s1_aligned[i]:
+            elif price < atr_lower[i] and vol_ratio > 1.2 and price < ema50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
