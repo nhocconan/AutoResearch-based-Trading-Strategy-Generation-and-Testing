@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ema_pullback_1d_trend_volume_v1
-# Hypothesis: EMA20 pullback in 6h with volume confirmation and 1-day EMA50 trend filter captures trend-following entries during pullbacks. Works in bull/bear by following higher timeframe trend. Uses tight entry conditions to limit trades (~30-50/year) and avoid fee drag.
+# 4h_ema_pullback_1d_trend_volume_v1
+# Hypothesis: EMA20 pullback in 4h with volume confirmation and 1-day EMA50 trend filter captures trend-following entries during pullbacks. Works in bull/bear by following higher timeframe trend. Uses tight entry conditions to limit trades (~30-50/year) and avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema_pullback_1d_trend_volume_v1"
-timeframe = "6h"
+name = "4h_ema_pullback_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,13 +29,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h
+    # Align 1d EMA50 to 4h
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # EMA20 on 6h
+    # EMA20 on 4h
     ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: 6h volume > 1.3x 20-period average
+    # Volume filter: 4h volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.3 * vol_ma)
     
