@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + 1d Trend + Volume + ATR Stop v1
-Hypothesis: Donchian channel breakouts (20-period) capture strong trends. 
-Filter by 1d EMA trend and volume confirmation to avoid whipsaws. 
-ATR-based stop loss manages risk. Works in bull/bear by using volatility-adjusted 
-stops and trend alignment. Targets 20-50 trades/year on 4h timeframe.
+4h Donchian Breakout + 1d EMA Trend + Volume + ATR Stop v2
+Hypothesis: Donchian channel breakouts capture strong trends. Filter by 1d EMA trend and volume confirmation to avoid whipsaws. ATR-based stop manages risk. Works in bull/bear by using volatility-adjusted stops and trend alignment. Targets 20-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
