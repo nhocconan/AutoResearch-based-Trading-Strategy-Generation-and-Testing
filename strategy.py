@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h Williams Alligator + Elder Ray Momentum with 1w Trend Filter
-Hypothesis: Williams Alligator identifies market phases (sleeping/awake/hunting).
-Elder Ray measures bull/bear power. Combined, they capture momentum in trending markets.
-The 1w trend filter ensures we only trade in strong weekly trends, avoiding whipsaws in ranging markets.
-Works in bull/bear by requiring alignment with higher timeframe trend. Targets 15-35 trades/year.
+12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: In trending markets (1d EMA alignment + ADX > 25), 12h Donchian breakouts with volume
+confirmation capture continuation of the trend. Works in bull/bear by requiring trend alignment.
+Volume spike = current 12h volume > 2.0 x 20-period average. Targets 15-35 trades/year.
 """
 
-name = "6h_alligator_elder_1w_trend_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,23 +23,55 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter - call ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filters - call ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 13, 8, 5 SMAs for Williams Alligator (Jaws, Teeth, Lips)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # 13-period SMA
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # 8-period SMA
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # 5-period SMA
+    # Calculate 20 EMA on 1d
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate 50 EMA on 1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 20-period EMA for 1w trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 14-period ADX for 1d
+    # True Range
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    
+    # Directional Movement
+    dm_plus_1d = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                          np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus_1d = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                           np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus_1d = np.concatenate([[0], dm_plus_1d])
+    dm_minus_1d = np.concatenate([[0], dm_minus_1d])
+    
+    # Smoothed values
+    tr14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14_1d = pd.Series(dm_plus_1d).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14_1d = pd.Series(dm_minus_1d).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus_1d = 100 * dm_plus_14_1d / tr14_1d
+    di_minus_1d = 100 * dm_minus_14_1d / tr14_1d
+    
+    # DX and ADX
+    dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
+    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume spike detector: current volume > 2.0 x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
+    
+    # Donchian channels (20-period high/low)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -50,52 +81,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema20_1w[i])):
+        if (np.isnan(ema20_1d[i]) or np.isnan(ema50_1d[i]) or 
+            np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1w EMA for current 6h bar
-        ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)[i]
+        # Get aligned 1d values for current 12h bar
+        ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)[i]
+        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
-        # Williams Alligator: Mouth open when all lines are separated and ordered
-        # Bullish: Lips > Teeth > Jaw (green alignment)
-        # Bearish: Jaw > Teeth > Lips (red alignment)
-        alligator_bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        alligator_bearish = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
+        # Trend filter: 1d EMA alignment (bullish: EMA20 > EMA50, bearish: EMA20 < EMA50)
+        ema_bullish = ema20_1d_aligned > ema50_1d_aligned
+        ema_bearish = ema20_1d_aligned < ema50_1d_aligned
         
-        # Elder Ray: Strong bull power and weak bear power for longs
-        # Strong bear power and weak bull power for shorts
-        elder_bullish = bull_power[i] > 0 and bear_power[i] < 0
-        elder_bearish = bear_power[i] > 0 and bull_power[i] < 0
-        
-        # 1w trend filter: price above/below 20 EMA
-        uptrend_1w = close[i] > ema20_1w_aligned
-        downtrend_1w = close[i] < ema20_1w_aligned
+        # Regime filter: only trade in strong trending markets on daily
+        strong_trend_1d = adx_1d_aligned > 25
         
         if position == 1:  # Long position
-            # Exit: alligator closes OR elder ray weakens OR trend fails
-            if not (alligator_bullish and elder_bullish and uptrend_1w):
+            # Exit: trend breaks OR price breaks below Donchian low
+            if not (ema_bullish and strong_trend_1d) or close[i] <= donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: alligator closes OR elder ray weakens OR trend fails
-            if not (alligator_bearish and elder_bearish and downtrend_1w):
+            # Exit: trend breaks OR price breaks above Donchian high
+            if not (ema_bearish and strong_trend_1d) or close[i] >= donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Enter long: alligator aligned bullish + elder bullish + uptrend
-            if alligator_bullish and elder_bullish and uptrend_1w:
+            # Only trade with volume spike and both trend filters aligned
+            if volume_spike[i] and ema_bullish and strong_trend_1d and close[i] >= donchian_high[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: alligator aligned bearish + elder bearish + downtrend
-            elif alligator_bearish and elder_bearish and downtrend_1w:
+            elif volume_spike[i] and ema_bearish and strong_trend_1d and close[i] <= donchian_low[i]:
                 position = -1
                 signals[i] = -0.25
     
