@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-# 1h_rsi_ema_4h_filter_v1
-# Hypothesis: On 1h timeframe, RSI(14) below 30 for long and above 70 for short captures short-term reversals.
-# Filter: Only trade in direction of 4h EMA(50) trend to avoid counter-trend trades.
-# Entry: Long when RSI < 30 and close > 4h EMA50; Short when RSI > 70 and close < 4h EMA50
-# Exit: RSI crosses back above 50 (long) or below 50 (short)
-# Position sizing: 0.20 long, -0.20 short
-# Uses 4h EMA50 for trend filter, 1h RSI for entry timing. Designed for both bull and bear markets.
-# Target: 15-37 trades/year (60-150 total over 4 years) by combining tight RSI extremes with trend filter.
+# 12h_donchian_breakout_1d_trend_volume_v1
+# Hypothesis: On 12h timeframe, Donchian(20) breakout with volume expansion and 1d EMA100 trend alignment captures momentum moves in both bull and bear markets. Trend filter avoids counter-trend entries. Volume confirmation filters false breakouts. Designed for low-frequency, high-conviction trades to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_ema_4h_filter_v1"
-timeframe = "1h"
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,37 +17,39 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for EMA100 trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1d = df_1d['close'].values
+    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # Align 4h EMA50 to 1h
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align 1d EMA100 to 12h
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # RSI(14) calculation on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Donchian(20) calculation
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter: 12h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -62,28 +58,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 50
-            if rsi[i] > 50:
+            # Exit: price below Donchian low OR price below 1d EMA100
+            if (close[i] < donchian_low[i]) or (close[i] < ema_100_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20  # Position size
+                signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50
-            if rsi[i] < 50:
+            # Exit: price above Donchian high OR price above 1d EMA100
+            if (close[i] > donchian_high[i]) or (close[i] > ema_100_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20  # Position size
+                signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: RSI < 30 and price > 4h EMA50
-            if (rsi[i] < 30) and (close[i] > ema_50_4h_aligned[i]):
+            # Long entry: price above Donchian high + volume + price > 1d EMA100
+            if (close[i] > donchian_high[i]) and volume_filter[i] and (close[i] > ema_100_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: RSI > 70 and price < 4h EMA50
-            elif (rsi[i] > 70) and (close[i] < ema_50_4h_aligned[i]):
+                signals[i] = 0.25
+            # Short entry: price below Donchian low + volume + price < 1d EMA100
+            elif (close[i] < donchian_low[i]) and volume_filter[i] and (close[i] < ema_100_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
