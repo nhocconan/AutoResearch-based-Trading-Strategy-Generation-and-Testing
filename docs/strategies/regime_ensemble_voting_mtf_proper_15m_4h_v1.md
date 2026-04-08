@@ -1,21 +1,16 @@
 # Strategy: regime_ensemble_voting_mtf_proper_15m_4h_v1
 
-## Status
-ACTIVE - Sharpe=0.184 | Return=+81.3% | DD=-36.3%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.883 | -24.2% | -39.0% | 232 |
-| ETHUSDT | 0.372 | +47.9% | -26.4% | 1 |
-| SOLUSDT | 1.062 | +220.3% | -43.4% | 36 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.837 | -22.4% | -37.6% | 232 | DISCARD |
+| ETHUSDT | 0.372 | +47.9% | -26.4% | 1 | DISCARD |
+| SOLUSDT | 1.065 | +221.5% | -43.4% | 36 | KEEP |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.716 | -2.2% | -11.1% | 97 |
-| ETHUSDT | -1.127 | -12.9% | -30.1% | 114 |
-| SOLUSDT | -0.267 | -0.9% | -20.0% | 115 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| SOLUSDT | -0.888 | -13.0% | -21.6% | 44 | DISCARD |
 
 ## Code
 ```python
@@ -459,4 +454,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 14:48
+2026-04-07 04:43

@@ -8,8 +8,8 @@ This is NOT a collection of Python trading scripts. The core innovation is:
 
 1. **An LLM agent writes the strategies** — It reads a [knowledge base](program.md) of real quantitative trading techniques, writes `strategy.py`, and submits it for testing.
 2. **Automated evaluation loop** — Each strategy is backtested on 4 years of data across 3 crypto assets, with realistic costs. The loop runs 24/7 without human intervention.
-3. **Ratcheting improvement** — Only strategies that beat the current best (or have exceptional risk-adjusted returns) are kept. Bad strategies are automatically discarded and the agent learns from failures.
-4. **Honest simulation** — No cheating. Strict no-lookahead enforcement, realistic fees (0.10% round trip), funding rates, and fill delays. A [compliance validator](validator.py) checks every strategy. See [Backtesting Rules](docs/backtesting-rules.md).
+3. **Ratcheting improvement** — Only strategies that pass the repo's per-symbol train/test rules are kept. Bad strategies are automatically discarded and the agent learns from failures.
+4. **Honest simulation** — No cheating. Strict no-lookahead enforcement, realistic fees (0.10% round trip), funding rates, and fill delays. A [compliance validator](validator.py) checks every strategy, and an independent verifier re-audits saved strategies. See [Backtesting Rules](docs/backtesting-rules.md) and [Autoresearch Operations](docs/autoresearch-operations.md).
 
 The result: hundreds of experiments tested automatically, with the system progressively discovering better strategies through structured exploration of trend following, mean reversion, momentum, multi-timeframe analysis, and ensemble approaches.
 
@@ -31,20 +31,26 @@ The AI does NOT:
 ## Architecture
 
 ```
-program.md          ← Research protocol & strategy knowledge base (human-written)
+program.md                    ← Research protocol & strategy knowledge base
     ↓
-agent_research.py   ← Main loop: LLM generates → validate → backtest → keep/discard
-    ↓                  Uses: llm_client.py (official Ollama Cloud/local, optional other providers)
-strategy.py         ← THE ONLY FILE THE LLM EDITS (mutable)
+watchdog.sh                   ← Keeps the live research loop healthy and restartable
     ↓
-backtest.py         ← Honest simulation engine (IMMUTABLE)
-    ↓                  Uses: prepare.py (data), evaluate.py (metrics)
-results.tsv         ← Experiment log (append-only)
-strategies/         ← All strategies with Sharpe > 0 saved here
-dashboard.py        ← Live web dashboard with charts & trade detail
+agent_research.py             ← Main loop: LLM generates → validate → backtest → keep/discard
+    ↓                            Uses: llm_client.py, validator.py, results.db state
+strategy.py                   ← Current mutable strategy under test
+    ↓
+backtest.py + evaluate.py     ← Honest simulation engine (IMMUTABLE)
+    ↓
+results.db + results.tsv      ← Primary result store + legacy mirror
+    ↓
+verification_remediation.py   ← Independent verification, purge, rerun, restart request
+    ↓
+strategies/ + docs/strategies ← Saved strategy code and generated docs
+    ↓
+dashboard.py                  ← Live web dashboard with charts & trade detail
 ```
 
-See [Architecture Details](docs/architecture.md) for the full breakdown.
+See [Architecture Details](docs/architecture.md) for the full breakdown and [Autoresearch Operations](docs/autoresearch-operations.md) for restart/remediation behavior.
 
 ## Quick Start
 
@@ -95,20 +101,30 @@ Live at `http://localhost:8888` (auto-refresh every 10 minutes).
     - Equity curve
     - Full trade-by-trade history with PnL, fees, funding
 
+## Operational Safeguards
+
+- `watchdog.sh` now restarts the research loop when core files change, the process gets stuck, or remediation requests a restart.
+- `agent_research.py` persists experiment state in `logs/agent_research_state.json`, so a restart resumes from the correct experiment number instead of going back to the beginning.
+- `auto_concept_research.sh` runs concept discovery and `verification_remediation.py` in the same scheduled job.
+- `verification_remediation.py` audits recent strategies, removes invalid stored results, reruns repaired strategies, and asks the watchdog to restart autoresearch when patched logic must become live.
+
+See [Autoresearch Operations](docs/autoresearch-operations.md) for the full operational flow.
+
 ## Key Rules
 
 All rules are enforced automatically. See [Backtesting Rules](docs/backtesting-rules.md) for details.
 
 | Rule | How Enforced |
 |------|-------------|
-| No lookahead | Engine shifts signals by 1 bar; [validator](validator.py) checks for `.shift(-n)` |
+| No lookahead | Engine shifts signals by 1 bar; validators reject `.shift(-n)`, `np.roll(..., -n)`, future indexing, and whole-prefix instability |
 | Fill at t+1 open | Engine applies `fill_delay_bars=1` |
 | Realistic costs | 0.04% fee + 0.01% slippage per side, funding every 8h |
-| Max drawdown -50% | Agent auto-rejects strategies exceeding this |
-| Min 10 trades | Agent auto-rejects trivial strategies |
+| Max drawdown -50% | Enforced per symbol on both train and test |
+| Trade minimums | Train: ≥ 5 per symbol, Test: ≥ 3 per symbol |
 | Position sizing ≤ 0.40 | System prompt enforces max signal magnitude |
 | Train/test separation | Train: 2021-2024, Test: 2025+. Never optimize on test. |
 | 1m timeframe banned | Too noisy — validator rejects it |
+| Test gating | A symbol runs test only if its own train pass succeeded |
 
 ## Data
 
@@ -144,20 +160,25 @@ See [program.md](program.md) for the full research protocol and experiment phase
 ├── .env                   ← API keys (not in git)
 ├── .env.example           ← API key template
 ├── run.sh                 ← Convenience runner script
+├── watchdog.sh            ← Keeps autoresearch running and restarts on fixes
+├── auto_concept_research.sh ← Scheduled concept discovery + verification remediation
 │
 ├── prepare.py             ← [IMMUTABLE] Data download & processing
 ├── backtest.py            ← [IMMUTABLE] Backtesting engine
 ├── evaluate.py            ← [IMMUTABLE] Performance metrics
 ├── strategy.py            ← [MUTABLE] Current strategy under test
 ├── agent_research.py      ← Main research loop (LLM agent)
+├── verification_remediation.py ← Independent verification, purge, rerun
 ├── llm_client.py          ← Multi-provider LLM client
 ├── dashboard.py           ← Web dashboard with charts
 ├── validator.py           ← Strategy compliance checker
 │
-├── results.tsv            ← All experiment results (append-only)
-├── strategies/            ← Saved strategy code (all with Sharpe > 0)
+├── results.db             ← Primary experiment/result database
+├── results.tsv            ← Legacy result mirror for compatibility
+├── strategies/            ← Saved strategy code (at least one symbol passed both train and test)
 ├── docs/                  ← Documentation
 │   ├── architecture.md
+│   ├── autoresearch-operations.md
 │   ├── backtesting-rules.md
 │   └── strategies/        ← Per-strategy docs + research compendium
 ├── data/                  ← Market data (not in git, download with prepare.py)

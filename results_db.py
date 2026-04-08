@@ -8,6 +8,7 @@ Schema mirrors TSV columns exactly; UNIQUE(strategy, symbol, period)
 prevents duplicates natively via INSERT OR IGNORE.
 """
 
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -185,21 +186,21 @@ def query_stats() -> dict:
     return _stats_cache
 
 
-def query_top_rows(period: str, limit: int = 100) -> pd.DataFrame:
-    """Return top rows by Sharpe for a given period. Used by dashboard tables."""
+def query_top_rows(period: str, limit: int = 100, status: str = "keep") -> pd.DataFrame:
+    """Return top active rows by Sharpe for a given period. Used by dashboard tables."""
     if not DB_FILE.exists():
         return pd.DataFrame()
     with get_conn() as conn:
         return pd.read_sql_query(
             'SELECT strategy, symbol, sharpe, return_pct, cagr_pct, max_dd_pct, '
             'win_rate, profit_factor, trades, sortino, calmar, status, period '
-            f'FROM results WHERE period=? ORDER BY sharpe DESC LIMIT {limit}',
-            conn, params=(period,)
+            f'FROM results WHERE period=? AND status=? ORDER BY sharpe DESC LIMIT {limit}',
+            conn, params=(period, status)
         )
 
 
-def query_avg_rows(period: str, limit: int = 50) -> pd.DataFrame:
-    """Return per-strategy average metrics for a given period. Used by dashboard avg table."""
+def query_avg_rows(period: str, limit: int = 50, status: str = "keep") -> pd.DataFrame:
+    """Return per-strategy average metrics for active rows in a given period."""
     if not DB_FILE.exists():
         return pd.DataFrame()
     with get_conn() as conn:
@@ -208,10 +209,10 @@ def query_avg_rows(period: str, limit: int = 50) -> pd.DataFrame:
                 AVG(sharpe) as sharpe, AVG(return_pct) as return_pct,
                 AVG(max_dd_pct) as max_dd_pct, AVG(win_rate) as win_rate,
                 AVG(trades) as trades, MAX(status) as status
-               FROM results WHERE period=?
+               FROM results WHERE period=? AND status=?
                GROUP BY strategy
                ORDER BY AVG(sharpe) DESC LIMIT ?""",
-            conn, params=(period, limit)
+            conn, params=(period, status, limit)
         )
 
 
@@ -251,7 +252,7 @@ def query_best_kept_sharpe() -> float:
 
 
 def query_recent_experiments(n: int = 12) -> pd.DataFrame:
-    """Return last n distinct strategies (train period) with aggregate metrics, ordered newest first."""
+    """Return last n active distinct strategies (train period), ordered newest first."""
     if not DB_FILE.exists():
         return pd.DataFrame()
     with get_conn() as conn:
@@ -267,16 +268,62 @@ def query_recent_experiments(n: int = 12) -> pd.DataFrame:
                WHERE period='train' AND strategy IN (
                    SELECT strategy FROM (
                        SELECT strategy, MAX(id) as last_id
-                       FROM results WHERE period='train'
+                       FROM results WHERE period='train' AND status='keep'
                        GROUP BY strategy
                        ORDER BY last_id DESC
                        LIMIT ?
                    )
                )
                GROUP BY strategy
+               HAVING MAX(CASE WHEN status='keep' THEN 1 ELSE 0 END) = 1
                ORDER BY MAX(id) DESC""",
             conn, params=(n,)
         )
+
+
+def query_recent_strategy_names(limit: int = 25) -> list[str]:
+    """Return the most recently written distinct strategy names by DB row id."""
+    if not DB_FILE.exists():
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT strategy
+            FROM (
+                SELECT strategy, MAX(id) AS last_id
+                FROM results
+                GROUP BY strategy
+                ORDER BY last_id DESC
+                LIMIT ?
+            )
+            ORDER BY last_id DESC
+            """,
+            (limit,),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def query_last_experiment_num() -> int:
+    """Return the highest recorded exp#NNN value from result descriptions."""
+    if not DB_FILE.exists():
+        return 0
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT description
+            FROM results
+            WHERE description LIKE 'exp#%'
+            ORDER BY id DESC
+            LIMIT 5000
+            """
+        ).fetchall()
+
+    best = 0
+    for (description,) in rows:
+        match = re.search(r"\bexp#(\d+)\b", description or "")
+        if match:
+            best = max(best, int(match.group(1)))
+    return best
 
 
 def upsert_results(rows: list[dict]):
@@ -431,7 +478,7 @@ def query_concept_stats() -> dict:
 
 
 def query_scatter_data(limit: int = 400) -> list:
-    """Per-strategy train vs test best Sharpe. For scatter plot.
+    """Per-active-strategy train vs test best Sharpe. For scatter plot.
     Cached for 2 minutes — complex JOIN query."""
     global _scatter_cache, _scatter_ts
     now = time.monotonic()
@@ -455,6 +502,7 @@ def query_scatter_data(limit: int = 400) -> list:
                 FROM results WHERE period='test'
                 GROUP BY strategy
             ) s ON t.strategy = s.strategy
+            WHERE t.any_kept = 1
             ORDER BY t.best_train DESC
             LIMIT ?
         """, (limit,)).fetchall()

@@ -25,6 +25,8 @@ from backtest import run_strategy_backtest, print_result_summary
 from evaluate import compute_metrics, print_metrics
 from results_db import append_results as _db_append
 from prepare import load_config
+from research_rules import test_symbol_pass, train_symbol_pass
+from validator import validate_file, summarize_validation_errors
 
 
 def get_git_commit() -> str:
@@ -62,6 +64,18 @@ def run_experiment(
     """
     if config is None:
         config = load_config()
+
+    validation = validate_file(strategy_path)
+    if not validation.valid:
+        error = summarize_validation_errors(validation)
+        print(f"\nERROR: strategy rejected before backtest: {error}")
+        return {
+            "results": {},
+            "metrics": {},
+            "avg_sharpe": 0.0,
+            "status": "crash",
+            "error": error,
+        }
 
     results = {}
     all_metrics = {}
@@ -133,6 +147,11 @@ def log_results(
     _db_append(results, experiment["status"], description)
 
 
+def log_single_result(metrics: dict, status: str, description: str, period: str) -> None:
+    payload = [dict(metrics)]
+    _db_append(payload, status, description, period)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run trading strategy research experiment")
     parser.add_argument("--strategy", default="strategy.py", help="Strategy file path")
@@ -147,12 +166,56 @@ def main():
     results_path = Path(config["research"]["results_file"])
 
     periods = []
-    if args.full:
-        periods = ["train", "test"]
-    elif args.test:
+    if args.test:
         periods = ["test"]
     else:
         periods = ["train"]
+
+    if args.full:
+        print(f"\n{'#' * 60}")
+        print("# Running experiment: FULL per-symbol flow")
+        print(f"# Strategy: {args.strategy}")
+        print(f"# Symbols: {', '.join(symbols)}")
+        print(f"# Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'#' * 60}")
+
+        for symbol in symbols:
+            try:
+                train_result = run_strategy_backtest(
+                    strategy_path=args.strategy,
+                    symbol=symbol,
+                    period="train",
+                    config=config,
+                )
+                train_metrics = compute_metrics(train_result)
+                train_metrics["strategy"] = train_result.strategy_name
+                train_metrics["symbol"] = symbol
+                train_status = "keep" if train_symbol_pass(train_metrics) else "discard"
+                print_metrics(train_metrics, f"{symbol} TRAIN")
+                log_single_result(train_metrics, train_status, args.description or "train run", "train")
+
+                if train_status != "keep":
+                    print(f"{symbol} test skipped: train failed")
+                    continue
+
+                test_result = run_strategy_backtest(
+                    strategy_path=args.strategy,
+                    symbol=symbol,
+                    period="test",
+                    config=config,
+                )
+                test_metrics = compute_metrics(test_result)
+                test_metrics["strategy"] = test_result.strategy_name
+                test_metrics["symbol"] = symbol
+                test_status = "keep" if test_symbol_pass(test_metrics) else "discard"
+                print_metrics(test_metrics, f"{symbol} TEST")
+                log_single_result(test_metrics, test_status, args.description or "test run", "test")
+
+            except Exception as e:
+                print(f"\nERROR running {symbol}: {e}")
+
+        print(f"\nResults logged to {results_path}")
+        return
 
     for period in periods:
         print(f"\n{'#' * 60}")

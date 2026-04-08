@@ -33,9 +33,12 @@ def detect_symbol(prices: pd.DataFrame) -> str:
     """Detect which symbol this prices DataFrame belongs to."""
     if "open_time" not in prices.columns:
         return ""
+    if len(prices) == 0:
+        return ""
 
-    first_close = float(prices["close"].iloc[100])  # Use bar 100 to avoid edge cases
-    first_time = prices["open_time"].iloc[100]
+    sample_idx = min(100, len(prices) - 1)  # Use bar 100 when possible, else last available
+    first_close = float(prices["close"].iloc[sample_idx])
+    first_time = prices["open_time"].iloc[sample_idx]
 
     for symbol_dir in sorted(DATA_DIR.iterdir()):
         if not symbol_dir.is_dir():
@@ -105,18 +108,43 @@ def align_htf_to_ltf(
     Returns:
         numpy array of same length as prices, with HTF values forward-filled
     """
-    # Create a Series indexed by HTF open_time
-    htf_series = pd.Series(htf_values, index=htf_df["open_time"])
+    if len(htf_df) != len(htf_values):
+        raise ValueError(f"HTF length mismatch: df={len(htf_df)} values={len(htf_values)}")
+    if len(prices) == 0:
+        return np.array([], dtype=np.float64)
 
+    htf_open_times = pd.to_datetime(htf_df["open_time"])
+    htf_deltas = htf_open_times.diff().dropna()
+    if len(htf_deltas) == 0:
+        inferred_duration = pd.Timedelta(0)
+    else:
+        inferred_duration = htf_deltas.mode().iloc[0]
+
+    effective_times = htf_open_times.copy()
     if use_completed_only:
-        # Shift by 1 HTF bar: at any LTF bar, only use the PREVIOUS completed HTF bar
-        htf_series = htf_series.shift(1)
+        # A HTF value becomes usable only when that HTF candle has CLOSED.
+        effective_times = effective_times + inferred_duration
 
-    # Reindex to LTF timestamps with forward-fill
-    ltf_times = prices["open_time"]
-    aligned = htf_series.reindex(ltf_times, method="ffill")
+    htf_effective = pd.DataFrame(
+        {
+            "effective_time": effective_times,
+            "value": np.asarray(htf_values, dtype=np.float64),
+        }
+    ).sort_values("effective_time", kind="stable")
 
-    return aligned.values
+    ltf_times = pd.DataFrame(
+        {"open_time": pd.to_datetime(prices["open_time"])}
+    ).sort_values("open_time", kind="stable")
+
+    aligned = pd.merge_asof(
+        ltf_times,
+        htf_effective,
+        left_on="open_time",
+        right_on="effective_time",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    return aligned["value"].to_numpy(dtype=np.float64)
 
 
 def get_htf_indicator(

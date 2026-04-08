@@ -1,21 +1,17 @@
 # Strategy: kama_triple_mtf_bbw_zscore_1h_v1
 
-## Status
-ACTIVE - Sharpe=0.219 | Return=+43.9% | DD=-15.2%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.444 | +10.0% | -8.6% | 34 |
-| ETHUSDT | 0.095 | +24.3% | -13.2% | 29 |
-| SOLUSDT | 1.008 | +97.3% | -23.8% | 8 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.432 | +10.3% | -8.5% | 34 | DISCARD |
+| ETHUSDT | 0.101 | +24.6% | -13.2% | 29 | KEEP |
+| SOLUSDT | 1.009 | +97.4% | -23.8% | 8 | KEEP |
 
 ## Test Results (2025+)
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -1.687 | -6.2% | -7.6% | 48 |
-| ETHUSDT | -0.900 | -3.5% | -8.8% | 33 |
-| SOLUSDT | -0.590 | -1.4% | -9.3% | 31 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | -0.416 | +1.1% | -9.0% | 36 | DISCARD |
+| SOLUSDT | -0.795 | -2.6% | -10.6% | 9 | DISCARD |
 
 ## Code
 ```python
@@ -539,4 +535,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-21 18:26
+2026-04-07 04:13

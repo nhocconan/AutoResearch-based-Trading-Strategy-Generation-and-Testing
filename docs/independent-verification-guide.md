@@ -172,11 +172,12 @@ print(f"Return: {result['return_pct']:+.1f}%  Trades: {result['num_trades']}")
 
 ### Must verify:
 1. **Does `generate_signals()` produce valid output?** — Same length as prices, values in [-1, 1]
-2. **No look-ahead?** — Signal at bar `i` should NOT change if you add more data after `i`:
+2. **No look-ahead?** — Signal values in the prefix should NOT change if you add more data after that prefix:
    ```python
    sig_1000 = mod.generate_signals(train.iloc[:1000])
    sig_full = mod.generate_signals(train)
-   assert abs(sig_1000[-1] - sig_full[999]) < 1e-8, "LOOK-AHEAD DETECTED!"
+   assert len(sig_1000) == 1000
+   assert np.allclose(sig_1000, sig_full[:1000], atol=1e-8, equal_nan=True), "LOOK-AHEAD DETECTED!"
    ```
 3. **Does your backtest return match the claimed return?** — Should be within ~5%
 4. **Drawdown** — Track peak equity, calculate max dropdown from peak
@@ -187,6 +188,7 @@ print(f"Return: {result['return_pct']:+.1f}%  Trades: {result['num_trades']}")
 - Sharpe > 10 — unusually high, check trade distribution over time
 - Most trades in one year only — may be overfitting to bull/bear market
 - Strategy uses `prices["open"]` in signal logic — potential subtle look-ahead since fills happen at open
+- Strategy uses `.shift(-N)` or `np.roll(..., -N)` — direct causal violation unless it is only for plotting and never used in signal logic
 
 ### Report format:
 ```
@@ -210,4 +212,4 @@ pip install pandas numpy pyarrow
 
 All data is already downloaded in `data/processed/`. Total ~571MB.
 
-*Last updated: 2026-03-21*
+*Last updated: 2026-04-03*

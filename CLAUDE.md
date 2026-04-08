@@ -12,9 +12,9 @@ BTC/ETH/SOL USDT-margined perpetual futures using Binance historical data.
 2. Validator checks: no lookahead, no manual MTF, no get_htf_data in loop
 3. PER-SYMBOL independent evaluation:
    For each symbol (BTC, ETH, SOL):
-     a. Train backtest → Sharpe > 0 AND trades >= 5? → train PASS
+     a. Train backtest → Sharpe > 0 AND trades >= 5 AND DD > -50%? → train PASS
      b. If train FAIL → skip test for this symbol, try next symbol
-     c. If train PASS → run test → Sharpe > 0 AND trades >= 3? → KEEP for this symbol
+     c. If train PASS → run test → Sharpe > 0 AND trades >= 3 AND DD > -50%? → KEEP for this symbol
 4. Prefix look-ahead test (if any symbol kept)
 5. Strategy is KEPT if at least 1 symbol passes BOTH train AND test
 ```
@@ -82,10 +82,19 @@ But ALWAYS try all 3 symbols — don't stop at first failure.
 - Test: ≥ 3 trades per symbol
 - If entry conditions are too strict, LOOSEN them
 
+## Threshold Source
+- `research_rules.py` is the single source of truth for train/test thresholds and DD limits
+
+## Self-Improvement Cadence
+- `auto_concept_research.sh` is the authoritative self-improvement cycle
+- Fixed order: `internet_strategy_discovery.py` -> `auto_process_review.py` -> `auto_concept_research.py` -> `verification_remediation.py`
+- Cron runs it every 12h, and `agent_research.py` also triggers it when those artifacts become stale
+- The cycle must stay single-instance; the shell entrypoint owns the lock
+
 ## Mutable Files
 - `strategy.py` - Current strategy under test (LLM edits this)
 - `results.tsv` - Experiment log (append-only)
-- `strategies/` - Saved strategy code (all with Sharpe > 0 on train)
+- `strategies/` - Saved strategy code (at least one symbol passed both train and test)
 
 ## Key Files
 - `STRATEGY_RULES.md` - Detailed code rules for LLM (with examples)

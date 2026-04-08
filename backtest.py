@@ -34,6 +34,7 @@ import pandas as pd
 import yaml
 
 from prepare import load_config, load_klines, load_funding_rate, get_train_test_split
+from validator import validate_file
 
 
 # =============================================================================
@@ -307,6 +308,11 @@ def load_strategy(strategy_path: str = "strategy.py"):
         - generate_signals_multi(data: dict[str, pd.DataFrame]) -> np.ndarray
             For multi-timeframe strategies. data keys are timeframe strings.
     """
+    validation = validate_file(strategy_path)
+    if not validation.valid:
+        summary = "; ".join(validation.errors[:5])
+        raise ValueError(f"Strategy validation failed for {strategy_path}: {summary}")
+
     spec = importlib.util.spec_from_file_location("strategy", strategy_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load strategy from {strategy_path}")

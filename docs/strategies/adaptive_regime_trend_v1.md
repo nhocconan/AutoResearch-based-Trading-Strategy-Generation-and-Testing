@@ -1,14 +1,15 @@
 # Strategy: adaptive_regime_trend_v1
 
-## Status
-ACTIVE - Sharpe=0.497 | Return=+652.8% | DD=-77.9%
-
 ## Train Results
-| Symbol | Sharpe | Return | Max DD | Trades |
-|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.136 | -64.1% | -80.8% | 6534 |
-| ETHUSDT | 0.418 | +32.8% | -72.1% | 7114 |
-| SOLUSDT | 1.210 | +1989.7% | -80.7% | 7793 |
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.233 | -5.0% | -71.1% | 6534 | DISCARD |
+| ETHUSDT | 0.728 | +250.8% | -62.7% | 7114 | DISCARD |
+| SOLUSDT | 1.421 | +4769.7% | -79.3% | 7793 | DISCARD |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
 
 ## Code
 ```python
@@ -528,4 +529,4 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
 ```
 
 ## Last Updated
-2026-03-20 20:38
+2026-04-07 04:13
