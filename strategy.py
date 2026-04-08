@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_keltner_breakout_volume_v1
-# Hypothesis: Trade Keltner channel breakouts on 4h with 1d trend filter and volume confirmation.
-# In bull markets, buy breakouts above upper Keltner band with 1d uptrend; in bear markets, sell breakdowns below lower band with 1d downtrend.
-# Volume surge confirms breakout strength. Uses ATR-based stops to manage risk.
+# 1d_weekly_macd_divergence_volume_v1
+# Hypothesis: Trade weekly MACD divergences on daily timeframe with volume confirmation.
+# In bull markets, buy bullish divergences; in bear markets, sell bearish divergences.
+# Volume surge confirms divergence strength. Uses ATR-based stops to manage risk.
 # Target: 20-50 trades/year with strict entry conditions to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_keltner_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_macd_divergence_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +23,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA25/50 crossover
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly MACD (12,26,9)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    ema25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema25_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate MACD components
+    ema12 = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # 4h Keltner channels (20-period EMA + 2.0*ATR)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly MACD to daily
+    macd_line_aligned = align_htf_to_ltf(prices, df_1w, macd_line)
+    signal_line_aligned = align_htf_to_ltf(prices, df_1w, signal_line)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1w, macd_hist)
     
-    # True Range and ATR
+    # Daily ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    upper_keltner = ema20 + 2.0 * atr
-    lower_keltner = ema20 - 2.0 * atr
-    
-    # Volume confirmation: 4h volume > 2.5x 20-period average (stricter)
+    # Volume confirmation: daily volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,9 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema25_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(macd_line_aligned[i]) or np.isnan(signal_line_aligned[i]) or 
+            np.isnan(macd_hist_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -65,34 +65,37 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition
-        vol_surge = volume[i] > 2.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: Price below lower Keltner band OR stoploss hit
-            if close[i] < lower_keltner[i] or close[i] < upper_keltner[i] - 2.5 * atr[i]:
+            # Exit: Bearish divergence OR stoploss hit
+            bearish_div = (high[i] > high[i-1] and macd_hist_aligned[i] < macd_hist_aligned[i-1])  # Higher price, lower MACD
+            if bearish_div or close[i] < high[i-1] - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above upper Keltner band OR stoploss hit
-            if close[i] > upper_keltner[i] or close[i] > lower_keltner[i] + 2.5 * atr[i]:
+            # Exit: Bullish divergence OR stoploss hit
+            bullish_div = (low[i] < low[i-1] and macd_hist_aligned[i] > macd_hist_aligned[i-1])  # Lower price, higher MACD
+            if bullish_div or close[i] > low[i-1] + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Break above upper Keltner band with 1d uptrend and volume surge
-            if (high[i] > upper_keltner[i-1] and  # New high breakout above previous upper band
-                ema25_1d_aligned[i] > ema50_1d_aligned[i] and  # 1d uptrend
-                vol_surge):
+            # Bullish divergence: lower price low, higher MACD low
+            bullish_div = (low[i] < low[i-1] and macd_hist_aligned[i] > macd_hist_aligned[i-1])
+            # Bearish divergence: higher price high, lower MACD high
+            bearish_div = (high[i] > high[i-1] and macd_hist_aligned[i] < macd_hist_aligned[i-1])
+            
+            # Long entry: Bullish divergence with volume surge
+            if bullish_div and vol_surge:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Break below lower Keltner band with 1d downtrend and volume surge
-            elif (low[i] < lower_keltner[i-1] and  # New low breakdown below previous lower band
-                  ema25_1d_aligned[i] < ema50_1d_aligned[i] and  # 1d downtrend
-                  vol_surge):
+            # Short entry: Bearish divergence with volume surge
+            elif bearish_div and vol_surge:
                 position = -1
                 signals[i] = -0.25
     
