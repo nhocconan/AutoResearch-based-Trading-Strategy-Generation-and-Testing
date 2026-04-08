@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly ADX trend filter and volume confirmation
-# Breakouts from weekly Donchian channels capture long-term momentum moves; ADX > 25 on weekly filters for strong trends;
-# Volume > 1.5x 20-period average confirms breakout strength.
-# Works in both bull and bear markets by capturing breakouts in either direction.
-# Target: 20-50 trades/year by requiring weekly Donchian breakout + trend + volume confirmation.
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+# Hypothesis: 6h Fractal Breakout with 1d Trend and Volume Confirmation
+# Uses Williams Fractal to identify swing points, then breaks above/below
+# recent fractal highs/lows in the direction of the 1d trend (ADX > 25).
+# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
+# Works in bull/bear by trading breakouts in trend direction.
+# Target: 12-37 trades/year via strict fractal + trend + volume confluence.
+name = "6h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ADX (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for ADX (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 14-period ADX for trend strength on weekly data
+    # Calculate 14-period ADX for trend strength on 1d data
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -57,9 +58,33 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # 1d Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Fractal (5-bar: need 2 bars on each side)
+    # Bullish fractal: low[n-2] < low[n-1] and low[n] < low[n-1] and low[n+1] > low[n] and low[n+2] > low[n]
+    # Bearish fractal: high[n-2] > high[n-1] and high[n] > high[n-1] and high[n+1] < high[n] and high[n+2] < high[n]
+    fractal_high = np.zeros(n, dtype=bool)
+    fractal_low = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n-2):
+        if (high[i-2] > high[i-1] and high[i] > high[i-1] and 
+            high[i+1] < high[i] and high[i+2] < high[i]):
+            fractal_high[i] = True
+        if (low[i-2] < low[i-1] and low[i] < low[i-1] and 
+            low[i+1] > low[i] and low[i+2] > low[i]):
+            fractal_low[i] = True
+    
+    # Most recent fractal high/low (updated when new fractal forms)
+    last_fractal_high = np.full(n, np.nan)
+    last_fractal_low = np.full(n, np.nan)
+    
+    last_high_val = np.nan
+    last_low_val = np.nan
+    for i in range(n):
+        if fractal_high[i]:
+            last_high_val = high[i]
+        if fractal_low[i]:
+            last_low_val = low[i]
+        last_fractal_high[i] = last_high_val
+        last_fractal_low[i] = last_low_val
     
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,13 +97,13 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(last_fractal_high[i]) or 
+            np.isnan(last_fractal_low[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned weekly values for current 1d bar
-        adx_aligned = align_htf_to_ltf(prices, df_1w, adx)[i]
+        # Get aligned 1d values for current 6h bar
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
         
         # Trend filter: ADX > 25 indicates strong trend
         strong_trend = adx_aligned > 25
@@ -87,30 +112,30 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR trend weakens
-            if close[i] < low_20[i] or not strong_trend:
+            # Exit: price closes below last fractal low OR trend weakens
+            if close[i] < last_fractal_low[i] or not strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR trend weakens
-            if close[i] > high_20[i] or not strong_trend:
+            # Exit: price closes above last fractal high OR trend weakens
+            if close[i] > last_fractal_high[i] or not strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat, look for entry
             # Only trade during strong trend with volume confirmation
             if strong_trend and volume_confirm:
-                # Long: price breaks above Donchian upper band
-                if close[i] > high_20[i]:
+                # Long: price breaks above last fractal high
+                if close[i] > last_fractal_high[i]:
                     position = 1
-                    signals[i] = 0.30
-                # Short: price breaks below Donchian lower band
-                elif close[i] < low_20[i]:
+                    signals[i] = 0.25
+                # Short: price breaks below last fractal low
+                elif close[i] < last_fractal_low[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
