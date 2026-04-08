@@ -1,11 +1,13 @@
-# 1d_Momentum_Trend_V1
-# Hypothesis: Combines 1-week EMA trend filter with 1-day RSI momentum on pullbacks.
-# In bull markets, buy RSI pullbacks above weekly EMA; in bear markets, sell RSI bounces below weekly EMA.
-# This captures trend continuation with mean-reversion entries, reducing whipsaws.
-# Target: 30-100 total trades over 4 years (7-25/year).
+#!/usr/bin/env python3
+# 4h_1d_donchian_breakout_volume_v1
+# Hypothesis: Breakout of 1-day Donchian channels with volume confirmation on 4h timeframe.
+# Buy when price breaks above 1-day high with above-average volume; sell when price breaks below 1-day low with above-average volume.
+# Uses 1-day structure for trend context and 4h for entry timing.
+# Volume filter ensures institutional participation, reducing false breakouts.
+# Works in both regimes by following higher timeframe structure.
 
-name = "1d_Momentum_Trend_V1"
-timeframe = "1d"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,36 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-week data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1-day data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 21-period EMA on weekly close
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 20-period Donchian channels on 1-day data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 14-period RSI on daily data
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Upper band: 20-day high
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-day low
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h timeframe (wait for 1-day bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Volume confirmation on 4h: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_confirm = vol_ratio > 1.5
+    
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup period
-    start_idx = 21
+    start_idx = max(20, 20) + 1
     
     for i in range(start_idx, n):
-        # Skip if weekly EMA is not available
-        if np.isnan(ema_21_1w_aligned[i]):
+        # Skip if Donchian levels are not available
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]):
             if position != 0:
                 # Hold position until exit
                 pass
@@ -58,28 +68,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Only consider new signals during session with volume confirmation
+        if not (in_session[i] and vol_confirm[i]):
+            if position != 0:
+                # Hold existing position
+                pass
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: RSI crosses below 50 (momentum fade) or weekly trend breaks
-            if rsi_values[i] < 50 or close[i] < ema_21_1w_aligned[i]:
+            # Exit: price closes below 1-day Donchian low (breakdown)
+            if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 50 (momentum fade) or weekly trend breaks
-            if rsi_values[i] > 50 or close[i] > ema_21_1w_aligned[i]:
+            # Exit: price closes above 1-day Donchian high (breakout)
+            if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: RSI pulls back to 30-40 and price above weekly EMA (bullish pullback)
-            if 30 <= rsi_values[i] <= 40 and close[i] > ema_21_1w_aligned[i]:
+            # Long entry: price breaks above 1-day Donchian high with volume
+            if close[i] > donchian_high_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: RSI bounces to 60-70 and price below weekly EMA (bearish bounce)
-            elif 60 <= rsi_values[i] <= 70 and close[i] < ema_21_1w_aligned[i]:
+            # Short entry: price breaks below 1-day Donchian low with volume
+            elif close[i] < donchian_low_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
