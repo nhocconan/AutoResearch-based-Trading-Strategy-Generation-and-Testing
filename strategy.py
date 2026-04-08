@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_trend_follow_volume_v2
-# Hypothesis: Follow the 4h trend using EMA21/50 cross and ADX > 25, with 1d regime filter (price > SMA50).
-# Enter on 1h breakouts above/below 4h EMA21 with volume confirmation. Works in bull/bear by aligning with higher timeframe trend.
+# 1d_2025_scalp_v1
+# Hypothesis: Follow the 1w trend using EMA crossover and ADX strength, with 1d regime filter to avoid sideways markets.
+# Enter on 1d pullbacks in the direction of the 1w trend with volume confirmation. Works in bull/bear by aligning with higher timeframe trend.
 # Uses volume spike to confirm institutional participation and reduce false signals.
-# Target: 60-150 total trades over 4 years (15-37/year).
+# Target: 30-100 total trades over 4 years (7-25/year).
 
-name = "1h_4h_1d_trend_follow_volume_v2"
-timeframe = "1h"
+name = "1d_2025_scalp_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,20 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h trend: EMA crossover
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1w trend: EMA crossover
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA21 and EMA50 on 4h close
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA21 and EMA50 on 1w close
+    close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h trend direction: 1 if EMA21 > EMA50, -1 if EMA21 < EMA50
-    trend_4h = np.where(ema21_4h > ema50_4h, 1, -1)
+    # 1w trend direction: 1 if EMA21 > EMA50, -1 if EMA21 < EMA50
+    trend_1w = np.where(ema21_1w > ema50_1w, 1, -1)
     
-    # 4h ADX for trend strength
+    # 1w ADX for trend strength
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -73,28 +73,20 @@ def generate_signals(prices):
         
         return adx
     
-    adx_4h = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values)
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values)
     
-    # Align 4h indicators to 1h
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    # Align 1w indicators to 1d
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # 1d regime filter: avoid ranging markets
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
+    close_1d = prices['close'].values
     sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
     # Market regime: 1 if trending (price > SMA50), -1 if ranging (price < SMA50)
     regime_1d = np.where(close_1d > sma50_1d, 1, -1)
-    regime_1d_aligned = align_htf_to_ltf(prices, df_1d, regime_1d)
     
-    # 4h EMA21 aligned to 1h for entry timing
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    
-    # Volume spike detection on 1h
+    # Volume spike detection on 1d
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_spike = vol_ratio > 1.5  # 50% above average volume
@@ -110,9 +102,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trend_4h_aligned[i]) or np.isnan(adx_4h_aligned[i]) or 
-            np.isnan(regime_1d_aligned[i]) or np.isnan(ema21_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trend_1w_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(sma50_1d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -126,30 +117,34 @@ def generate_signals(prices):
                 continue
         
         if position == 1:  # Long position
-            # Exit: 4h trend turns bearish OR ADX weakens
-            if trend_4h_aligned[i] == -1 or adx_4h_aligned[i] < 20:
+            # Exit: 1w trend turns bearish OR ADX weakens
+            if trend_1w_aligned[i] == -1 or adx_1w_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: 4h trend turns bullish OR ADX weakens
-            if trend_4h_aligned[i] == 1 or adx_4h_aligned[i] < 20:
+            # Exit: 1w trend turns bullish OR ADX weakens
+            if trend_1w_aligned[i] == 1 or adx_1w_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.20
         else:  # Flat, look for entry
             # Need strong trend (ADX > 25) and favorable regime
-            if adx_4h_aligned[i] > 25 and regime_1d_aligned[i] == trend_4h_aligned[i]:
-                # Long: 4h bullish trend + price above 4h EMA21 (breakout entry)
-                if trend_4h_aligned[i] == 1 and close[i] > ema21_4h_aligned[i]:
-                    position = 1
-                    signals[i] = 0.20
-                # Short: 4h bearish trend + price below 4h EMA21
-                elif trend_4h_aligned[i] == -1 and close[i] < ema21_4h_aligned[i]:
-                    position = -1
-                    signals[i] = -0.20
+            if adx_1w_aligned[i] > 25 and regime_1d == trend_1w_aligned[i]:
+                # Long: 1w bullish trend + price above 1d EMA21 (pullback entry)
+                if trend_1w_aligned[i] == 1:
+                    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+                    if not np.isnan(ema21_1d[i]) and close[i] > ema21_1d[i]:
+                        position = 1
+                        signals[i] = 0.20
+                # Short: 1w bearish trend + price below 1d EMA21
+                elif trend_1w_aligned[i] == -1:
+                    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+                    if not np.isnan(ema21_1d[i]) and close[i] < ema21_1d[i]:
+                        position = -1
+                        signals[i] = -0.20
     
     return signals
