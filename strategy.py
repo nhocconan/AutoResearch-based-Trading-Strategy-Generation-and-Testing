@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h fractal breakout with 1d trend and volume confirmation
-# Uses Williams Fractals for breakout detection, 1d EMA for trend, and volume spike
-# Designed to work in both bull and bear markets by requiring strong trend alignment
-# Target: 12-37 trades/year, focused on high-probability breakouts with confirmation
-name = "12h_fractal_breakout_1d_trend_volume_v5"
-timeframe = "12h"
+# Hypothesis: Daily Donchian breakout with weekly trend and volume confirmation
+# Uses Donchian(20) for breakouts, weekly EMA for trend, and volume spike for confirmation
+# Designed to capture strong momentum moves in both bull and bear markets
+# Target: 7-25 trades/year (30-100 total) for 1d timeframe
+name = "1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -22,89 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume context (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Get weekly data for trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 1d EMA for trend filter (50-period)
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly EMA for trend filter (21-period)
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 1d volume SMA for volume context (20-period)
-    vol_sma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly volume SMA for volume context (10-period)
+    vol_sma_1w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate 12h Williams Fractals (5-bar window)
-    # Bullish fractal: low[n-2] < low[n-1] and low[n-2] < low[n] and low[n-2] < low[n+1] and low[n-2] < low[n+2]
-    # Bearish fractal: high[n-2] > high[n-1] and high[n-2] > high[n] and high[n-2] > high[n+1] and high[n-2] > high[n+2]
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(2, n-2):
-        # Bullish fractal (support level)
-        if (low[i-2] < low[i-1] and low[i-2] < low[i] and 
-            low[i-2] < low[i+1] and low[i-2] < low[i+2]):
-            lowest_low[i] = low[i-2]
-        # Bearish fractal (resistance level)
-        if (high[i-2] > high[i-1] and high[i-2] > high[i] and 
-            high[i-2] > high[i+1] and high[i-2] > high[i+2]):
-            highest_high[i] = high[i-2]
-    
-    # Forward fill fractal levels to maintain until broken
-    for i in range(1, n):
-        if np.isnan(lowest_low[i]):
-            lowest_low[i] = lowest_low[i-1]
-        if np.isnan(highest_high[i]):
-            highest_high[i] = highest_high[i-1]
+    # Calculate daily Donchian channels (20-period)
+    # Upper band: 20-period high
+    # Lower band: 20-period low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d[i]) or np.isnan(volume_1d[i]) or 
-            np.isnan(vol_sma_1d[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i])):
+        if (np.isnan(ema_1w[i]) or np.isnan(volume_1w[i]) or 
+            np.isnan(vol_sma_1w[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 12h bar
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
-        vol_sma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_1d)[i]
+        # Get aligned weekly values for current daily bar
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)[i]
+        vol_sma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma_1w)[i]
         
-        # Trend filter: price above/below 50 EMA on 1d
-        uptrend = close[i] > ema_1d_aligned
-        downtrend = close[i] < ema_1d_aligned
+        # Trend filter: price above/below 21 EMA on weekly
+        uptrend = close[i] > ema_1w_aligned
+        downtrend = close[i] < ema_1w_aligned
         
-        # Volume filter: current volume above 2.0x 1d average volume
-        volume_filter = volume[i] > (vol_sma_1d_aligned * 2.0)
+        # Volume filter: current volume above 2.5x weekly average volume
+        volume_filter = volume[i] > (vol_sma_1w_aligned * 2.5)
         
         if position == 1:  # Long position
-            # Exit: price breaks below recent fractal low OR trend reversal
-            if close[i] < lowest_low[i] or not uptrend:
+            # Exit: price breaks below Donchian low OR trend reversal
+            if close[i] < donchian_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above recent fractal high OR trend reversal
-            if close[i] > highest_high[i] or not downtrend:
+            # Exit: price breaks above Donchian high OR trend reversal
+            if close[i] > donchian_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price breaks above recent fractal high + uptrend + volume filter
-            if close[i] > highest_high[i] and uptrend and volume_filter:
+            # Long: price breaks above Donchian high + uptrend + volume filter
+            if close[i] > donchian_high[i] and uptrend and volume_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below recent fractal low + downtrend + volume filter
-            elif close[i] < lowest_low[i] and downtrend and volume_filter:
+            # Short: price breaks below Donchian low + downtrend + volume filter
+            elif close[i] < donchian_low[i] and downtrend and volume_filter:
                 position = -1
                 signals[i] = -0.25
     
