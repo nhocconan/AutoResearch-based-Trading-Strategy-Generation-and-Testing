@@ -1,85 +1,129 @@
 #!/usr/bin/env python3
-# 4h_1w_donchian_breakout_volume_filter_v2
-# Hypothesis: Breakout of 4-hour Donchian channel (20-period) with weekly volume confirmation (>1.5x 4-week average) and trend filter (price above/below 200-period EMA).
-# Long when price breaks above upper Donchian band with weekly volume surge and price > EMA200.
-# Short when price breaks below lower Donchian band with weekly volume surge and price < EMA200.
-# Uses weekly volume to filter false breakouts and EMA200 to avoid counter-trend trades.
-# Designed for 20-30 trades/year on 4h to minimize fee decay while capturing strong momentum moves.
-# Works in bull markets via upside breakouts and bear markets via downside breakouts.
+# 1d_1w_kama_rsi_chop_v1
+# Hypothesis: On daily timeframe, use KAMA for trend direction, RSI for momentum/overbought-oversold,
+# and Choppiness Index for regime filtering. Enter long when KAMA trends up, RSI < 30 (oversold),
+# and market is trending (CHOP < 38.2). Enter short when KAMA trends down, RSI > 70 (overbought),
+# and market is trending. Uses weekly trend filter to avoid counter-trend trades.
+# Designed for 15-25 trades/year on 1d to minimize fee drag while capturing meaningful moves.
+# Works in bull markets via trend-following longs and bear markets via trend-following shorts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1w_donchian_breakout_volume_filter_v2"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, er_period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change) > 1 else np.abs(change)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index: higher = ranging, lower = trending"""
+    atr = np.zeros_like(close)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    
+    max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    chop = np.zeros_like(close)
+    for i in range(len(close)):
+        if atr[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(atr[i] * period / (max_high[i] - min_low[i])) / np.log10(period)
+        else:
+            chop[i] = 50.0  # neutral when undefined
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 4-hour Donchian channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA for trend direction
+    kama = calculate_kama(close, er_period=10, fast=2, slow=30)
     
-    # 4-hour EMA(200) for trend filter
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # RSI for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get 1-week volume data for confirmation
+    # Choppiness Index for regime
+    chop = calculate_choppiness(high, low, close, period=14)
+    
+    # Weekly trend filter: EMA(21) on weekly close
     df_1w = get_htf_data(prices, '1w')
-    volume_1w = df_1w['volume'].values
-    
-    # 1-week volume moving average (4-period) for surge detection
-    vol_ma_4_1w = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values
-    vol_ma_4_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_4_1w)
-    volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+    ema21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 200  # Ensure EMA(200) is ready
+    start_idx = 30  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(ema200[i]) or np.isnan(vol_ma_4_1w_aligned[i]) or np.isnan(volume_1w_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema21_1w_aligned[i]):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition: current 1w volume > 1.5x 4-period average
-        vol_surge = volume_1w_aligned[i] > 1.5 * vol_ma_4_1w_aligned[i] if vol_ma_4_1w_aligned[i] > 0 else False
+        kama_slope = kama[i] - kama[i-1]  # positive = rising trend
+        chop_value = chop[i]
+        rsi_value = rsi[i]
+        weekly_trend = ema21_1w_aligned[i]  # above = bullish week, below = bearish week
         
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian band or trend filter fails
-            if close[i] < low_roll[i] or close[i] < ema200[i]:
+            # Exit: KAMA turns down OR chop becomes too high (ranging) OR weekly trend turns bearish
+            if kama_slope < 0 or chop_value > 61.8 or close[i] < weekly_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian band or trend filter fails
-            if close[i] > high_roll[i] or close[i] > ema200[i]:
+            # Exit: KAMA turns up OR chop becomes too high (ranging) OR weekly trend turns bullish
+            if kama_slope > 0 or chop_value > 61.8 or close[i] > weekly_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper Donchian band with volume surge and uptrend
-            if close[i] > high_roll[i] and vol_surge and close[i] > ema200[i]:
+            # Long entry: KAMA rising, RSI oversold, chop low (trending), weekly trend bullish
+            if (kama_slope > 0 and 
+                rsi_value < 30 and 
+                chop_value < 38.2 and 
+                close[i] > weekly_trend):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower Donchian band with volume surge and downtrend
-            elif close[i] < low_roll[i] and vol_surge and close[i] < ema200[i]:
+            # Short entry: KAMA falling, RSI overbought, chop low (trending), weekly trend bearish
+            elif (kama_slope < 0 and 
+                  rsi_value > 70 and 
+                  chop_value < 38.2 and 
+                  close[i] < weekly_trend):
                 position = -1
                 signals[i] = -0.25
     
