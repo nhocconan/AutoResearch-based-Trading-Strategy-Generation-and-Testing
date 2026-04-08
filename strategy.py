@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_1d_rsi_mean_reversion_v1
-Hypothesis: RSI mean reversion on 4h with 1d trend filter. 
-- Long when RSI < 30 and 1d close > EMA50 (bullish bias in uptrend)
-- Short when RSI > 70 and 1d close < EMA50 (bearish bias in downtrend)
-- Volume filter: 4h volume > 1.5x 20-period average to confirm momentum
-- Exit: RSI crosses back through 50
+6h_donchian_breakout_1d_trend_volume_v1
+Hypothesis: 6h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
+- Entry: Long when price breaks above Donchian(20) high with 1d uptrend (close > EMA50) and volume > 1.5x 20-period avg
+         Short when price breaks below Donchian(20) low with 1d downtrend (close < EMA50) and volume > 1.5x 20-period avg
+- Exit: Close crosses back through Donchian(20) midline (10-period average of high/low)
 - Position sizing: 0.25 long, -0.25 short
-- Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
+- Designed to capture trend continuation in both bull and bear markets with volume confirmation to avoid false breakouts
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_rsi_mean_reversion_v1"
-timeframe = "4h"
+name = "6h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,19 +45,16 @@ def generate_signals(prices):
     trend_1d_up_ffilled = trend_1d_up_series.ffill().values
     trend_1d_down_ffilled = trend_1d_down_series.ffill().values
     
-    # Align 1d trend to 4h
+    # Align 1d trend to 6h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up_ffilled)
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down_ffilled)
     
-    # 4h RSI calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_roll
+    donchian_low = low_roll
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,12 +64,13 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(volume_filter[i])):
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -82,32 +79,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50
-            if rsi_values[i] > 50:
+            # Exit: Close crosses below Donchian midline
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Position size
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50
-            if rsi_values[i] < 50:
+            # Exit: Close crosses above Donchian midline
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Position size
         else:  # Flat, look for entry
-            # Long entry: RSI < 30 + 1d uptrend + volume
-            if (rsi_values[i] < 30) and trend_1d_up_aligned[i] and volume_filter[i]:
-                # Confirm RSI was above 30 previous bar
-                if i > start_idx and rsi_values[i-1] >= 30:
-                    position = 1
-                    signals[i] = 0.25
-            # Short entry: RSI > 70 + 1d downtrend + volume
-            elif (rsi_values[i] > 70) and trend_1d_down_aligned[i] and volume_filter[i]:
-                # Confirm RSI was below 70 previous bar
-                if i > start_idx and rsi_values[i-1] <= 70:
-                    position = -1
-                    signals[i] = -0.25
+            # Long entry: Price breaks above Donchian high + 1d uptrend + volume
+            if (close[i] > donchian_high[i]) and trend_1d_up_aligned[i] and volume_filter[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short entry: Price breaks below Donchian low + 1d downtrend + volume
+            elif (close[i] < donchian_low[i]) and trend_1d_down_aligned[i] and volume_filter[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
