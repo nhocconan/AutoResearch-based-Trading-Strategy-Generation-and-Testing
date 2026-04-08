@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_fractal_breakout_1d_trend_volume_v10
-# Hypothesis: Refine fractal breakout strategy with stricter volume confirmation (3x average) and tighter RSI range (45-55) to reduce trade frequency and improve quality.
-# Uses Williams Fractals from daily timeframe with 2-bar confirmation, trend filter via daily EMA20, and momentum filter via RSI.
+# 4h_fractal_breakout_1d_trend_volume_v11
+# Hypothesis: Further refine the fractal breakout strategy by adding a volatility filter (ATR-based) to avoid choppy markets and tightening the volume confirmation to 4x average.
+# Uses Williams Fractals from daily timeframe with 2-bar confirmation, trend filter via daily EMA20, and momentum filter via RSI (40-60).
 # Trades only during 08-20 UTC to avoid low-liquidity periods. Position size fixed at 0.25.
-# Target: 20-40 trades/year by requiring confluence of trend, fractal breakout, high volume, and neutral momentum.
-# Designed to work in both bull and bear markets via trend filter and avoid chop with tight RSI range.
+# Target: 15-30 trades/year by requiring confluence of trend, fractal breakout, high volume, healthy momentum, and low volatility.
+# Designed to work in both bull and bear markets via trend filter and avoid chop with volatility filter and moderate RSI range.
 
-name = "4h_fractal_breakout_1d_trend_volume_v10"
+name = "4h_fractal_breakout_1d_trend_volume_v11"
 timeframe = "4h"
 leverage = 1.0
 
@@ -84,6 +84,14 @@ def generate_signals(prices):
     # Calculate RSI for momentum filter
     rsi = calculate_rsi(close, 14)
     
+    # Calculate ATR for volatility filter (14-period)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
@@ -106,22 +114,27 @@ def generate_signals(prices):
         bullish_val = bullish_fractal_aligned[i]
         rsi_val = rsi[i]
         vol_ma_val = vol_ma[i]
+        atr_val = atr[i]
+        atr_ma_val = atr_ma[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(ema20_val) or np.isnan(vol_ma_val) or 
+        if (np.isnan(ema20_val) or np.isnan(vol_ma_val) or np.isnan(atr_val) or np.isnan(atr_ma_val) or
             volume[i] == 0 or np.isnan(rsi_val)):
             signals[i] = 0.0
             continue
         
-        # Volume breakout condition: current volume > 3.0x 20-period average (stricter)
-        vol_breakout = volume[i] > 3.0 * vol_ma_val
+        # Volatility filter: current ATR < 1.5x 20-period average ATR (avoid choppy markets)
+        vol_filter = atr_val < 1.5 * atr_ma_val
+        
+        # Volume breakout condition: current volume > 4.0x 20-period average (tighter)
+        vol_breakout = volume[i] > 4.0 * vol_ma_val
         
         # Trend filter: price above/below daily EMA20
         uptrend = close[i] > ema20_val
         downtrend = close[i] < ema20_val
         
-        # Momentum filter: RSI in tight 45-55 range for pullback entries in trend
-        rsi_healthy = 45 <= rsi_val <= 55
+        # Momentum filter: RSI in moderate 40-60 range
+        rsi_healthy = 40 <= rsi_val <= 60
         
         if position == 1:  # Long position
             # Exit if price breaks below bullish fractal (support)
@@ -139,14 +152,14 @@ def generate_signals(prices):
             elif position == -1:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout long above bearish fractal (resistance) with volume confirmation, uptrend, and healthy RSI
+            # Breakout long above bearish fractal (resistance) with volume confirmation, uptrend, healthy momentum, and low volatility
             if (not np.isnan(bearish_val) and high[i] >= bearish_val and 
-                close[i] > bearish_val and vol_breakout and uptrend and rsi_healthy):
+                close[i] > bearish_val and vol_breakout and uptrend and rsi_healthy and vol_filter):
                 position = 1
                 signals[i] = 0.25
-            # Breakout short below bullish fractal (support) with volume confirmation, downtrend, and healthy RSI
+            # Breakout short below bullish fractal (support) with volume confirmation, downtrend, healthy momentum, and low volatility
             elif (not np.isnan(bullish_val) and low[i] <= bullish_val and 
-                  close[i] < bullish_val and vol_breakout and downtrend and rsi_healthy):
+                  close[i] < bullish_val and vol_breakout and downtrend and rsi_healthy and vol_filter):
                 position = -1
                 signals[i] = -0.25
     
