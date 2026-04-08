@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1w_trend_1d_camarilla_volume_v1
-# Hypothesis: Trade with the weekly trend using daily Camarilla pivot levels for entries with volume confirmation on 12h timeframe.
-# In weekly uptrend: go long when price touches S3 with volume confirmation.
-# In weekly downtrend: go short when price touches R3 with volume confirmation.
-# Exit when price reaches opposite H4 level or weekly trend breaks.
-# Uses volume filter to avoid false breakouts and weekly EMA for trend filter.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# 1h_rsi_sma_trend_filter_v1
+# Hypothesis: Use 4h trend filter (SMA50) with 1h RSI pullback entries.
+# In 4h uptrend: go long when RSI(14) pulls back to 40-45 and price > SMA20.
+# In 4h downtrend: go short when RSI(14) bounces to 55-60 and price < SMA20.
+# Exit when RSI reaches opposite extreme (60 for long, 40 for short) or trend flips.
+# Uses 1d volume filter to avoid low-volatility chop.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_trend_1d_camarilla_volume_v1"
-timeframe = "12h"
+name = "1h_rsi_sma_trend_filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,96 +25,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA21 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # 4h SMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    sma50_4h = pd.Series(df_4h['close']).rolling(window=50, min_periods=50).mean().values
+    sma50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma50_4h)
     
-    # Daily data for Camarilla calculation
+    # 1d volume filter: volume > 1.5x 20-period average
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Camarilla levels for previous day
-    camarilla_S3 = np.zeros(len(high_1d))
-    camarilla_R3 = np.zeros(len(high_1d))
-    camarilla_S4 = np.zeros(len(high_1d))
-    camarilla_R4 = np.zeros(len(high_1d))
+    # 1h RSI(14)
+    delta = pd.Series(close).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(1, len(high_1d)):
-        # Previous day's range
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        
-        if range_val > 0:
-            camarilla_S3[i] = prev_close - 1.1 * range_val * 1.0/6.0
-            camarilla_R3[i] = prev_close + 1.1 * range_val * 1.0/6.0
-            camarilla_S4[i] = prev_close - 1.1 * range_val * 1.5/6.0
-            camarilla_R4[i] = prev_close + 1.1 * range_val * 1.5/6.0
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
-    camarilla_R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
-    
-    # Volume confirmation: volume > 2.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h SMA20 for dynamic support/resistance
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    bars_since_entry = 0  # Track holding period
     
     start_idx = 100  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
-            np.isnan(camarilla_R3_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma50_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(sma20[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume surge condition
-        vol_surge = volume[i] > 2.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        # Volume filter: avoid low-volatility chop
+        vol_filter = volume[i] > 1.5 * vol_ma_20_1d_aligned[i] if vol_ma_20_1d_aligned[i] > 0 else False
         
         if position == 1:  # Long position
-            bars_since_entry += 1
-            # Exit: price < S4 (breakdown) or weekly trend breaks (price < weekly EMA21)
-            # Minimum holding period: 2 bars (24 hours)
-            if bars_since_entry >= 2 and (close[i] < camarilla_S4_aligned[i] or close[i] < ema21_1w_aligned[i]):
+            # Exit: RSI >= 60 (overbought) or trend flips (price < 4h SMA50)
+            if rsi[i] >= 60 or close[i] < sma50_4h_aligned[i]:
                 position = 0
-                bars_since_entry = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            bars_since_entry += 1
-            # Exit: price > R4 (breakout) or weekly trend breaks (price > weekly EMA21)
-            # Minimum holding period: 2 bars (24 hours)
-            if bars_since_entry >= 2 and (close[i] > camarilla_R4_aligned[i] or close[i] > ema21_1w_aligned[i]):
+            # Exit: RSI <= 40 (oversold) or trend flips (price > 4h SMA50)
+            if rsi[i] <= 40 or close[i] > sma50_4h_aligned[i]:
                 position = 0
-                bars_since_entry = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            bars_since_entry = 0
-            # Long entry: price > S3 with volume surge and weekly uptrend
-            if (close[i] > camarilla_S3_aligned[i] and vol_surge and 
-                close[i] > ema21_1w_aligned[i]):
+            # Long entry: 4h uptrend + RSI pullback to 40-45 + price > SMA20 + volume filter
+            if (close[i] > sma50_4h_aligned[i] and 
+                40 <= rsi[i] <= 45 and 
+                close[i] > sma20[i] and 
+                vol_filter):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price < R3 with volume surge and weekly downtrend
-            elif (close[i] < camarilla_R3_aligned[i] and vol_surge and 
-                  close[i] < ema21_1w_aligned[i]):
+                signals[i] = 0.20
+            # Short entry: 4h downtrend + RSI bounce to 55-60 + price < SMA20 + volume filter
+            elif (close[i] < sma50_4h_aligned[i] and 
+                  55 <= rsi[i] <= 60 and 
+                  close[i] < sma20[i] and 
+                  vol_filter):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
