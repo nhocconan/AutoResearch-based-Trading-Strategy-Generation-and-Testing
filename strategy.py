@@ -1,37 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Williams Fractal Breakout with 1d Trend and Volume Confirmation v6
-Hypothesis: Williams Fractal breakouts aligned with 1d EMA trend and ADX > 25,
-confirmed by volume spikes, capture strong momentum moves with fewer trades
-than Donchian breaks. Works in bull/bear by requiring trend alignment.
-Target: 20-30 trades/year. Uses more selective volume threshold (4.0x) and 
-requires both fractal and price confirmation to reduce false signals.
+4h Donchian Breakout with Volume Spike and 1d ADX Filter
+Hypothesis: Donchian(20) breakouts on 4h with volume spikes (>3x average) 
+and strong 1d trend (ADX > 25) capture sustained moves while avoiding 
+false breakouts in ranging markets. Works in bull/bear by requiring 
+trend alignment and volume confirmation. Target: 25-35 trades/year.
 """
-name = "4h_williams_fractal_breakout_1d_trend_volume_v6"
+name = "4h_donchian_breakout_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_williams_fractals(high, low):
-    """Calculate Williams Fractals: bearish (high) and bullish (low)"""
-    n = len(high)
-    bearish = np.zeros(n, dtype=bool)
-    bullish = np.zeros(n, dtype=bool)
-    
-    for i in range(2, n-2):
-        # Bearish fractal: high is highest of 5 bars
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            bearish[i] = True
-        # Bullish fractal: low is lowest of 5 bars
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            bullish[i] = True
-    
-    return bearish, bullish
 
 def generate_signals(prices):
     n = len(prices)
@@ -49,12 +30,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # Calculate 20 EMA on 1d
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate 50 EMA on 1d
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 14-period ADX for 1d
     # True Range
@@ -84,62 +59,55 @@ def generate_signals(prices):
     dx_1d = 100 * np.abs(di_plus_1d - di_minus_1d) / (di_plus_1d + di_minus_1d)
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Williams Fractals on 4h
-    bearish_fractal, bullish_fractal = calculate_williams_fractals(high, low)
+    # Donchian channels on 4h (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detector: current volume > 4.0 x 20-period average (more selective)
+    # Volume spike detector: current volume > 3.0 x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (4.0 * vol_ma_20)
+    volume_spike = volume > (3.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1d[i]) or np.isnan(ema50_1d[i]) or 
-            np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_1d[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values for current 4h bar
-        ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)[i]
-        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
+        # Get aligned 1d ADX for current 4h bar
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        
-        # Trend filter: 1d EMA alignment (bullish: EMA20 > EMA50, bearish: EMA20 < EMA50)
-        ema_bullish = ema20_1d_aligned > ema50_1d_aligned
-        ema_bearish = ema20_1d_aligned < ema50_1d_aligned
         
         # Regime filter: only trade in strong trending markets on daily
         strong_trend_1d = adx_1d_aligned > 25
         
         if position == 1:  # Long position
-            # Exit: trend breaks OR price closes below bullish fractal low
-            if not (ema_bullish and strong_trend_1d) or (bullish_fractal[i] and close[i] < low[i-1]):
+            # Exit: trend weakens OR price closes below Donchian low
+            if not strong_trend_1d or close[i] < donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend breaks OR price closes above bearish fractal high
-            if not (ema_bearish and strong_trend_1d) or (bearish_fractal[i] and close[i] > high[i-1]):
+            # Exit: trend weakens OR price closes above Donchian high
+            if not strong_trend_1d or close[i] > donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Only trade with volume spike and both trend filters aligned
-            # Additional price confirmation: close must break fractal level
-            if (volume_spike[i] and ema_bullish and strong_trend_1d and 
-                bearish_fractal[i] and close[i] > high[i]):
+            # Only trade with volume spike and strong 1d trend
+            # Breakout conditions: price breaks Donchian levels
+            if volume_spike[i] and strong_trend_1d and close[i] > donch_high[i]:
                 position = 1
                 signals[i] = 0.25
-            elif (volume_spike[i] and ema_bearish and strong_trend_1d and 
-                  bullish_fractal[i] and close[i] < low[i]):
+            elif volume_spike[i] and strong_trend_1d and close[i] < donch_low[i]:
                 position = -1
                 signals[i] = -0.25
     
