@@ -1,19 +1,20 @@
-# 4h_bollinger_breakout_volume_v1
-# Strategy: Bollinger Band breakout with volume confirmation and Bollinger Width regime filter.
-# Long when price breaks above upper BB with volume > 1.5x avg and BW < 50th percentile (low volatility).
-# Short when price breaks below lower BB with volume > 1.5x avg and BW < 50th percentile.
-# Exit when price crosses back inside BB or volatility expands (BW > 70th percentile).
-# Designed to capture volatility breakouts in both trending and ranging markets.
-# Target: 20-50 trades/year per symbol.
-
 #!/usr/bin/env python3
+"""
+1d_1w_camarilla_breakout_volume_v1
+Hypothesis: Use weekly EMA for trend bias and daily Camarilla levels for entries on 1d timeframe.
+Long when daily close > daily R3 with volume confirmation and weekly bias up.
+Short when daily close < daily S3 with volume confirmation and weekly bias down.
+Exit when price reverses to opposite Camarilla level or weekly bias changes.
+Designed to capture trend continuation and reversals at key levels with low trade frequency.
+Target: 7-25 trades/year per symbol (28-100 total over 4 years).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_bollinger_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,22 +28,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    close_series = pd.Series(close)
-    bb_ma = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_ma + bb_std * bb_std_dev
-    bb_lower = bb_ma - bb_std * bb_std_dev
+    # Get daily data (same as primary timeframe for calculations)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Bollinger Width (BW) for volatility regime
-    bb_width = (bb_upper - bb_lower) / bb_ma
-    # Percentile rank of BB width over last 50 periods
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
+    # Get weekly data for bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's close for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_close[0] = close_1d[0]  # First value
+    
+    # Daily range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
+    r4 = close_1d + range_1d * 1.1 / 2
+    s4 = close_1d - range_1d * 1.1 / 2
+    
+    # Align daily Camarilla levels to 1d timeframe (no alignment needed as same TF)
+    r3_aligned = r3
+    s3_aligned = s3
+    r4_aligned = r4
+    s4_aligned = s4
+    
+    # Weekly bias using EMA (13-period)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align weekly EMA to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +80,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -66,30 +90,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses back inside BB or volatility expands (BW > 70th percentile)
-            if close[i] < bb_ma[i] or bb_width_percentile[i] > 0.7:
+            # Exit: price breaks below daily S3 or weekly bias turns down
+            if close[i] < s3_aligned[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price crosses back inside BB or volatility expands (BW > 70th percentile)
-            if close[i] > bb_ma[i] or bb_width_percentile[i] > 0.7:
+            # Exit: price breaks above daily R3 or weekly bias turns up
+            if close[i] > r3_aligned[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Low volatility regime: BB width below 50th percentile
-            low_vol = bb_width_percentile[i] < 0.5
-            
-            # Long entry: price breaks above upper BB with volume and low volatility
-            if close[i] > bb_upper[i] and vol_confirm[i] and low_vol:
+            # Long entry: price closes above daily R3 with volume and weekly bias up
+            if close[i] > r3_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower BB with volume and low volatility
-            elif close[i] < bb_lower[i] and vol_confirm[i] and low_vol:
+            # Short entry: price closes below daily S3 with volume and weekly bias down
+            elif close[i] < s3_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
