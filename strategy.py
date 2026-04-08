@@ -1,123 +1,151 @@
 #!/usr/bin/env python3
 """
-1d_williams_alligator_v1
-Hypothesis: Williams Alligator on 1-day chart with 1-week trend filter and volume confirmation.
-- Long when Alligator jaws (13-period SMMA) crosses above teeth (8-period SMMA) with price above both, 
-  weekly uptrend (price > weekly SMA50), and volume expansion
-- Short when jaws crosses below teeth with price below both, weekly downtrend, and volume expansion
-- Uses Williams Alligator's smoothed moving averages to reduce whipsaw in ranging markets
-- Weekly trend filter ensures alignment with higher timeframe momentum
-- Designed for low trade frequency (10-30/year) to minimize fee drift
-- Works in bull/bear via weekly trend filter and volume confirmation requirement
+6h_1d_rvsi_trend_v1
+Hypothesis: Use 1-day Relative Vigor Index (RVI) with 6-hour price action for trend-following entries.
+- RVI measures conviction of trend by comparing close-open to high-low ranges
+- Long when RVI crosses above 0.50 with price above 6h EMA20 (bullish momentum)
+- Short when RVI crosses below 0.50 with price below 6h EMA20 (bearish momentum)
+- Uses 1-day trend as filter to avoid counter-trend trades in choppy markets
+- Designed for low trade frequency (15-30/year) to minimize fee drag
+- Works in bull/bear via trend filter and momentum confirmation
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_williams_alligator_v1"
-timeframe = "1d"
+name = "6h_1d_rvsi_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def smma(data, period):
-    """Smoothed Moving Average (SMMA) - Williams Alligator uses SMMA"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
+def calculate_rvi(high, low, open_, close, period=10):
+    """Calculate Relative Vigor Index"""
+    if len(close) < period:
+        return np.full(len(close), np.nan)
     
-    smma = np.full_like(data, np.nan, dtype=float)
-    smma[period-1] = np.mean(data[:period])
-    for i in range(period, len(data)):
-        smma[i] = (smma[i-1] * (period-1) + data[i]) / period
-    return smma
+    numerator = np.zeros(len(close))
+    denominator = np.zeros(len(close))
+    
+    for i in range(len(close)):
+        if i >= period - 1:
+            # Numerator: (close - open) + 2*(close_prev - open_prev) + 2*(close_prev2 - open_prev2) + (close_prev3 - open_prev3)
+            c_o = close[i] - open_[i]
+            c_o1 = close[i-1] - open_[i-1] if i-1 >= 0 else 0
+            c_o2 = close[i-2] - open_[i-2] if i-2 >= 0 else 0
+            c_o3 = close[i-3] - open_[i-3] if i-3 >= 0 else 0
+            numerator[i] = c_o + 2*c_o1 + 2*c_o2 + c_o3
+            
+            # Denominator: (high - low) + 2*(high_prev - low_prev) + 2*(high_prev2 - low_prev2) + (high_prev3 - low_prev3)
+            h_l = high[i] - low[i]
+            h_l1 = high[i-1] - low[i-1] if i-1 >= 0 else 0
+            h_l2 = high[i-2] - low[i-2] if i-2 >= 0 else 0
+            h_l3 = high[i-3] - low[i-3] if i-3 >= 0 else 0
+            denominator[i] = h_l + 2*h_l1 + 2*h_l2 + h_l3
+    
+    # Smooth numerator and denominator
+    num_smooth = np.zeros(len(close))
+    den_smooth = np.zeros(len(close))
+    
+    for i in range(len(close)):
+        if i >= period - 1:
+            num_smooth[i] = np.mean(numerator[i-period+1:i+1])
+            den_smooth[i] = np.mean(denominator[i-period+1:i+1])
+    
+    rvi = np.full(len(close), np.nan)
+    mask = den_smooth != 0
+    rvi[mask] = num_smooth[mask] / den_smooth[mask]
+    
+    # Signal line: 4-period SMA of RVI
+    signal_line = np.full(len(close), np.nan)
+    for i in range(len(close)):
+        if i >= 3 and not np.isnan(rvi[i]):
+            signal_line[i] = np.mean(rvi[i-3:i+1])
+    
+    return rvi, signal_line
+
+def calculate_ema(close, period):
+    """Calculate EMA with proper handling"""
+    if len(close) < period:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    ema = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_ = prices['open'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Williams Alligator
+    # Get 1-day data for RVI trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate 1-day RVI for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    open_1d = df_1d['open'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator on 1-day
-    # Jaws: 13-period SMMA of median price
-    median_price = (high + low) / 2.0
-    median_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        median_1d[i] = (df_1d['high'].iloc[i] + df_1d['low'].iloc[i]) / 2.0
+    rvi_1d, rvi_signal_1d = calculate_rvi(high_1d, low_1d, open_1d, close_1d, 10)
     
-    jaws = smma(median_1d, 13)  # Blue line
-    teeth = smma(median_1d, 8)   # Red line
-    lips = smma(median_1d, 5)    # Green line (not used in signals)
+    # Calculate 6-hour EMA for entry timing
+    ema_20_6h = calculate_ema(close, 20)
     
-    # Weekly trend filter: price > weekly SMA50 for uptrend
-    close_1w = df_1w['close'].values
-    sma_50_1w = np.full_like(close_1w, np.nan, dtype=float)
-    for i in range(50, len(close_1w)):
-        sma_50_1w[i] = np.mean(close_1w[i-50:i])
-    
-    # Align indicators to daily timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
-    
-    # Volume confirmation: 20-day average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align indicators to 6-hour timeframe
+    rvi_1d_aligned = align_htf_to_ltf(prices, df_1d, rvi_1d)
+    rvi_signal_1d_aligned = align_htf_to_ltf(prices, df_1d, rvi_signal_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(sma_50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rvi_1d_aligned[i]) or np.isnan(rvi_signal_1d_aligned[i]) or
+            np.isnan(ema_20_6h[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        rvi = rvi_1d_aligned[i]
+        rvi_signal = rvi_signal_1d_aligned[i]
         price = close[i]
-        jaw = jaws_aligned[i]
-        tooth = teeth_aligned[i]
-        weekly_uptrend = price > sma_50_1w_aligned[i]
+        ema_20 = ema_20_6h[i]
         
         if position == 1:  # Long
-            # Exit: jaws crosses below teeth OR volume drops significantly
-            if jaw < tooth or vol_ratio < 1.2:
+            # Exit: RVI crosses below signal line OR price closes below EMA20
+            if rvi < rvi_signal or price < ema_20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: jaws crosses above teeth OR volume drops significantly
-            if jaw > tooth or vol_ratio < 1.2:
+            # Exit: RVI crosses above signal line OR price closes above EMA20
+            if rvi > rvi_signal or price > ema_20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: jaws crosses above teeth with price above both, weekly uptrend, volume expansion
-            if jaw > tooth and price > jaw and price > tooth and weekly_uptrend and vol_ratio > 1.8:
+            # Enter long: RVI crosses above signal line with price above EMA20 (bullish momentum)
+            if rvi > rvi_signal and price > ema_20:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: jaws crosses below teeth with price below both, weekly downtrend, volume expansion
-            elif jaw < tooth and price < jaw and price < tooth and not weekly_uptrend and vol_ratio > 1.8:
+            # Enter short: RVI crosses below signal line with price below EMA20 (bearish momentum)
+            elif rvi < rvi_signal and price < ema_20:
                 position = -1
                 signals[i] = -0.25
     
