@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_1d_cci_trend_volume_v1
-# Hypothesis: Trade CCI(20) overbought/oversold reversals on 4h timeframe with daily trend filter and volume confirmation.
-# In bullish regime (price > 50-day SMA): long when CCI crosses below -100 (oversold bounce).
-# In bearish regime (price < 50-day SMA): short when CCI crosses above +100 (overbought rejection).
-# Uses volume > 1.3x 20-period average to confirm momentum shift.
-# Designed for 4h timeframe targeting 20-50 trades/year (80-200 total over 4 years).
-# Works in both bull and bear markets by adapting to trend via daily SMA filter.
+# 6h_1d_1w_pivots_momentum_v1
+# Hypothesis: Combine weekly pivot points with daily momentum on 6h timeframe.
+# Long when price breaks above weekly R1 with daily RSI > 50 and volume confirmation.
+# Short when price breaks below weekly S1 with daily RSI < 50 and volume confirmation.
+# Uses weekly pivots for structure and daily momentum for timing.
+# Designed for 6h timeframe targeting 50-150 total trades over 4 years.
+# Works in bull markets via breakout momentum and bear markets via mean reversion at S1/R1.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_trend_volume_v1"
-timeframe = "4h"
+name = "6h_1d_1w_pivots_momentum_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,20 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points (standard formula)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Daily RSI for momentum filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Daily 50-period SMA for trend filter
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Calculate RSI(14)
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[0], delta])  # First element is 0
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # CCI(20) calculation on 4h data
-    tp = (high + low + close) / 3.0  # Typical Price
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(np.abs(tp - ma_tp)).rolling(window=20, min_periods=20).mean().values
-    # Avoid division by zero
-    cci = np.where(mad != 0, (tp - ma_tp) / (0.015 * mad), 0.0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align daily RSI to 6h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,12 +70,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 100  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(sma50_1d_aligned[i]) or np.isnan(cci[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ma_tp[i]) or np.isnan(mad[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -62,29 +86,27 @@ def generate_signals(prices):
         vol_surge = volume[i] > 1.3 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: CCI crosses above +100 (overbought) or trend turns bearish
-            if cci[i] > 100.0 or close[i] < sma50_1d_aligned[i]:
+            # Exit: price breaks below weekly S1 or RSI < 40
+            if close[i] < s1_aligned[i] or rsi_aligned[i] < 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses below -100 (oversold) or trend turns bullish
-            if cci[i] < -100.0 or close[i] > sma50_1d_aligned[i]:
+            # Exit: price breaks above weekly R1 or RSI > 60
+            if close[i] > r1_aligned[i] or rsi_aligned[i] > 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: CCI crosses below -100 (oversold bounce) with volume surge and bullish trend
-            if (cci[i] <= -100.0 and cci[i-1] > -100.0 and vol_surge and 
-                close[i] > sma50_1d_aligned[i]):
+            # Long entry: price breaks above weekly R1 with RSI > 50 and volume surge
+            if (close[i] > r1_aligned[i] and rsi_aligned[i] > 50 and vol_surge):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: CCI crosses above +100 (overbought rejection) with volume surge and bearish trend
-            elif (cci[i] >= 100.0 and cci[i-1] < 100.0 and vol_surge and 
-                  close[i] < sma50_1d_aligned[i]):
+            # Short entry: price breaks below weekly S1 with RSI < 50 and volume surge
+            elif (close[i] < s1_aligned[i] and rsi_aligned[i] < 50 and vol_surge):
                 position = -1
                 signals[i] = -0.25
     
