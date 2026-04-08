@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_kama_rsi_v1
-# Hypothesis: Use 1-week EMA34 for trend, daily KAMA(14) for momentum, and daily RSI(14) for entries. 
-# Long when weekly trend is up, price > KAMA, and RSI < 40 (oversold bounce).
-# Short when weekly trend is down, price < KAMA, and RSI > 60 (overbought rejection).
-# Exit on opposite KAMA cross or weekly trend reversal. 
-# Target: 10-30 trades/year (40-120 total over 4 years) to minimize fee drag.
+# 6h_1d_volatility_mean_reversion_v1
+# Hypothesis: In 6h timeframe, mean-reversion opportunities arise when volatility spikes
+# (ATR ratio > 2.0) and price reaches Bollinger Bands extremes (2.5 std) in the opposite
+# direction of the 1d trend. Uses 1d EMA50 as trend filter: long only when price > EMA50,
+# short only when price < EMA50. Exit when volatility contracts (ATR ratio < 1.2) or
+# price returns to mean (middle Bollinger Band). Designed for 12-30 trades/year to
+# minimize fee drag while capturing volatility mean reversion in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_v1"
-timeframe = "1d"
+name = "6h_1d_volatility_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,69 +20,36 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Daily KAMA (14) - Kaufman Adaptive Moving Average
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Efficiency Ratio (ER) for KAMA
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
+    # Bollinger Bands (20, 2.5) on 6h
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.5 * bb_std
+    bb_lower = bb_middle - 2.5 * bb_std
     
-    # Proper ER calculation: |close - close[10]| / sum(|diff|) over 10 periods
-    lookback = 10
-    change_er = np.zeros_like(close_1d)
-    volatility_er = np.zeros_like(close_1d)
+    # ATR for volatility measurement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(lookback, len(close_1d)):
-        change_er[i] = np.abs(close_1d[i] - close_1d[i-lookback])
-        volatility_er[i] = np.sum(np.abs(np.diff(close_1d[i-lookback:i+1])))
-    
-    er = np.zeros_like(close_1d)
-    mask = volatility_er > 0
-    er[mask] = change_er[mask] / volatility_er[mask]
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # first average
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align KAMA and RSI to 1d timeframe (already aligned since we used daily data)
-    kama_aligned = kama  # already on 1d frequency
-    rsi_aligned = rsi    # already on 1d frequency
+    # ATR ratio: current ATR(7) / ATR(30) to detect volatility spikes
+    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = np.where(atr30 > 0, atr7 / atr30, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -90,8 +58,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or 
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -99,31 +68,30 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price < KAMA or weekly trend turns down
-            if close[i] < kama_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit: volatility contracts OR price returns to mean
+            if atr_ratio[i] < 1.2 or close[i] > bb_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > KAMA or weekly trend turns up
-            if close[i] > kama_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit: volatility contracts OR price returns to mean
+            if atr_ratio[i] < 1.2 or close[i] < bb_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: weekly uptrend, price > KAMA, RSI < 40 (oversold)
-            if (close[i] > kama_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and 
-                rsi_aligned[i] < 40):
+            # Volatility spike condition
+            vol_spike = atr_ratio[i] > 2.0
+            
+            # Long entry: volatility spike + price at lower BB + uptrend (price > EMA50)
+            if vol_spike and close[i] <= bb_lower[i] and close[i] > ema50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: weekly downtrend, price < KAMA, RSI > 60 (overbought)
-            elif (close[i] < kama_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  rsi_aligned[i] > 60):
+            # Short entry: volatility spike + price at upper BB + downtrend (price < EMA50)
+            elif vol_spike and close[i] >= bb_upper[i] and close[i] < ema50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
