@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 1d_1w_volatility_breakout_v1
+# 1d_1w_volatility_breakout_v2
 # Hypothesis: Daily volatility breakout above 1-week high/low with volume confirmation and volatility filter.
 # Long when daily close > 1-week high with volume > 1.5x 20-day average and ATR(14) > median ATR(100).
 # Short when daily close < 1-week low with volume > 1.5x 20-day average and ATR(14) > median ATR(100).
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_volatility_breakout_v1"
+name = "1d_1w_volatility_breakout_v2"
 timeframe = "1d"
 leverage = 1.0
 
