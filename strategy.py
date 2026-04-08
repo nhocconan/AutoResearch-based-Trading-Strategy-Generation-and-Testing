@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_price_channel_volume_v1
-# Hypothesis: Daily price channel (Donchian 20) breakout with weekly trend filter and volume confirmation.
-# Works in bull markets by buying breakouts above channel, in bear markets by selling breakdowns below channel.
-# Volume filter ensures institutional participation, reducing false signals.
-# Target: 10-25 trades/year via Donchian breakouts + weekly trend + volume confirmation.
+# 6d_donchian_weekly_pivot_volume_v1
+# Hypothesis: 6-hour Donchian(20) breakouts filtered by weekly pivot direction and volume confirmation.
+# In bull markets: Buy breakouts above weekly pivot resistance with volume.
+# In bear markets: Sell breakouts below weekly pivot support with volume.
+# Weekly pivot provides institutional reference points; volume confirms participation.
+# Target: 15-30 trades/year via tight Donchian breakout + pivot + volume confluence.
 
-name = "1d_1w_price_channel_volume_v1"
-timeframe = "1d"
+name = "6d_donchian_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,31 +26,38 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian Channel (20-period)
-    period = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    donchian_len = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
     
-    for i in range(period-1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    for i in range(donchian_len - 1, n):
+        upper[i] = np.max(high[i - donchian_len + 1:i + 1])
+        lower[i] = np.min(low[i - donchian_len + 1:i + 1])
     
-    # Weekly trend filter (EWMA 50)
+    # Weekly pivot points (using weekly OHLC)
     df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # EMA 50 on weekly
-    ema_period = 50
-    ema_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= ema_period:
-        ema_weekly[ema_period-1] = np.mean(close_weekly[:ema_period])
-        for i in range(ema_period, len(close_weekly)):
-            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * (ema_period - 1)) / (ema_period + 1)
+    # Standard pivot: P = (H + L + C)/3
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # Resistance levels: R1 = 2*P - L, R2 = P + (H - L)
+    r1 = 2 * pivot - weekly_low
+    r2 = pivot + (weekly_high - weekly_low)
+    # Support levels: S1 = 2*P - H, S2 = P - (H - L)
+    s1 = 2 * pivot - weekly_high
+    s2 = pivot - (weekly_high - weekly_low)
     
-    # Align weekly EMA to daily
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
     
-    # Volume filter: 20-day average volume
-    vol_ma = np.full(n, np.nan)
+    # Volume filter: 20-period average volume
+    vol_ma = np.zeros_like(volume)
     vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
     vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
     
@@ -61,7 +69,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(period, ema_period) + 5
+    start_idx = max(donchian_len, 20) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -71,39 +79,41 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-day average
+        # Volume filter: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema_weekly_aligned[i]
-        weekly_downtrend = close[i] < ema_weekly_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit if price breaks below lower channel or trend reverses
-            if close[i] < lower[i] or not weekly_uptrend:
+            # Exit if price breaks below weekly S1 or Donchian lower
+            if close[i] < s1_aligned[i] or close[i] < lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above upper channel or trend reverses
-            if close[i] > upper[i] or not weekly_downtrend:
+            # Exit if price breaks above weekly R1 or Donchian upper
+            if close[i] > r1_aligned[i] or close[i] > upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper channel, volume, weekly uptrend
-            if close[i] > upper[i] and volume_filter and weekly_uptrend:
+            # Long entry: Donchian breakout above upper with volume and above weekly pivot
+            if (close[i] > upper[i] and 
+                close[i] > pivot_aligned[i] and 
+                volume_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower channel, volume, weekly downtrend
-            elif close[i] < lower[i] and volume_filter and weekly_downtrend:
+            # Short entry: Donchian breakdown below lower with volume and below weekly pivot
+            elif (close[i] < lower[i] and 
+                  close[i] < pivot_aligned[i] and 
+                  volume_filter):
                 position = -1
                 signals[i] = -0.25
     
