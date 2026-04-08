@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_pivot_breakout_volume_v1
-Hypothesis: Use 4h price action with 12h pivot levels and 1d trend bias.
-Long when 4h price breaks above 12h R1 with 1d bullish trend and volume confirmation.
-Short when 4h price breaks below 12h S1 with 1d bearish trend and volume confirmation.
-Designed to capture institutional breakouts at key 12h pivot levels with trend alignment.
-Target: 15-40 trades/year per symbol (60-160 total over 4 years) by requiring strong breakouts.
+1d_1w_donchian_breakout_volume_v1
+Hypothesis: On the daily timeframe, buy when price breaks above the 20-day Donchian channel with weekly trend confirmation and volume expansion; sell when price breaks below the 20-day Donchian channel with weekly bearish trend and volume expansion. This captures medium-term breakouts aligned with the weekly trend, reducing false signals in choppy markets. Designed for low turnover (10-25 trades/year) to minimize fee impact while capturing sustained trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_pivot_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -27,88 +23,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Get 1d data for trend bias
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 20-day Donchian channel
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h pivot points (standard floor trader pivots)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Weekly trend: EMA(20) on weekly close
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_uptrend = close_1w > ema_20_1w
+    weekly_downtrend = close_1w < ema_20_1w
     
-    # 12h pivot point
-    pivot_point = (high_12h + low_12h + close_12h) / 3.0
-    # 12h resistance and support levels
-    r1 = 2 * pivot_point - low_12h
-    s1 = 2 * pivot_point - high_12h
-    r2 = pivot_point + (high_12h - low_12h)
-    s2 = pivot_point - (high_12h - low_12h)
+    # Align weekly trend to daily timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
-    # Align 12h pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
-    
-    # 1d trend bias: close > EMA(50) for bullish, close < EMA(50) for bearish
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_bullish = close_1d > ema_50
-    trend_bearish = close_1d < ema_50
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_bullish.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, trend_bearish.astype(float))
-    
-    # Volume confirmation: volume > 1.5x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    # Volume filter: volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_expansion = volume > vol_ma_20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup
-    start_idx = 50
+    # Start after warmup period
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(trend_bullish_aligned[i]) or
-            np.isnan(trend_bearish_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
-                # Hold position until exit conditions met
-                pass
+                signals[i] = 0.25 if position == 1 else -0.25  # Maintain position
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below 12h S1 or 1d trend turns bearish
-            if close[i] < s1_aligned[i] or trend_bearish_aligned[i] > 0.5:
+            # Exit: price breaks below 20-day low or weekly trend turns down
+            if close[i] < low_20[i] or weekly_downtrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.25  # Maintain long
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above 12h R1 or 1d trend turns bullish
-            if close[i] > r1_aligned[i] or trend_bullish_aligned[i] > 0.5:
+            # Exit: price breaks above 20-day high or weekly trend turns up
+            if close[i] > high_20[i] or weekly_uptrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.25  # Maintain short
         else:  # Flat, look for entry
-            # Long entry: price breaks above 12h R1 with 1d bullish trend and volume
-            if close[i] > r1_aligned[i] and trend_bullish_aligned[i] > 0.5 and vol_confirm[i]:
+            # Long entry: price breaks above 20-day high with weekly uptrend and volume expansion
+            if close[i] > high_20[i] and weekly_uptrend_aligned[i] > 0.5 and vol_expansion[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 12h S1 with 1d bearish trend and volume
-            elif close[i] < s1_aligned[i] and trend_bearish_aligned[i] > 0.5 and vol_confirm[i]:
+            # Short entry: price breaks below 20-day low with weekly downtrend and volume expansion
+            elif close[i] < low_20[i] and weekly_downtrend_aligned[i] > 0.5 and vol_expansion[i]:
                 position = -1
                 signals[i] = -0.25
     
