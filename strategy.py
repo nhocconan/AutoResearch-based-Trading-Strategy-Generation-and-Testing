@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_pivot_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,36 +18,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla pivot levels from previous 12h bar
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    prev_close = df_12h['close'].shift(1).values
     
     # Pivot point
     pivot = (prev_high + prev_low + prev_close) / 3.0
-    # Camarilla levels
-    r4 = pivot + (prev_high - prev_low) * 1.1 / 2
+    # Camarilla levels (R3, S3 - stronger reversal points)
     r3 = pivot + (prev_high - prev_low) * 1.1 / 4
-    r2 = pivot + (prev_high - prev_low) * 1.1 / 6
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
-    s2 = pivot - (prev_high - prev_low) * 1.1 / 6
     s3 = pivot - (prev_high - prev_low) * 1.1 / 4
+    # R4/S4 - breakout levels
+    r4 = pivot + (prev_high - prev_low) * 1.1 / 2
     s4 = pivot - (prev_high - prev_low) * 1.1 / 2
     
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
-    # Volume confirmation: 6h volume > 1.5x average of last 20 periods
+    # Volume confirmation: 4h volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > vol_ma * 1.5
     
@@ -69,7 +66,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below S3 or touches S4 (strong support)
+            # Exit: price closes below S3 or touches S4 (strong support/breakdown)
             if close[i] < s3_aligned[i] or close[i] <= s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -77,7 +74,7 @@ def generate_signals(prices):
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 or touches R4 (strong resistance)
+            # Exit: price closes above R3 or touches R4 (strong resistance/breakout)
             if close[i] > r3_aligned[i] or close[i] >= r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
