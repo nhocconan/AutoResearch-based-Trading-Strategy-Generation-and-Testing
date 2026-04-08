@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_ema_crossover_volume_v1
-Hypothesis: Use EMA crossovers on daily and weekly timeframes for trend direction,
-with 12-hour price closing above/below the EMA and volume confirmation for entry.
-Works in bull markets via trend continuation and in bear markets via mean reversion
-when price extends too far from the EMA (using Bollinger Bands on 12h as filter).
-Target: 12-37 trades/year per symbol (48-148 total over 4 years).
+4h_12h_donchian_breakout_volume_v1
+Hypothesis: Use 12h trend via EMA(20) for bias and 4h Donchian(20) breakout with volume confirmation for entry.
+Long when 4h price breaks above Donchian high with volume and 12h EMA up.
+Short when 4h price breaks below Donchian low with volume and 12h EMA down.
+Designed to work in both bull (breakouts) and bear (reversals at key levels) markets.
+Target: 15-35 trades/year per symbol (60-140 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_ema_crossover_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,32 +27,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for bias
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Get weekly data for EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 12h EMA(20) for bias
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate daily EMA (21-period)
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate weekly EMA (13-period)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate 12h Bollinger Bands (20, 2) for mean reversion filter
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean().values
-    dev = close_series.rolling(window=20, min_periods=20).std().values
-    upper = basis + 2 * dev
-    lower = basis - 2 * dev
+    # Calculate 4h Donchian(20)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,13 +49,11 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma[i])):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -77,27 +62,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 12h EMA(20) or too far above mean (touch upper BB)
-            if close[i] < basis[i] or close[i] > upper[i]:
+            # Exit: price breaks below Donchian low or 12h EMA turns down
+            if close[i] < low_min[i] or close[i] < ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 12h EMA(20) or too far below mean (touch lower BB)
-            if close[i] > basis[i] or close[i] < lower[i]:
+            # Exit: price breaks above Donchian high or 12h EMA turns up
+            if close[i] > high_max[i] or close[i] > ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price closes above both daily and weekly EMA with volume
-            if close[i] > ema_1d_aligned[i] and close[i] > ema_1w_aligned[i] and vol_confirm[i]:
+            # Long entry: price breaks above Donchian high with volume and 12h EMA up
+            if close[i] > high_max[i] and vol_confirm[i] and close[i] > ema_12h_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price closes below both daily and weekly EMA with volume
-            elif close[i] < ema_1d_aligned[i] and close[i] < ema_1w_aligned[i] and vol_confirm[i]:
+            # Short entry: price breaks below Donchian low with volume and 12h EMA down
+            elif close[i] < low_min[i] and vol_confirm[i] and close[i] < ema_12h_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
