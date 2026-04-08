@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-# 1h_rsi_reversion_4h1d_trend_v1
-# Hypothesis: Mean reversion on 1h RSI extremes filtered by 4h/1d trend. Goes long when 1h RSI < 30 and price > 4h EMA50 and 1d EMA200 (uptrend). Short when RSI > 70 and price < 4h EMA50 and 1d EMA200 (downtrend). Uses volume confirmation to avoid false signals. Target: 20-50 trades/year to minimize fee drag. Works in bull (trend follow pullbacks) and bear (mean reversion in range).
+# 6h_weekly_pivot_breakout_1d_trend_volume_v1
+# Hypothesis: Uses weekly pivot levels with 1d trend filter and volume confirmation on 6h timeframe.
+# Goes long when price breaks above weekly R1 in daily uptrend with volume confirmation.
+# Goes short when price breaks below weekly S1 in daily downtrend with volume confirmation.
+# Uses 6h candles to reduce trade frequency and avoid fee drag. Target: 12-37 trades/year.
+# Weekly pivots provide strong support/resistance; trend filter avoids counter-trend trades; volume confirms breakout strength.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_reversion_4h1d_trend_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_breakout_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -21,80 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d data for trend filter
+    # Calculate weekly pivot points (standard floor trader pivots)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot_1w - low_1w
+    s1 = 2 * pivot_1w - high_1w
+    
+    # Daily trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h EMA50 trend
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Align weekly and daily data to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d EMA200 trend
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation
+    # Volume confirmation on 6h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 200
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(avg_volume[i]):
+        # Skip if any required data is NaN
+        if np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(ema50_1d[i]) or np.isnan(avg_volume[i]):
             if position != 0:
-                pass
+                pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend filters
-        uptrend_4h = close[i] > ema50_4h_aligned[i]
-        uptrend_1d = close[i] > ema200_1d_aligned[i]
-        downtrend_4h = close[i] < ema50_4h_aligned[i]
-        downtrend_1d = close[i] < ema200_1d_aligned[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 or trend breakdown
-            if rsi[i] > 50 or not (uptrend_4h and uptrend_1d):
+            # Exit: price falls below S1 or trend changes to downtrend
+            if close[i] <= s1_aligned[i] or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 or trend breakdown
-            if rsi[i] < 50 or not (downtrend_4h and downtrend_1d):
+            # Exit: price rises above R1 or trend changes to uptrend
+            if close[i] >= r1_aligned[i] or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
             if volume_ok:
-                # Long entry: RSI oversold in uptrend
-                if rsi[i] < 30 and uptrend_4h and uptrend_1d:
+                # Long entry: price breaks above R1 in uptrend
+                if daily_uptrend and close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]:
                     position = 1
-                    signals[i] = 0.20
-                # Short entry: RSI overbought in downtrend
-                elif rsi[i] > 70 and downtrend_4h and downtrend_1d:
+                    signals[i] = 0.25
+                # Short entry: price breaks below S1 in downtrend
+                elif daily_downtrend and close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
