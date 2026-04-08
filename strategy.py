@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_donchian_breakout_volume_v2
-# Hypothesis: Trade 12-hour Donchian channel breakouts with 1-day trend filter and volume confirmation.
-# In bull markets, buy breakouts above upper band with 1-day uptrend; in bear markets, sell breakdowns below lower band with 1-day downtrend.
-# Volume surge confirms breakout strength. Uses ATR-based stops to manage risk.
-# Target: 12-37 trades/year with strict entry conditions to minimize fee drag.
+# 4h_1w_1d_volume_breakout_v2
+# Hypothesis: Trade 4-hour price breakouts from Donchian channels (20) with 1-week trend filter and daily volume confirmation.
+# In bull markets, buy breakouts above upper band with 1w uptrend; in bear markets, sell breakdowns below lower band with 1w downtrend.
+# Daily volume surge confirms breakout strength. Uses ATR-based stops to manage risk.
+# Target: 20-50 trades/year with strict entry conditions to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_volume_v2"
-timeframe = "12h"
+name = "4h_1w_1d_volume_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,16 +23,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day trend: EMA25/50 crossover
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # 1-week trend: EMA25/50 crossover
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    ema25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema25_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema25_1w = pd.Series(close_1w).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema25_1w_aligned = align_htf_to_ltf(prices, df_1w, ema25_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 12h Donchian channels (20-period)
+    # 4-hour Donchian channels (20-period)
     high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: 12h volume > 1.8x 20-period average
+    # Daily volume confirmation: 4h volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema25_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(ema25_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
@@ -81,15 +81,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Break above upper Donchian band with 1-day uptrend and volume surge
+            # Long entry: Break above upper Donchian band with 1w uptrend and volume surge
             if (high_max_20[i] > high_max_20[i-1] and  # New high breakout
-                ema25_1d_aligned[i] > ema50_1d_aligned[i] and  # 1-day uptrend
+                ema25_1w_aligned[i] > ema50_1w_aligned[i] and  # 1w uptrend
                 vol_surge):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Break below lower Donchian band with 1-day downtrend and volume surge
+            # Short entry: Break below lower Donchian band with 1w downtrend and volume surge
             elif (low_min_20[i] < low_min_20[i-1] and  # New low breakdown
-                  ema25_1d_aligned[i] < ema50_1d_aligned[i] and  # 1-day downtrend
+                  ema25_1w_aligned[i] < ema50_1w_aligned[i] and  # 1w downtrend
                   vol_surge):
                 position = -1
                 signals[i] = -0.25
