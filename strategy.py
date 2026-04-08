@@ -1,3 +1,6 @@
+# 4h_1d_donchian_breakout_volume_v1
+# Hypothesis: Breakout of 1h Donchian channels with 1d EMA trend filter and volume confirmation works in both bull and bear markets by capturing momentum bursts while avoiding countertrend trades. 4h timeframe limits overtrading; volume and trend filters reduce false breakouts.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
