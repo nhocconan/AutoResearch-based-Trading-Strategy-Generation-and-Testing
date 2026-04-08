@@ -1,110 +1,175 @@
 #!/usr/bin/env python3
 """
-1d_1w_kama_rsi_v1
-Hypothesis: 1-day KAMA trend with RSI mean reversion on weekly timeframe, filtered by 1-week volatility regime.
-- KAMA adapts to market noise, effective in both trending and ranging markets.
-- Weekly RSI > 70 or < 30 indicates overextension on higher timeframe, signaling mean reversion.
-- Weekly ATR ratio (current/average) filters for high volatility environments where mean reversion works best.
-- Position size: 0.25 for mean reversion trades.
-Target: 15-25 trades/year (60-100 total over 4 years).
+12h_Camarilla_Pivot_Volume_Spray_v1
+Hypothesis: 
+- Uses 1d Camarilla pivot levels (support/resistance) as key price levels
+- Enters long near L3 support with bullish rejection, short near H3 resistance with bearish rejection
+- Requires volume spike (>2x 20-period average) to confirm institutional interest
+- Uses 1-week ADX > 25 to ensure we're in a trending environment (avoids chop)
+- Designed for 12h timeframe to capture multi-day swings while minimizing noise
+- Works in both bull/bear markets by fading extremes in trending conditions
+- Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_v1"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_Volume_Spray_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_kama(close, er_len=10, fast_len=2, slow_len=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).rolling(window=er_len, min_periods=1).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-week data for RSI and ATR
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from previous 1d bar
+    # H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
+    # L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels (using previous day's values)
+    H3 = close_1d + 1.1 * range_1d
+    H4 = close_1d + 1.5 * range_1d
+    L3 = close_1d - 1.1 * range_1d
+    L4 = close_1d - 1.5 * range_1d
+    
+    # Align Camarilla levels to 12h timeframe (using previous day's levels)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    # Calculate ADX on weekly data
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Weekly RSI(14)
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Weekly ATR(14) and its average for volatility regime
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma_1w = pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1w / atr_ma_1w
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Daily KAMA(10,2,30)
-    kama = calculate_kama(close, er_len=10, fast_len=2, slow_len=30)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period]) 
+        # Subsequent values using Wilder's smoothing
+        for i in range(period, len(arr)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Align weekly indicators to daily
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    atr_period = 14
+    atr_1w = smooth_wilder(tr, atr_period)
+    dm_plus_smooth = smooth_wilder(dm_plus, atr_period)
+    dm_minus_smooth = smooth_wilder(dm_minus, atr_period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1w = smooth_wilder(dx, atr_period)
+    
+    # Align ADX to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Volume filter: volume spike > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup
-    start_idx = 60
+    # Start after warmup (need enough data for calculations)
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if weekly data not available
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(atr_ratio_aligned[i]):
-            signals[i] = 0.0
+        # Skip if data not available
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(volume_spike[i])):
+            if position != 0:
+                # Hold position until exit conditions met
+                pass
+            else:
+                signals[i] = 0.0
             continue
         
-        # High volatility regime (ATR ratio > 1.2) for mean reversion
-        if atr_ratio_aligned[i] > 1.2:
-            # Mean reversion signals from weekly RSI extremes
-            if rsi_1w_aligned[i] < 30 and close[i] > kama[i]:
-                # Oversold and price above KAMA -> long
-                signals[i] = 0.25
-            elif rsi_1w_aligned[i] > 70 and close[i] < kama[i]:
-                # Overbought and price below KAMA -> short
-                signals[i] = -0.25
-            else:
+        # Trend filter: only trade in trending markets (ADX > 25)
+        trending = adx_1w_aligned[i] > 25
+        
+        if position == 1:  # Long position
+            # Exit: price reaches H3 (take profit) or trend dies
+            if close[i] >= H3_aligned[i] or not trending:
+                position = 0
                 signals[i] = 0.0
-        else:
-            # Low volatility: follow KAMA trend
-            if close[i] > kama[i]:
-                signals[i] = 0.25
-            elif close[i] < kama[i]:
-                signals[i] = -0.25
             else:
+                signals[i] = 0.25  # Position size
+                
+        elif position == -1:  # Short position
+            # Exit: price reaches L3 (take profit) or trend dies
+            if close[i] <= L3_aligned[i] or not trending:
+                position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = -0.25  # Position size
+        else:  # Flat, look for entry
+            # Only enter in trending markets
+            if not trending:
+                signals[i] = 0.0
+                continue
+                
+            # Long entry: price near L3 support with bullish rejection + volume spike
+            # Price within 0.5% of L3 and closing above it (bullish rejection)
+            near_L3 = np.abs(close[i] - L3_aligned[i]) / L3_aligned[i] < 0.005
+            bullish_rejection = close[i] > L3_aligned[i]
+            
+            # Short entry: price near H3 resistance with bearish rejection + volume spike
+            near_H3 = np.abs(close[i] - H3_aligned[i]) / H3_aligned[i] < 0.005
+            bearish_rejection = close[i] < H3_aligned[i]
+            
+            if near_L3 and bullish_rejection and volume_spike[i]:
+                position = 1
+                signals[i] = 0.25
+            elif near_H3 and bearish_rejection and volume_spike[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
