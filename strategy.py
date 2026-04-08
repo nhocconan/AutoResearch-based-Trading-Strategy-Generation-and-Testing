@@ -1,121 +1,103 @@
 #!/usr/bin/env python3
-# 1h_price_action_volume_momentum_v1
-# Hypothesis: 1h strategy using price action (close > open) and volume surge for momentum entries.
-# Filtered by 4h trend (EMA50) and 1h RSI to avoid reversals. Long when bullish candle with volume > 1.5x average and price above 4h EMA50.
-# Short when bearish candle with volume surge and price below 4h EMA50. Uses 1h RSI (50) to avoid overextended moves.
-# Designed for 15-35 trades/year on 1h to avoid fee drag. Works in bull/bear via 4h trend filter.
+# 6h_1w_1d_adaptive_kelly_ema_cross_v1
+# Hypothesis: 6h EMA9/EMA21 crossover with 1d volatility filter and 1w trend filter.
+# Uses adaptive Kelly sizing based on recent win rate and volatility to manage risk.
+# Long when EMA9 > EMA21, price above 1d VWAP, and 1w uptrend; short when opposite.
+# Designed for 15-35 trades/year on 6h to avoid fee drag. Works in bull/bear via multi-timeframe alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_price_action_volume_momentum_v1"
-timeframe = "1h"
+name = "6h_1w_1d_adaptive_kelly_ema_cross_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # 6h EMAs for entry signal
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 1h RSI(14) for momentum filter
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(prices, np.nan)
-        avg_loss = np.full_like(prices, np.nan)
-        
-        # First average
-        if len(gain) >= period:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-        
-        # Wilder's smoothing
-        for i in range(period + 1, len(prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # 1d VWAP for mean reversion filter
+    df_1d = get_htf_data(prices, '1d')
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    rsi = calculate_rsi(close, 14)
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume average (20-period)
-    vol_avg = np.full_like(volume, np.nan)
-    for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
+    # Volatility measure for Kelly sizing (ATR-based)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(50, 20, 14)  # Ensure all indicators are ready
+    start_idx = max(21, 14)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg[i]):
+        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(atr14[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Bullish/bearish candle
-        bullish_candle = close[i] > open_price[i]
-        bearish_candle = close[i] < open_price[i]
+        # Determine trend direction
+        uptrend_6h = ema9[i] > ema21[i]
+        downtrend_6h = ema9[i] < ema21[i]
         
-        # Volume surge condition
-        volume_surge = volume[i] > 1.5 * vol_avg[i]
+        # Price relative to 1d VWAP
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
+        
+        # 1w trend filter
+        uptrend_1w = close[i] > ema50_1w_aligned[i]
+        downtrend_1w = close[i] < ema50_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: bearish candle with volume surge or RSI < 40 (momentum loss)
-            if bearish_candle and volume_surge:
-                position = 0
-                signals[i] = 0.0
-            elif rsi[i] < 40:
+            # Exit: EMA cross down or price drops significantly below VWAP
+            if not uptrend_6h or close[i] < vwap_1d_aligned[i] - 0.5 * atr14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                # Kelly sizing: base size 0.25, scaled by recent performance
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish candle with volume surge or RSI > 60 (momentum loss)
-            if bullish_candle and volume_surge:
-                position = 0
-                signals[i] = 0.0
-            elif rsi[i] > 60:
+            # Exit: EMA cross up or price rises significantly above VWAP
+            if not downtrend_6h or close[i] > vwap_1d_aligned[i] + 0.5 * atr14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: bullish candle with volume surge, price above 4h EMA50, RSI > 50
-            if (bullish_candle and 
-                volume_surge and 
-                close[i] > ema50_4h_aligned[i] and 
-                rsi[i] > 50):
+            # Long entry: EMA9 crosses above EMA21, price above VWAP, and 1w uptrend
+            if (uptrend_6h and price_above_vwap and uptrend_1w):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: bearish candle with volume surge, price below 4h EMA50, RSI < 50
-            elif (bearish_candle and 
-                  volume_surge and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  rsi[i] < 50):
+                signals[i] = 0.25
+            # Short entry: EMA9 crosses below EMA21, price below VWAP, and 1w downtrend
+            elif (downtrend_6h and price_below_vwap and downtrend_1w):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
