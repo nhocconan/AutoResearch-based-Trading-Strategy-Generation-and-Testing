@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 12h_1d_ema_touch_volume_v1
-# Hypothesis: 12-hour price touching 21-period EMA with volume > 1.8x average and alignment with daily trend (price > daily EMA200).
-# Long when price touches EMA21 from below (low <= EMA21 < close) with volume confirmation and bullish daily trend.
-# Short when price touches EMA21 from above (high >= EMA21 > close) with volume confirmation and bearish daily trend.
-# Exit when price crosses EMA21 in opposite direction.
-# Uses EMA21 for dynamic support/resistance and daily EMA200 for trend filter to work in both bull and bear markets.
+# 1d_weekly_pivot_reversion_v1
+# Hypothesis: Daily mean reversion from weekly pivot levels with volume confirmation.
+# Long when price pulls back to weekly pivot support in an uptrend (price > weekly SMA50).
+# Short when price rallies to weekly pivot resistance in a downtrend (price < weekly SMA50).
+# Uses weekly pivot from 1-week data as dynamic support/resistance.
+# Works in both bull (buy dips) and bear (sell rallies) markets by following trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_ema_touch_volume_v1"
-timeframe = "12h"
+name = "1d_weekly_pivot_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,67 +24,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for daily EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 1-week data for weekly pivot and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate EMA21 for 12h timeframe
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate weekly pivot from weekly data (using previous week's data)
+    # Weekly pivot = (Prior week high + prior week low + prior week close) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily EMA200
-    close_1d_s = pd.Series(df_1d['close'].values)
-    ema200_1d = close_1d_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Need at least 1 week
+    weekly_pivot = np.full(len(close_1w), np.nan)
+    for i in range(0, len(close_1w)):
+        if i >= 0:  # Use current week's data for pivot (will be aligned to previous week)
+            week_high = high_1w[i]
+            week_low = low_1w[i]
+            week_close = close_1w[i]
+            weekly_pivot[i] = (week_high + week_low + week_close) / 3.0
     
-    # Align daily EMA200 to 12h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate weekly SMA50 for trend filter
+    sma_50_1w = np.full(len(close_1w), np.nan)
+    for i in range(49, len(close_1w)):
+        sma_50_1w[i] = np.mean(close_1w[i-49:i+1])
     
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align weekly indicators to daily timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    
+    # Calculate daily volatility filter (ATR-based)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):  # Start after EMA21 warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema21[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(sma_50_1w_aligned[i]) or 
+            np.isnan(atr[i]) or atr[i] == 0):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        ema21_val = ema21[i]
-        daily_ema200 = ema200_1d_aligned[i]
+        pivot = weekly_pivot_aligned[i]
+        sma50 = sma_50_1w_aligned[i]
+        vol_ma = np.mean(volume[max(0, i-19):i+1])  # 20-period volume average
+        vol_ratio = volume[i] / vol_ma if vol_ma > 0 else 0
         
         if position == 1:  # Long
-            # Exit: price crosses below EMA21
-            if price < ema21_val:
+            # Exit: price reaches weekly pivot or trend changes
+            if price >= pivot or price < sma50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses above EMA21
-            if price > ema21_val:
+            # Exit: price reaches weekly pivot or trend changes
+            if price <= pivot or price > sma50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches EMA21 from below with volume expansion and bullish daily trend
-            if low[i] <= ema21_val < close[i] and vol_ratio > 1.8 and price > daily_ema200:
+            # Enter long: price pulls back to weekly pivot support in uptrend
+            if price <= pivot * 1.02 and price >= pivot * 0.98 and price > sma50 and vol_ratio > 1.5:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches EMA21 from above with volume expansion and bearish daily trend
-            elif high[i] >= ema21_val > close[i] and vol_ratio > 1.8 and price < daily_ema200:
+            # Enter short: price rallies to weekly pivot resistance in downtrend
+            elif price >= pivot * 0.98 and price <= pivot * 1.02 and price < sma50 and vol_ratio > 1.5:
                 position = -1
                 signals[i] = -0.25
     
