@@ -1,16 +1,17 @@
-#!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume_v1
-# Hypothesis: 12h Donchian breakout (20-period) with volume confirmation and daily trend filter.
-# Enters long on breakout above upper band in daily uptrend, short on breakdown below lower band in daily downtrend.
-# Volume filter (>1.5x average) reduces false signals. Targets 20-40 trades/year to minimize fee drag.
+# 4h_fractal_breakout_1d_trend_volume_v1
+# Hypothesis: Williams Fractal breakout with 1d trend filter and volume confirmation.
+# Uses daily Williams Fractals to identify key support/resistance levels.
+# Breaks above/below fractal levels trigger entries with volume confirmation (>1.5x average) and daily trend filter.
+# Works in bull markets by catching breakouts above resistance and in bear markets by catching breakdowns below support.
+# Fractal breakouts provide high-probability entries with clear structure, targeting 20-40 trades/year.
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_fractal_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,32 +24,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    period = 20
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
-    
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    # Volume filter: 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    
-    # Get daily data for trend filter
+    # Get daily data for Williams Fractals and trend filter
     df_daily = get_htf_data(prices, '1d')
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
+    
+    # Williams Fractals (need 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_daily, low_daily)
+    # Align fractals with 2-bar additional delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_daily, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_daily, bullish_fractal, additional_delay_bars=2)
     
     # Daily EMA (50-period) for higher timeframe trend
     ema_period = 50
-    ema_daily = np.full_like(close_daily, np.nan)
-    for i in range(ema_period-1, len(close_daily)):
-        ema_daily[i] = np.mean(close_daily[i-ema_period+1:i+1])
+    ema_daily = np.zeros_like(close_daily)
+    ema_daily[ema_period-1] = np.mean(close_daily[:ema_period])
+    for i in range(ema_period, len(close_daily)):
+        ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * (ema_period - 1)) / (ema_period + 1)
     
-    # Align daily EMA to 12h timeframe
+    # Align daily EMA to 4h timeframe
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    
+    # Volume filter: 20-period average volume
+    vol_ma = np.zeros_like(volume)
+    vol_ma[19:] = np.convolve(volume, np.ones(20)/20, mode='valid')
+    vol_ma[:19] = vol_ma[19]  # Fill beginning with first valid value
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -58,7 +59,7 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = max(period, ema_period) + 5
+    start_idx = max(ema_period) + 5
     
     for i in range(start_idx, n):
         # Skip if outside trading session
@@ -67,7 +68,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
             np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma[i]) or volume[i] == 0):
             signals[i] = 0.0
             continue
@@ -80,29 +81,29 @@ def generate_signals(prices):
         downtrend_htf = close[i] < ema_daily_aligned[i]
         
         if position == 1:  # Long position
-            # Exit if price breaks below lower band or volume fails
-            if close[i] < lower[i] or not volume_filter:
+            # Exit if price breaks below bullish fractal (support) or volume fails
+            if close[i] < bullish_fractal_aligned[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit if price breaks above upper band or volume fails
-            if close[i] > upper[i] or not volume_filter:
+            # Exit if price breaks above bearish fractal (resistance) or volume fails
+            if close[i] > bearish_fractal_aligned[i] or not volume_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: breakout above upper band, volume confirmation, and daily uptrend
-            if (close[i] > upper[i] and 
+            # Long entry: price breaks above bullish fractal (resistance becomes support), volume confirmation, and daily uptrend
+            if (close[i] > bullish_fractal_aligned[i] and 
                 volume_filter and 
                 uptrend_htf):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakdown below lower band, volume confirmation, and daily downtrend
-            elif (close[i] < lower[i] and 
+            # Short entry: price breaks below bearish fractal (support becomes resistance), volume confirmation, and daily downtrend
+            elif (close[i] < bearish_fractal_aligned[i] and 
                   volume_filter and 
                   downtrend_htf):
                 position = -1
