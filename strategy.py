@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_trend_v2
-# Hypothesis: Camarilla pivot levels from daily timeframe act as institutional support/resistance.
-# Long when price breaks above R4 with volume confirmation in uptrend (EMA50 > EMA200).
-# Short when price breaks below S4 with volume confirmation in downtrend (EMA50 < EMA200).
-# Uses 4h timeframe for entries and daily for pivot calculation to reduce noise.
-# Volume filter requires current volume > 1.5x 20-period average to avoid false breakouts.
-# Designed for fewer, higher-quality trades to minimize fee drag in ranging markets.
+# 6h_1d_ema_pullback_v1
+# Hypothesis: 6h trend following using 1d EMA(20) as dynamic trend filter and 6h EMA(8/21) for entry timing.
+# In bull markets: price > 1d EMA20 + 6h EMA8 crosses above EMA21 → long
+# In bear markets: price < 1d EMA20 + 6h EMA8 crosses below EMA21 → short
+# Uses 1d trend filter to avoid counter-trend trades, reducing whipsaws in both bull and bear markets.
+# Entry on EMA crossover provides timely signals while 1d EMA ensures alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_trend_v2"
-timeframe = "4h"
+name = "6h_1d_ema_pullback_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,68 +24,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA50 and EMA200 for trend filter
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Volume average for confirmation
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Daily Camarilla pivot levels
+    # 1d EMA(20) - trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Previous day's values for today's levels
-    phigh = np.concatenate([[np.nan], high_1d[:-1]])
-    plow = np.concatenate([[np.nan], low_1d[:-1]])
-    pclose = np.concatenate([[np.nan], close_1d[:-1]])
-    
-    pivot = (phigh + plow + pclose) / 3
-    range_ = phigh - plow
-    
-    # Camarilla levels
-    r4 = pivot + (range_ * 1.1 / 2)
-    r3 = pivot + (range_ * 1.1 / 4)
-    s3 = pivot - (range_ * 1.1 / 4)
-    s4 = pivot - (range_ * 1.1 / 2)
-    
-    # Align to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # 6h EMA(8) and EMA(21) for entry timing
+    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any data is NaN
-        if (np.isnan(ema50[i]) or np.isnan(ema200[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(s4_aligned[i])):
+    for i in range(21, n):
+        ema8 = ema_8[i]
+        ema21 = ema_21[i]
+        price = close[i]
+        ema20_1d = ema_20_1d_aligned[i]
+        
+        if np.isnan(ema8) or np.isnan(ema21) or np.isnan(ema20_1d):
+            if position != 0:
+                pass  # Hold position
+            else:
+                signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Long: price breaks above R4 with volume in uptrend
-        if (close[i] > r4_aligned[i] and vol_confirm and 
-            ema50[i] > ema200[i]):
-            signals[i] = 0.25
-        # Short: price breaks below S4 with volume in downtrend
-        elif (close[i] < s4_aligned[i] and vol_confirm and 
-              ema50[i] < ema200[i]):
-            signals[i] = -0.25
-        # Otherwise, stay flat (0)
-        else:
-            signals[i] = 0.0
+        if position == 1:  # Long position
+            if ema8 <= ema21 or price < ema20_1d:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            if ema8 >= ema21 or price > ema20_1d:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat
+            if ema8 > ema21 and price > ema20_1d:
+                position = 1
+                signals[i] = 0.25
+            elif ema8 < ema21 and price < ema20_1d:
+                position = -1
+                signals[i] = -0.25
     
     return signals
