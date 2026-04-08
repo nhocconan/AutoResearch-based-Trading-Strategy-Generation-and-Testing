@@ -1,17 +1,17 @@
-#4h_12h_ema_cross_vol_breakout_v1
-# Hypothesis: 4-hour EMA crossover with 12-hour trend filter and volume confirmation.
-# Long when fast EMA crosses above slow EMA, price above 12h EMA, and volume > 1.5x average.
-# Short when fast EMA crosses below slow EMA, price below 12h EMA, and volume > 1.5x average.
-# Exit when EMA cross reverses or volume drops below average.
-# Uses EMA on 4h for entry timing and 12h for trend filter to avoid counter-trend trades.
-# Designed to generate ~20-30 trades/year to avoid fee decay while capturing strong trends.
+#!/usr/bin/env python3
+# 6h_1d_ema_trend_follow_v1
+# Hypothesis: 6-hour EMA trend following with 1-day EMA filter and volume confirmation.
+# Long when price > 20 EMA and 20 EMA > 50 EMA on 6h, with price > 20 EMA on 1d and volume > 1.5x average.
+# Short when price < 20 EMA and 20 EMA < 50 EMA on 6h, with price < 20 EMA on 1d and volume > 1.5x average.
+# Exit when trend reverses (20 EMA crosses 50 EMA) or volume drops below average.
+# Designed to capture strong trends while avoiding choppy markets, targeting 15-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_ema_cross_vol_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_ema_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,51 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA on 4h data
-    fast_period = 9
-    slow_period = 21
-    
-    # Fast EMA
-    ema_fast = np.full(n, np.nan)
-    ema_fast[fast_period-1] = np.mean(close[:fast_period])
-    for i in range(fast_period, n):
-        ema_fast[i] = (close[i] * 2/(fast_period+1)) + (ema_fast[i-1] * (1-2/(fast_period+1)))
-    
-    # Slow EMA
-    ema_slow = np.full(n, np.nan)
-    ema_slow[slow_period-1] = np.mean(close[:slow_period])
-    for i in range(slow_period, n):
-        ema_slow[i] = (close[i] * 2/(slow_period+1)) + (ema_slow[i-1] * (1-2/(slow_period+1)))
-    
-    # Get 12-hour data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    # Calculate EMA on 12-hour data
-    ema_12h = np.full(len(close_12h), np.nan)
-    ema_12h[20] = np.mean(close_12h[:21])
-    for i in range(21, len(close_12h)):
-        ema_12h[i] = (close_12h[i] * 2/22) + (ema_12h[i-1] * (1-2/22))
-    
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate EMAs on 6h data
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
     
     # Calculate average volume for confirmation
-    vol_ma = np.full(n, np.nan)
-    vol_ma[19] = np.mean(volume[:20])
-    for i in range(20, n):
-        vol_ma[i] = (volume[i] + vol_ma[i-1] * 19) / 20
+    vol_series = pd.Series(volume)
+    avg_volume = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).values
+    
+    # Align 1d EMA to 6h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(ema_20_1d_aligned[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -76,41 +59,33 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        ema_fast_val = ema_fast[i]
-        ema_slow_val = ema_slow[i]
-        ema_12h_val = ema_12h_aligned[i]
-        vol_ma_val = vol_ma[i]
-        volume_val = volume[i]
+        vol = volume[i]
         
         if position == 1:  # Long
-            # Exit: EMA cross reverses or volume drops below average
-            if ema_fast_val < ema_slow_val or volume_val < vol_ma_val:
+            # Exit: trend reversal or low volume
+            if ema_20[i] < ema_50[i] or vol < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: EMA cross reverses or volume drops below average
-            if ema_fast_val > ema_slow_val or volume_val < vol_ma_val:
+            # Exit: trend reversal or low volume
+            if ema_20[i] > ema_50[i] or vol < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: EMA crossover with trend filter and volume confirmation
-            # Bullish: fast EMA crosses above slow EMA, price above 12h EMA, volume > 1.5x average
-            if (ema_fast_val > ema_slow_val and 
-                ema_fast_val <= ema_slow_val + 1e-9 and  # Ensure crossover just happened
-                price > ema_12h_val and 
-                volume_val > vol_ma_val * 1.5):
+            # Entry conditions: EMA alignment with volume confirmation
+            # Bullish: price > EMA20 > EMA50 on 6h, price > EMA20 on 1d, volume > 1.5x average
+            if (price > ema_20[i] and ema_20[i] > ema_50[i] and 
+                price > ema_20_1d_aligned[i] and vol > 1.5 * avg_volume[i]):
                 position = 1
                 signals[i] = 0.25
-            # Bearish: fast EMA crosses below slow EMA, price below 12h EMA, volume > 1.5x average
-            elif (ema_fast_val < ema_slow_val and 
-                  ema_fast_val >= ema_slow_val - 1e-9 and  # Ensure crossover just happened
-                  price < ema_12h_val and 
-                  volume_val > vol_ma_val * 1.5):
+            # Bearish: price < EMA20 < EMA50 on 6h, price < EMA20 on 1d, volume > 1.5x average
+            elif (price < ema_20[i] and ema_20[i] < ema_50[i] and 
+                  price < ema_20_1d_aligned[i] and vol > 1.5 * avg_volume[i]):
                 position = -1
                 signals[i] = -0.25
     
