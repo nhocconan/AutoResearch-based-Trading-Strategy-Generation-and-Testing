@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_rsi_pullback_volume_v1
-Hypothesis: RSI pullback strategy on 4h timeframe with volume confirmation and EMA trend filter.
-Works in both bull and bear markets by taking pullbacks in the direction of the higher timeframe trend.
-- Long when RSI < 30 (oversold), price > EMA20 (uptrend), and volume > 1.5x average
-- Short when RSI > 70 (overbought), price < EMA20 (downtrend), and volume > 1.5x average
-- Uses daily EMA50 as higher timeframe trend filter to avoid counter-trend trades
-- Targets 20-40 trades/year to minimize fee drag while capturing high-probability setups
+4h_cci_trend_reversal_v2
+Hypothesis: Uses CCI(20) on 4h with 1d trend filter and volume confirmation.
+Long when CCI crosses below -100 (oversold) with 1d bullish trend and volume surge.
+Short when CCI crosses above +100 (overbought) with 1d bearish trend and volume surge.
+Designed for 15-25 trades/year to avoid fee drag while capturing mean-reversion in trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_pullback_volume_v1"
+name = "4h_cci_trend_reversal_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,42 +25,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA20 for 4h trend
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # CCI calculation (20-period)
+    typical_price = (high + low + close) / 3
+    sma_tp = np.full(n, np.nan)
+    mad = np.full(n, np.nan)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    cci_period = 20
+    for i in range(cci_period-1, n):
+        sma_tp[i] = np.mean(typical_price[i-cci_period+1:i+1])
+        mean_dev = np.mean(np.abs(typical_price[i-cci_period+1:i+1] - sma_tp[i]))
+        if mean_dev > 0:
+            mad[i] = mean_dev
+        else:
+            mad[i] = 1e-10
     
-    # Volume filter: 1.5x 20-period average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > 1.5 * vol_ma
+    cci = np.full(n, np.nan)
+    for i in range(cci_period-1, n):
+        cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
     
-    # Get daily data for EMA50 trend filter
+    # Volume filter: 1.8x 20-period average (approx 3.3 days)
+    vol_ma_period = 20
+    vol_ma = np.full(n, np.nan)
+    for i in range(vol_ma_period-1, n):
+        vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
+    
+    vol_surge = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            vol_surge[i] = volume[i] > 1.8 * vol_ma[i]
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA50
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Daily EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    alpha = 2 / (50 + 1)
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema_50_1d[i] = close_1d[i]
+        elif not np.isnan(close_1d[i]):
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
+        else:
+            ema_50_1d[i] = ema_50_1d[i-1]
+    
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_1d = close_1d > ema_50_1d
+    bearish_1d = close_1d < ema_50_1d
+    
+    # Align daily trend to 4h timeframe
+    bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_1d.astype(float))
+    bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 20  # Need enough data for EMA20 and RSI
+    start_idx = max(cci_period, vol_ma_period, 20) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema20[i]) or np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(cci[i]) or np.isnan(bullish_1d_aligned[i]) or 
+            np.isnan(bearish_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -70,34 +95,36 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) or price < EMA20
-            if rsi[i] > 70 or close[i] < ema20[i]:
+            # Exit: CCI crosses above 0 or trend turns bearish
+            if i > 0 and cci[i-1] <= 0 and cci[i] > 0:
+                position = 0
+                signals[i] = 0.0
+            elif bearish_1d_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) or price > EMA20
-            if rsi[i] < 30 or close[i] > ema20[i]:
+            # Exit: CCI crosses below 0 or trend turns bullish
+            if i > 0 and cci[i-1] >= 0 and cci[i] < 0:
+                position = 0
+                signals[i] = 0.0
+            elif bullish_1d_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: RSI < 30 (oversold), price > EMA20 (uptrend), price > daily EMA50 (bullish bias), volume surge
-            if (rsi[i] < 30 and 
-                close[i] > ema20[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                vol_surge[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: RSI > 70 (overbought), price < EMA20 (downtrend), price < daily EMA50 (bearish bias), volume surge
-            elif (rsi[i] > 70 and 
-                  close[i] < ema20[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  vol_surge[i]):
-                position = -1
-                signals[i] = -0.25
+            # Long entry: CCI crosses below -100, bullish trend, volume surge
+            if i > 0 and cci[i-1] > -100 and cci[i] <= -100:
+                if bullish_1d_aligned[i] > 0.5 and vol_surge[i]:
+                    position = 1
+                    signals[i] = 0.25
+            # Short entry: CCI crosses above +100, bearish trend, volume surge
+            elif i > 0 and cci[i-1] < 100 and cci[i] >= 100:
+                if bearish_1d_aligned[i] > 0.5 and vol_surge[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
