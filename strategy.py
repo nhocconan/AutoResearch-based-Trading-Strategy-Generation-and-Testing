@@ -3,110 +3,114 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot Breakout with 1w Trend Filter
-# Uses daily Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout).
-# Trades breakouts in the direction of the weekly trend (EMA20 slope).
-# Mean reversion at R3/S3 when weekly trend is weak (EMA20 flat).
-# Works in bull/bear by adapting to weekly trend direction.
-# Target: 12-37 trades/year via strict pivot level + trend confluence.
-name = "6h_camarilla_pivot_1w_trend_v1"
-timeframe = "6h"
+# Hypothesis: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+# Uses Donchian channel (20-period high/low) on 12h timeframe to identify breakouts.
+# Trades only in direction of 1d trend (ADX > 25) with volume confirmation (>1.5x 20-period average).
+# Works in bull/bear by trading breakouts in trend direction.
+# Target: 12-37 trades/year via strict Donchian + trend + volume confluence.
+name = "12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots (call ONCE before loop)
+    # Get 1d data for ADX (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each daily bar
-    # Formula: 
-    # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1/2
-    # R3 = PP + (H - L) * 1.1/4
-    # S3 = PP - (H - L) * 1.1/4
-    # S4 = PP - (H - L) * 1.1/2
-    pp = (high_1d + low_1d + close_1d) / 3
-    r4 = pp + (high_1d - low_1d) * 1.1 / 2
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4
-    s4 = pp - (high_1d - low_1d) * 1.1 / 2
+    # Calculate 14-period ADX for trend strength on 1d data
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Get weekly data for EMA20 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Calculate EMA20 on weekly close
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate EMA20 slope for trend strength
-    ema_slope = np.diff(ema_20, prepend=ema_20[0])
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
     
-    # Align all HTF data to 6s timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    ema_slope_6h = align_htf_to_ltf(prices, df_1w, ema_slope)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # 20-period Donchian channel on 12h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start from sufficient lookback
-    start_idx = 10
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or 
-            np.isnan(ema_slope_6h[i])):
+        if (np.isnan(adx[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
+        # Get aligned 1d values for current 12h bar
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
+        
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned > 25
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        
         if position == 1:  # Long position
-            # Exit: price closes below S3 OR weekly trend turns negative
-            if close[i] < s3_6h[i] or ema_slope_6h[i] < 0:
+            # Exit: price closes below Donchian low OR trend weakens
+            if close[i] < donchian_low[i] or not strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above R3 OR weekly trend turns positive
-            if close[i] > r3_6h[i] or ema_slope_6h[i] > 0:
+            # Exit: price closes above Donchian high OR trend weakens
+            if close[i] > donchian_high[i] or not strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Breakout mode: strong weekly trend (|slope| > 0.1% of price)
-            strong_trend = abs(ema_slope_6h[i]) > 0.001 * close[i]
-            
-            if strong_trend:
-                # Breakout continuation: trade in trend direction
-                if ema_slope_6h[i] > 0 and close[i] > r4_6h[i]:  # Uptrend + break above R4
+            # Only trade during strong trend with volume confirmation
+            if strong_trend and volume_confirm:
+                # Long: price breaks above Donchian high
+                if close[i] > donchian_high[i]:
                     position = 1
                     signals[i] = 0.25
-                elif ema_slope_6h[i] < 0 and close[i] < s4_6h[i]:  # Downtrend + break below S4
+                # Short: price breaks below Donchian low
+                elif close[i] < donchian_low[i]:
                     position = -1
                     signals[i] = -0.25
-            else:
-                # Mean reversion mode: weak trend, fade at R3/S3
-                if close[i] > r3_6h[i]:  # Sell at R3 resistance
-                    position = -1
-                    signals[i] = -0.25
-                elif close[i] < s3_6h[i]:  # Buy at S3 support
-                    position = 1
-                    signals[i] = 0.25
     
     return signals
