@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_daily_trend_volume_v1
+# 12h_camarilla_pivot_daily_trend_volume_v2
 # Hypothesis: Uses daily Camarilla pivot levels with 1d trend filter and volume confirmation on 12h timeframe.
 # Goes long when price rebounds from S3/S4 in daily uptrend with volume confirmation.
 # Goes short when price rebounds from R3/R4 in daily downtrend with volume confirmation.
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_daily_trend_volume_v1"
+name = "12h_camarilla_pivot_daily_trend_volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
