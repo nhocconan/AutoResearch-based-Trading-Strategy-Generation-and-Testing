@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_supertrend_weekly_filter_v1
-Hypothesis: Supertrend on 12h with weekly trend filter to avoid counter-trend trades.
-- Long when Supertrend turns green and weekly trend is bullish
-- Short when Supertrend turns red and weekly trend is bearish
-- Exit when Supertrend reverses
-- Targets 15-30 trades/year to minimize fee decay
+4h_triple_confirmation_v1
+Hypothesis: Uses 4h Donchian breakout with 1d volume confirmation and weekly trend filter.
+- Long when price breaks above Donchian(20) high, 1d volume > 1.5x 20-day average, and weekly close > weekly EMA50
+- Short when price breaks below Donchian(20) low, 1d volume > 1.5x 20-day average, and weekly close < weekly EMA50
+- Exit when price returns to Donchian midpoint or weekly trend reverses
+- Targets 20-40 trades/year to minimize fee decay
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_supertrend_weekly_filter_v1"
-timeframe = "12h"
+name = "4h_triple_confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,72 +24,46 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Supertrend parameters
-    atr_period = 10
-    multiplier = 3.0
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    atr[atr_period:] = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values[atr_period:]
+    # 1-day volume average (20-period)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate upper and lower bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Initialize Supertrend
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-        
-        # Prevent reversal
-        if direction[i] == 1 and supertrend[i] < supertrend[i-1]:
-            supertrend[i] = supertrend[i-1]
-        if direction[i] == -1 and supertrend[i] > supertrend[i-1]:
-            supertrend[i] = supertrend[i-1]
+    # Daily volume (20-period average)
+    daily_volume = df_1d['volume'].values
+    daily_volume_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    daily_volume_ma_aligned = align_htf_to_ltf(prices, df_1d, daily_volume_ma)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Weekly EMA for trend
+    # Weekly EMA50
     close_1w = df_1w['close'].values
-    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_bullish = close_1w > ema_21
-    weekly_bearish = close_1w < ema_21
-    
-    # Align weekly trend to 12h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(atr_period, 21)  # Wait for indicators to be valid
+    start_idx = max(lookback, 20)  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(supertrend[i]) or np.isnan(weekly_bullish_aligned[i]) or 
-            np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(daily_volume_ma_aligned[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -97,27 +71,33 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Supertrend turns red or weekly turns bearish
-            if direction[i] == -1 or weekly_bearish_aligned[i] > 0.5:
+            # Exit: Price returns to midpoint or weekly trend turns bearish
+            if close[i] <= donchian_mid[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Supertrend turns green or weekly turns bullish
-            if direction[i] == 1 or weekly_bullish_aligned[i] > 0.5:
+            # Exit: Price returns to midpoint or weekly trend turns bullish
+            if close[i] >= donchian_mid[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Supertrend turns green and weekly bullish
-            if direction[i] == 1 and direction[i-1] == -1 and weekly_bullish_aligned[i] > 0.5:
+            # Long entry: Price breaks above Donchian high with volume confirmation and weekly bullish trend
+            if (close[i] > donchian_high[i] and 
+                volume[i] > 1.5 * volume_ma[i] and
+                daily_volume[i] > 1.5 * daily_volume_ma_aligned[i] and
+                close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Supertrend turns red and weekly bearish
-            elif direction[i] == -1 and direction[i-1] == 1 and weekly_bearish_aligned[i] > 0.5:
+            # Short entry: Price breaks below Donchian low with volume confirmation and weekly bearish trend
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > 1.5 * volume_ma[i] and
+                  daily_volume[i] > 1.5 * daily_volume_ma_aligned[i] and
+                  close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
