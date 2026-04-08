@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_fractal_breakout_1d_trend_volume_v1
-# Hypothesis: 12h timeframe trading using daily Williams Fractal breakouts with volume confirmation and 1d trend filter. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Daily trend filter ensures alignment with higher timeframe direction. Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# 4h_fractal_breakout_1d_trend_volume_v2
+# Hypothesis: 4h timeframe trading using daily Williams Fractal breakouts with volume confirmation and 1d trend filter. Fractals provide key support/resistance levels; breakouts with volume capture momentum in both bull and bear markets. Daily trend filter ensures alignment with higher timeframe direction. Target: 19-50 trades/year per symbol (75-200 total over 4 years).
 
-name = "12h_fractal_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_fractal_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -52,7 +52,7 @@ def generate_signals(prices):
     bearish_fractal_aligned = align_htf_to_ltf(prices, df_d, bearish_fractal, additional_delay_bars=2)
     bullish_fractal_aligned = align_htf_to_ltf(prices, df_d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 20-period average volume for 12h timeframe
+    # Calculate 20-period average volume for 4h timeframe
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -62,7 +62,7 @@ def generate_signals(prices):
     start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Get aligned daily indicators for current 12h bar
+        # Get aligned daily indicators for current 4h bar
         ema20_val = align_htf_to_ltf(prices, df_d, ema20_d)[i]
         bearish_val = bearish_fractal_aligned[i]
         bullish_val = bullish_fractal_aligned[i]
