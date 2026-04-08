@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_1w_1d_camarilla_breakout_volume_v2
-Hypothesis: Use weekly price channel (Donchian) for long-term bias and daily Camarilla levels for precise entry/exit with volume confirmation. 
-Long when daily price breaks above daily R3 with volume and weekly bias up. 
-Short when daily price breaks below daily S3 with volume and weekly bias down.
-Designed to work in both bull (breakouts) and bear (reversals at key levels) markets.
-Target: 7-25 trades/year per symbol (28-100 total over 4 years).
+12h_1d_momentum_volume_reversal_v1
+Hypothesis: On 12h timeframe, combine momentum (12-period RSI) with volume confirmation and 1d trend filter.
+Go long when RSI < 30 (oversold) + volume spike + price above 1d EMA50.
+Go short when RSI > 70 (overbought) + volume spike + price below 1d EMA50.
+Exit when RSI returns to neutral zone (40-60).
+Designed to capture mean reversals in ranging markets while avoiding trend-following whipsaws.
+Target: 15-35 trades/year per symbol (60-140 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_1d_camarilla_breakout_volume_v2"
-timeframe = "1d"
+name = "12h_1d_momentum_volume_reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,51 +28,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get weekly data for bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate 12-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[12] = np.mean(gain[1:13])
+    avg_loss[12] = np.mean(loss[1:13])
+    
+    for i in range(13, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 11 + gain[i]) / 12
+        avg_loss[i] = (avg_loss[i-1] * 11 + loss[i]) / 12
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous day's close for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_close[0] = close_1d[0]  # First value
-    
-    # Daily range
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-    r4 = close_1d + range_1d * 1.1 / 2
-    s4 = close_1d - range_1d * 1.1 / 2
-    
-    # Align daily Camarilla levels to daily timeframe (no shift needed as already daily)
-    r3_aligned = r3
-    s3_aligned = s3
-    r4_aligned = r4
-    s4_aligned = s4
-    
-    # Weekly bias using Donchian channel (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Volume confirmation: volume > 1.5x average of last 20 periods
+    # Volume confirmation: volume > 2.0x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    vol_confirm = volume > vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -81,9 +68,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -92,27 +77,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below daily S3 or weekly Donchian low
-            if close[i] < s3_aligned[i] or close[i] < donchian_low_aligned[i]:
+            # Exit: RSI returns to neutral zone (40-60)
+            if rsi[i] >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above daily R3 or weekly Donchian high
-            if close[i] > r3_aligned[i] or close[i] > donchian_high_aligned[i]:
+            # Exit: RSI returns to neutral zone (40-60)
+            if rsi[i] <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above daily R3 with volume and weekly bias up
-            if close[i] > r3_aligned[i] and vol_confirm[i] and close[i] > donchian_high_aligned[i]:
+            # Long entry: RSI < 30 (oversold) + volume spike + price above 1d EMA50
+            if rsi[i] < 30 and vol_confirm[i] and close[i] > ema_50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below daily S3 with volume and weekly bias down
-            elif close[i] < s3_aligned[i] and vol_confirm[i] and close[i] < donchian_low_aligned[i]:
+            # Short entry: RSI > 70 (overbought) + volume spike + price below 1d EMA50
+            elif rsi[i] > 70 and vol_confirm[i] and close[i] < ema_50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
