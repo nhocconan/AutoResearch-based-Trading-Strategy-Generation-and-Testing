@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + 12h Trend + Volume Filter
-Hypothesis: Donchian(20) breakouts on 4h with 12h trend alignment (EMA21) and volume confirmation
-capture strong trends while avoiding false breakouts in chop. Works in bull (breakouts) and bear
-(breakdowns) by using symmetric long/short logic. Volume filter ensures commitment.
-Target: 20-50 trades/year per symbol.
+1h RSI Pullback with 4h/1d Trend and Volume Confirmation v1
+Hypothesis: In strong trends (4h/1d aligned), RSI pullbacks on 1h provide high-probability entries.
+Volume confirms institutional participation. Works in bull/bear by following higher timeframe trend.
+Target: 15-37 trades/year (60-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1h_rsi_pullback_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,60 +25,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # 4h data for trend and RSI
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # 12h EMA(21) for trend filter
-    ema_21_12h = df_12h['close'].ewm(span=21, adjust=False, min_periods=21).mean()
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h.values)
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate RSI on 4h (14-period)
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(prices)
+        avg_loss = np.zeros_like(prices)
+        
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # 4h volume filter (>1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.5)
+    rsi_4h = calculate_rsi(close_4h, 14)
+    
+    # Calculate EMA on 4h and 1d for trend
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Volume filter on 4h (>1.3x 20-period average)
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_filter_4h = volume_4h > (vol_ma_4h * 1.3)
+    
+    # Align to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    vol_filter_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_filter_4h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_21_12h_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_filter_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend alignment (both 4h and 1d must agree)
+        bullish_trend = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if close[i] <= donchian_low[i] or close[i] < ema_21_12h_aligned[i]:
+            # Exit: RSI > 70 (overbought) or trend breaks
+            if rsi_4h_aligned[i] > 70 or not bullish_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if close[i] >= donchian_high[i] or close[i] > ema_21_12h_aligned[i]:
+            # Exit: RSI < 30 (oversold) or trend breaks
+            if rsi_4h_aligned[i] < 30 or not bearish_trend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Breakout long with trend alignment and volume
-            if (close[i] >= donchian_high[i] and 
-                close[i] > ema_21_12h_aligned[i] and 
-                vol_filter[i]):
+            # Pullback long in uptrend: RSI < 40 with volume confirmation
+            if (bullish_trend and 
+                rsi_4h_aligned[i] < 40 and 
+                vol_filter_4h_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Breakdown short with trend alignment and volume
-            elif (close[i] <= donchian_low[i] and 
-                  close[i] < ema_21_12h_aligned[i] and 
-                  vol_filter[i]):
+                signals[i] = 0.20
+            # Pullback short in downtrend: RSI > 60 with volume confirmation
+            elif (bearish_trend and 
+                  rsi_4h_aligned[i] > 60 and 
+                  vol_filter_4h_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
