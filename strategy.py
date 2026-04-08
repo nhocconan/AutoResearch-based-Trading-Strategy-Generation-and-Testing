@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d trend filter and volume concentration
-Hypothesis: Price breaking Donchian(20) channels in direction of 1d EMA(50) trend with volume concentration (current volume > 2.0x 20-period average) captures momentum in both bull and bear markets. The 1d trend filter reduces whipsaws, while volume confirmation ensures institutional participation. Designed for 12h timeframe to achieve 12-37 trades/year.
+4h Donchian breakout with 1d trend filter and volume concentration
+Hypothesis: Price breaking Donchian(20) channels in direction of 1d EMA(50) trend with volume concentration (current volume > 2.0x 20-period average) captures momentum in both bull and bear markets. The 1d trend filter reduces whipsaws by ensuring trades align with higher timeframe trend, while volume confirmation ensures breakout strength. Target: 20-40 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
