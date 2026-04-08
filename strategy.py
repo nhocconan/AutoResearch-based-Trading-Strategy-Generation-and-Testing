@@ -1,58 +1,50 @@
 #!/usr/bin/env python3
 """
-6h_1d1w_volatility_breakout_v2
-Hypothesis: 6-hour strategy using daily and weekly volatility breakouts with volume confirmation.
-Long when price breaks above 6h Donchian(20) high + daily ATR expansion + weekly trend filter.
-Short when price breaks below 6h Donchian(20) low + daily ATR expansion + weekly trend filter.
-Exit when price crosses opposite Donchian boundary or ATR contraction.
-Uses discrete position sizing (0.25) to manage risk. Target: 15-25 trades/year.
+12h_1w_donchian_breakout_v1
+Hypothesis: 12-hour strategy using weekly Donchian channel breakout with volume confirmation and trend filter.
+Long when price breaks above weekly Donchian high (20) with volume > 1.5x average and price > weekly EMA50 (bullish trend).
+Short when price breaks below weekly Donchian low (20) with volume > 1.5x average and price < weekly EMA50 (bearish trend).
+Exit when price returns to weekly Donchian midpoint or volume drops below average.
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d1w_volatility_breakout_v2"
-timeframe = "6h"
+name = "12h_1w_donchian_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR with proper handling"""
-    if len(high) < period:
-        return np.full_like(high, np.nan, dtype=float)
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    atr = np.full_like(high, np.nan, dtype=float)
-    if period == 1:
-        atr = tr
-    else:
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    if len(high) < period:
-        return np.full_like(high, np.nan, dtype=float), np.full_like(high, np.nan, dtype=float)
+def calculate_donchian_channels(high, low, window):
+    """Calculate Donchian channels: upper band = rolling max(high), lower band = rolling min(low)"""
+    if len(high) < window:
+        return np.full(len(high), np.nan), np.full(len(high), np.nan)
     
     upper = np.full_like(high, np.nan, dtype=float)
     lower = np.full_like(high, np.nan, dtype=float)
     
-    for i in range(period-1, len(high)):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    for i in range(window-1, len(high)):
+        upper[i] = np.max(high[i-window+1:i+1])
+        lower[i] = np.min(low[i-window+1:i+1])
     
     return upper, lower
 
+def calculate_ema(close, period):
+    """Calculate EMA with proper handling"""
+    if len(close) < period:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    ema = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
+    for i in range(period, len(close)):
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    return ema
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -60,60 +52,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Get weekly data for trend filter
+    # Get weekly data for Donchian channels and EMA
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    
-    # Calculate daily ATR moving average for expansion detection
-    atr_ma_1d = np.full_like(atr_1d, np.nan, dtype=float)
-    for i in range(10, len(atr_1d)):
-        atr_ma_1d[i] = np.mean(atr_1d[i-10:i])
-    
-    # Calculate weekly EMA for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_50_1w = np.full_like(close_1w, np.nan, dtype=float)
-    if len(close_1w) >= 50:
-        alpha = 2.0 / (50 + 1)
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
     
-    # Calculate 6h Donchian channels
-    donch_period = 20
-    donch_upper, donch_lower = calculate_donchian(high, low, donch_period)
+    # Calculate weekly Donchian channels (20-period)
+    donch_high_20, donch_low_20 = calculate_donchian_channels(high_1w, low_1w, 20)
     
-    # Align indicators to 6-hour timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = calculate_ema(close_1w, 50)
+    
+    # Calculate weekly Donchian midpoint for exit
+    donch_mid_20 = (donch_high_20 + donch_low_20) / 2.0
+    
+    # Align indicators to 12-hour timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    donch_mid_20_aligned = align_htf_to_ltf(prices, df_1w, donch_mid_20)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower)
     
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 30-period average on 12h timeframe
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(30, n):
+        vol_ma[i] = np.mean(volume[i-30:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(donch_upper_aligned[i]) or 
-            np.isnan(donch_lower_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(donch_mid_20_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
@@ -122,37 +97,33 @@ def generate_signals(prices):
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         price = close[i]
-        atr = atr_1d_aligned[i]
-        atr_ma = atr_ma_1d_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
-        upper = donch_upper_aligned[i]
-        lower = donch_lower_aligned[i]
-        
-        # Volatility expansion condition
-        vol_expansion = atr > atr_ma * 1.2
+        upper = donch_high_20_aligned[i]
+        lower = donch_low_20_aligned[i]
+        midpoint = donch_mid_20_aligned[i]
+        trend_up = price > ema_50_1w_aligned[i]
         
         if position == 1:  # Long
-            # Exit: price breaks below lower Donchian or volatility contracts
-            if price < lower or (vol_ratio < 1.0 and atr < atr_ma):
+            # Exit: price returns to midpoint or volume drops below average
+            if price <= midpoint or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above upper Donchian or volatility contracts
-            if price > upper or (vol_ratio < 1.0 and atr < atr_ma):
+            # Exit: price returns to midpoint or volume drops below average
+            if price >= midpoint or vol_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above upper Donchian with vol expansion and weekly uptrend
-            if price > upper and vol_expansion and vol_ratio > 1.5 and price > ema_trend:
+            # Enter long: price breaks above weekly Donchian high with volume expansion and uptrend
+            if price > upper and vol_ratio > 1.5 and trend_up:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower Donchian with vol expansion and weekly downtrend
-            elif price < lower and vol_expansion and vol_ratio > 1.5 and price < ema_trend:
+            # Enter short: price breaks below weekly Donchian low with volume expansion and downtrend
+            elif price < lower and vol_ratio > 1.5 and not trend_up:
                 position = -1
                 signals[i] = -0.25
     
