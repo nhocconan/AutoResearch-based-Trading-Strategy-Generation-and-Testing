@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-6h Pivot Reversal with Volume Surge and 1d Trend Filter
-Hypothesis: Daily pivot points provide institutional support/resistance.
-On 6b timeframe, look for price rejection at pivot levels (R1/S1, R2/S2) with
-volume surge indicating institutional interest, filtered by 1d EMA trend.
-Works in bull/bear by using adaptive pivot levels and trend alignment.
-Target: 15-25 trades/year on 6h timeframe.
+12h Donchian Breakout with Weekly Trend and Volume Confirmation
+Hypothesis: Donchian channel breakouts on 12h timeframe, filtered by weekly trend
+direction and volume surge, capture strong momentum moves while avoiding false
+breakouts in choppy markets. Works in bull by riding uptrends and in bear by
+catching short-term bounces or breakdowns with clear volume confirmation.
+Target: 20-30 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_pivot_reversal_volume_trend_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -27,93 +27,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for pivots and trend
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA(20) for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily data for Donchian channel (20-day lookback)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Standard pivot points (not Camarilla)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    # R2 = P + (H - L)
-    # S2 = P - (H - L)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Donchian channel (20-day high/low)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: current volume > 2x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (vol_ma * 2.0)
+    vol_surge = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or
-            np.isnan(s2_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_surge[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_surge[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below S1 OR trend turns bearish
-            if (close[i] <= s1_1d_aligned[i] or 
-                close[i] <= ema_50_1d_aligned[i]):
+            # Exit: price breaks below Donchian low OR weekly trend turns bearish
+            if (close[i] <= low_20_aligned[i] or 
+                close[i] < ema_20_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above R1 OR trend turns bullish
-            if (close[i] >= r1_1d_aligned[i] or 
-                close[i] >= ema_50_1d_aligned[i]):
+            # Exit: price breaks above Donchian high OR weekly trend turns bullish
+            if (close[i] >= high_20_aligned[i] or 
+                close[i] > ema_20_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long: price rejects S1 with volume surge and uptrend
-            # Rejection = price touches/goes below S1 then closes back above it
-            if (low[i] <= s1_1d_aligned[i] and 
-                close[i] > s1_1d_aligned[i] and
-                close[i] > ema_50_1d_aligned[i] and
+            # Long: price breaks above Donchian high with volume surge and bullish weekly trend
+            if (close[i] >= high_20_aligned[i] and 
+                close[i] > ema_20_1w_aligned[i] and
                 vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price rejects R1 with volume surge and downtrend
-            elif (high[i] >= r1_1d_aligned[i] and 
-                  close[i] < r1_1d_aligned[i] and
-                  close[i] < ema_50_1d_aligned[i] and
-                  vol_surge[i]):
-                position = -1
-                signals[i] = -0.25
-            # Long: price breaks above R2 with volume surge and uptrend (momentum)
-            elif (close[i] >= r2_1d_aligned[i] and 
-                  close[i] > ema_50_1d_aligned[i] and
-                  vol_surge[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: price breaks below S2 with volume surge and downtrend (momentum)
-            elif (close[i] <= s2_1d_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
+            # Short: price breaks below Donchian low with volume surge and bearish weekly trend
+            elif (close[i] <= low_20_aligned[i] and 
+                  close[i] < ema_20_1w_aligned[i] and
                   vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
