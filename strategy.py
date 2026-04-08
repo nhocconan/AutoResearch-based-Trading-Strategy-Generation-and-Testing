@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
+
+# 4h_rsi_pullback_trend_v1
+# Hypothesis: RSI pullback strategy in trending markets. Uses daily EMA200 for trend filter,
+# RSI(14) for pullback entries (RSI<35 in uptrend, RSI>65 in downtrend), and volume confirmation.
+# Works in both bull and bear markets by trading pullbacks within the dominant trend.
+# Target: 25-35 trades/year for low fee drag.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_alligator_vortex_volume"
-timeframe = "12h"
+name = "4h_rsi_pullback_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -18,30 +25,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Daily trend filter (1d EMA200) - load once before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate EMA200 on daily data
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Williams Alligator (12h) - using SMAs
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    # Vortex Indicator (12h)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.nan
-    vm_minus[0] = np.nan
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum() / pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum() / pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    vi_plus = vi_plus.values
-    vi_minus = vi_minus.values
+    # 4h indicators
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad first element
+    rsi = np.concatenate([[50.0], rsi])
     
     # Volume confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,46 +51,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 100  # Need indicators warmed up
+    start_idx = 50  # Need indicators warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(avg_volume[i]) or np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 pass
             else:
                 signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Daily trend filter
+        daily_uptrend = close[i] > ema200_1d_aligned[i]
+        daily_downtrend = close[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: Alligator lines cross (teeth < lips) OR Vortex reversal
-            if teeth[i] < lips[i] or (vi_plus[i] < vi_minus[i] and vi_plus[i-1] >= vi_minus[i-1]):
+            # Exit: RSI > 70 (overbought) or trend reversal
+            if rsi[i] > 70 or not daily_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator lines cross (teeth > lips) OR Vortex reversal
-            if teeth[i] > lips[i] or (vi_minus[i] < vi_plus[i] and vi_minus[i-1] >= vi_plus[i-1]):
+            # Exit: RSI < 30 (oversold) or trend reversal
+            if rsi[i] < 30 or not daily_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Volume confirmation
-            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            volume_ok = volume[i] > 1.3 * avg_volume[i]
             
             if volume_ok:
-                # Long: Alligator aligned (lips > teeth > jaw) AND VI+ > VI- AND weekly uptrend
-                if lips[i] > teeth[i] and teeth[i] > jaw[i] and vi_plus[i] > vi_minus[i] and weekly_uptrend:
+                # Long entry: RSI pullback in uptrend
+                if daily_uptrend and rsi[i] < 35:
                     position = 1
                     signals[i] = 0.25
-                # Short: Alligator aligned (jaw > teeth > lips) AND VI- > VI+ AND weekly downtrend
-                elif jaw[i] > teeth[i] and teeth[i] > lips[i] and vi_minus[i] > vi_plus[i] and weekly_downtrend:
+                # Short entry: RSI pullback in downtrend
+                elif daily_downtrend and rsi[i] > 65:
                     position = -1
                     signals[i] = -0.25
     
