@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_trend_volume
-# Hypothesis: Donchian channel breakout on 12h filtered by 1d EMA trend and volume confirmation.
+# 4h_donchian_breakout_1d_trend_volume
+# Hypothesis: Donchian channel breakout on 4h filtered by 1d EMA trend and volume confirmation.
 # Long when price breaks above 20-period Donchian high with uptrend (price > 1d EMA50) and volume > 1.5x average.
 # Short when price breaks below 20-period Donchian low with downtrend (price < 1d EMA50) and volume > 1.5x average.
-# Designed to capture strong trending moves while avoiding choppy markets. Target: 20-40 trades/year (~80-160 total over 4 years).
+# Designed to capture strong trending moves while avoiding choppy markets. Target: 20-50 trades/year (~80-200 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_trend_volume"
-timeframe = "12h"
+name = "4h_donchian_breakout_1d_trend_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
