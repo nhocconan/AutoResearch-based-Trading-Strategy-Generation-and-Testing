@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-6h_1d_price_channel_volume_v3
-Hypothesis: Use 1-day price channels (Donchian) to capture trend with volume confirmation.
-Long when price breaks above 1-day high with volume > 1.5x avg. Short when breaks below 1-day low with volume > 1.5x avg.
-Exit when price returns to middle of channel (mean reversion within day).
-Designed to work in trending markets with volume confirmation to avoid false breakouts.
-Target: 15-35 trades/year per symbol (60-140 total over 4 years).
+12h_1d1w_trend_breakout_volume_v1
+Hypothesis: Use weekly EMA for long-term bias and daily Donchian breakout for entry with volume confirmation.
+Long when price breaks above daily Donchian upper (20) with volume and weekly bias up.
+Short when price breaks below daily Donchian lower (20) with volume and weekly bias down.
+Designed to work in both bull (breakouts) and bear (reversals at key levels) markets.
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_price_channel_volume_v3"
-timeframe = "6h"
+name = "12h_1d1w_trend_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -27,27 +27,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for price channel calculation
+    # Get daily data for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-day lookback)
+    # Get weekly data for bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # 20-period high and low (using previous 20 days, not including current)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    # Donchian upper (20-period high)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian lower (20-period low)
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Middle of channel
-    mid_20 = (high_20 + low_20) / 2
+    # Align daily Donchian levels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Align daily channels to 6h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
+    # Weekly bias using EMA (20-period)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,12 +63,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(mid_20_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -71,27 +77,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to middle of channel or breaks below low
-            if close[i] <= mid_20_aligned[i] or close[i] < low_20_aligned[i]:
+            # Exit: price breaks below daily Donchian lower or weekly bias turns down
+            if close[i] < donch_low_aligned[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: price returns to middle of channel or breaks above high
-            if close[i] >= mid_20_aligned[i] or close[i] > high_20_aligned[i]:
+            # Exit: price breaks above daily Donchian upper or weekly bias turns up
+            if close[i] > donch_high_aligned[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: price breaks above 20-day high with volume confirmation
-            if close[i] > high_20_aligned[i] and vol_confirm[i]:
+            # Long entry: price breaks above daily Donchian upper with volume and weekly bias up
+            if close[i] > donch_high_aligned[i] and vol_confirm[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below 20-day low with volume confirmation
-            elif close[i] < low_20_aligned[i] and vol_confirm[i]:
+            # Short entry: price breaks below daily Donchian lower with volume and weekly bias down
+            elif close[i] < donch_low_aligned[i] and vol_confirm[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
