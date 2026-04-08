@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 12h Trend and Volume Confirmation
-# Uses Williams Alligator (three smoothed moving averages: Jaw, Teeth, Lips) on 6h timeframe
-# to identify trend direction and potential reversals. Trades only when 12h trend is strong (ADX > 25)
-# with volume confirmation (>1.5x 20-period average). In strong trends, the Alligator's
-# mouth opens (JAW < TEETH < LIPS for uptrend, JAW > TEETH > LIPS for downtrend), signaling
-# entry. Exit when the mouth closes (lines intertwine) or trend weakens.
-# Target: 12-37 trades/year via Alligator + trend + volume confluence.
-name = "6h_alligator_12h_trend_volume_v1"
+# Hypothesis: 6h Donchian Breakout with 12h Trend Filter and Volume Confirmation
+# Uses 6h Donchian channel breakout for entry, filtered by 12h ADX > 25 for trend strength
+# and volume > 1.5x 20-period average for confirmation. Exits on opposite Donchian breakout
+# or when trend weakens (ADX < 20). Designed to work in both bull and bear markets
+# by capturing strong trending moves with volume validation.
+# Target: 15-35 trades/year via Donchian + trend + volume confluence.
+
+name = "6h_donchian_12h_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:  # Need sufficient data for Alligator smoothing
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -59,21 +59,9 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Williams Alligator components on 6h data (using close prices)
-    # Jaw: 13-period SMMA, shifted 8 bars ahead
-    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)  # Shift forward 8 periods
-    jaw[:8] = np.nan  # First 8 values invalid after shift
-    
-    # Teeth: 8-period SMMA, shifted 5 bars ahead
-    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)  # Shift forward 5 periods
-    teeth[:5] = np.nan  # First 5 values invalid after shift
-    
-    # Lips: 5-period SMMA, shifted 3 bars ahead
-    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)  # Shift forward 3 periods
-    lips[:3] = np.nan  # First 3 values invalid after shift
+    # 6h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,44 +69,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from sufficient lookback (need to account for Alligator shifts)
-    start_idx = 80
+    # Start from sufficient lookback
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
         # Get aligned 12h values for current 6h bar
         adx_aligned = align_htf_to_ltf(prices, df_12h, adx)[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
+        # Trend filter: ADX > 25 for strong trend, ADX < 20 for weak trend
         strong_trend = adx_aligned > 25
+        weak_trend = adx_aligned < 20
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Alligator signals
-        # Uptrend: JAW < TEETH < LIPS (mouth opening upward)
-        alligator_long = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        # Downtrend: JAW > TEETH > LIPS (mouth opening downward)
-        alligator_short = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        # Market sleeping (no trend): lines intertwined
-        # (No explicit check needed - handled by else conditions)
+        # Donchian breakout signals
+        long_breakout = close[i] > donchian_high[i-1]  # Break above upper band
+        short_breakout = close[i] < donchian_low[i-1]  # Break below lower band
         
         if position == 1:  # Long position
-            # Exit: Alligator closes mouth OR trend weakens
-            if not alligator_long or not strong_trend:
+            # Exit: opposite breakout OR trend weakens
+            if short_breakout or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator closes mouth OR trend weakens
-            if not alligator_short or not strong_trend:
+            # Exit: opposite breakout OR trend weakens
+            if long_breakout or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -126,12 +111,12 @@ def generate_signals(prices):
         else:  # Flat, look for entry
             # Only trade during strong trend with volume confirmation
             if strong_trend and volume_confirm:
-                # Long: Alligator mouth opens upward
-                if alligator_long:
+                # Long on upward breakout
+                if long_breakout:
                     position = 1
                     signals[i] = 0.25
-                # Short: Alligator mouth opens downward
-                elif alligator_short:
+                # Short on downward breakout
+                elif short_breakout:
                     position = -1
                     signals[i] = -0.25
     
