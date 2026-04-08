@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_cci_reversal_v2
-Hypothesis: 6-hour strategy using CCI on 1-day for trend direction and RSI on 6-hour for mean reversion entries.
-Long when CCI(20) on 1d > 100 (uptrend) and RSI(14) on 6h < 30 (oversold).
-Short when CCI(20) on 1d < -100 (downtrend) and RSI(14) on 6h > 70 (overbought).
-Exit when RSI crosses back to neutral (40-60 range).
-Uses higher timeframe trend filter to avoid counter-trend trades in both bull and bear markets.
+4h_12h_camarilla_pivot_v1
+Hypothesis: 4-hour strategy using 12h Camarilla pivot with volume confirmation.
+Long when price breaks above 12h R2 with volume > 2x average and price > 1d EMA50.
+Short when price breaks below 12h S2 with volume > 2x average and price < 1d EMA50.
+Exit when price crosses opposite 12h level OR volume falls below 1.5x average.
+Uses higher timeframe pivots for better signal quality in both bull and bear markets.
 Target: 15-40 trades/year per symbol.
 """
 
@@ -13,60 +13,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_cci_reversal_v2"
-timeframe = "6h"
+name = "4h_12h_camarilla_pivot_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_cci(high, low, close, period):
-    """Calculate Commodity Channel Index"""
+def calculate_ema(close, period):
+    """Calculate EMA with proper handling"""
     if len(close) < period:
         return np.full_like(close, np.nan, dtype=float)
     
-    tp = (high + low + close) / 3.0
-    sma = np.full_like(tp, np.nan, dtype=float)
-    for i in range(period, len(tp)):
-        sma[i] = np.mean(tp[i-period+1:i+1])
-    
-    mad = np.full_like(tp, np.nan, dtype=float)
-    for i in range(period, len(tp)):
-        mad[i] = np.mean(np.abs(tp[i-period+1:i+1] - sma[i]))
-    
-    cci = np.full_like(tp, np.nan, dtype=float)
-    for i in range(period, len(tp)):
-        if mad[i] != 0:
-            cci[i] = (tp[i] - sma[i]) / (0.015 * mad[i])
-    return cci
-
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    if len(close) < period + 1:
-        return np.full_like(close, np.nan, dtype=float)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close, np.nan, dtype=float)
-    avg_loss = np.full_like(close, np.nan, dtype=float)
-    
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.full_like(close, np.nan, dtype=float)
+    ema = np.full_like(close, np.nan, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema[period-1] = np.mean(close[:period])
     for i in range(period, len(close)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-        else:
-            rs[i] = np.inf
-    
-    rsi = np.full_like(close, np.nan, dtype=float)
-    for i in range(period, len(close)):
-        rsi[i] = 100 - (100 / (1 + rs[i]))
-    return rsi
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    return ema
 
 def generate_signals(prices):
     n = len(prices)
@@ -76,59 +37,79 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-day data for trend filter
+    # Get 12-hour and 1-day data for context
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_12h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate CCI on 1-day for trend direction
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    cci_20_1d = calculate_cci(high_1d, low_1d, close_1d, 20)
-    cci_20_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_20_1d)
+    # Calculate 12h Pivot (using previous 12h bar's data)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate RSI on 6-hour for entry signals
-    rsi_14_6h = calculate_rsi(close, 14)
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    # 12h support/resistance levels (Camarilla S2/R2)
+    S2_12h = pivot_12h - (range_12h * 1.1 / 6)  # 12h S2
+    R2_12h = pivot_12h + (range_12h * 1.1 / 6)  # 12h R2
+    
+    # Calculate 1d EMA for trend filter
+    ema_50_1d = calculate_ema(df_1d['close'].values, 50)
+    
+    # Align indicators to 4-hour timeframe
+    S2_12h_aligned = align_htf_to_ltf(prices, df_12h, S2_12h)
+    R2_12h_aligned = align_htf_to_ltf(prices, df_12h, R2_12h)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if data not ready
-        if np.isnan(cci_20_1d_aligned[i]) or np.isnan(rsi_14_6h[i]):
+        if (np.isnan(S2_12h_aligned[i]) or np.isnan(R2_12h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        cci = cci_20_1d_aligned[i]
-        rsi = rsi_14_6h[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        price = close[i]
+        S2 = S2_12h_aligned[i]
+        R2 = R2_12h_aligned[i]
+        trend_up_1d = price > ema_50_1d_aligned[i]
         
         if position == 1:  # Long
-            # Exit: RSI crosses above 40 (exiting oversold)
-            if rsi > 40:
+            # Exit: price crosses below 12h S2 or volume drops below 1.5x average
+            if price < S2 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: RSI crosses below 60 (exiting overbought)
-            if rsi < 60:
+            # Exit: price crosses above 12h R2 or volume drops below 1.5x average
+            if price > R2 or vol_ratio < 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: CCI indicates uptrend on 1d and RSI oversold on 6h
-            if cci > 100 and rsi < 30:
+            # Enter long: price breaks above 12h R2 with volume expansion and uptrend on 1d
+            if price > R2 and vol_ratio > 2.0 and trend_up_1d:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: CCI indicates downtrend on 1d and RSI overbought on 6h
-            elif cci < -100 and rsi > 70:
+            # Enter short: price breaks below 12h S2 with volume expansion and downtrend on 1d
+            elif price < S2 and vol_ratio > 2.0 and not trend_up_1d:
                 position = -1
                 signals[i] = -0.25
     
