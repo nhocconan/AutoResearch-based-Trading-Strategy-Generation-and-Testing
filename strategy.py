@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-4h Donchian Channel Breakout + 1d Trend + Volume Confirmation v1
-Hypothesis: Donchian breakouts capture sustained trends, filtered by 1d EMA trend and volume spikes to avoid false breakouts. Works in bull markets (trend continuation) and bear markets (mean reversion at extremes) by adapting to volatility regimes. Target: 25-35 trades/year.
+6h Volume Spike Reversal + 12h Trend Filter v1
+Hypothesis: Volume spikes (>2.5x average) at Bollinger Band extremes (20,2) signal exhaustion reversals.
+Filtered by 12h EMA(50) trend to avoid counter-trend trades. Works in bull/bear by capturing mean reversion
+in overextended moves during volatile periods, with volume confirming institutional participation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_volume_spike_reversal_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -23,55 +25,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # 4h Donchian Channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h EMA(50) for trend filter
+    ema_50_12h = df_12h['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter (>2.0x 20-period average)
+    # 6h Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2.0 * std_20)
+    lower_bb = sma_20 - (2.0 * std_20)
+    
+    # Volume filter (>2.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or trend reverses
-            if close[i] <= low_20[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price returns to middle Bollinger Band or trend reverses
+            if close[i] >= sma_20[i] or close[i] <= ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or trend reverses
-            if close[i] >= high_20[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price returns to middle Bollinger Band or trend reverses
+            if close[i] <= sma_20[i] or close[i] >= ema_50_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long breakout with trend alignment and volume
-            if (close[i] >= high_20[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                vol_filter[i]):
+            # Long reversal at lower BB with volume spike and against trend
+            if (close[i] <= lower_bb[i] and 
+                vol_spike[i] and 
+                close[i] < ema_50_12h_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown with trend alignment and volume
-            elif (close[i] <= low_20[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  vol_filter[i]):
+            # Short reversal at upper BB with volume spike and against trend
+            elif (close[i] >= upper_bb[i] and 
+                  vol_spike[i] and 
+                  close[i] > ema_50_12h_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
