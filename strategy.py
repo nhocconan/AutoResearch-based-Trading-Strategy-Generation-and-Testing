@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_fractal_breakout_1d_trend_volume_v11"
+name = "4h_fractal_breakout_1d_trend_volume_v12"
 timeframe = "4h"
 leverage = 1.0
 
@@ -68,10 +68,10 @@ def generate_signals(prices):
         
         # Volatility filter: avoid extremely low volatility (choppy) conditions
         # Use 50-period SMA of ATR to normalize
-        volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.7)  # Only trade when volatility is above 70% of average
+        volatility_filter = atr_1d_aligned > (atr_ma_50_aligned * 0.8)  # Only trade when volatility is above 80% of average
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter)
-        volume_confirmation = volume[i] > (avg_volume_4[i] * 2.0)
+        # Volume confirmation: current volume > 2.5x average volume (stricter)
+        volume_confirmation = volume[i] > (avg_volume_4[i] * 2.5)
         
         # Trend filter: price above/below 50 EMA on 1d
         uptrend = close[i] > ema_1d_aligned
@@ -83,7 +83,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price breaks above 4-period high OR trend reversal
@@ -91,15 +91,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat, look for entry
             # Long: price breaks above 4-period high + uptrend + volume confirmation + volatility filter
             if close[i] > high_4[i] and uptrend and volume_confirmation and volatility_filter:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Short: price breaks below 4-period low + downtrend + volume confirmation + volatility filter
             elif close[i] < low_4[i] and downtrend and volume_confirmation and volatility_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
