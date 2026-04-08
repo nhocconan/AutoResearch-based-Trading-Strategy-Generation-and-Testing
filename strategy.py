@@ -1,19 +1,18 @@
-#!/usr/bin/env python3
-"""
-12h_donchian20_volume_regime_v1
-Hypothesis: Uses Donchian(20) breakouts on 12h timeframe with volume confirmation and 1d chop regime filter.
-Long when price breaks above upper band with volume surge in trending market (CHOP < 61.8).
-Short when price breaks below lower band with volume surge in trending market.
-Uses 1d timeframe for chop regime filter to avoid false breakouts in sideways markets.
-Targets 15-30 trades/year to minimize fee drag while capturing significant breakouts.
-"""
+# 1d_vwap_mean_reversion_v1
+# Hypothesis: Mean reversion at VWAP with 1-week trend filter. VWAP acts as dynamic support/resistance.
+# Long when price crosses above VWAP in weekly uptrend with volume confirmation.
+# Short when price crosses below VWAP in weekly downtrend with volume confirmation.
+# Uses 1d timeframe to reduce trade frequency and capture mean reversion moves.
+# Weekly trend filter prevents counter-trend trades in strong trends.
+# Volume surge confirms institutional participation at VWAP retests.
+# Target: 10-25 trades/year to minimize fee drag while capturing meaningful reversions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_regime_v1"
-timeframe = "12h"
+name = "1d_vwap_mean_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,8 +25,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: 1.5x 24-period average (24*12h = 12 days)
-    vol_ma_period = 24
+    # Calculate VWAP: cumulative (price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3
+    pv = typical_price * volume
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    
+    # Volume filter: 1.3x 20-period average
+    vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
     for i in range(vol_ma_period-1, n):
         vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
@@ -35,59 +41,32 @@ def generate_signals(prices):
     vol_surge = np.full(n, False)
     for i in range(n):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
+            vol_surge[i] = volume[i] > 1.3 * vol_ma[i]
     
-    # Donchian channels (20-period) on 12h
-    donchian_period = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(donchian_period-1, n):
-        upper[i] = np.max(high[i-donchian_period+1:i+1])
-        lower[i] = np.min(low[i-donchian_period+1:i+1])
-    
-    # Get 1d data for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Chop Index (14-period) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA(21) for trend direction
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_uptrend = close_1w > ema_21_1w
+    weekly_downtrend = close_1w < ema_21_1w
     
-    # True Range
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                               np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]  # First value
-    
-    # ATR (14-period)
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(13, len(df_1d)):
-        atr_1d[i] = np.mean(tr[i-13:i+1])
-    
-    # Chop Index = 100 * log10(sum(TR14)/(ATR14 * 14)) / log10(14)
-    chop = np.full(len(df_1d), np.nan)
-    for i in range(13, len(df_1d)):
-        if atr_1d[i] > 0:
-            tr_sum = np.sum(tr[i-13:i+1])
-            chop[i] = 100 * np.log10(tr_sum / (atr_1d[i] * 14)) / np.log10(14)
-    
-    # Trending market: CHOP < 61.8 (below this = trending)
-    trending = chop < 61.8
-    
-    # Align chop regime to 12h timeframe
-    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
+    # Align weekly trend to daily timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(vol_ma_period, donchian_period, 14) + 1
+    start_idx = max(vol_ma_period, 1)
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(trending_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(weekly_uptrend_aligned[i]) or 
+            np.isnan(weekly_downtrend_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -95,31 +74,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price drops below lower band or market becomes ranging
-            if close[i] < lower[i] or trending_aligned[i] < 0.5:
+            # Exit: Price crosses below VWAP or weekly trend turns down
+            if close[i] < vwap[i] or weekly_downtrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price rises above upper band or market becomes ranging
-            if close[i] > upper[i] or trending_aligned[i] < 0.5:
+            # Exit: Price crosses above VWAP or weekly trend turns up
+            if close[i] > vwap[i] or weekly_uptrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above upper band, volume surge, trending market
-            if (close[i] > upper[i] and 
-                vol_surge[i] and 
-                trending_aligned[i] > 0.5):
+            # Long entry: Price crosses above VWAP, weekly uptrend, volume surge
+            if (close[i] > vwap[i] and 
+                weekly_uptrend_aligned[i] > 0.5 and 
+                vol_surge[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below lower band, volume surge, trending market
-            elif (close[i] < lower[i] and 
-                  vol_surge[i] and 
-                  trending_aligned[i] > 0.5):
+            # Short entry: Price crosses below VWAP, weekly downtrend, volume surge
+            elif (close[i] < vwap[i] and 
+                  weekly_downtrend_aligned[i] > 0.5 and 
+                  vol_surge[i]):
                 position = -1
                 signals[i] = -0.25
     
