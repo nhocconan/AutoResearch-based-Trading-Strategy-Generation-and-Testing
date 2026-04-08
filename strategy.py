@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_20_1d_trend_volume_v2"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,60 +18,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend
+    # 1d data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 4h Donchian channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    n1 = len(close_1d)
+    camarilla_s3 = np.full(n1, np.nan)
+    camarilla_r3 = np.full(n1, np.nan)
+    camarilla_s4 = np.full(n1, np.nan)
+    camarilla_r4 = np.full(n1, np.nan)
     
-    # 1d EMA trend (34-period)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    for i in range(1, n1):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        
+        camarilla_s3[i] = prev_close - 1.0 * range_val * 1.250
+        camarilla_r3[i] = prev_close + 1.0 * range_val * 1.250
+        camarilla_s4[i] = prev_close - 1.0 * range_val * 1.625
+        camarilla_r4[i] = prev_close + 1.0 * range_val * 1.625
     
-    # Volume filter: 4h volume > 1.3x 20-period average
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    
+    # 1d trend: 50-period EMA
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: 6h volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s4_6h[i]) or 
+            np.isnan(camarilla_r4_6h[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower band or trend fails
-            if close[i] < low_roll[i] or close[i] < ema_34_4h[i]:
+            # Exit: price crosses below S3 or trend fails
+            if close[i] < camarilla_s3_6h[i] or close[i] < ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian upper band or trend fails
-            if close[i] > high_roll[i] or close[i] > ema_34_4h[i]:
+            # Exit: price crosses above R3 or trend fails
+            if close[i] > camarilla_r3_6h[i] or close[i] > ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
             # Trend filter
-            bullish = close[i] > ema_34_4h[i]
-            bearish = close[i] < ema_34_4h[i]
+            bullish = close[i] > ema_50_6h[i]
+            bearish = close[i] < ema_50_6h[i]
             
-            # Long: price breaks above Donchian upper band + bullish trend + volume
-            if (close[i] > high_roll[i] and 
+            # Long: break above R4 with volume (continuation in uptrend)
+            if (close[i] > camarilla_r4_6h[i] and 
                 bullish and 
                 vol_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian lower band + bearish trend + volume
-            elif (close[i] < low_roll[i] and 
+            # Short: break below S4 with volume (continuation in downtrend)
+            elif (close[i] < camarilla_s4_6h[i] and 
+                  bearish and 
+                  vol_filter[i]):
+                position = -1
+                signals[i] = -0.25
+            # Long: bounce from S3 in uptrend
+            elif (close[i] > camarilla_s3_6h[i] and 
+                  close[i-1] <= camarilla_s3_6h[i-1] and
+                  bullish and 
+                  vol_filter[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short: bounce from R3 in downtrend
+            elif (close[i] < camarilla_r3_6h[i] and 
+                  close[i-1] >= camarilla_r3_6h[i-1] and
                   bearish and 
                   vol_filter[i]):
                 position = -1
