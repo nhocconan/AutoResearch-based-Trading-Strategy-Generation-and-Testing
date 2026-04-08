@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_keltner_rsi_reversion_v1
-Hypothesis: Mean reversion on daily timeframe using Keltner Channel + RSI.
-- Uses 20-day EMA with ATR(10) bands (Keltner Channel)
-- Long when price touches lower band and RSI < 30 (oversold)
-- Short when price touches upper band and RSI > 70 (overbought)
-- Exit when price crosses back to EMA or RSI normalizes
-- Weekly trend filter: only take long if weekly close > weekly EMA(50), short if < weekly EMA(50)
-- Designed for low trade frequency (<20/year) to minimize fee drag
+12h_donchian_breakout_volume_v2
+Hypothesis: Donchian channel breakouts with volume confirmation and trend filter work in both bull and bear markets.
+- Uses 12h timeframe for lower trade frequency (target: 20-40 trades/year)
+- Entry: Price breaks above/below 20-period Donchian channel with volume > 1.5x average
+- Trend filter: Only take longs when price > 50-period EMA, shorts when price < 50-period EMA
+- Exit: Opposite Donchian breakout or trend reversal
+- Volume filter reduces false breakouts, trend filter avoids counter-trend trades
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_keltner_rsi_reversion_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,88 +25,67 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === DAILY INDICATORS ===
-    # EMA(20) for Keltner middle
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Donchian channel (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # ATR(10) for Keltner width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # first bar has no previous close
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # Keltner Bands
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Volume average (20-period)
+    vol_avg = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        vol_avg[i] = np.mean(volume[i - lookback + 1:i + 1])
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # EMA trend filter (50-period)
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === WEEKLY TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_bullish = close_1w > ema_50_1w
-    weekly_bearish = close_1w < ema_50_1w
-    
-    # Align weekly trend to daily
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
-    
-    # === SIGNAL LOGIC ===
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after EMA warmup
+    for i in range(lookback, n):
         # Skip if data not ready
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(rsi[i]) or np.isnan(weekly_bullish_aligned[i]) or 
-            np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema_50[i])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
+        vol_ratio = volume[i] / vol_avg[i] if vol_avg[i] > 0 else 0
+        
         if position == 1:  # Long
-            # Exit: price crosses above EMA(20) or RSI > 50
-            if close[i] > ema_20[i] or rsi[i] > 50:
+            # Exit: price breaks below lower Donchian or trend turns bearish
+            if close[i] < lowest_low[i] or close[i] < ema_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price crosses below EMA(20) or RSI < 50
-            if close[i] < ema_20[i] or rsi[i] < 50:
+            # Exit: price breaks above upper Donchian or trend turns bullish
+            if close[i] > highest_high[i] or close[i] > ema_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: price touches lower band + RSI oversold + weekly bullish
-            if (low[i] <= keltner_lower[i] and 
-                rsi[i] < 30 and 
-                weekly_bullish_aligned[i] > 0.5):
+            # Long: price breaks above upper Donchian with volume + uptrend
+            if (close[i] > highest_high[i] and 
+                vol_ratio > 1.5 and 
+                close[i] > ema_50[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches upper band + RSI overbought + weekly bearish
-            elif (high[i] >= keltner_upper[i] and 
-                  rsi[i] > 70 and 
-                  weekly_bearish_aligned[i] > 0.5):
+            # Short: price breaks below lower Donchian with volume + downtrend
+            elif (close[i] < lowest_low[i] and 
+                  vol_ratio > 1.5 and 
+                  close[i] < ema_50[i]):
                 position = -1
                 signals[i] = -0.25
     
