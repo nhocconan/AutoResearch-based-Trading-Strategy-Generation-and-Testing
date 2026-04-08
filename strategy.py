@@ -1,20 +1,44 @@
 #!/usr/bin/env python3
 """
-4h_donchian_breakout_volume_v1
-Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter works in both bull and bear markets.
-- Long: Price breaks above 20-period high + volume > 1.5x average + ATR > 0
-- Short: Price breaks below 20-period low + volume > 1.5x average + ATR > 0
-- Exit: Opposite Donchian break or ATR-based stop
-- Uses 1d trend filter to avoid counter-trend trades
+1d_weekly_rsi_divergence_v1
+Hypothesis: Weekly RSI divergence + daily price action for mean reversion.
+- Only trade when weekly RSI shows divergence (bullish/bearish) at extremes
+- Bullish divergence: weekly RSI makes higher low while price makes lower low
+- Bearish divergence: weekly RSI makes lower high while price makes higher high
+- Enter on daily close in direction of divergence with volume confirmation
+- Exit on opposite divergence or weekly RSI normalization
+- Target: 15-25 trades/year to avoid overtrading
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_rsi_divergence_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_rsi(prices, period=14):
+    """Calculate RSI with proper Wilder smoothing"""
+    delta = np.diff(prices)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(prices)
+    avg_loss = np.zeros_like(prices)
+    
+    # Wilder's smoothing
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    for i in range(period + 1, len(prices)):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:period] = np.nan
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,78 +50,99 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # Daily data (same as input)
+    df_1d = prices.copy()
     
-    # Volume average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        vol_ma[i] = np.mean(volume[i - lookback + 1:i + 1])
-    
-    # ATR (14-period) for stop and filter
-    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.mean(tr[i - 13:i + 1])
-    
-    # 1d trend filter (close above/below 50 EMA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly RSI for divergence detection
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    for i in range(49, len(close_1d)):
-        ema_50_1d[i] = np.mean(close_1d[i - 49:i + 1])  # Simple MA as EMA proxy
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    close_1w = df_1w['close'].values
+    rsi_1w = calculate_rsi(close_1w, 14)
+    
+    # Align weekly RSI to daily
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Volume confirmation (20-period average)
+    vol_ma = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma[i] = vol_sum / 20
+        else:
+            vol_ma[i] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(close[i]) or np.isnan(close[i-1])):
             if position != 0:
                 pass  # Hold
             else:
                 signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        strong_volume = vol_ratio > 1.5
-        atr_filter = atr[i] > 0  # Always true if ATR calculated
-        
         if position == 1:  # Long
-            # Exit: price breaks below Donchian low or trend turns bearish
-            if close[i] < lowest_low[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: bearish divergence or RSI normalization
+            if (rsi_1w_aligned[i] < 30 and 
+                rsi_1w_aligned[i-1] >= 30):  # RSI crossed below 30
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short
-            # Exit: price breaks above Donchian high or trend turns bullish
-            if close[i] > highest_high[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: bullish divergence or RSI normalization
+            if (rsi_1w_aligned[i] > 70 and 
+                rsi_1w_aligned[i-1] <= 70):  # RSI crossed above 70
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long: breakout above Donchian high with volume + uptrend
-            if (close[i] > highest_high[i] and strong_volume and atr_filter and
-                close[i] > ema_50_1d_aligned[i]):
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            bullish_div = False
+            if i >= 2:
+                # Look for recent swing lows
+                if low[i] < low[i-1] and low[i-1] > low[i-2]:  # Recent low
+                    # Check if this is a significant low vs prior
+                    lookback = min(10, i-1)
+                    if low[i] == np.min(low[i-lookback:i]):
+                        # Check RSI at this point vs prior low
+                        if (not np.isnan(rsi_1w_aligned[i]) and 
+                            not np.isnan(rsi_1w_aligned[i-1]) and
+                            rsi_1w_aligned[i] > rsi_1w_aligned[i-1] and
+                            rsi_1w_aligned[i] < 40):  # Oversold but improving
+                            bullish_div = True
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            bearish_div = False
+            if i >= 2:
+                # Look for recent swing highs
+                if high[i] > high[i-1] and high[i-1] > high[i-2]:  # Recent high
+                    # Check if this is a significant high vs prior
+                    lookback = min(10, i-1)
+                    if high[i] == np.max(high[i-lookback:i]):
+                        # Check RSI at this point vs prior high
+                        if (not np.isnan(rsi_1w_aligned[i]) and 
+                            not np.isnan(rsi_1w_aligned[i-1]) and
+                            rsi_1w_aligned[i] < rsi_1w_aligned[i-1] and
+                            rsi_1w_aligned[i] > 60):  # Overbought but deteriorating
+                            bearish_div = True
+            
+            # Long entry: bullish divergence + volume confirmation
+            if bullish_div and volume[i] > vol_ma[i] * 1.5:
                 position = 1
                 signals[i] = 0.25
-            # Short: breakdown below Donchian low with volume + downtrend
-            elif (close[i] < lowest_low[i] and strong_volume and atr_filter and
-                  close[i] < ema_50_1d_aligned[i]):
+            # Short entry: bearish divergence + volume confirmation
+            elif bearish_div and volume[i] > vol_ma[i] * 1.5:
                 position = -1
                 signals[i] = -0.25
     
