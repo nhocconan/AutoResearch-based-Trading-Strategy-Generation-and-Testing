@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1d_1w_1d_volume_breakout_v1
-# Hypothesis: Trade daily breakouts above/below previous day's high/low with weekly trend filter and volume confirmation.
-# In weekly uptrend: go long when price breaks above previous day's high with volume > 2x average.
-# In weekly downtrend: go short when price breaks below previous day's low with volume > 2x average.
-# Exit when price returns to previous day's close or weekly trend reverses.
-# Uses weekly EMA21 for trend, daily breakout levels for entry, and volume surge filter.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# 1h_4d_1d_rsi_reversal_v1
+# Hypothesis: Trade reversals at RSI extremes with trend filter from 4h EMA50 and 1d trend filter.
+# In 1d uptrend: go long when RSI(14) < 30 on 1h, exit when RSI > 70 or 1d trend breaks.
+# In 1d downtrend: go short when RSI(14) > 70 on 1h, exit when RSI < 30 or 1d trend breaks.
+# Uses volume confirmation to avoid false signals. Target: 15-35 trades/year (60-140 total over 4 years).
+# Uses 4h EMA50 for intermediate trend filter and 1d EMA50 for higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_1d_volume_breakout_v1"
-timeframe = "1d"
+name = "1h_4d_1d_rsi_reversal_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,20 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA21 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # 4h EMA50 for intermediate trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Daily breakout levels: previous day's high and low
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # 1d EMA50 for higher timeframe trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: volume > 2x 20-period average
+    # RSI(14) on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(prev_high[i]) or 
-            np.isnan(prev_low[i]) or np.isnan(prev_close[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -57,33 +63,35 @@ def generate_signals(prices):
             continue
         
         # Volume surge condition
-        vol_surge = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
+        vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: price returns to previous day's close or weekly trend breaks down
-            if close[i] <= prev_close[i] or close[i] < ema21_1w_aligned[i]:
+            # Exit: RSI > 70 (overbought) or 1d trend breaks (price < 1d EMA50)
+            if rsi[i] > 70 or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price returns to previous day's close or weekly trend breaks up
-            if close[i] >= prev_close[i] or close[i] > ema21_1w_aligned[i]:
+            # Exit: RSI < 30 (oversold) or 1d trend breaks (price > 1d EMA50)
+            if rsi[i] < 30 or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat, look for entry
-            # Long entry: price breaks above previous day's high with volume surge and weekly uptrend
-            if (high[i] > prev_high[i] and vol_surge and 
-                close[i] > ema21_1w_aligned[i]):
+            # Long entry: RSI < 30 with volume surge and 4d/1d uptrend
+            if (rsi[i] < 30 and vol_surge and 
+                close[i] > ema50_4h_aligned[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below previous day's low with volume surge and weekly downtrend
-            elif (low[i] < prev_low[i] and vol_surge and 
-                  close[i] < ema21_1w_aligned[i]):
+                signals[i] = 0.20
+            # Short entry: RSI > 70 with volume surge and 4d/1d downtrend
+            elif (rsi[i] > 70 and vol_surge and 
+                  close[i] < ema50_4h_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
