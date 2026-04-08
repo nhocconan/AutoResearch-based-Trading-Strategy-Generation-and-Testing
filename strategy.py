@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# 6h_donchian20_daily_pivot_volume_v1
-# Hypothesis: 6h Donchian(20) breakout with daily pivot directional bias and volume confirmation.
-# Long when price breaks above Donchian(20) high, daily pivot > prior day close, and volume > 1.5x 20-period average.
-# Short when price breaks below Donchian(20) low, daily pivot < prior day close, and volume > 1.5x average.
-# Exit when price re-enters Donchian channel or volume drops below average.
-# Uses daily pivot for bias to work in both bull/bear regimes. Target: 12-37 trades/year.
+# 4h_donchian_breakout_volume_v1
+# Hypothesis: Breakouts from Donchian channel (20-period) with volume confirmation (>1.5x 20-period average volume).
+# Long when price breaks above upper band with volume surge; short when breaks below lower band with volume surge.
+# Exit when price crosses the middle line (mean of upper/lower) or volume drops below average.
+# Uses 12h timeframe for trend filter: only take long if 12h SMA50 slope > 0, short if < 0.
+# Designed to capture strong trending moves with low trade frequency to minimize fee drag.
+# Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_daily_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,51 +25,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Donchian(20) channels
-    donchian_len = 20
+    # Donchian channel (20-period)
+    dc_period = 20
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
-    for i in range(donchian_len - 1, n):
-        upper[i] = np.max(high[i-donchian_len+1:i+1])
-        lower[i] = np.min(low[i-donchian_len+1:i+1])
+    for i in range(dc_period-1, n):
+        upper[i] = np.max(high[i-dc_period+1:i+1])
+        lower[i] = np.min(low[i-dc_period+1:i+1])
+    middle = (upper + lower) / 2.0
     
     # Volume filter: 1.5x 20-period average
     vol_ma_period = 20
     vol_ma = np.full(n, np.nan)
-    for i in range(vol_ma_period - 1, n):
+    for i in range(vol_ma_period-1, n):
         vol_ma[i] = np.mean(volume[i-vol_ma_period+1:i+1])
     vol_surge = np.full(n, False)
     for i in range(n):
         if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
             vol_surge[i] = volume[i] > 1.5 * vol_ma[i]
     
-    # Get 1d data for daily pivot
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Daily pivot point: (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Pivot bias: 1 if today's pivot > yesterday's close, -1 if <, 0 otherwise
-    pivot_bias_1d = np.full(len(close_1d), 0)
-    for i in range(1, len(close_1d)):
-        if pivot_1d[i] > close_1d[i-1]:
-            pivot_bias_1d[i] = 1
-        elif pivot_1d[i] < close_1d[i-1]:
-            pivot_bias_1d[i] = -1
-    
-    # Align pivot bias to 6h timeframe
-    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias_1d)
+    # 12h SMA50 slope for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    sma_period = 50
+    sma50_12h = pd.Series(close_12h).rolling(window=sma_period, min_periods=sma_period).mean().values
+    sma50_slope_12h = np.full(len(close_12h), np.nan)
+    for i in range(sma_period, len(close_12h)):
+        if not np.isnan(sma50_12h[i]) and not np.isnan(sma50_12h[i-1]):
+            sma50_slope_12h[i] = sma50_12h[i] - sma50_12h[i-1]
+    sma50_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, sma50_slope_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(donchian_len, vol_ma_period, 1) + 1
+    start_idx = max(dc_period, vol_ma_period, sma_period) + 1
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]) or np.isnan(pivot_bias_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(sma50_slope_12h_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -76,31 +71,31 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Price below Donchian upper or volume drops below average
-            if close[i] < upper[i] or volume[i] < vol_ma[i]:
+            # Exit: Price below middle line or volume drops below average
+            if close[i] < middle[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price above Donchian lower or volume drops below average
-            if close[i] > lower[i] or volume[i] < vol_ma[i]:
+            # Exit: Price above middle line or volume drops below average
+            if close[i] > middle[i] or volume[i] < vol_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: Price breaks above Donchian upper, pivot bias up, volume surge
+            # Long entry: Price breaks above upper band, volume surge, 12h SMA50 slope positive
             if (close[i] > upper[i] and 
-                pivot_bias_aligned[i] > 0 and 
-                vol_surge[i]):
+                vol_surge[i] and 
+                sma50_slope_12h_aligned[i] > 0):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian lower, pivot bias down, volume surge
+            # Short entry: Price breaks below lower band, volume surge, 12h SMA50 slope negative
             elif (close[i] < lower[i] and 
-                  pivot_bias_aligned[i] < 0 and 
-                  vol_surge[i]):
+                  vol_surge[i] and 
+                  sma50_slope_12h_aligned[i] < 0):
                 position = -1
                 signals[i] = -0.25
     
