@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_momentum_breakout_volume_v1
-Hypothesis: Use 12h price momentum (close > open) with 1d volume confirmation and 1w trend filter.
-Enter long when 12h candle is bullish, volume > 1.5x 24-period average, and 1w EMA(21) is rising.
-Enter short when 12h candle is bearish, volume > 1.5x 24-period average, and 1w EMA(21) is falling.
-Uses 12h timeframe for entries, 1w for trend filter. Target: 15-25 trades/year.
-Works in bull/bear via trend filter and volume confirmation to avoid false breakouts.
+4h_turtle_trading_v1
+Hypothesis: 4h Turtle Trading system with Donchian breakouts, ATR-based position sizing, and trend filter.
+Uses 20-period Donchian channels for breakouts and 25-period EMA for trend filtering.
+Designed to work in both bull and bear markets by only trading in direction of higher timeframe trend.
+Target: 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_momentum_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_turtle_trading_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,32 +22,41 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    open_price = prices['open'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w EMA(21) for trend
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 1.5x average of last 24 periods (24*12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_confirm = volume > vol_ma * 1.5
+    # Calculate 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h ATR(14) for volatility filtering
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup
-    start_idx = 30
+    # Start after warmup period
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(atr[i])):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -56,33 +64,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # 12h candle direction
-        candle_bullish = close[i] > open_price[i]
-        candle_bearish = close[i] < open_price[i]
-        
         if position == 1:  # Long position
-            # Exit: candle turns bearish or 1w trend turns down
-            if not candle_bullish or ema_1w_aligned[i] < ema_1w_aligned[max(0, i-1)]:
+            # Exit: price crosses below 10-period low OR trend changes
+            low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values[i]
+            if close[i] < low_10 or ema_50_1d_aligned[i] < ema_50_1d_aligned[max(0, i-1)]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long position
+                signals[i] = 0.30  # Maintain long position
                 
         elif position == -1:  # Short position
-            # Exit: candle turns bullish or 1w trend turns up
-            if not candle_bearish or ema_1w_aligned[i] > ema_1w_aligned[max(0, i-1)]:
+            # Exit: price crosses above 10-period high OR trend changes
+            high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values[i]
+            if close[i] > high_10 or ema_50_1d_aligned[i] > ema_50_1d_aligned[max(0, i-1)]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short position
+                signals[i] = -0.30  # Maintain short position
         else:  # Flat, look for entry
-            # Long entry: bullish 12h candle with volume and 1w uptrend
-            if candle_bullish and vol_confirm[i] and ema_1w_aligned[i] > ema_1w_aligned[max(0, i-1)]:
+            # Long entry: price breaks above 20-period high with uptrend
+            if (not np.isnan(high_20[i]) and close[i] > high_20[i] and 
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[max(0, i-1)]):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: bearish 12h candle with volume and 1w downtrend
-            elif candle_bearish and vol_confirm[i] and ema_1w_aligned[i] < ema_1w_aligned[max(0, i-1)]:
+                signals[i] = 0.30
+            # Short entry: price breaks below 20-period low with downtrend
+            elif (not np.isnan(low_20[i]) and close[i] < low_20[i] and 
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[max(0, i-1)]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
