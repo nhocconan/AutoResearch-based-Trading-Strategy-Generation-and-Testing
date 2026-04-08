@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_price_channel_breakout_v1
-# Hypothesis: Breakout of 4-hour Donchian channel (20-period) with volume confirmation and 1-day trend filter.
-# Enters long when price breaks above upper band with volume > 1.5x average, and 1-day EMA50 rising.
-# Enters short when price breaks below lower band with volume > 1.5x average, and 1-day EMA50 falling.
-# Uses weekly trend filter to avoid counter-trend trades in strong weekly trends.
-# Designed for 20-40 trades/year on 4h to avoid fee drag. Works in bull/bear via multi-timeframe alignment.
+# 12h_1d_1w_volume_breakout_momentum_v1
+# Hypothesis: 12h price breaks Donchian(20) channel with 1d volume confirmation and 1w momentum filter.
+# Long when price breaks above Donchian high + volume spike + 1w bullish momentum.
+# Short when price breaks below Donchian low + volume spike + 1w bearish momentum.
+# Uses volume spike (>1.5x 20-period average) and 1w RSI(14) > 50 for long, < 50 for short.
+# Designed for 15-30 trades/year on 12h to avoid fee drag. Works in bull/bear via momentum filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_price_channel_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_1w_volume_breakout_momentum_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,102 +24,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
-    period = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(period, n):
-        highest_high[i] = np.max(high[i-period:i+1])
-        lowest_low[i] = np.min(low[i-period:i+1])
+    # Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i+1])
+        donchian_low[i] = np.min(low[i-20:i+1])
     
-    upper_band = highest_high
-    lower_band = lowest_low
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i+1])
+    volume_spike = volume > (vol_ma * 1.5)
     
-    # Volume average (20-period)
-    vol_avg = np.full(n, np.nan)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if i >= period:
-            vol_sum -= volume[i - period]
-            vol_count -= 1
-        if vol_count == period:
-            vol_avg[i] = vol_sum / period
-    
-    # 1-day EMA50 for trend filter
+    # Get 1d data for volume confirmation (optional secondary confirmation)
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    ema50_1d[49] = np.mean(close_1d[:50])
-    for i in range(50, len(close_1d)):
-        ema50_1d[i] = (close_1d[i] * 2/51) + (ema50_1d[i-1] * 49/51)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        vol_ma_1d[i] = np.mean(vol_1d[i-20:i+1])
+    volume_spike_1d = vol_1d > (vol_ma_1d * 1.5)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # 1-week EMA50 for trend filter (avoid counter-trend)
+    # Get 1w data for momentum filter (RSI)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = (close_1w[i] * 2/51) + (ema50_1w[i-1] * 49/51)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # RSI(14) on 1w
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(len(close_1w), np.nan)
+    avg_loss = np.full(len(close_1w), np.nan)
+    for i in range(14, len(close_1w)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[i-14:i+1])
+            avg_loss[i] = np.mean(loss[i-14:i+1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = max(period, 50)
+    start_idx = 20  # Donchian needs 20 periods
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(rsi_1w_aligned[i])):
             if position != 0:
                 pass  # Hold position
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
-        
-        # Trend filters
-        uptrend_1d = close[i] > ema50_1d_aligned[i]
-        downtrend_1d = close[i] < ema50_1d_aligned[i]
-        uptrend_1w = close[i] > ema50_1w_aligned[i]
-        downtrend_1w = close[i] < ema50_1w_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price closes below lower band or trend turns down
-            if close[i] < lower_band[i] or not uptrend_1d:
+            # Exit: price breaks below Donchian low or momentum turns bearish
+            if close[i] < donchian_low[i] or rsi_1w_aligned[i] < 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper band or trend turns up
-            if close[i] > upper_band[i] or not downtrend_1d:
+            # Exit: price breaks above Donchian high or momentum turns bullish
+            if close[i] > donchian_high[i] or rsi_1w_aligned[i] > 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: price breaks above upper band with volume and trend alignment
-            if (close[i] > upper_band[i] and 
-                vol_confirm and 
-                uptrend_1d and 
-                uptrend_1w):
+            # Long entry: price breaks above Donchian high + volume spike + bullish momentum
+            if (close[i] > donchian_high[i] and 
+                (volume_spike[i] or volume_spike_1d_aligned[i]) and 
+                rsi_1w_aligned[i] > 50):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower band with volume and trend alignment
-            elif (close[i] < lower_band[i] and 
-                  vol_confirm and 
-                  downtrend_1d and 
-                  downtrend_1w):
+            # Short entry: price breaks below Donchian low + volume spike + bearish momentum
+            elif (close[i] < donchian_low[i] and 
+                  (volume_spike[i] or volume_spike_1d_aligned[i]) and 
+                  rsi_1w_aligned[i] < 50):
                 position = -1
                 signals[i] = -0.25
     
