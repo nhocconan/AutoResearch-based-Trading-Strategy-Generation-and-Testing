@@ -1,18 +1,19 @@
-# 1d_weekly_camarilla_trend_volume_v2
-# Hypothesis: On daily timeframe, use weekly Camarilla pivot levels with trend filter and volume confirmation.
-# Long when price closes above H3 (bullish pivot) with volume > 1.5x average and weekly trend up.
-# Short when price closes below L3 (bearish pivot) with volume > 1.5x average and weekly trend down.
+#!/usr/bin/env python3
+# 4h_camarilla_pivot_1d_trend_volume_v1
+# Hypothesis: On 4h timeframe, use daily Camarilla pivot levels with trend filter and volume confirmation.
+# Long when price closes above H3 (bullish pivot) with volume > 1.5x average and daily trend up.
+# Short when price closes below L3 (bearish pivot) with volume > 1.5x average and daily trend down.
 # Exit on opposite pivot touch or when volume drops below average.
-# Weekly trend defined by price above/below weekly EMA20.
-# This strategy targets fewer trades (7-25/year) by using daily timeframe with weekly structure and tight entry conditions.
+# Daily trend defined by price above/below daily EMA20.
+# This strategy targets fewer trades (19-50/year) by using higher timeframe structure and tight entry conditions.
 # Works in both bull and bear markets via trend filter and pivot mean reversion in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_camarilla_trend_volume_v2"
-timeframe = "1d"
+name = "4h_camarilla_pivot_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,39 +27,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate pivot points from weekly data (using previous week's OHLC)
-    # Get weekly data
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Calculate pivot points from daily data (using previous day's OHLC)
+    # Get daily data
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels using previous week's data
+    # Calculate daily Camarilla levels using previous day's data
     # Camarilla formulas: H4 = C + (H-L)*1.1/2, H3 = C + (H-L)*1.1/4, etc.
-    # We use previous week's H, L, C to avoid look-ahead
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # We use previous day's H, L, C to avoid look-ahead
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Calculate pivot levels using previous week's data
-    camarilla_H4 = weekly_close + (weekly_high - weekly_low) * 1.1 / 2
-    camarilla_H3 = weekly_close + (weekly_high - weekly_low) * 1.1 / 4
-    camarilla_H2 = weekly_close + (weekly_high - weekly_low) * 1.1 / 6
-    camarilla_H1 = weekly_close + (weekly_high - weekly_low) * 1.1 / 12
-    camarilla_L1 = weekly_close - (weekly_high - weekly_low) * 1.1 / 12
-    camarilla_L2 = weekly_close - (weekly_high - weekly_low) * 1.1 / 6
-    camarilla_L3 = weekly_close - (weekly_high - weekly_low) * 1.1 / 4
-    camarilla_L4 = weekly_close - (weekly_high - weekly_low) * 1.1 / 2
+    # Calculate pivot levels using previous day's data
+    camarilla_H4 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_H3 = daily_close + (daily_high - daily_low) * 1.1 / 4
+    camarilla_H2 = daily_close + (daily_high - daily_low) * 1.1 / 6
+    camarilla_H1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    camarilla_L1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    camarilla_L2 = daily_close - (daily_high - daily_low) * 1.1 / 6
+    camarilla_L3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    camarilla_L4 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Align weekly pivot levels to daily timeframe (with proper delay for weekly bar close)
-    H4_1d = align_htf_to_ltf(prices, df_weekly, camarilla_H4)
-    H3_1d = align_htf_to_ltf(prices, df_weekly, camarilla_H3)
-    L3_1d = align_htf_to_ltf(prices, df_weekly, camarilla_L3)
+    # Align daily pivot levels to 4h timeframe (with proper delay for daily bar close)
+    H4_4h = align_htf_to_ltf(prices, df_daily, camarilla_H4)
+    H3_4h = align_htf_to_ltf(prices, df_daily, camarilla_H3)
+    L3_4h = align_htf_to_ltf(prices, df_daily, camarilla_L3)
     
-    # Weekly trend filter: price above/below weekly EMA20
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    weekly_ema20_1d = align_htf_to_ltf(prices, df_weekly, weekly_ema20)
+    # Daily trend filter: price above/below daily EMA20
+    daily_ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    daily_ema20_4h = align_htf_to_ltf(prices, df_daily, daily_ema20)
     
-    # Volume confirmation: 20-period average on daily
+    # Volume confirmation: 20-period average on 4h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -69,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(H3_1d[i]) or np.isnan(L3_1d[i]) or np.isnan(weekly_ema20_1d[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(H3_4h[i]) or np.isnan(L3_4h[i]) or np.isnan(daily_ema20_4h[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 # Hold position until exit conditions met
                 pass
@@ -79,7 +80,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: price touches L3 (opposite pivot) or volume drops below average
-            if close[i] <= L3_1d[i] or volume[i] < avg_volume[i]:
+            if close[i] <= L3_4h[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -87,7 +88,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price touches H3 (opposite pivot) or volume drops below average
-            if close[i] >= H3_1d[i] or volume[i] < avg_volume[i]:
+            if close[i] >= H3_4h[i] or volume[i] < avg_volume[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,16 +97,16 @@ def generate_signals(prices):
             # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Weekly trend filter
-            weekly_uptrend = close[i] > weekly_ema20_1d[i]
-            weekly_downtrend = close[i] < weekly_ema20_1d[i]
+            # Daily trend filter
+            daily_uptrend = close[i] > daily_ema20_4h[i]
+            daily_downtrend = close[i] < daily_ema20_4h[i]
             
             # Long entry: price closes above H3 with volume and uptrend
-            if close[i] > H3_1d[i] and volume_ok and weekly_uptrend:
+            if close[i] > H3_4h[i] and volume_ok and daily_uptrend:
                 position = 1
                 signals[i] = 0.25
             # Short entry: price closes below L3 with volume and downtrend
-            elif close[i] < L3_1d[i] and volume_ok and weekly_downtrend:
+            elif close[i] < L3_4h[i] and volume_ok and daily_downtrend:
                 position = -1
                 signals[i] = -0.25
     
