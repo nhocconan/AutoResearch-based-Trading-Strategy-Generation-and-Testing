@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_donchian_breakout_volume_chop_v1
-# Hypothesis: 1d Donchian channel breakout with weekly trend filter, volume confirmation, and chop regime avoidance.
-# Long: price breaks above Donchian(20) high AND weekly EMA(21) rising AND volume > 1.5x average AND chop < 61.8
-# Short: price breaks below Donchian(20) low AND weekly EMA(21) falling AND volume > 1.5x average AND chop < 61.8
-# Exit: opposite Donchian breakout or chop > 61.8 (range) or volume drops
-# Designed to capture strong trends in both bull and bear markets while avoiding false breakouts in choppy/ranging conditions.
-# Weekly EMA provides multi-timeframe trend direction, volume confirms institutional participation, chop filter avoids whipsaws.
+# 12h_daily_pivot_volume_filter_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation.
+# Long: price crosses above H3 (bullish breakout) with volume > 1.5x 20-period average
+# Short: price crosses below L3 (bearish breakdown) with volume > 1.5x 20-period average
+# Exit: price returns to P (pivot point) or opposite pivot level touched
+# Designed to capture institutional breakout/breakdown moves with volume validation.
+# Works in both bull/bear markets as it captures momentum shifts regardless of direction.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_volume_chop_v1"
-timeframe = "1d"
+name = "12h_daily_pivot_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +25,196 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
-    
-    # Weekly EMA(21) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for Camarilla pivots (calculated from previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate Camarilla pivots from previous daily bar
+    # H4, H3, H2, H1, L1, L2, L3, L4
+    # Pivot = (H + L + C) / 3
+    # H3 = P + (H - L) * 1.1 / 4
+    # L3 = P - (H - L) * 1.1 / 4
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Weekly EMA slope (rising/falling)
-    ema_slope = np.full(n, np.nan)
-    for i in range(1, n):
-        if not np.isnan(ema_21_1w_aligned[i]) and not np.isnan(ema_21_1w_aligned[i-1]):
-            ema_slope[i] = ema_21_1w_aligned[i] - ema_21_1w_aligned[i-1]
+    pivot = (prev_high + prev_low + prev_close) / 3
+    rang = prev_high - prev_low
+    h3 = pivot + rang * 1.1 / 4
+    l3 = pivot - rang * 1.1 / 4
     
-    # Average volume (20-period)
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    # Align to 12h timeframe (using previous day's pivots)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Choppiness Index (14-period) - measures ranging vs trending
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        atr_sum = 0.0
-        for j in range(i-13, i+1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
-        if atr_sum > 0:
-            highest_high = np.max(high[i-13:i+1])
-            lowest_low = np.min(low[i-13:i+1])
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if vol_count >= 20:
+            vol_ma[i] = vol_sum / 20
+            vol_sum -= volume[i - 19]
+            vol_count -= 1
+    
+    volume_filter = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            volume_filter[i] = volume[i] > (vol_ma[i] * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_slope[i]) or np.isnan(avg_volume[i]) or np.isnan(chop[i]):
+    for i in range(50, n):
+        # Skip if any values are NaN
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]):
             if position != 0:
-                signals[i] = 0.25 if position == 1 else -0.25  # Hold position
+                signals[i] = 0.25 if position == 1 else -0.25
             else:
                 signals[i] = 0.0
             continue
         
+        vol_ok = volume_filter[i]
         price = close[i]
-        vol_ratio = volume[i] / avg_volume[i] if avg_volume[i] > 0 else 0
-        
-        # Long conditions: breakout above Donchian high + weekly uptrend + volume spike + not choppy
-        long_breakout = price > donch_high[i]
-        long_trend = ema_slope[i] > 0  # Weekly EMA rising
-        long_volume = vol_ratio > 1.5  # Volume > 1.5x average
-        long_chop = chop[i] < 61.8  # Not in choppy regime (trending)
-        
-        # Short conditions: breakout below Donchian low + weekly downtrend + volume spike + not choppy
-        short_breakout = price < donch_low[i]
-        short_trend = ema_slope[i] < 0  # Weekly EMA falling
-        short_volume = vol_ratio > 1.5  # Volume > 1.5x average
-        short_chop = chop[i] < 61.8  # Not in choppy regime (trending)
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR chop increases (range) OR volume drops significantly
-            if price < donch_low[i] or chop[i] > 61.8 or vol_ratio < 0.8:
+            # Exit: price returns to pivot or breaks below L3
+            if price <= pivot_aligned[i] or price < l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR chop increases (range) OR volume drops significantly
-            if price > donch_high[i] or chop[i] > 61.8 or vol_ratio < 0.8:
+            # Exit: price returns to pivot or breaks above H3
+            if price >= pivot_aligned[i] or price > h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: bullish breakout with confirmation
-            if long_breakout and long_trend and long_volume and long_chop:
+            # Enter long: price breaks above H3 with volume confirmation
+            if price > h3_aligned[i] and vol_ok:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: bearish breakout with confirmation
-            elif short_breakout and short_trend and short_volume and short_chop:
+            # Enter short: price breaks below L3 with volume confirmation
+            elif price < l3_aligned[i] and vol_ok:
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+#!/usr/bin/env python3
+# 12h_daily_pivot_volume_filter_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation.
+# Long: price crosses above H3 (bullish breakout) with volume > 1.5x 20-period average
+# Short: price crosses below L3 (bearish breakdown) with volume > 1.5x 20-period average
+# Exit: price returns to P (pivot point) or opposite pivot level touched
+# Designed to capture institutional breakout/breakdown moves with volume validation.
+# Works in both bull/bear markets as it captures momentum shifts regardless of direction.
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "12h_daily_pivot_volume_filter_v1"
+timeframe = "12h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get daily data for Camarilla pivots (calculated from previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivots from previous daily bar
+    # H4, H3, H2, H1, L1, L2, L3, L4
+    # Pivot = (H + L + C) / 3
+    # H3 = P + (H - L) * 1.1 / 4
+    # L3 = P - (H - L) * 1.1 / 4
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    rang = prev_high - prev_low
+    h3 = pivot + rang * 1.1 / 4
+    l3 = pivot - rang * 1.1 / 4
+    
+    # Align to 12h timeframe (using previous day's pivots)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if vol_count >= 20:
+            vol_ma[i] = vol_sum / 20
+            vol_sum -= volume[i - 19]
+            vol_count -= 1
+    
+    volume_filter = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
+            volume_filter[i] = volume[i] > (vol_ma[i] * 1.5)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(50, n):
+        # Skip if any values are NaN
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]):
+            if position != 0:
+                signals[i] = 0.25 if position == 1 else -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        vol_ok = volume_filter[i]
+        price = close[i]
+        
+        if position == 1:  # Long position
+            # Exit: price returns to pivot or breaks below L3
+            if price <= pivot_aligned[i] or price < l3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Exit: price returns to pivot or breaks above H3
+            if price >= pivot_aligned[i] or price > h3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:  # Flat
+            # Enter long: price breaks above H3 with volume confirmation
+            if price > h3_aligned[i] and vol_ok:
+                position = 1
+                signals[i] = 0.25
+            # Enter short: price breaks below L3 with volume confirmation
+            elif price < l3_aligned[i] and vol_ok:
                 position = -1
                 signals[i] = -0.25
             else:
