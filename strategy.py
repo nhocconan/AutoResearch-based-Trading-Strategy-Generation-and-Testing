@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_ma_crossover_volume_filter_v1
-# Hypothesis: Trade MA crossovers on 6h timeframe with volume confirmation and 1d trend filter.
-# Uses 6h EMA8/EMA21 crossover for entry, confirmed by volume > 1.5x 20-period average.
-# Trend filter: only take longs when 6h price > 1d EMA50, shorts when 6h price < 1d EMA50.
-# Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
-# Works in both bull and bear markets by aligning with higher timeframe trend and requiring volume confirmation.
+# 4h_1d_donchian_breakout_volume_v1
+# Hypothesis: Trade 4-hour Donchian channel breakouts with daily volume confirmation and trend filter.
+# Long when price breaks above 20-period Donchian high with volume > 1.5x 20-bar average and price > daily EMA50.
+# Short when price breaks below 20-period Donchian low with volume > 1.5x 20-bar average and price < daily EMA50.
+# Exit when price returns to the Donchian midpoint (average of 20-period high and low).
+# Designed for 4h timeframe to target 20-50 trades/year (80-200 total over 4 years).
+# Daily trend filter ensures alignment with higher timeframe momentum, working in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ma_crossover_volume_filter_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,17 +25,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # EMA50 for 1d trend filter
+    # EMA50 for daily trend
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 6h EMA8 and EMA21 for crossover
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,11 +44,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    start_idx = 50  # Ensure EMA21 and 1d EMA50 are ready
+    start_idx = 50  # Ensure EMA50 and Donchian are ready
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 pass  # Hold position
             else:
@@ -57,28 +60,28 @@ def generate_signals(prices):
         vol_surge = volume[i] > 1.5 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 1:  # Long position
-            # Exit: EMA8 crosses below EMA21
-            if ema8[i] < ema21[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] <= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA8 crosses above EMA21
-            if ema8[i] > ema21[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] >= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long entry: EMA8 crosses above EMA21 with volume surge and 1d uptrend
-            if (ema8[i] > ema21[i] and ema8[i-1] <= ema21[i-1] and vol_surge and 
+            # Long entry: price breaks above Donchian high with volume surge and daily uptrend
+            if (close[i] > highest_high[i] and vol_surge and 
                 close[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: EMA8 crosses below EMA21 with volume surge and 1d downtrend
-            elif (ema8[i] < ema21[i] and ema8[i-1] >= ema21[i-1] and vol_surge and 
+            # Short entry: price breaks below Donchian low with volume surge and daily downtrend
+            elif (close[i] < lowest_low[i] and vol_surge and 
                   close[i] < ema50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
