@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""
-6h_cci_trend_volume_v1
-Hypothesis: Use 12h CCI as trend filter and 6h CCI for entries with volume confirmation.
-In trending markets (|CCI_12h| > 100), look for pullbacks in CCI_6h to enter with the trend.
-Volume > 1.5x average confirms momentum. Works in both bull/bear by following trend.
-Target: 20-40 trades/year to avoid fee drag.
-"""
+# 4h_donchian_breakout_1d_trend_volume_v1
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Donchian high(20) with 1d uptrend and volume > 1.5x average.
+# Short when price breaks below Donchian low(20) with 1d downtrend and volume > 1.5x average.
+# Exit when price crosses opposite Donchian level or trend reverses.
+# Designed for 20-30 trades/year to minimize fee drag while capturing strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_trend_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,81 +25,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate CCI on 12h (20-period)
-    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    ma_12h = typical_price_12h.rolling(window=20, min_periods=20).mean()
-    mad_12h = typical_price_12h.rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci_12h = (typical_price_12h - ma_12h) / (0.015 * mad_12h)
-    cci_12h = cci_12h.values
+    # Daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    uptrend_1d = close_1d > ema50_1d
+    downtrend_1d = close_1d < ema50_1d
     
-    # Calculate CCI on 6h (20-period) for entries
-    typical_price = (high + low + close) / 3
-    ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci = (typical_price - ma) / (0.015 * mad)
-    cci = cci.values
+    # Align daily trend to 4h
+    uptrend_1d_4h = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_4h = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Align 12h CCI to 6h timeframe
-    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
+    # Donchian channels (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-period average on 4h
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not available
-        if np.isnan(cci[i]) or np.isnan(cci_12h_aligned[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or \
+           np.isnan(avg_volume[i]) or np.isnan(uptrend_1d_4h[i]) or \
+           np.isnan(downtrend_1d_4h[i]):
             if position != 0:
+                # Hold position until exit conditions met
                 pass
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI_6h > 100 (overbought) or opposite signal
-            if cci[i] > 100 or \
-               (cci[i] < -100 and cci_12h_aligned[i] < -100 and volume[i] > 1.5 * avg_volume[i]):
+            # Exit: price crosses below Donchian low or trend reverses
+            if close[i] < low_20[i] or \
+               (downtrend_1d_4h[i] and not uptrend_1d_4h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI_6h < -100 (oversold) or opposite signal
-            if cci[i] < -100 or \
-               (cci[i] > 100 and cci_12h_aligned[i] > 100 and volume[i] > 1.5 * avg_volume[i]):
+            # Exit: price crosses above Donchian high or trend reverses
+            if close[i] > high_20[i] or \
+               (uptrend_1d_4h[i] and not downtrend_1d_4h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Trend filter: |CCI_12h| > 100 indicates trend
-            strong_uptrend = cci_12h_aligned[i] > 100
-            strong_downtrend = cci_12h_aligned[i] < -100
-            
-            # Volume confirmation
+            # Volume confirmation: current volume > 1.5x average volume
             volume_ok = volume[i] > 1.5 * avg_volume[i]
             
-            # Long entry: pullback in uptrend (CCI_6h < -50) with volume
-            if strong_uptrend and cci[i] < -50 and volume_ok:
+            # Long entry: price breaks above Donchian high with volume and 1d uptrend
+            if close[i] > high_20[i] and volume_ok and uptrend_1d_4h[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: pullback in downtrend (CCI_6h > 50) with volume
-            elif strong_downtrend and cci[i] > 50 and volume_ok:
+            # Short entry: price breaks below Donchian low with volume and 1d downtrend
+            elif close[i] < low_20[i] and volume_ok and downtrend_1d_4h[i]:
                 position = -1
                 signals[i] = -0.25
     
