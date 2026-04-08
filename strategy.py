@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_regime_v1
-# Hypothesis: Camarilla pivot levels from 1d + volume spike + choppiness regime filter on 12h timeframe.
-# Long: Close > H3 AND volume > 1.5 * volume_ma(20) AND CHOP(14) > 61.8 (range regime)
-# Short: Close < L3 AND volume > 1.5 * volume_ma(20) AND CHOP(14) > 61.8 (range regime)
-# Exit: Opposite pivot touch or regime change to trending (CHOP < 38.2)
-# Uses 12h primary timeframe with 1d HTF for Camarilla levels and chop filter.
-# Target: 50-150 total trades over 4 years to minimize fee drag and avoid overtrading.
+# 1h_4h_1d_camarilla_pivot_volume_regime_v1
+# Hypothesis: Camarilla pivot levels on 4h with volume spike and 1d regime filter on 1h timeframe.
+# Long: Price > H4 (camarilla resistance) AND volume > 1.5 * volume_ma(20) AND close > 1d EMA50
+# Short: Price < L4 (camarilla support) AND volume > 1.5 * volume_ma(20) AND close < 1d EMA50
+# Exit: Opposite signal or price reverts to Pivot Point (PP)
+# Uses 1h primary timeframe with 4h for Camarilla pivot calculation and 1d for EMA50 regime filter.
+# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag and avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_regime_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_pivot_volume_regime_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,100 +25,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate volume moving average for spike detection
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Get 4h data for Camarilla pivot calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
     
-    # Calculate Choppiness Index on 12h data
-    def calculate_chop(high_arr, low_arr, close_arr, period=14):
-        atr = np.zeros(len(close_arr))
-        tr = np.zeros(len(close_arr))
-        for i in range(1, len(close_arr)):
-            tr[i] = max(high_arr[i] - low_arr[i], 
-                       abs(high_arr[i] - close_arr[i-1]),
-                       abs(low_arr[i] - close_arr[i-1]))
-        # Smooth TR with Wilder's smoothing (EMA with alpha=1/period)
-        atr[period] = np.nanmean(tr[1:period+1])
-        for i in range(period+1, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        # Calculate chopiness
-        chop = np.full(len(close_arr), np.nan)
-        for i in range(period, len(close_arr)):
-            atr_sum = np.nansum(atr[i-period+1:i+1])
-            hh = np.nanmax(high_arr[i-period+1:i+1])
-            ll = np.nanmin(low_arr[i-period+1:i+1])
-            if hh != ll and atr_sum > 0:
-                chop[i] = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
-        return chop
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    chop = calculate_chop(high, low, close, 14)
+    # Calculate Camarilla levels for each 4h bar
+    # Typical Price = (High + Low + Close) / 3
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
+    # Range = High - Low
+    range_4h = high_4h - low_4h
     
-    # Get 1d data for Camarilla pivot levels
+    # Camarilla levels:
+    # H4 = Close + 1.1 * Range / 2
+    # L4 = Close - 1.1 * Range / 2
+    # PP = (High + Low + Close) / 3 (same as typical price)
+    h4_4h = close_4h + 1.1 * range_4h / 2.0
+    l4_4h = close_4h - 1.1 * range_4h / 2.0
+    pp_4h = typical_price_4h  # (High + Low + Close) / 3
+    
+    # Align 4h Camarilla levels to 1h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_4h, h4_4h)
+    l4_aligned = align_htf_to_ltf(prices, df_4h, l4_4h)
+    pp_aligned = align_htf_to_ltf(prices, df_4h, pp_4h)
+    
+    # Get 1d data for regime filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Calculate EMA50 on 1d with min_periods
+    close_1d_s = pd.Series(close_1d)
+    ema50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels for 1d
-    camarilla_high = np.zeros(len(close_1d))
-    camarilla_low = np.zeros(len(close_1d))
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_high[i] = np.nan
-            camarilla_low[i] = np.nan
-        else:
-            # Camarilla levels based on previous day
-            range_ = high_1d[i-1] - low_1d[i-1]
-            camarilla_high[i] = close_1d[i-1] + range_ * 1.1 / 4  # H3
-            camarilla_low[i] = close_1d[i-1] - range_ * 1.1 / 4   # L3
+    # Align 1d EMA50 to 1h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Volume confirmation: volume > 1.5 * volume_ma(20)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * volume_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after volume_ma warmup
         # Skip if any required data is NaN
-        if (np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(chop[i]) or np.isnan(camarilla_high_aligned[i]) or 
-            np.isnan(camarilla_low_aligned[i])):
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume spike condition
-        volume_spike = volume[i] > 1.5 * volume_ma[i]
-        
-        # Regime filter: only trade in ranging markets (CHOP > 61.8)
-        in_range = chop[i] > 61.8
+        # Apply session filter
+        if not session_filter[i]:
+            # Outside session: flatten position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit: price touches L3 (opposite pivot) OR regime changes to trending
-            if close[i] < camarilla_low_aligned[i] or not in_range:
+            # Exit conditions:
+            # 1. Opposite signal (price < L4)
+            # 2. Price reverts to Pivot Point (PP)
+            if close[i] < l4_aligned[i] or abs(close[i] - pp_aligned[i]) < 0.001 * pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price touches H3 (opposite pivot) OR regime changes to trending
-            if close[i] > camarilla_high_aligned[i] or not in_range:
+            # Exit conditions:
+            # 1. Opposite signal (price > H4)
+            # 2. Price reverts to Pivot Point (PP)
+            if close[i] > h4_aligned[i] or abs(close[i] - pp_aligned[i]) < 0.001 * pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Long entry: Close > H3 AND volume spike AND ranging regime
-            if close[i] > camarilla_high_aligned[i] and volume_spike and in_range:
+            # Long entry: Price > H4 AND volume confirmation AND close > 1d EMA50 (bull regime)
+            if close[i] > h4_aligned[i] and volume_confirm[i] and close[i] > ema50_1d_aligned[i]:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Close < L3 AND volume spike AND ranging regime
-            elif close[i] < camarilla_low_aligned[i] and volume_spike and in_range:
+                signals[i] = 0.20
+            # Short entry: Price < L4 AND volume confirmation AND close < 1d EMA50 (bear regime)
+            elif close[i] < l4_aligned[i] and volume_confirm[i] and close[i] < ema50_1d_aligned[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
