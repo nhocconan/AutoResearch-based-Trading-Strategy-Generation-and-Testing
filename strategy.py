@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_regime_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and choppiness regime filter.
+# 4h_daily_camarilla_pivot_volume_regime_v2
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and choppiness regime filter.
 # Long: Price breaks above H4 pivot with volume > 1.5x 20-period average and CHOP > 61.8 (range regime)
 # Short: Price breaks below L4 pivot with volume > 1.5x 20-period average and CHOP > 61.8 (range regime)
 # Exit: Price returns to H3/L3 levels or opposite pivot break
-# Uses 12h primary timeframe with 1d HTF for Camarilla pivot calculation and 1h HTF for choppiness index.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation and 1h HTF for choppiness index.
+# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in both bull and bear markets by focusing on mean reversion in ranging conditions (CHOP > 61.8).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_regime_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,7 +50,7 @@ def generate_signals(prices):
     h4_1d = pivot_1d + (range_1d * 1.1 / 2)
     l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
@@ -84,7 +84,7 @@ def generate_signals(prices):
     chop_raw = 100 * np.log10(atr_sum / chop_denominator) / np.log10(14)
     chop_1h = np.where(chop_denominator > 0, chop_raw, 50.0)  # Default to 50 when denominator is 0
     
-    # Align 1h Choppiness Index to 12h timeframe
+    # Align 1h Choppiness Index to 4h timeframe
     chop_1h_aligned = align_htf_to_ltf(prices, df_1h, chop_1h)
     
     signals = np.zeros(n)
