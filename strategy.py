@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-# 1d_kdj_reversal_v1
-# Hypothesis: Uses 1-day KDJ (Stochastic) oscillator to catch reversals in BTC/ETH/SOL.
-# In bear markets (2025+), reversals from oversold (K<20) and overbought (K>80) levels offer edge.
-# Confirmed with weekly trend filter to avoid counter-trend trades and volume surge for confirmation.
-# Target: 15-30 trades/year (60-120 total over 4 years) to stay within limits.
+# 12h_camarilla_volatility_breakout_v2
+# Hypothesis: Uses daily Camarilla pivot levels on 12h timeframe. Enters on break of R3/S3 with volume confirmation and ATR-based volatility filter. Uses 1d trend filter to avoid counter-trend trades. Designed for 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kdj_reversal_v1"
-timeframe = "1d"
+name = "12h_camarilla_volatility_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,55 +20,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly trend filter (EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema20_1w = np.zeros(len(df_1w))
-    ema20_1w[0] = close_1w[0]
-    for i in range(1, len(df_1w)):
-        ema20_1w[i] = (2/21) * close_1w[i] + (19/21) * ema20_1w[i-1]
-    trend_1w = np.where(close_1w > ema20_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_20_1w)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate daily KDJ (9,3,3)
-    if len(high) < 9:
+    # Calculate pivot and levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels (focus on R3/S3 for entries)
+    r3 = pivot + (range_hl * 1.1 / 2)
+    s3 = pivot - (range_hl * 1.1 / 2)
+    
+    # Align to 12h timeframe (using previous day's levels)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 1d trend filter (EMA25)
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    lowest_low = np.zeros(n)
-    highest_high = np.zeros(n)
+    close_1d = df_1d['close'].values
+    alpha_1d = 2 / (25 + 1)
+    ema25_1d = np.zeros(len(df_1d))
+    ema25_1d[0] = close_1d[0]
+    for i in range(1, len(df_1d)):
+        ema25_1d[i] = alpha_1d * close_1d[i] + (1 - alpha_1d) * ema25_1d[i-1]
+    
+    # 1d trend: 1 if close > EMA25, -1 if close < EMA25
+    trend_1d = np.where(close_1d > ema25_1d, 1, -1)
+    trend_12h = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Volatility filter: ATR(14) ratio (current ATR / 50-period ATR mean)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar
+    atr14 = np.zeros(n)
+    atr_sum = 0
     for i in range(n):
-        if i < 8:
-            lowest_low[i] = np.nan
-            highest_high[i] = np.nan
-        else:
-            lowest_low[i] = np.min(low[i-8:i+1])
-            highest_high[i] = np.max(high[i-8:i+1])
+        atr_sum += tr[i]
+        if i >= 14:
+            atr_sum -= tr[i-14]
+        if i >= 13:
+            atr14[i] = atr_sum / 14
     
-    rsv = np.zeros(n)
+    atr50 = np.zeros(n)
+    atr_sum50 = 0
     for i in range(n):
-        if highest_high[i] == lowest_low[i]:
-            rsv[i] = 50
-        else:
-            rsv[i] = (close[i] - lowest_low[i]) / (highest_high[i] - lowest_low[i]) * 100
+        atr_sum50 += tr[i]
+        if i >= 50:
+            atr_sum50 -= tr[i-50]
+        if i >= 49:
+            atr50[i] = atr_sum50 / 50
     
-    k = np.zeros(n)
-    d = np.zeros(n)
-    j = np.zeros(n)
-    k[0] = 50
-    d[0] = 50
-    for i in range(1, n):
-        if np.isnan(rsv[i]):
-            k[i] = k[i-1]
-            d[i] = d[i-1]
+    # Avoid division by zero
+    atr_ratio = np.zeros(n)
+    for i in range(n):
+        if atr50[i] > 0:
+            atr_ratio[i] = atr14[i] / atr50[i]
         else:
-            k[i] = (2/3) * k[i-1] + (1/3) * rsv[i]
-            d[i] = (2/3) * d[i-1] + (1/3) * k[i]
-        j[i] = 3 * k[i] - 2 * d[i]
+            atr_ratio[i] = 1.0
     
-    # Volume confirmation: 20-day average
+    # Volume filter: 20-period average
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -85,41 +100,51 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if any required data is NaN
-        if (np.isnan(k[i]) or np.isnan(d[i]) or np.isnan(j[i]) or 
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if any required data is NaN or invalid
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(trend_12h[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Volume confirmation (1.5x average)
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
+        # Volatility filter: trade only when volatility is elevated (ATR ratio > 0.8) but not extreme (< 3.0)
+        vol_filter_ok = (atr_ratio[i] > 0.8) and (atr_ratio[i] < 3.0)
+        
         if position == 1:  # Long position
-            # Exit: KDJ overbought (K>80) or trend turns bearish
-            if k[i] > 80 or trend_1w_aligned[i] == -1:
+            # Exit: close below R3 or trend turns bearish or volatility drops
+            if (close[i] < r3_12h[i] or 
+                trend_12h[i] == -1 or 
+                not vol_filter_ok):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: KDJ oversold (K<20) or trend turns bullish
-            if k[i] < 20 or trend_1w_aligned[i] == 1:
+            # Exit: close above S3 or trend turns bullish or volatility drops
+            if (close[i] > s3_12h[i] or 
+                trend_12h[i] == 1 or 
+                not vol_filter_ok):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: KDJ oversold (K<20) with volume and bullish weekly trend
-            if (k[i] < 20 and 
+            # Enter long: break above R3 with volume, bullish trend, and adequate volatility
+            if (close[i] > r3_12h[i] and 
                 vol_ok and 
-                trend_1w_aligned[i] == 1):
+                trend_12h[i] == 1 and
+                vol_filter_ok):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: KDJ overbought (K>80) with volume and bearish weekly trend
-            elif (k[i] > 80 and 
+            # Enter short: break below S3 with volume, bearish trend, and adequate volatility
+            elif (close[i] < s3_12h[i] and 
                   vol_ok and 
-                  trend_1w_aligned[i] == -1):
+                  trend_12h[i] == -1 and
+                  vol_filter_ok):
                 position = -1
                 signals[i] = -0.25
     
