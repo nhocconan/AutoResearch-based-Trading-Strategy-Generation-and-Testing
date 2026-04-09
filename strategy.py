@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and ATR stoploss
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
-# - Requires volume > 2.0 * 20-period volume average for confirmation
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and ATR stoploss
+# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 4h timeframe
+# - Requires volume > 2.0 * 20-period volume average for confirmation (strict filter)
 # - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
-# - Works in bull markets via breakouts above H3, in bear via breakdowns below L3
-# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years) to avoid fee drag
+# - Works in bull markets via breakouts above H3 resistance, in bear via breakdowns below L3 support
+# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to avoid fee drag
+# - Camarilla pivots provide mathematically derived support/resistance levels that work across regimes
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,27 +22,29 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d OHLC for Camarilla calculation
+    # 1d Camarilla pivot levels (based on previous day's range)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot and Camarilla levels
+    # Calculate pivot point and ranges
     pivot = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: H3/L3 are key breakout levels
-    h3 = close_1d + range_1d * 1.1 / 4.0  # approx: close + 1.1*(HL)/4
-    l3 = close_1d - range_1d * 1.1 / 4.0  # approx: close - 1.1*(HL)/4
+    # Camarilla levels: H3/L3 are the key breakout levels
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    h3 = close_1d + 1.1 * range_1d / 4.0
+    l3 = close_1d - 1.1 * range_1d / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Pre-compute 12h ATR(14) for stoploss
+    # Pre-compute 4h ATR(14) for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -81,7 +84,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < l3_aligned[i]:  # Mean reversion exit (break below L3)
+            elif close[i] < l3_aligned[i]:  # Mean reversion exit (break below L3 support)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -99,7 +102,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > h3_aligned[i]:  # Mean reversion exit (break above H3)
+            elif close[i] > h3_aligned[i]:  # Mean reversion exit (break above H3 resistance)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -108,12 +111,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Look for breakout entries with strict volume confirmation
-            if close[i] > h3_aligned[i] and volume_confirm[i]:  # Break above H3
+            if close[i] > h3_aligned[i] and volume_confirm[i]:  # Break above H3 resistance
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif close[i] < l3_aligned[i] and volume_confirm[i]:  # Break below L3
+            elif close[i] < l3_aligned[i] and volume_confirm[i]:  # Break below L3 support
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
