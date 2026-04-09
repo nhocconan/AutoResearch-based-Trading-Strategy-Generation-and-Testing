@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_hma_trend_volume_v1
-# Hypothesis: 12h strategy using HMA(21) trend filter from 1d HTF for direction, volume confirmation (>1.5x 20-bar average volume), and discrete position sizing (0.25). Enters long when price > HMA with volume confirmation; enters short when price < HMA with volume confirmation. Exits on trend reversal. Uses weekly timeframe only for HTF alignment safety. Target: 12-37 trades/year (50-150 total over 4 years). HMA reduces lag vs SMA/EMA while volume filters weak moves. Works in bull/bear by following established trend with institutional volume confirmation.
+# 1d_donchian_breakout_volume_chop_regime_v1
+# Hypothesis: 1d strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar average volume), and choppiness regime filter (CHOP(14) > 61.8 = range → mean reversion, CHOP < 38.2 = trending → trend follow). Enters long on upper band breakout with volume confirmation in trending regime; enters short on lower band breakout with volume confirmation in trending regime. Uses weekly timeframe only for HTF alignment safety. Target: 7-25 trades/year (30-100 total over 4 years). Donchian provides clear structure, volume filters weak breakouts, chop regime avoids whipsaws in sideways markets. Works in bull/bear by adapting to market regime.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_hma_trend_volume_v1"
-timeframe = "12h"
+name = "1d_donchian_breakout_volume_chop_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,23 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume average for confirmation (20-period = 10 days of 12h bars)
+    # Volume average for confirmation (20-period = 20 days)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Multi-timeframe: 1d HMA(21) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate HMA(21) on 1d close
-    n_hma = 21
-    half_n = n_hma // 2
-    sqrt_n = int(np.sqrt(n_hma))
+    # Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    wma_half = pd.Series(close_1d).rolling(window=half_n, min_periods=half_n).mean().values
-    wma_full = pd.Series(close_1d).rolling(window=n_hma, min_periods=n_hma).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma_21_1d = pd.Series(raw_hma).rolling(window=sqrt_n, min_periods=sqrt_n).mean().values
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    # Multi-timeframe: 1w HTF alignment safety (not used for signals, just for alignment)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Choppiness Index (14-period)
+    def calculate_chop(high, low, close, window=14):
+        atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=window, min_periods=1).sum()
+        max_high = pd.Series(high).rolling(window=window, min_periods=1).max()
+        min_low = pd.Series(low).rolling(window=window, min_periods=1).min()
+        chop = 100 * np.log10(atr / (max_high - min_low)) / np.log10(window)
+        # Handle division by zero and edge cases
+        chop = np.where((max_high - min_low) == 0, 50, chop)
+        return chop.values
+    
+    chop = calculate_chop(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -44,39 +49,40 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
         if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(hma_21_1d_aligned[i])):
+            np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Trend filters
-        uptrend = close[i] > hma_21_1d_aligned[i]
-        downtrend = close[i] < hma_21_1d_aligned[i]
+        # Regime filters
+        is_trending = chop[i] < 38.2  # Trending regime
+        is_ranging = chop[i] > 61.8   # Ranging regime
         
         if position == 1:  # Long position
-            # Exit: trend turns down
-            if not uptrend:
+            # Exit: price breaks below lower Donchian band OR regime shifts to ranging
+            if close[i] < low_min[i] or is_ranging:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend turns up
-            if not downtrend:
+            # Exit: price breaks above upper Donchian band OR regime shifts to ranging
+            if close[i] > high_max[i] or is_ranging:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for trend continuation with volume confirmation
-            if uptrend and volume_confirmed:
-                position = 1
-                signals[i] = 0.25
-            elif downtrend and volume_confirmed:
-                position = -1
-                signals[i] = -0.25
+            # Check for breakout with volume confirmation in trending regime
+            if is_trending and volume_confirmed:
+                if close[i] > high_max[i]:  # Breakout above upper band
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < low_min[i]:  # Breakdown below lower band
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
