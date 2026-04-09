@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v5
-# Hypothesis: 4h strategy using Camarilla pivot levels from 1d for mean reversion in ranging markets,
-# filtered by 12h choppiness regime to avoid trending markets. Volume confirmation on entry.
-# Long: price touches S3 + CHOP > 61.8 (range) + volume spike
-# Short: price touches R3 + CHOP > 61.8 (range) + volume spike
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+# 1h_macd_rsi_4h1d_trend_v1
+# Hypothesis: 1h strategy using MACD histogram cross + RSI pullback for entry timing,
+# with 4h EMA trend filter and 1d ADX regime filter. Designed for low trade frequency
+# (target: 60-150 total trades over 4 years) to avoid fee drag. Works in bull/bear
+# by using trend filter (4h EMA) and regime filter (1d ADX < 25 = range, > 25 = trend).
+# Uses discrete sizing (±0.20) to minimize fee churn.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v5"
-timeframe = "4h"
+name = "1h_macd_rsi_4h1d_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,100 +24,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots
+    # 4h HTF data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1d HTF data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    # Pivot = (high + low + close) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3
-    # Range = high - low
-    rang = high_1d - low_1d
-    # Resistance levels
-    r4 = close_1d + rang * 1.500
-    r3 = close_1d + rang * 1.250
-    r2 = close_1d + rang * 1.166
-    r1 = close_1d + rang * 1.083
-    # Support levels
-    s1 = close_1d - rang * 1.083
-    s2 = close_1d - rang * 1.166
-    s3 = close_1d - rang * 1.250
-    s4 = close_1d - rang * 1.500
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    up_move = pd.Series(high_1d) - pd.Series(high_1d).shift(1)
+    down_move = pd.Series(low_1d).shift(1) - pd.Series(low_1d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # 12h HTF data for choppiness regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
     
-    # Choppiness Index: CHOP = 100 * log10(sum(atr1) / (n * log(n+1))) / log10(n)
-    # Simplified: CHOP = 100 * log10(atr_sum / (true_range_max * n)) / log10(n)
-    # Where atr_sum = sum of true range over n periods
-    # true_range = max(high-low, abs(high-close_prev), abs(low-close_prev))
-    tr1 = np.maximum(high_12h - low_12h, np.abs(high_12h - np.roll(close_12h, 1)))
-    tr1 = np.maximum(tr1, np.abs(low_12h - np.roll(close_12h, 1)))
-    tr1[0] = high_12h[0] - low_12h[0]  # first period
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    atr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    tr_max = pd.Series(tr1).rolling(window=14, min_periods=14).max().values
+    # 1h indicators for entry timing
+    # MACD (12,26,9)
+    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Avoid division by zero
-    chop_raw = np.where(tr_max > 0, atr_sum / (tr_max * 14), 1.0)
-    chop = 100 * np.log10(chop_raw) / np.log10(14)
-    
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI (14)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(macd_hist[i]) or np.isnan(signal_line[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend direction from 4h EMA
+        trend_up = close[i] > ema_4h_aligned[i]
+        trend_down = close[i] < ema_4h_aligned[i]
+        
+        # Determine regime from 1d ADX
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] <= 25
+        
         if position == 1:  # Long position
-            # Exit: price moves above S2 (mean reversion complete) OR chop < 38.2 (trending)
-            if close[i] > s2_aligned[i] if not np.isnan(s2_aligned[i]) else False or chop_aligned[i] < 38.2:
+            # Exit: trend reversal OR MACD histogram turns negative
+            if not trend_up or macd_hist[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price moves below R2 (mean reversion complete) OR chop < 38.2 (trending)
-            if close[i] < r2_aligned[i] if not np.isnan(r2_aligned[i]) else False or chop_aligned[i] < 38.2:
+            # Exit: trend reversal OR MACD histogram turns positive
+            if not trend_down or macd_hist[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Need chop > 61.8 (ranging market) and volume confirmation
-            if chop_aligned[i] > 61.8 and volume[i] > 2.0 * volume_ma[i]:
-                # Long: price touches S3 (strong support)
-                if close[i] <= s3_aligned[i]:
+            # Volume confirmation: current volume > 1.5x 20-period average
+            volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i] if not np.isnan(volume_ma[i]) else False
+            
+            if volume_confirmed:
+                # Long conditions: uptrend + MACD bullish cross + RSI pullback (not overbought)
+                if trend_up and macd_hist[i] > 0 and macd_hist[i-1] <= 0 and rsi[i] < 70:
                     position = 1
-                    signals[i] = 0.25
-                # Short: price touches R3 (strong resistance)
-                elif close[i] >= r3_aligned[i]:
+                    signals[i] = 0.20
+                # Short conditions: downtrend + MACD bearish cross + RSI pullback (not oversold)
+                elif trend_down and macd_hist[i] < 0 and macd_hist[i-1] >= 0 and rsi[i] > 30:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
