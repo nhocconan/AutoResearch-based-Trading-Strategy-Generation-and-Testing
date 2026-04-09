@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
-# Donchian breakouts capture momentum; 1d ADX > 25 filters for trending markets only
+# Hypothesis: 4h Donchian(20) breakout + 1d Williams %R + volume confirmation
+# Donchian breakouts capture momentum; 1d Williams %R identifies overbought/oversold conditions on higher timeframe
 # Volume confirmation ensures breakout authenticity with conviction
-# Works in bull/bear: ADX regime filter avoids whipsaws in ranging markets
+# Williams %R provides mean-reversion edge in ranging markets while Donchian catches trends
 # Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_donchian_adx_volume_v1"
+name = "4h_1d_williamsr_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,55 +23,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX calculation
+    # Load 1d data ONCE before loop for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
+    # Calculate 14-period Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        alpha = 1.0 / period
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
+    williams_r = np.full(len(close_1d), np.nan)
+    for i in range(len(close_1d)):
+        if i < 13:  # Need 14 periods for calculation (0-indexed)
+            williams_r[i] = np.nan
+        else:
+            highest_high = np.max(high_1d[i-13:i+1])
+            lowest_low = np.min(low_1d[i-13:i+1])
+            if highest_high == lowest_low:
+                williams_r[i] = -50  # Avoid division by zero
             else:
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+                williams_r[i] = ((highest_high - close_1d[i]) / (highest_high - lowest_low)) * -100
     
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align ADX data to 4h timeframe (wait for daily close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align Williams %R data to 4h timeframe (wait for daily close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate 4h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
@@ -99,39 +74,37 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(williams_r_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * avg_volume[i]
-        # Regime filter: ADX > 25 indicates trending market
-        trending_regime = adx_aligned[i] > 25
         
         if position == 1:  # Long position
-            # Exit: price < Donchian low OR ADX < 20 (losing trend)
-            if close[i] < donchian_low[i] or adx_aligned[i] < 20:
+            # Exit: price < Donchian low OR Williams %R > -20 (overbought)
+            if close[i] < donchian_low[i] or williams_r_aligned[i] > -20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high OR ADX < 20 (losing trend)
-            if close[i] > donchian_high[i] or adx_aligned[i] < 20:
+            # Exit: price > Donchian high OR Williams %R < -80 (oversold)
+            if close[i] > donchian_high[i] or williams_r_aligned[i] < -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation, Donchian breakout + ADX filter
-            if volume_confirmed and trending_regime:
-                # Long entry: price > Donchian high
-                if close[i] > donchian_high[i]:
+            # Entry logic with volume confirmation and Donchian breakout + Williams %R filter
+            if volume_confirmed:
+                # Long entry: price > Donchian high AND Williams %R < -50 (not overbought)
+                if close[i] > donchian_high[i] and williams_r_aligned[i] < -50:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low
-                elif close[i] < donchian_low[i]:
+                # Short entry: price < Donchian low AND Williams %R > -50 (not oversold)
+                elif close[i] < donchian_low[i] and williams_r_aligned[i] > -50:
                     position = -1
                     signals[i] = -0.25
     
