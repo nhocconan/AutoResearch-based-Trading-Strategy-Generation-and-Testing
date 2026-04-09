@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
-# 4h_donchian_1d_camarilla_volume_chop_v3
-# Hypothesis: 4h Donchian(20) breakout with 1d Camarilla H4/L4 filter, volume confirmation, and chop regime filter.
-# Uses 4h timeframe for optimal trade frequency (~30-60 trades/year). Donchian provides trend following breakouts,
-# Camarilla H4/L4 from 1d acts as strong bias filter (only trade in direction of daily pivot extremes),
-# volume spike confirms institutional interest, chop filter avoids whipsaws in ranging markets.
-# Designed to work in bull/bear markets: breakouts capture trends, Camarilla filter avoids counter-trend fakes,
-# chop filter reduces losses in sideways markets. Target: 75-200 total trades over 4 years.
+# 6h_hma_camarilla_volume_v1
+# Hypothesis: 6h Hull Moving Average (HMA) crossover with 1d Camarilla H3/L3 filter and volume confirmation.
+# Uses 6h timeframe to balance trade frequency and responsiveness. HMA provides smooth trend signals with reduced lag,
+# Camarilla H3/L3 acts as strong bias filter from daily pivot structure (only trade in direction of daily extremes),
+# volume spike confirms institutional participation. Designed for 12-37 trades/year (50-150 over 4 years).
+# Works in bull/bear markets: HMA captures trends with less whipsaw, Camarilla filter avoids counter-trend fakes during ranging.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1d_camarilla_volume_chop_v3"
-timeframe = "4h"
+name = "6h_hma_camarilla_volume_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA for half period
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean().values
+    # WMA for full period
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean().values
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,21 +41,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data for HMA calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 55:  # Need enough for HMA(55)
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 6h HMA(55) for trend
+    close_6h = df_6h['close'].values
+    hma_6h = calculate_hma(close_6h, 55)
     
-    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 4h Donchian levels to 4h timeframe (completed 4h candle only)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
+    # Align 6h HMA to 6h timeframe (completed 6h candle only)
+    hma_6h_aligned = align_htf_to_ltf(prices, df_6h, hma_6h)
     
     # Get 1d HTF data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -54,72 +66,50 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels for daily (H4/L4 for stronger direction filter)
-    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # Camarilla H3/L3 levels (stronger bias filter than H4/L4)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align Camarilla levels to 4h timeframe (completed daily candle only)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Align Camarilla levels to 6h timeframe (completed daily candle only)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma_20 * 2.0)
-    
-    # Chop regime filter using 4h data (avoid whipsaws in ranging markets)
-    chop_window = 14
-    if len(df_4h) >= chop_window:
-        high_4h_series = pd.Series(df_4h['high'])
-        low_4h_series = pd.Series(df_4h['low'])
-        true_range = np.maximum(
-            high_4h_series - low_4h_series,
-            np.maximum(
-                np.abs(high_4h_series - df_4h['close']),
-                np.abs(low_4h_series - df_4h['close'])
-            )
-        )
-        atr = true_range.rolling(window=chop_window, min_periods=chop_window).mean().values
-        highest_high = high_4h_series.rolling(window=chop_window, min_periods=chop_window).max().values
-        lowest_low = low_4h_series.rolling(window=chop_window, min_periods=chop_window).min().values
-        chop = 100 * np.log10((highest_high - lowest_low) / (atr * chop_window)) / np.log10(chop_window)
-        chop_aligned = align_htf_to_ltf(prices, df_4h, chop)
-        chop_filter = chop_aligned > 50  # Only trade when chop > 50 (avoid strong trends for mean reversion, but we use it as trend filter)
-    else:
-        chop_filter = np.ones(n, dtype=bool)  # Default to true if not enough data
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop_filter[i])):
+        if (np.isnan(hma_6h_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
+            np.isnan(l3_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian lower band
-            if close[i] < donchian_lower_aligned[i]:
+            # Exit: price closes below 6h HMA
+            if close[i] < hma_6h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian upper band
-            if close[i] > donchian_upper_aligned[i]:
+            # Exit: price closes above 6h HMA
+            if close[i] > hma_6h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 4h Donchian upper, above 1d H4, with volume spike, and chop > 50
-            if (close[i] > donchian_upper_aligned[i]) and (close[i] > h4_1d_aligned[i]) and vol_spike[i] and chop_filter[i]:
+            # Enter long: price closes above 6h HMA, above 1d H3, with volume spike
+            if (close[i] > hma_6h_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 4h Donchian lower, below 1d L4, with volume spike, and chop > 50
-            elif (close[i] < donchian_lower_aligned[i]) and (close[i] < l4_1d_aligned[i]) and vol_spike[i] and chop_filter[i]:
+            # Enter short: price closes below 6h HMA, below 1d L3, with volume spike
+            elif (close[i] < hma_6h_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
