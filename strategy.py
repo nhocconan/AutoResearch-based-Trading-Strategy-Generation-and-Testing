@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d ATR regime filter
-# Uses Camarilla pivot levels (H3/L3) from 1d for breakout triggers, confirmed by volume spike (>2.0x avg)
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d ATR regime filter
+# Uses Donchian(20) breakout from 4h for entry triggers, confirmed by volume spike (>1.5x avg)
 # Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) for reliability
 # Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
 # Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
 
-name = "12h_1d_camarilla_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,10 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and ATR regime filter
+    # Load 4h data ONCE before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Load 1d data ONCE before loop for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
+    
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = np.full(len(df_4h), np.nan)
+    donchian_low = np.full(len(df_4h), np.nan)
+    
+    for i in range(len(df_4h)):
+        if i < 20:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
+        else:
+            # Use lookback window excluding current bar to avoid look-ahead
+            donchian_high[i] = np.max(df_4h['high'].iloc[i-20:i])
+            donchian_low[i] = np.min(df_4h['low'].iloc[i-20:i])
     
     # Calculate 1d ATR(14) for regime filter
     tr_1d = np.full(len(df_1d), np.nan)
@@ -58,28 +76,13 @@ def generate_signals(prices):
         else:
             atr_ma_50[i] = np.mean(atr_1d[i-50:i])
     
-    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
+    # Align 4h Donchian channels to 4h timeframe (no shift needed as already aligned)
+    donchian_high_4h = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_4h = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    for i in range(len(df_1d)):
-        if i < 1:
-            camarilla_h3[i] = np.nan
-            camarilla_l3[i] = np.nan
-        else:
-            # Use previous day's OHLC to avoid look-ahead
-            prev_high = df_1d['high'].iloc[i-1]
-            prev_low = df_1d['low'].iloc[i-1]
-            prev_close = df_1d['close'].iloc[i-1]
-            range_val = prev_high - prev_low
-            camarilla_h3[i] = prev_close + range_val * 1.1 / 4
-            camarilla_l3[i] = prev_close - range_val * 1.1 / 4
-    
-    # Align 1d indicators to 12h timeframe
-    camarilla_h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    atr_ma_50_12h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align 1d ATR regime to 4h timeframe
+    atr_ma_50_4h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -94,44 +97,44 @@ def generate_signals(prices):
     
     for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_12h[i]) or 
-            np.isnan(camarilla_l3_12h[i]) or 
-            np.isnan(atr_ma_50_12h[i]) or 
-            np.isnan(atr_12h[i]) or 
+        if (np.isnan(donchian_high_4h[i]) or 
+            np.isnan(donchian_low_4h[i]) or 
+            np.isnan(atr_ma_50_4h[i]) or 
+            np.isnan(atr_4h[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume[i] > 2.0 * avg_volume[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
-        atr_regime = atr_12h[i] < atr_ma_50_12h[i]
+        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
         
         if position == 1:  # Long position
-            # Exit conditions: price closes below Camarilla L3 OR ATR regime turns unfavorable
-            if close[i] < camarilla_l3_12h[i] or not atr_regime:
+            # Exit conditions: price closes below Donchian low OR ATR regime turns unfavorable
+            if close[i] < donchian_low_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price closes above Camarilla H3 OR ATR regime turns unfavorable
-            if close[i] > camarilla_h3_12h[i] or not atr_regime:
+            # Exit conditions: price closes above Donchian high OR ATR regime turns unfavorable
+            if close[i] > donchian_high_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Camarilla breakout with volume confirmation and ATR regime filter
+            # Entry logic: Donchian breakout with volume confirmation and ATR regime filter
             if volume_confirm and atr_regime:
-                # Long breakout: price closes above Camarilla H3
-                if close[i] > camarilla_h3_12h[i]:
+                # Long breakout: price closes above Donchian high
+                if close[i] > donchian_high_4h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below Camarilla L3
-                elif close[i] < camarilla_l3_12h[i]:
+                # Short breakout: price closes below Donchian low
+                elif close[i] < donchian_low_4h[i]:
                     position = -1
                     signals[i] = -0.25
     
