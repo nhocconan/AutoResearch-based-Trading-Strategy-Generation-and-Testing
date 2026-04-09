@@ -3,19 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
-# In bull/bear markets: buy when price breaks above 20-day high with 1w EMA uptrend and volume spike
-# Sell/short when price breaks below 20-day low with 1w EMA downtrend and volume confirmation
-# Uses discrete position sizing 0.25 to limit trades and reduce fee drag
-# Designed to work in both trending and ranging markets via volume confirmation and trend filter
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
+# Bull Power = High - EMA(13), Bear Power = Low - EMA(13) on 6h timeframe
+# ADX > 25 indicates trending regime: trade in direction of Elder Ray power
+# ADX <= 25 indicates ranging regime: fade extreme Elder Ray readings
+# Volume confirmation ensures participation
+# Designed for low trade frequency (12-37/year) to minimize fee drag
+# Works in bull/bear markets: adapts to regime via ADX filter
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,64 +25,126 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA(21) for trend filter
-    close_s_1w = pd.Series(close_1w)
-    ema_21_1w = close_s_1w.ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Calculate 1d ADX(14)
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = wilders_smoothing(tr, 14)
     
-    # Calculate 1d average volume (20-period) for confirmation
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align 1w EMA to 1d timeframe
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # DI+ and DI-
+    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
+    
+    # DX and ADX
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, 14)
+    
+    # Calculate 6h EMA(13) for Elder Ray
+    close_s = pd.Series(close)
+    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume confirmation: 6h volume > 1.5x 20-period average
+    volume_s = pd.Series(volume)
+    avg_volume = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.5 * avg_volume
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(avg_volume_20[i]) or np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
+        adx = adx_1d_aligned[i]
+        bull = bull_power[i]
+        bear = bear_power[i]
+        vol_conf = volume_confirmed[i]
+        
         if position == 1:  # Long position
-            # Exit long if price breaks below 20-day low or trend turns down
-            if close[i] < lowest_low_20[i] or ema_21_1w_aligned[i] < close_1w[0]:  # placeholder for trend check
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
+            if adx > 25:  # Trending regime
+                # Exit long if bear power becomes stronger than bull power or ADX weakens
+                if bear > bull or adx < 20:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            else:  # Ranging regime
+                # Exit long if power fades or reverses
+                if bull < 0 or bear > 0:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
-            # Exit short if price breaks above 20-day high or trend turns up
-            if close[i] > highest_high_20[i] or ema_21_1w_aligned[i] > close_1w[0]:  # placeholder for trend check
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            if adx > 25:  # Trending regime
+                # Exit short if bull power becomes stronger than bear power or ADX weakens
+                if bull > bear or adx < 20:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:  # Ranging regime
+                # Exit short if power fades or reverses
+                if bear > 0 or bull < 0:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Enter long on breakout above 20-day high with volume confirmation and 1w uptrend
-            if (close[i] > highest_high_20[i] and 
-                volume[i] > 1.5 * avg_volume_20[i] and 
-                ema_21_1w_aligned[i] > ema_21_1w_aligned[max(0, i-1)]):
-                position = 1
-                signals[i] = 0.25
-            # Enter short on breakout below 20-day low with volume confirmation and 1w downtrend
-            elif (close[i] < lowest_low_20[i] and 
-                  volume[i] > 1.5 * avg_volume_20[i] and 
-                  ema_21_1w_aligned[i] < ema_21_1w_aligned[max(0, i-1)]):
-                position = -1
-                signals[i] = -0.25
+            if adx > 25:  # Trending regime
+                # Enter long if bull power > bear power and both positive
+                if bull > bear and bull > 0 and vol_conf:
+                    position = 1
+                    signals[i] = 0.25
+                # Enter short if bear power > bull power and both negative
+                elif bear > bull and bear < 0 and vol_conf:
+                    position = -1
+                    signals[i] = -0.25
+            else:  # Ranging regime
+                # Fade extreme power readings
+                if bull < -2.0 * np.std(bull_power[max(0, i-50):i]) and vol_conf:
+                    position = 1
+                    signals[i] = 0.25
+                elif bear > 2.0 * np.std(bear_power[max(0, i-50):i]) and vol_conf:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
