@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and ATR filter
-# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation filters false signals (current 4h volume > 1.3x 20-period average)
+# Hypothesis: 6h strategy using 1d/1w Williams %R extremes with volume confirmation and ATR filter
+# Williams %R(14) < -80 = oversold (long), > -20 = overbought (short) on 1d
+# Weekly trend filter: only trade long when price > weekly EMA(50), short when price < weekly EMA(50)
+# Volume confirmation: current 6h volume > 1.5x 20-period average filters low-quality signals
 # ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
-# Position size fixed at 0.25 to balance profit potential and drawdown control
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Position size fixed at 0.25 to balance return and drawdown
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_camarilla_atr_volume_v1"
-timeframe = "4h"
+name = "6h_1d_1w_williamsr_atr_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +26,28 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 20 or len(df_1w) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + range_1d * 1.1 / 2.0
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1d Williams %R (14-period)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    williams_r[highest_high_14 == lowest_low_14] = -50  # Avoid division by zero
+    
+    # Calculate 1w EMA (50-period) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 1d ATR (14-period) for volatility filtering
     tr1 = high_1d - low_1d
@@ -50,14 +57,12 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period has no previous close
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 4h timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align all HTF data to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute session filter (08-20 UTC)
@@ -69,15 +74,14 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            not in_session[i] or atr_1d_aligned[i] <= 0):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or not in_session[i] or
+            atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.3x average 4h volume
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         # Volatility filter: only trade when 1d ATR is above its 50-period average
         atr_ma_50_1d = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean()
@@ -94,44 +98,35 @@ def generate_signals(prices):
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit on retracement to S3 (1d) or stop at S4 breakdown (1d)
-            if close[i] < s3_1d_aligned[i]:
+            # Exit on Williams %R > -20 (overbought) or stop at close < weekly EMA
+            if williams_r_aligned[i] > -20:
                 position = 0
                 signals[i] = 0.0
-            elif close[i] < s4_1d_aligned[i]:  # Stop loss at S4 breakdown
+            elif close[i] < ema_50_1w_aligned[i]:  # Stop loss: close below weekly EMA
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit on retracement to R3 (1d) or stop at R4 breakout (1d)
-            if close[i] > r3_1d_aligned[i]:
+            # Exit on Williams %R < -80 (oversold) or stop at close > weekly EMA
+            if williams_r_aligned[i] < -80:
                 position = 0
                 signals[i] = 0.0
-            elif close[i] > r4_1d_aligned[i]:  # Stop loss at R4 breakout
+            elif close[i] > ema_50_1w_aligned[i]:  # Stop loss: close above weekly EMA
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
-            # Camarilla pivot trading with volume and volatility confirmation
-            # Fade at R3/S3 (mean reversion), breakout at R4/S4 (trend following)
+            # Williams %R extreme + volume confirmation + weekly trend filter
             if volume_confirmed:
-                # Fade at R3 (sell at resistance, expect reversion to pivot)
-                if close[i] > r3_1d_aligned[i] and close[i] < r4_1d_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-                # Fade at S3 (buy at support, expect reversion to pivot)
-                elif close[i] < s3_1d_aligned[i] and close[i] > s4_1d_aligned[i]:
+                # Long: Williams %R < -80 (oversold) AND price > weekly EMA (uptrend)
+                if williams_r_aligned[i] < -80 and close[i] > ema_50_1w_aligned[i]:
                     position = 1
                     signals[i] = position_size
-                # Breakout continuation at R4 (buy break above resistance)
-                elif close[i] > r4_1d_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakout continuation at S4 (sell break below support)
-                elif close[i] < s4_1d_aligned[i]:
+                # Short: Williams %R > -20 (overbought) AND price < weekly EMA (downtrend)
+                elif williams_r_aligned[i] > -20 and close[i] < ema_50_1w_aligned[i]:
                     position = -1
                     signals[i] = -position_size
     
