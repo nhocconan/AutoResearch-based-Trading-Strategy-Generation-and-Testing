@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + ATR(14) stoploss
-# - Primary signal: Donchian channel breakout on 4h timeframe - long when price > 20-period high, short when price < 20-period low
-# - Volume filter: 1d volume > 20-period median volume (avoid low-participation breakouts)
-# - ATR stoploss: exit when price moves against position by 2.0 * ATR(14) from entry
+# Hypothesis: 6h Donchian(20) breakout + 1d Camarilla pivot alignment + volume confirmation
+# - Primary signal: Donchian breakout on 6h timeframe (new 20-period high/low)
+# - Trend filter: 1d Camarilla pivot levels - only long when price > daily pivot, short when price < daily pivot
+# - Volume confirmation: 6h volume > 1.5 * 20-period median volume (avoid low-participation signals)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
-# - Works in bull/bear: Donchian breakouts capture strong trends, volume filter ensures validity, ATR stop manages risk in volatile markets
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Works in bull/bear: Donchian captures breakouts, Camarilla pivot provides institutional reference levels
+# - Exit: price retrace to midpoint of Donchian channel or opposite breakout
 
-name = "4h_1d_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1d_donchian_camarilla_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,77 +23,90 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d volume regime: volume > 20-period median
-    volume_1d = df_1d['volume'].values
-    median_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
-    volume_regime_1d = volume_1d > median_volume_20
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime_1d)
-    
-    # Pre-compute ATR(14) on 1d for stoploss
+    # Pre-compute 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Camarilla levels based on previous day
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Pre-compute Donchian(20) on 4h (primary timeframe)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    # First value will be invalid due to roll, but min_periods will handle it
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels
+    r3 = pivot + (range_val * 1.1 / 2)
+    s3 = pivot - (range_val * 1.1 / 2)
+    r4 = pivot + (range_val * 1.1)
+    s4 = pivot - (range_val * 1.1)
+    
+    # Align Camarilla levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Pre-compute Donchian channel on 6h timeframe
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    
+    # Donchian(20) - highest high and lowest low over 20 periods
+    highest_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # 6h volume regime: volume > 1.5 * 20-period median volume
+    volume = prices['volume'].values
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > (1.5 * median_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0  # Track entry price for ATR-based stoploss
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(volume_regime_aligned[i]) or
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian low OR ATR stoploss hit
-            if close_4h[i] < lowest_low[i] or close_4h[i] < entry_price - 2.0 * atr_14_aligned[i]:
+            # Exit: price retrace to Donchian midpoint OR Donchian breakdown
+            if close_6h[i] <= donchian_mid[i] or close_6h[i] < lowest_low[i]:
                 position = 0
-                entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian high OR ATR stoploss hit
-            if close_4h[i] > highest_high[i] or close_4h[i] > entry_price + 2.0 * atr_14_aligned[i]:
+            # Exit: price retrace to Donchian midpoint OR Donchian breakout
+            if close_6h[i] >= donchian_mid[i] or close_6h[i] > highest_high[i]:
                 position = 0
-                entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume confirmation
-            if close_4h[i] > highest_high[i] and volume_regime_aligned[i]:
+            # Look for Donchian breakout with Camarilla alignment and volume confirmation
+            # Bullish breakout: price above Donchian upper band AND above daily pivot AND volume
+            if (close_6h[i] > highest_high[i] and 
+                close_6h[i] > pivot_aligned[i] and 
+                volume_regime[i]):
                 position = 1
-                entry_price = close_4h[i]
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume confirmation
-            elif close_4h[i] < lowest_low[i] and volume_regime_aligned[i]:
+            # Bearish breakout: price below Donchian lower band AND below daily pivot AND volume
+            elif (close_6h[i] < lowest_low[i] and 
+                  close_6h[i] < pivot_aligned[i] and 
+                  volume_regime[i]):
                 position = -1
-                entry_price = close_4h[i]
                 signals[i] = -0.25
     
     return signals
