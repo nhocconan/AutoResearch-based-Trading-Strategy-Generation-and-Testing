@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d volume and ATR regime filter
 # - Uses 4h Donchian channel (20-period high/low) derived from 1d data for breakout signals
 # - Confirms with 1d ATR(14) > 1.2x its 50-period average (high volatility regime)
 # - Confirms with 1d volume > 1.5x its 20-period average (institutional participation)
