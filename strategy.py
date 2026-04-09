@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d HMA50 trend filter and volume confirmation
-# Uses Donchian channels from 4h data: breakout above upper band = long, below lower band = short
-# 1d HMA50 filter ensures trades align with higher timeframe trend (more stable than 12h)
+# Hypothesis: 1d Camarilla pivot levels with 1w EMA200 trend filter and volume confirmation
+# Uses Camarilla levels from 1d data: long at L3 with bullish 1w trend, short at H3 with bearish 1w trend
+# 1w EMA200 filter ensures trades align with weekly trend (more stable than 1d)
 # Volume confirmation reduces false breakouts
-# Designed for 4h timeframe to target 20-50 trades/year (75-200 over 4 years)
-# Works in bull/bear: HMA50 adapts to trend, Donchian provides robust structure
+# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year)
+# Works in bull/bear: EMA200 adapts to trend, Camarilla provides mean-reversion structure
 
-name = "4h_1d_donchian_hma_volume_v5"
-timeframe = "4h"
+name = "1d_1w_camarilla_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +24,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Donchian channels and HMA50
+    # Load 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1w data ONCE before loop for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
     
-    # Upper band: highest high of last 20 periods
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla formula: 
+    # H4 = close + 1.1*(high-low)*1.1/2
+    # H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4
+    # L4 = close - 1.1*(high-low)*1.1/2
     
-    # Align 1d Donchian bands to 4h timeframe
-    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate 1d HMA50 trend filter
-    half_n = int(50/2 + 0.5)
-    wma_half = pd.Series(close_1d).rolling(window=half_n, min_periods=half_n).mean()
-    wma_full = pd.Series(close_1d).rolling(window=50, min_periods=50).mean()
-    hma_50_1d = (2 * wma_half - wma_full).values
+    # Calculate Camarilla levels
+    H3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
+    L3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
+    H4 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
+    L4 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
     
-    # Align 1d HMA50 to 4h timeframe
-    hma_50_4h = align_htf_to_ltf(prices, df_1d, hma_50_1d)
+    # Align 1d Camarilla levels to 1d timeframe (no shift needed as they're based on prev day)
+    H3_1d = align_htf_to_ltf(prices, df_1d, H3)
+    L3_1d = align_htf_to_ltf(prices, df_1d, L3)
+    H4_1d = align_htf_to_ltf(prices, df_1d, H4)
+    L4_1d = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Calculate 20-period average volume for volume confirmation (4h volume)
+    # Calculate 1w EMA200 trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    
+    # Align 1w EMA200 to 1d timeframe
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Calculate 20-period average volume for volume confirmation (1d volume)
     avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -65,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or
-            np.isnan(hma_50_4h[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(H3_1d[i]) or np.isnan(L3_1d[i]) or np.isnan(H4_1d[i]) or 
+            np.isnan(L4_1d[i]) or np.isnan(ema_200_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -74,16 +86,16 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR trend turns bearish
-            if close[i] < lower_20_4h[i] or close[i] < hma_50_4h[i]:
+            # Exit: price closes below L3 OR trend turns bearish (price < EMA200)
+            if close[i] < L3_1d[i] or close[i] < ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR trend turns bullish
-            if close[i] > upper_20_4h[i] or close[i] > hma_50_4h[i]:
+            # Exit: price closes above H3 OR trend turns bullish (price > EMA200)
+            if close[i] > H3_1d[i] or close[i] > ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,12 +103,12 @@ def generate_signals(prices):
         else:  # Flat
             # Entry logic with volume confirmation
             if volume_confirm:
-                # Long breakout: price closes above Donchian upper band AND price > 1d HMA50 (bullish trend)
-                if close[i] > upper_20_4h[i] and close[i] > hma_50_4h[i]:
+                # Long entry: price closes below L3 (mean reversion) AND price > 1w EMA200 (bullish trend)
+                if close[i] < L3_1d[i] and close[i] > ema_200_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below Donchian lower band AND price < 1d HMA50 (bearish trend)
-                elif close[i] < lower_20_4h[i] and close[i] < hma_50_4h[i]:
+                # Short entry: price closes above H3 (mean reversion) AND price < 1w EMA200 (bearish trend)
+                elif close[i] > H3_1d[i] and close[i] < ema_200_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
