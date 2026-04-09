@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_v3
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and chop regime filter.
-# In ranging markets (2025+), price tends to revert from pivot support/resistance levels.
-# Volume confirmation filters false touches. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years by requiring pivot touch + volume spike + chop filter.
-# Primary timeframe: 12h, HTF: 1d for Camarilla levels and regime filter.
+# 1d_camarilla_pivot_volume_chop_v2
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation and choppiness regime filter.
+# In ranging markets (2025+), price tends to revert from weekly pivot support/resistance levels.
+# Volume confirmation filters false touches. Choppiness filter ensures ranging market conditions.
+# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 30-100 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_v3"
-timeframe = "12h"
+name = "1d_camarilla_pivot_volume_chop_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 1w HTF data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous 1w bar
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
     # Camarilla levels (using formula: Close ± (Range * 1.1/12))
-    camarilla_h5 = close_1d + (range_1d * 1.1 / 12)
-    camarilla_h4 = close_1d + (range_1d * 1.1 / 6)
-    camarilla_h3 = close_1d + (range_1d * 1.1 / 4)
-    camarilla_l3 = close_1d - (range_1d * 1.1 / 4)
-    camarilla_l4 = close_1d - (range_1d * 1.1 / 6)
-    camarilla_l5 = close_1d - (range_1d * 1.1 / 12)
+    camarilla_h5 = close_1w + (range_1w * 1.1 / 12)
+    camarilla_h4 = close_1w + (range_1w * 1.1 / 6)
+    camarilla_h3 = close_1w + (range_1w * 1.1 / 4)
+    camarilla_l3 = close_1w - (range_1w * 1.1 / 4)
+    camarilla_l4 = close_1w - (range_1w * 1.1 / 6)
+    camarilla_l5 = close_1w - (range_1w * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
-    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    # Align Camarilla levels to 1d timeframe
+    h5_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h5)
+    h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    l5_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l5)
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     # Choppiness index regime filter (14-period) - using 1d data
-    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
+    high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).sum().values
     
     # Avoid division by zero
     chop_denom = np.log10(atr_14) * np.log10(14)
     chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
     chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -74,7 +72,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
         if (np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(volume_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -82,7 +80,7 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         # Chop regime: only trade when market is ranging (chop > 50)
-        chop_regime = chop_aligned[i] > 50
+        chop_regime = chop[i] > 50
         
         if position == 1:  # Long position
             # Exit: price moves below L3 or volume dries up
