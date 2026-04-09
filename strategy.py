@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with daily pivot direction and volume confirmation
-# Works in bull/bear by using daily pivot levels as trend filters (price above daily pivot = bullish bias, below = bearish bias)
-# Donchian breakouts capture momentum, pivot direction avoids counter-trend trades, volume confirms legitimacy
-# Target: 15-35 trades/year (~60-140 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness filter
+# Works in bull/bear by using mean-reversion at extreme levels (S4/R4) with volume confirmation
+# Target: 20-40 trades/year to avoid fee drag, focusing on high-probability breakouts
 
-name = "6h_1d_donchian_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v30"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,25 +26,28 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot point (using prior day's OHLC)
-    pivot = np.full(len(df_1d), np.nan)
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    r4 = np.full(len(df_1d), np.nan)
+    s4 = np.full(len(df_1d), np.nan)
+    prev_high = np.full(len(df_1d), np.nan)
+    prev_low = np.full(len(df_1d), np.nan)
+    
     for i in range(1, len(df_1d)):
         ph = float(df_1d['high'].iloc[i-1])
         pl = float(df_1d['low'].iloc[i-1])
         pc = float(df_1d['close'].iloc[i-1])
-        pivot[i] = (ph + pl + pc) / 3.0
+        r4[i] = pc + (ph - pl) * 1.1 / 2
+        s4[i] = pc - (ph - pl) * 1.1 / 2
+        prev_high[i] = ph
+        prev_low[i] = pl
     
-    # Align daily pivot to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align 1d values to 4h timeframe
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
     
-    # Donchian channel (20-period) on 6h data
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
-    
-    # Volume confirmation: 4-period average (24h)
+    # Volume confirmation: 4-period average (16h)
     vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -55,45 +57,65 @@ def generate_signals(prices):
         if i >= 3:
             vol_ma_4[i] = vol_sum / 4
     
+    # Choppiness regime filter (14-period) - optimized version
+    chop = np.full(n, np.nan)
+    for i in range(13, n):
+        high_max = np.max(high[i-13:i+1])
+        low_min = np.min(low[i-13:i+1])
+        if high_max <= low_min:
+            chop[i] = np.nan
+            continue
+        sum_true_range = 0.0
+        for j in range(14):
+            idx = i - j
+            tr = high[idx] - low[idx]
+            if idx > 0:
+                tr = max(tr, abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
+            sum_true_range += tr
+        if sum_true_range > 0:
+            chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(pivot_6h[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(r4_4h[i]) or 
+            np.isnan(s4_4h[i]) or 
+            np.isnan(prev_high_4h[i]) or 
+            np.isnan(prev_low_4h[i]) or 
+            np.isnan(vol_ma_4[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low OR pivot bias turns bearish
-            if (close[i] <= donchian_low[i]) or (close[i] < pivot_6h[i]):
+            # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
+            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high OR pivot bias turns bullish
-            if (close[i] >= donchian_high[i]) or (close[i] > pivot_6h[i]):
+            # Exit: price closes back inside previous day's range OR chop > 61.8
+            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above Donchian high with volume confirmation AND price above daily pivot (bullish bias)
+            # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
             vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
-            if (close[i] > donchian_high[i] and 
-                vol_ratio > 1.5 and 
-                close[i] > pivot_6h[i]):
+            if (close[i] > r4_4h[i] and 
+                vol_ratio > 2.0 and 
+                chop[i] < 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian low with volume confirmation AND price below daily pivot (bearish bias)
-            elif (close[i] < donchian_low[i] and 
-                  vol_ratio > 1.5 and 
-                  close[i] < pivot_6h[i]):
+            # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
+            elif (close[i] < s4_4h[i] and 
+                  vol_ratio > 2.0 and 
+                  chop[i] < 61.8):
                 position = -1
                 signals[i] = -0.25
     
