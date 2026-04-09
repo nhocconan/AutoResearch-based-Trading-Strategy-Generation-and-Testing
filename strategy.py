@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_donchian_volume_chop_regime_v4
-# Hypothesis: 4h Donchian breakout with volume confirmation and choppiness regime filter.
-# Long: price breaks above Donchian(20) high + volume > 1.5x 20-period average + CHOP > 61.8 (range).
-# Short: price breaks below Donchian(20) low + volume > 1.5x 20-period average + CHOP > 61.8.
-# Uses daily HTF for trend filter: only long if price > daily EMA50, only short if price < daily EMA50.
-# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 25-35 trades/year.
-# Uses 1d HTF data for EMA50, called ONCE before loop.
+# 1d_keltner_channel_v1
+# Hypothesis: 1d strategy using Keltner Channel (20, ATR=2.0) breakouts with volume confirmation.
+# Long when price closes above upper band + volume > 1.5x 20-day average.
+# Short when price closes below lower band + volume > 1.5x 20-day average.
+# Uses 1w HTF EMA(50) as trend filter: only long when price > weekly EMA50, short when price < weekly EMA50.
+# Discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year.
+# Works in bull/bear: breaks capture momentum, weekly EMA filter avoids counter-trend trades.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_volume_chop_regime_v4"
-timeframe = "4h"
+name = "1d_keltner_channel_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,75 +25,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_d = df_1d['close'].values
-    ema_50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_d)
+    # Weekly EMA(50) for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Donchian channels (20-period)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
+    # Daily Keltner Channel (20, ATR=2.0)
+    atr_period = 20
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_band = ema_20 + 2.0 * atr
+    lower_band = ema_20 - 2.0 * atr
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (CHOP) - 14 period
-    # CHOP = 100 * log10(sum(ATR(1)) / (log10(n) * max(high-n) - min(low-n)))
-    # Simplified: CHOP = 100 * log10(ATR_sum / (log10(14) * (HHV - LLV))) / log10(14)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # First TR
-    atr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    highest_high = high_s.rolling(window=14, min_periods=14).max().values
-    lowest_low = low_s.rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (np.log10(14) * (highest_high - lowest_low))) / np.log10(14)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(upper_band[i]) or
+            np.isnan(lower_band[i]) or np.isnan(volume_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Choppiness regime: CHOP > 61.8 indicates ranging market (good for mean reversion/breakouts)
-        chop_regime = chop[i] > 61.8
-        
         if position == 1:  # Long position
-            # Exit: price falls below Donchian low OR loss of volume/chop confirmation
-            if close[i] < donchian_low[i] or not (volume_confirmed and chop_regime):
+            # Exit: price closes below middle line (EMA20) OR weekly trend turns bearish
+            if close[i] < ema_20[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian high OR loss of volume/chop confirmation
-            if close[i] > donchian_high[i] or not (volume_confirmed and chop_regime):
+            # Exit: price closes above middle line (EMA20) OR weekly trend turns bullish
+            if close[i] > ema_20[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed and chop_regime:
-                # Long entry: price breaks above Donchian high AND above daily EMA50 (uptrend filter)
-                if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
+            if volume_confirmed:
+                # Long entry: price closes above upper band AND price > weekly EMA50 (bullish trend)
+                if close[i] > upper_band[i] and close[i] > ema_50_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price breaks below Donchian low AND below daily EMA50 (downtrend filter)
-                elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
+                # Short entry: price closes below lower band AND price < weekly EMA50 (bearish trend)
+                elif close[i] < lower_band[i] and close[i] < ema_50_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
