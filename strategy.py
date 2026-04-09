@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_trend_v2
-# Hypothesis: 12h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation and EMA50 trend filter.
+# 4h_daily_camarilla_pivot_volume_trend_v1
+# Hypothesis: 4h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation and EMA50 trend filter.
 # Long: Price breaks above Camarilla H3 level, close > EMA50, volume > 1.5x 20-period average.
 # Short: Price breaks below Camarilla L3 level, close < EMA50, volume > 1.5x 20-period average.
 # Exit: Opposite pivot break or price crosses EMA50.
 # Uses 1d Camarilla pivots for structure, volume confirmation to filter weak breakouts, EMA50 for trend alignment.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# Target: 20-50 trades/year (75-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_trend_v2"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA50 for trend filter (12h)
+    # EMA50 for trend filter (4h)
     close_s = pd.Series(close)
     ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     
@@ -48,7 +48,7 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align HTF Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align HTF Camarilla levels to 4h timeframe (wait for completed 1d bar)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
