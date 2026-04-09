@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v2
-# Hypothesis: Breakout above/below 1-day Camarilla pivot levels on 4h chart with volume confirmation and volatility filter.
+# 4h_1d_camarilla_breakout_v3
+# Hypothesis: Breakout above/below 1-day Camarilla pivot levels (H3/L3) on 4h chart with volume confirmation and volatility filter.
 # Only take long when price breaks above H3 level, short when breaks below L3 level.
 # Exit when price returns to Pivot Point (PP) level.
 # Uses volatility filter (ATR < 3.5% of price) and volume confirmation (volume > 1.3x 20-period avg).
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
