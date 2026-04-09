@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d ADX trend filter + volume confirmation
-# - Uses 6h Williams %R(14) for overbought/oversold signals (long < -80, short > -20)
-# - Confirms with 1d ADX(14) > 25 (strong trend) to avoid choppy markets
-# - Adds 1d volume > 1.5x 20-period average for institutional participation
-# - Exits when Williams %R reverts to -50 (mean reversion in trend)
-# - Position size: 0.25 (25% of capital) for balanced risk/return
-# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years) to minimize fee drag
-# - Works in bull markets (trend continuation) and bear markets (trend continuation)
-# - Williams %R captures momentum extremes, ADX filters non-trending conditions
+# Hypothesis: 12h Camarilla pivot levels with 1w volume confirmation and chop regime filter
+# - Uses weekly Camarilla pivot levels (H3/L3) for breakout signals
+# - Confirms with 1w volume > 2.0x 4-period average (strong institutional participation)
+# - Filters by 1w choppiness index: trade only when CHOP > 61.8 (range) OR CHOP < 38.2 (trend)
+# - Exits when price touches opposite Camarilla level (H3/L3) or ATR-based stoploss (2.0x ATR)
+# - Position size: 0.25 (25% of capital) for conservative risk management
+# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years) to minimize fee drag
+# - Camarilla pivots provide mathematical support/resistance levels that work in all market regimes
+# - Volume confirmation ensures breakouts have conviction
+# - Chop regime filter avoids false signals in choppy markets while allowing trending/range strategies
 
-name = "6h_1d_williamsr_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,101 +24,121 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     # Pre-compute HTF indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1d True Range for ADX
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate True Range for ATR and chop
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value has no previous close
     
-    # 1d ADX components
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # 1w ATR(4) for stoploss
+    atr_1w = pd.Series(tr).rolling(window=4, min_periods=4).mean().values
     
-    # 1d ATR(14) for ADX
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1w Camarilla levels (based on previous week's OHLC)
+    # H4 = Close + 1.5*(High-Low), H3 = Close + 1.0*(High-Low), etc.
+    # Using previous week's values (already closed)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = high_1w[0]  # First week: use current values
+    prev_low[0] = low_1w[0]
+    prev_close[0] = close_1w[0]
     
-    # 1d smoothed +/- DM
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels
+    camarilla_h3 = prev_close + 1.0 * (prev_high - prev_low)  # H3 level
+    camarilla_l3 = prev_close - 1.0 * (prev_high - prev_low)  # L3 level
+    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)  # H4 level (stoploss reference)
+    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)  # L4 level (stoploss reference)
     
-    # 1d DI+ and DI-
-    plus_di = np.where(atr_1d > 0, 100 * plus_dm_smooth / atr_1d, 0)
-    minus_di = np.where(atr_1d > 0, 100 * minus_dm_smooth / atr_1d, 0)
+    # 1w Volume > 2.0x 4-period average (stricter for fewer trades)
+    avg_volume_4 = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume_1w > (2.0 * avg_volume_4)
     
-    # 1d DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # 1w Choppiness Index(4)
+    sum_tr_4 = pd.Series(tr).rolling(window=4, min_periods=4).sum().values
+    highest_4 = pd.Series(high_1w).rolling(window=4, min_periods=4).max().values
+    lowest_4 = pd.Series(low_1w).rolling(window=4, min_periods=4).min().values
+    chop_denom = np.where((highest_4 - lowest_4) > 0, highest_4 - lowest_4, 1e-10)
+    chop = 100 * np.log10(sum_tr_4 / chop_denom) / np.log10(4)
+    chop_range = chop > 61.8  # range-bound market
+    chop_trend = chop < 38.2  # trending market
     
-    # 1d Volume > 1.5x 20-period average
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * avg_volume_20)
+    # Align all 1w indicators to 12h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike.astype(float))
+    chop_range_aligned = align_htf_to_ltf(prices, df_1w, chop_range.astype(float))
+    chop_trend_aligned = align_htf_to_ltf(prices, df_1w, chop_trend.astype(float))
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Align all 1d indicators to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    
-    # 6h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # 6h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
-    for i in range(30, n):
+    for i in range(10, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or adx_aligned[i] <= 0):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_range_aligned[i]) or
+            np.isnan(chop_trend_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
+            atr_1w_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit when Williams %R reverts to -50 (mean reversion in trend)
-            if williams_r[i] >= -50:
+            # Exit conditions: opposite Camarilla touch (L3) or ATR stoploss
+            if low[i] <= camarilla_l3_aligned[i]:  # Touch opposite band
+                position = 0
+                signals[i] = 0.0
+            elif high[i] >= entry_price + (2.0 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when Williams %R reverts to -50 (mean reversion in trend)
-            if williams_r[i] <= -50:
+            # Exit conditions: opposite Camarilla touch (H3) or ATR stoploss
+            if high[i] >= camarilla_h3_aligned[i]:  # Touch opposite band
+                position = 0
+                signals[i] = 0.0
+            elif low[i] <= entry_price - (2.0 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Williams %R extremes with ADX trend filter and volume confirmation
-            if (williams_r[i] < -80 and  # Oversold
-                adx_aligned[i] > 25 and      # Strong trend
-                volume_spike_aligned[i]):    # Volume confirmation
+            # Look for Camarilla breakout with volume confirmation and regime filter
+            if (high[i] >= camarilla_h3_aligned[i] and  # Break above H3
+                volume_spike_aligned[i] and         # Volume confirmation
+                (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = 1
+                entry_price = high[i]
+                atr_stop = atr_1w_aligned[i]
                 signals[i] = 0.25
-            elif (williams_r[i] > -20 and   # Overbought
-                  adx_aligned[i] > 25 and      # Strong trend
-                  volume_spike_aligned[i]):    # Volume confirmation
+            elif (low[i] <= camarilla_l3_aligned[i] and   # Break below L3
+                  volume_spike_aligned[i] and         # Volume confirmation
+                  (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = -1
+                entry_price = low[i]
+                atr_stop = atr_1w_aligned[i]
                 signals[i] = -0.25
     
     return signals
