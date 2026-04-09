@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and chop filter
-# Donchian(20) from 12h provides structure aligned with 4h timeframe
-# Volume confirmation (current 4h volume > 1.5x 20-period average) filters false breakouts
-# Choppiness regime filter: CHOP(14) > 61.8 for mean reversion, < 38.2 for trend following
-# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# Works in bull/bear: price reacts to 12h structure, volume confirms validity, chop filter adapts to regime
+# Hypothesis: 6h strategy using daily ATR-based volatility regime with Camarilla pivot breakouts
+# In low volatility regimes (ATR ratio < 0.8), price tends to revert to mean near Camarilla S3/R3
+# In high volatility regimes (ATR ratio > 1.2), price tends to breakout and continue in direction of Camarilla S4/R4
+# Volume confirmation filters false signals
+# Works in bull/bear: adapts to volatility regime
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
 
-name = "4h_12h_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "6h_1d_camarilla_vol_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,91 +25,107 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_h_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_l_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_h_20 + donchian_l_20) / 2.0
+    # Calculate 1d ATR for volatility regime
+    atr_period = 14
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Align Donchian levels to 4h timeframe
-    dh_20_aligned = align_htf_to_ltf(prices, df_12h, donchian_h_20)
-    dl_20_aligned = align_htf_to_ltf(prices, df_12h, donchian_l_20)
-    dm_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    # Calculate 1d ATR ratio (current vs 20-period average) for regime detection
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
     
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Calculate 1d Camarilla pivot levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    camarilla_r3 = close_1d + range_1d * 1.1 / 4.0
+    camarilla_r4 = close_1d + range_1d * 1.1 / 2.0
+    camarilla_s3 = close_1d - range_1d * 1.1 / 4.0
+    camarilla_s4 = close_1d - range_1d * 1.1 / 2.0
+    
+    # Align 1d indicators to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute Choppiness Index (14-period) for regime filter
-    # CHOP = 100 * LOG10(SUM(ATR(1),14) / (LOG10(HH(14)-LL(14)) / LOG10(14)))
-    # Simplified: CHOP = 100 * LOG10(ATR_sum / (LOG10(range_max - range_min) / LOG10(period)))
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # First bar TR
-    atr_1 = pd.Series(tr1).rolling(window=1, min_periods=1).sum().values  # ATR(1) = true range
-    atr_sum_14 = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = hh_14 - ll_14
-    # Avoid division by zero and log of zero
-    chop_raw = 100 * np.log10(atr_sum_14 / (np.log10(np.maximum(range_14, 1e-10)) / np.log10(14)))
-    chop = np.where(range_14 > 0, chop_raw, 50.0)  # Default to 50 when no range
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(dh_20_aligned[i]) or np.isnan(dl_20_aligned[i]) or
-            np.isnan(dm_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit conditions: Donchian middle retracement OR chop > 61.8 (range) AND price < mid
-            if close[i] < dm_aligned[i] or (chop[i] > 61.8 and close[i] < dm_aligned[i]):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
+            # Exit logic depends on volatility regime
+            if atr_ratio_aligned[i] < 0.8:  # Low vol: mean reversion
+                if close[i] < s3_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            else:  # High vol: trend continuation
+                if close[i] < r3_aligned[i]:  # Exit if price falls below R3
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
-            # Exit conditions: Donchian middle retracement OR chop > 61.8 (range) AND price > mid
-            if close[i] > dm_aligned[i] or (chop[i] > 61.8 and close[i] > dm_aligned[i]):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            # Exit logic depends on volatility regime
+            if atr_ratio_aligned[i] < 0.8:  # Low vol: mean reversion
+                if close[i] > r3_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:  # High vol: trend continuation
+                if close[i] > s3_aligned[i]:  # Exit if price rises above S3
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Breakout trading with volume confirmation and chop regime filter
-            # Long on Donchian high breakout in trending OR mean reversion from low in ranging
-            # Short on Donchian low breakdown in trending OR mean reversion from high in ranging
+            # Entry logic depends on volatility regime
             if volume_confirmed:
-                if chop[i] < 38.2:  # Strong trend - follow breakout
-                    if close[i] > dh_20_aligned[i]:
+                if atr_ratio_aligned[i] < 0.8:  # Low vol: mean reversion at S3/R3
+                    if close[i] > s3_aligned[i] and close[i] < r3_aligned[i]:
+                        # Range-bound: look for bounce off S3 or rejection at R3
+                        if i > 0 and close[i-1] <= s3_aligned[i-1] and close[i] > s3_aligned[i]:
+                            position = 1
+                            signals[i] = 0.25
+                        elif i > 0 and close[i-1] >= r3_aligned[i-1] and close[i] < r3_aligned[i]:
+                            position = -1
+                            signals[i] = -0.25
+                else:  # High vol: breakout at S4/R4
+                    if close[i] > r4_aligned[i]:
                         position = 1
                         signals[i] = 0.25
-                    elif close[i] < dl_20_aligned[i]:
+                    elif close[i] < s4_aligned[i]:
                         position = -1
                         signals[i] = -0.25
-                elif chop[i] > 61.8:  # Range - mean reversion
-                    if close[i] < dl_20_aligned[i]:  # Oversold - buy
-                        position = 1
-                        signals[i] = 0.25
-                    elif close[i] > dh_20_aligned[i]:  # Overbought - sell
-                        position = -1
-                        signals[i] = -0.25
-                # Neutral chop (38.2-61.8): no new entries
     
     return signals
