@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation and ATR trailing stop
-# Camarilla levels from 1w provide strong support/resistance structure proven to work across market regimes
-# Volume confirmation (current 1d volume > 2.0x 20-period average) filters false breakouts
-# ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
-# Designed for 1d timeframe targeting 15-25 trades/year (60-100 over 4 years)
-# Works in bull/bear: price reacts to 1w structure, volume confirms validity, ATR stop controls drawdown
+# Hypothesis: 6h strategy using 12h Ichimoku Cloud + TK Cross with volume confirmation
+# Ichimoku Cloud from 12h provides dynamic support/resistance and trend direction
+# TK Cross (Tenkan-Kijun cross) gives timely entry signals aligned with 12h momentum
+# Volume confirmation (current 6h volume > 2.0x 20-period average) filters false signals
+# Designed for 6h timeframe targeting 12-25 trades/year (50-100 over 4 years)
+# Works in bull/bear: price reacts to 12h Ichimoku structure, volume confirms validity
 
-name = "1d_1w_camarilla_volume_atr_v1"
-timeframe = "1d"
+name = "6h_12h_ichimoku_tk_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,46 +24,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w Camarilla pivot levels (based on prior week)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # L4 = C - Range * 1.1/2
-    # H4 = C + Range * 1.1/2
-    # L3 = C - Range * 1.1/4
-    # H3 = C + Range * 1.1/4
-    # L2 = C - Range * 1.1/6
-    # H2 = C + Range * 1.1/6
-    # L1 = C - Range * 1.1/12
-    # H1 = C + Range * 1.1/12
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    rng = high_1w - low_1w
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    h4 = close_1w + rng * 1.1 / 2.0
-    l4 = close_1w - rng * 1.1 / 2.0
-    h3 = close_1w + rng * 1.1 / 4.0
-    l3 = close_1w - rng * 1.1 / 4.0
-    h2 = close_1w + rng * 1.1 / 6.0
-    l2 = close_1w - rng * 1.1 / 6.0
-    h1 = close_1w + rng * 1.1 / 12.0
-    l1 = close_1w - rng * 1.1 / 12.0
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Align 1w Camarilla levels to 1d timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
     
-    # Pre-compute ATR(14) for 1d timeframe
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b)
+    
+    # Pre-compute ATR(14) for 6h timeframe for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -83,14 +78,18 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x average 1d volume
+        # Volume confirmation: current 6h volume > 2.0x average 6h volume
         volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -116,14 +115,24 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Camarilla breakout trading with volume confirmation
-            # Long on H4 breakout, Short on L4 breakdown
+            # Ichimoku TK Cross signals with volume confirmation and cloud filter
+            # Long: Tenkan crosses above Kijun AND price above cloud
+            # Short: Tenkan crosses below Kijun AND price below cloud
             if volume_confirmed:
-                if close[i] > h4_aligned[i]:
+                tenkan_prev = tenkan_aligned[i-1] if i > 0 else tenkan_aligned[i]
+                kijun_prev = kijun_aligned[i-1] if i > 0 else kijun_aligned[i]
+                
+                # Bullish TK cross: Tenkan crosses above Kijun
+                if (tenkan_aligned[i] > kijun_aligned[i] and 
+                    tenkan_prev <= kijun_prev and 
+                    close[i] > cloud_top):
                     position = 1
                     highest_since_long = close[i]
                     signals[i] = 0.25
-                elif close[i] < l4_aligned[i]:
+                # Bearish TK cross: Tenkan crosses below Kijun
+                elif (tenkan_aligned[i] < kijun_aligned[i] and 
+                      tenkan_prev >= kijun_prev and 
+                      close[i] < cloud_bottom):
                     position = -1
                     lowest_since_short = close[i]
                     signals[i] = -0.25
