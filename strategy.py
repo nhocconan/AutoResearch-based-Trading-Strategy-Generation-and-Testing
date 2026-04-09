@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and choppiness regime filter
-# In trending regimes (CHOP < 38.2): breakout above/below Donchian H/L levels with volume confirmation
-# In ranging regimes (CHOP > 61.8): mean reversion at Donchian H/L levels with volume confirmation
-# Uses discrete position sizing 0.30 to balance return and risk with ~30-50 trades/year
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and choppiness regime filter
+# In trending regimes (CHOP < 38.2): breakout above/below 20-period Donchian channels with volume confirmation
+# In ranging regimes (CHOP > 61.8): mean reversion at Donchian channel mid-point with volume confirmation
+# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
 # Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
 
-name = "4h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -66,15 +66,20 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)
     
-    # Calculate 1d Donchian channel levels (based on prior 20 days to avoid look-ahead)
-    donch_h_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_l_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d Donchian channels (20-period) based on prior day to avoid look-ahead
+    # Upper = max(high, 20), Lower = min(low, 20), Middle = (Upper + Lower) / 2
+    high_s_1d = pd.Series(high_1d)
+    low_s_1d = pd.Series(low_1d)
+    upper_1d = high_s_1d.rolling(window=20, min_periods=20).max().values
+    lower_1d = low_s_1d.rolling(window=20, min_periods=20).min().values
+    middle_1d = (upper_1d + lower_1d) / 2
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    donch_h_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_h_1d)
-    donch_l_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_l_1d)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    middle_1d_aligned = align_htf_to_ltf(prices, df_1d, middle_1d)
     
     # Pre-compute volume confirmation array
     avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -87,8 +92,8 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            np.isnan(donch_h_1d_aligned[i]) or np.isnan(donch_l_1d_aligned[i]) or
-            np.isnan(volume_confirmed[i])):
+            np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
+            np.isnan(middle_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
@@ -98,52 +103,52 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if price breaks below Donchian L or we enter ranging regime
-                if close[i] < donch_l_1d_aligned[i] or ranging_regime:
+                # Exit long if price breaks below lower channel or we enter ranging regime
+                if close[i] < lower_1d_aligned[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price rises above Donchian H or drops below Donchian L
-                if close[i] > donch_h_1d_aligned[i] or close[i] < donch_l_1d_aligned[i]:
+                # Exit long if price rises above upper channel or drops below lower channel
+                if close[i] > upper_1d_aligned[i] or close[i] < lower_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if price breaks above Donchian H or we enter ranging regime
-                if close[i] > donch_h_1d_aligned[i] or ranging_regime:
+                # Exit short if price breaks above upper channel or we enter ranging regime
+                if close[i] > upper_1d_aligned[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price drops below Donchian L or rises above Donchian H
-                if close[i] < donch_l_1d_aligned[i] or close[i] > donch_h_1d_aligned[i]:
+                # Exit short if price drops below lower channel or rises above upper channel
+                if close[i] < lower_1d_aligned[i] or close[i] > upper_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                # Enter long on breakout above Donchian H with volume confirmation
-                if close[i] > donch_h_1d_aligned[i] and volume_confirmed[i]:
+                # Enter long on breakout above upper channel with volume confirmation
+                if close[i] > upper_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
-                    signals[i] = 0.30
-                # Enter short on breakout below Donchian L with volume confirmation
-                elif close[i] < donch_l_1d_aligned[i] and volume_confirmed[i]:
+                    signals[i] = 0.25
+                # Enter short on breakout below lower channel with volume confirmation
+                elif close[i] < lower_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
             elif ranging_regime:
-                # Mean reversion: buy near Donchian L, sell near Donchian H
-                if close[i] <= donch_l_1d_aligned[i] and volume_confirmed[i]:
+                # Mean reversion: buy near lower channel, sell near upper channel
+                if close[i] <= lower_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
-                    signals[i] = 0.30
-                elif close[i] >= donch_h_1d_aligned[i] and volume_confirmed[i]:
+                    signals[i] = 0.25
+                elif close[i] >= upper_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
