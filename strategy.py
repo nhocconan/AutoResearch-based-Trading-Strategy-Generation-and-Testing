@@ -3,175 +3,119 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction + RSI(14) + Choppiness Index regime filter
-# In trending regimes (CHOP < 38.2): follow KAMA direction (price > KAMA = long, price < KAMA = short)
-# In ranging regimes (CHOP > 61.8): mean reversion at RSI extremes (RSI < 30 = long, RSI > 70 = short)
-# Uses discrete position sizing 0.25 to limit trades to ~7-25/year and reduce fee drag
-# Works in bull/bear markets: trend following captures moves, chop filter avoids whipsaws in ranging markets
+# Hypothesis: 6h Williams %R + 1d ADX trend filter with volume confirmation
+# Williams %R identifies overbought/oversold conditions (long when %R < -80, short when %R > -20)
+# 1d ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions
+# Volume confirmation ensures breakouts have participation
+# Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years)
+# Works in bull/bear markets: mean reversion in extremes + trend filter avoids false signals
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_1d_williamsr_adx_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close, period=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else np.array([np.nan])
-        # For vectorized calculation, we need to compute volatility differently
-        er = np.full(len(close), np.nan)
-        for i in range(period, len(close)):
-            price_change = np.abs(close[i] - close[i-period])
-            price_volatility = np.sum(np.abs(np.diff(close[i-period:i+1])))
-            if price_volatility > 0:
-                er[i] = price_change / price_volatility
-            else:
-                er[i] = 1.0
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA calculation
-        kama = np.full(len(close), np.nan)
-        kama[period] = close[period]  # Initialize
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
-    
-    # Calculate RSI(14)
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(len(close), np.nan)
-        avg_loss = np.full(len(close), np.nan)
-        # Wilder's smoothing
-        if len(gain) >= period:
-            avg_gain[period-1] = np.mean(gain[:period])
-            avg_loss[period-1] = np.mean(loss[:period])
-            for i in range(period, len(close)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close, period=14)
-    
-    # Load 1w data ONCE before loop for Choppiness Index
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w ATR(14) for Choppiness Index
-    def calculate_atr(high, low, close, period=14):
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        atr = np.full(len(close), np.nan)
-        for i in range(period, len(tr)):
-            if i == period:
-                atr[i] = np.nanmean(tr[1:i+1])
-            else:
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # Calculate 1d ADX(14)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, period=14)
+    # Directional Movement
+    up_move = np.concatenate([[np.nan], high_1d[1:] - high_1d[:-1]])
+    down_move = np.concatenate([[np.nan], low_1d[:-1] - low_1d[1:]])
     
-    # Calculate 1w Choppiness Index (CHOP)
-    hh_1w = np.full(len(high_1w), np.nan)
-    ll_1w = np.full(len(low_1w), np.nan)
-    for i in range(14, len(high_1w)):
-        hh_1w[i] = np.max(high_1w[i-13:i+1])
-        ll_1w[i] = np.min(low_1w[i-13:i+1])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    sum_atr_14 = np.full(len(atr_1w), np.nan)
-    for i in range(14, len(atr_1w)):
-        sum_atr_14[i] = np.sum(atr_1w[i-13:i+1])
+    # Wilder's smoothing
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    range_14 = hh_1w - ll_1w
-    chop_1w = np.where(range_14 != 0, 
-                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
-                       50)
+    tr_smoothed = wilders_smoothing(tr, 14)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, 14)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, 14)
     
-    # Align 1w indicators to 1d timeframe
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # DI and DX
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = wilders_smoothing(dx, 14)
+    
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 6h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    
+    # Volume confirmation: 6h volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter based on weekly chop
-        trending_regime = chop_1w_aligned[i] < 38.2
-        ranging_regime = chop_1w_aligned[i] > 61.8
+        # Trend filter: only trade when ADX > 25 (trending market)
+        trending = adx_1d_aligned[i] > 25
         
         if position == 1:  # Long position
-            if trending_regime:
-                # Exit long if price falls below KAMA or we enter ranging regime
-                if close[i] < kama[i] or ranging_regime:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            elif ranging_regime:
-                # Exit long if RSI rises above 50 (mean reversion complete)
-                if rsi[i] > 50:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit long if Williams %R rises above -50 (overbought) or trend weakens
+            if williams_r[i] > -50 or not trending:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if trending_regime:
-                # Exit short if price rises above KAMA or we enter ranging regime
-                if close[i] > kama[i] or ranging_regime:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-            elif ranging_regime:
-                # Exit short if RSI falls below 50 (mean reversion complete)
-                if rsi[i] < 50:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit short if Williams %R falls below -50 (oversold) or trend weakens
+            if williams_r[i] < -50 or not trending:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
         else:  # Flat
-            if trending_regime:
-                # Enter long on price above KAMA
-                if close[i] > kama[i]:
+            if trending:
+                # Enter long when Williams %R < -80 (oversold) with volume confirmation
+                if williams_r[i] < -80 and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short on price below KAMA
-                elif close[i] < kama[i]:
-                    position = -1
-                    signals[i] = -0.25
-            elif ranging_regime:
-                # Mean reversion: buy at RSI < 30, sell at RSI > 70
-                if rsi[i] < 30:
-                    position = 1
-                    signals[i] = 0.25
-                elif rsi[i] > 70:
+                # Enter short when Williams %R > -20 (overbought) with volume confirmation
+                elif williams_r[i] > -20 and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
     
