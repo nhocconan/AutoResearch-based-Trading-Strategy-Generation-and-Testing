@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakout with 1w ADX regime filter
-# Donchian breakout captures momentum; ADX > 25 confirms trending market
-# In trending regime: follow breakout direction (long on upper band break, short on lower band break)
-# In ranging regime (ADX < 20): mean revert at Donchian extremes (long at lower band, short at upper band)
-# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
+# Hypothesis: 1d strategy using Williams Alligator (Jaw/Teeth/Lips) with 1w ADX regime filter
+# Williams Alligator: Jaw=SMA(13,8), Teeth=SMA(8,5), Lips=SMA(5,3) - identifies trend strength and direction
+# ADX > 25 indicates trending market; ADX < 20 indicates ranging market
+# In trending regime (ADX > 25): follow Alligator alignment (long when Lips>Teeth>Jaw, short when Lips<Teeth<Jaw)
+# In ranging regime (ADX < 20): mean revert at extreme Alligator deviations (long when Lips far below Jaw, short when Lips far above Jaw)
+# Uses discrete position sizing 0.25 to limit trades to ~7-25/year and reduce fee drag
 # Works in bull/bear markets: trend following in strong trends, mean reversion in ranging markets
 
-name = "12h_1d_1w_donchian_adx_regime_v1"
-timeframe = "12h"
+name = "1d_1w_alligator_adx_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop (primary timeframe)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -33,14 +34,16 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    lookback = 20
-    upper_1d = np.full(len(high_1d), np.nan)
-    lower_1d = np.full(len(low_1d), np.nan)
+    # Calculate Williams Alligator components on 1d
+    # Jaw: SMA(13, 8) - slowest
+    close_s_1d = pd.Series(close_1d)
+    jaw_1d = close_s_1d.rolling(window=13, min_periods=13).mean().shift(8).values
     
-    for i in range(lookback, len(high_1d)):
-        upper_1d[i] = np.max(high_1d[i-lookback+1:i+1])
-        lower_1d[i] = np.min(low_1d[i-lookback+1:i+1])
+    # Teeth: SMA(8, 5) - medium
+    teeth_1d = close_s_1d.rolling(window=8, min_periods=8).mean().shift(5).values
+    
+    # Lips: SMA(5, 3) - fastest
+    lips_1d = close_s_1d.rolling(window=5, min_periods=5).mean().shift(3).values
     
     # Calculate 1d ATR(14) for volatility normalization
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
@@ -60,9 +63,10 @@ def generate_signals(prices):
     
     atr_1d = wilders_smoothing(tr, 14)
     
-    # Normalize Donchian width by ATR to make it comparable across volatility regimes
-    donchian_width_1d = upper_1d - lower_1d
-    norm_width_1d = np.where(atr_1d > 0, donchian_width_1d / atr_1d, 0)
+    # Normalize Alligator deviations by ATR to make signals volatility-adjusted
+    # Deviation = Lips - Jaw (positive = bullish alignment, negative = bearish alignment)
+    lips_minus_jaw_1d = lips_1d - jaw_1d
+    norm_deviation_1d = np.where(atr_1d > 0, lips_minus_jaw_1d / atr_1d, 0)
     
     # Load 1w data for ADX regime filter
     df_1w = get_htf_data(prices, '1w')
@@ -104,24 +108,21 @@ def generate_signals(prices):
     
     adx_1w = calculate_dmi(high_1w, low_1w, close_1w, 14)
     
-    # Align 1d indicators to 12h timeframe
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
-    norm_width_1d_aligned = align_htf_to_ltf(prices, df_1d, norm_width_1d)
+    # Align 1d indicators to 1d timeframe (no shift needed as we're already on 1d)
+    norm_deviation_1d_aligned = align_htf_to_ltf(prices, df_1d, norm_deviation_1d)
     
-    # Align 1w ADX to 12h timeframe
+    # Align 1w ADX to 1d timeframe
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Threshold for Donchian breakout confirmation
-    breakout_threshold = 0.5  # 0.5 ATR above/below bands
+    # Threshold for extreme deviations in ranging market
+    extreme_threshold = 1.0  # 1.0 ATR deviation
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
-            np.isnan(norm_width_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(norm_deviation_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -131,16 +132,15 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if price falls below lower Donchian band
-                if close[i] < lower_1d_aligned[i]:
+                # Exit long if Alligator alignment breaks (Lips <= Jaw)
+                if norm_deviation_1d_aligned[i] <= 0:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price returns to mid-band
-                mid_band = (upper_1d_aligned[i] + lower_1d_aligned[i]) / 2
-                if close[i] > mid_band:
+                # Exit long if deviation returns from extreme
+                if norm_deviation_1d_aligned[i] > -extreme_threshold * 0.5:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -148,35 +148,34 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if price rises above upper Donchian band
-                if close[i] > upper_1d_aligned[i]:
+                # Exit short if Alligator alignment breaks (Lips >= Jaw)
+                if norm_deviation_1d_aligned[i] >= 0:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price returns to mid-band
-                mid_band = (upper_1d_aligned[i] + lower_1d_aligned[i]) / 2
-                if close[i] < mid_band:
+                # Exit short if deviation returns from extreme
+                if norm_deviation_1d_aligned[i] < extreme_threshold * 0.5:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                # Follow Donchian breakout in trending market
-                if close[i] > upper_1d_aligned[i] + breakout_threshold * atr_1d[-1] if len(atr_1d) > 0 and not np.isnan(atr_1d[-1]) else upper_1d_aligned[i]:
+                # Follow Alligator alignment in trending market
+                if norm_deviation_1d_aligned[i] > 0:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < lower_1d_aligned[i] - breakout_threshold * atr_1d[-1] if len(atr_1d) > 0 and not np.isnan(atr_1d[-1]) else lower_1d_aligned[i]:
+                elif norm_deviation_1d_aligned[i] < 0:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                # Mean revert at Donchian extremes in ranging market
-                if close[i] < lower_1d_aligned[i]:
+                # Mean revert at extreme Alligator deviations in ranging market
+                if norm_deviation_1d_aligned[i] < -extreme_threshold:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] > upper_1d_aligned[i]:
+                elif norm_deviation_1d_aligned[i] > extreme_threshold:
                     position = -1
                     signals[i] = -0.25
     
