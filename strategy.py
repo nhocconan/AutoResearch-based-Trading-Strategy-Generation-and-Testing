@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator trend filter with 1d volume spike and price close to Jaw line
-# - Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs) on 1d defines trend: price > Jaw = bull, price < Jaw = bear
-# - Enter only when price is within 0.5*ATR of Jaw line (pullback to trend) with volume > 2.0 * 20-period average
-# - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
-# - Works in bull markets via pullbacks to rising Jaw, in bear via rallies to falling Jaw
-# - Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years) to avoid fee drag
-# - Alligator provides smooth trend definition; volume spike confirms momentum; pullback improves risk/reward
+# Hypothesis: 4h Donchian breakout with 12h volume regime filter and ATR trailing stop
+# - Uses 4h Donchian channels (20-period) for breakout entries
+# - Confirms with 12h volume regime: volume > 1.5 * 50-period median volume (avoids low-volume breakouts)
+# - Uses ATR(14) for dynamic trailing stoploss (2.5 * ATR from extreme) and position sizing (0.25)
+# - Works in bull markets via upside breakouts, in bear via downside breakouts
+# - Volume regime filter reduces false breakouts during low-activity periods
+# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to minimize fee drag
 
-name = "12h_1d_alligator_volume_pullback_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,46 +21,32 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # need enough for Alligator (max period 13 smoothed)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d Williams Alligator: Jaw(13), Teeth(8), Lips(5) SMAs
-    close_1d = df_1d['close'].values
+    # Pre-compute 12h volume regime filter: volume > 1.5 * 50-period median
+    vol_12h = df_12h['volume'].values
+    vol_median_50 = pd.Series(vol_12h).rolling(window=50, min_periods=50).median().values
+    vol_regime_12h = vol_12h > (1.5 * vol_median_50)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_12h, vol_regime_12h)
     
-    # Jaw: 13-period SMA, then smoothed by 8 periods
-    jaw_raw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
-    
-    # Teeth: 8-period SMA, then smoothed by 5 periods
-    teeth_raw = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
-    
-    # Lips: 5-period SMA, then smoothed by 3 periods
-    lips_raw = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
-    
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Pre-compute 12h ATR(14) for stoploss and pullback band
+    # Pre-compute 4h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # Donchian upper/lower bands
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 4h ATR(14) for stoploss and sizing
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Pre-compute volume confirmation: volume > 2.0 * 20-period average
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,9 +55,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
             np.isnan(atr[i]) or atr[i] <= 0 or
-            np.isnan(volume_confirm[i])):
+            np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -79,13 +65,13 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # Exit conditions: stoploss or trend reversal
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: ATR trailing stop or Donchian reversion
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR trailing stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < jaw_aligned[i]:  # Trend reversal (price below Jaw)
+            elif close[i] < donch_low[i]:  # Mean reversion exit (break below Donchian low)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -97,13 +83,13 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # Exit conditions: stoploss or trend reversal
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: ATR trailing stop or Donchian reversion
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR trailing stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > jaw_aligned[i]:  # Trend reversal (price above Jaw)
+            elif close[i] > donch_high[i]:  # Mean reversion exit (break above Donchian high)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -111,22 +97,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for pullback entries to Jaw line with volume confirmation
-            # Bullish: price near Jaw from below (pullback in uptrend)
-            if close[i] > jaw_aligned[i] and abs(close[i] - jaw_aligned[i]) <= 0.5 * atr[i] and volume_confirm[i]:
-                # Additional filter: teeth above lips (bullish alignment)
-                if teeth_aligned[i] > lips_aligned[i]:
-                    position = 1
-                    highest_high_since_entry = high[i]
-                    lowest_low_since_entry = low[i]
-                    signals[i] = 0.25
-            # Bearish: price near Jaw from above (pullback in downtrend)
-            elif close[i] < jaw_aligned[i] and abs(close[i] - jaw_aligned[i]) <= 0.5 * atr[i] and volume_confirm[i]:
-                # Additional filter: teeth below lips (bearish alignment)
-                if teeth_aligned[i] < lips_aligned[i]:
-                    position = -1
-                    highest_high_since_entry = high[i]
-                    lowest_low_since_entry = low[i]
-                    signals[i] = -0.25
+            # Look for breakout entries with volume regime confirmation
+            if close[i] > donch_high[i] and vol_regime_aligned[i]:  # Break above Donchian high
+                position = 1
+                highest_high_since_entry = high[i]
+                lowest_low_since_entry = low[i]
+                signals[i] = 0.25
+            elif close[i] < donch_low[i] and vol_regime_aligned[i]:  # Break below Donchian low
+                position = -1
+                highest_high_since_entry = high[i]
+                lowest_low_since_entry = low[i]
+                signals[i] = -0.25
     
     return signals
