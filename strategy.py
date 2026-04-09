@@ -1,78 +1,89 @@
 #!/usr/bin/env python3
-# daily_rsi20_reversal_v1
-# Hypothesis: Daily RSI(14) extremes (RSI<30 for long, RSI>70 for short) with volume confirmation (>1.5x 20-day avg) and weekly trend filter (price above/below weekly EMA50) work in both bull and bear markets by capturing mean reversion with trend alignment.
-# Target: 15-25 trades/year (60-100 over 4 years) with controlled risk.
+# 12h_price_action_reversal_v1
+# Hypothesis: 12-hour price action reversals at weekly support/resistance levels with volume confirmation work in both bull and bear markets.
+# Uses price rejection at weekly high/low (pin bar) with volume > 1.5x 20-period average.
+# Daily trend filter (EMA50) ensures alignment with intermediate trend.
+# Target: 12-30 trades/year (48-120 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "daily_rsi20_reversal_v1"
-timeframe = "1d"
+name = "12h_price_action_reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate body and wicks for pin bar detection
+    body = np.abs(close - open_price)
+    upper_wick = high - np.maximum(close, open_price)
+    lower_wick = np.minimum(close, open_price) - low
     
-    # Volume confirmation: 20-day average
+    # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma_20 * 1.5
     
-    # Weekly trend filter: EMA50 on weekly data
+    # Daily trend filter: EMA50 on daily data
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Weekly support/resistance: weekly high/low
     df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if (np.isnan(body[i]) or np.isnan(upper_wick[i]) or np.isnan(lower_wick[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) or weekly trend turns bearish
-            if rsi[i] > 50 or close[i] < ema_50_1w_aligned[i]:
+            # Exit: price closes below weekly low or daily trend turns bearish
+            if close[i] < weekly_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 (mean reversion complete) or weekly trend turns bullish
-            if rsi[i] < 50 or close[i] > ema_50_1w_aligned[i]:
+            # Exit: price closes above weekly high or daily trend turns bullish
+            if close[i] > weekly_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: RSI < 30 (oversold) with volume confirmation and weekly uptrend
-            if rsi[i] < 30 and volume[i] > vol_threshold[i] and close[i] > ema_50_1w_aligned[i]:
+            # Enter long: bullish pin bar at weekly support with volume confirmation and daily uptrend
+            bullish_pin = (lower_wick[i] > 2 * body[i]) and (body[i] > 0)
+            at_support = low[i] <= weekly_low_aligned[i] * 1.002  # within 0.2% of weekly low
+            if bullish_pin and at_support and volume[i] > vol_threshold[i] and close[i] > ema_50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: RSI > 70 (overbought) with volume confirmation and weekly downtrend
-            elif rsi[i] > 70 and volume[i] > vol_threshold[i] and close[i] < ema_50_1w_aligned[i]:
-                position = -1
-                signals[i] = -0.25
+            # Enter short: bearish pin bar at weekly resistance with volume confirmation and daily downtrend
+            elif (upper_wick[i] > 2 * body[i]) and (body[i] > 0):  # bearish pin
+                at_resistance = high[i] >= weekly_high_aligned[i] * 0.998  # within 0.2% of weekly high
+                if at_resistance and volume[i] > vol_threshold[i] and close[i] < ema_50_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
