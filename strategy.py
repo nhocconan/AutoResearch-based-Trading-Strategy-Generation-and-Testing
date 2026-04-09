@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 4h_camarilla_breakout_v5
-# Hypothesis: 4h strategy using daily Camarilla pivot levels with strict volume, trend, and chop regime filters.
-# Long when price breaks above daily R4 with volume > 2.0x 20-period average, price > 4h EMA50, and chop < 61.8 (trending).
-# Short when price breaks below daily S4 with volume > 2.0x 20-period average, price < 4h EMA50, and chop < 61.8 (trending).
-# Exit when price closes back inside daily R3/S3 levels.
+# 6h_trix_volume_chop_regime_v1
+# Hypothesis: 6h strategy using TRIX (triple-smoothed EMA) for momentum, volume confirmation, and chop regime filter.
+# Long when TRIX crosses above zero with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when TRIX crosses below zero with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when TRIX crosses back through zero in opposite direction.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 15-30 trades/year (60-120 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Target: 12-25 trades/year (50-100 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Works in both bull and bear markets: TRIX captures momentum shifts, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_breakout_v5"
-timeframe = "4h"
+name = "6h_trix_volume_chop_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,9 +30,16 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # 4h EMA50 for trend filter
+    # TRIX calculation: triple-smoothed EMA of ROC
+    # ROC(1) = (close[t] - close[t-1]) / close[t-1]
     close_s = pd.Series(close)
-    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    roc = close_s.pct_change(periods=1)  # (close[t] - close[t-1]) / close[t-1]
+    
+    # Triple EMA smoothing: EMA(EMA(EMA(ROC)))
+    ema1 = roc.ewm(span=15, min_periods=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, min_periods=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, min_periods=15, adjust=False).mean()
+    trix = ema3.values * 100  # Multiply by 100 for readability
     
     # Choppiness Index regime filter (14-period)
     atr_period = 14
@@ -48,82 +56,46 @@ def generate_signals(prices):
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
     chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
     
-    # Get daily data for pivot levels (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
-    
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    pivot_1d = typical_price_1d
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align all levels to 4h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(ema50[i]) or np.isnan(chop[i]) or
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
             np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (stricter)
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
-        # Trend filter: price > EMA50 for long, price < EMA50 for short
-        # Regime filter: chop < 61.8 indicates trending market (good for breakouts)
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
         
         if position == 1:  # Long position
-            # Exit: Price closes back below daily R3 (take profit) or below daily S4 (stop)
-            if close[i] < r3_1d_aligned[i] or close[i] < s4_1d_aligned[i]:
+            # Exit: TRIX crosses below zero
+            if trix[i] < 0 and trix[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price closes back above daily S3 (take profit) or above daily R4 (stop)
-            if close[i] > s3_1d_aligned[i] or close[i] > r4_1d_aligned[i]:
+            # Exit: TRIX crosses above zero
+            if trix[i] > 0 and trix[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume, trend, and regime confirmation
-            bullish_breakout = (close[i] > r4_1d_aligned[i]) and volume_confirmed and (close[i] > ema50[i]) and trending_market
-            bearish_breakout = (close[i] < s4_1d_aligned[i]) and volume_confirmed and (close[i] < ema50[i]) and trending_market
+            # Check for TRIX zero-cross with volume and regime confirmation
+            bullish_cross = (trix[i] > 0 and trix[i-1] <= 0) and volume_confirmed and trending_market
+            bearish_cross = (trix[i] < 0 and trix[i-1] >= 0) and volume_confirmed and trending_market
             
-            if bullish_breakout:
+            if bullish_cross:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_cross:
                 position = -1
                 signals[i] = -0.25
     
