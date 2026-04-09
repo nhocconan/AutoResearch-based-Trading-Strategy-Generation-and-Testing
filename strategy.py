@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 6d_ewo_volume_v1
-# Hypothesis: Uses Elder's Force Index (EFI) with volume confirmation on 6h timeframe.
-# EFI measures buying/selling pressure by combining price change and volume.
-# Long when EFI crosses above zero with volume > 1.5x average; short when EFI crosses below zero.
-# Designed to work in both bull and bear markets by capturing momentum shifts.
+# 12h_camarilla_pivot_volume_v1
+# Hypothesis: Uses Camarilla pivot levels on 1d timeframe with volume confirmation on 12h timeframe.
+# Long when price touches S3 level with volume > 1.5x average; short when price touches R3 level with volume > 1.5x average.
+# Designed to work in both bull and bear markets by capturing reversals at key pivot levels.
 # Target: 15-25 trades/year (60-100 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6d_ewo_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,18 +23,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. Elder's Force Index (EFI) - 13 period EMA of price change * volume
-    price_change = np.diff(close, prepend=close[0])
-    efi_raw = price_change * volume
+    # Calculate 1d Camarilla pivot levels once before loop
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA of EFI
-    efi = np.zeros(n)
-    efi[0] = efi_raw[0]
-    alpha = 2.0 / (13 + 1)  # 13-period EMA
-    for i in range(1, n):
-        efi[i] = alpha * efi_raw[i] + (1 - alpha) * efi[i-1]
+    # Calculate pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # 2. Volume confirmation - 20 period average
+    # Camarilla levels
+    s3 = pivot - (range_1d * 1.1 / 2)
+    s2 = pivot - (range_1d * 1.1 / 4)
+    s1 = pivot - (range_1d * 1.1 / 6)
+    r1 = pivot + (range_1d * 1.1 / 6)
+    r2 = pivot + (range_1d * 1.1 / 4)
+    r3 = pivot + (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    
+    # Volume confirmation - 20 period average on 12h
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -50,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(efi[i]) or np.isnan(efi[i-1]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -58,27 +68,27 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: EFI crosses below zero
-            if efi[i] < 0 and efi[i-1] >= 0:
+            # Exit: price moves above S1 level or volume confirmation fails
+            if close[i] > s1_aligned[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EFI crosses above zero
-            if efi[i] > 0 and efi[i-1] <= 0:
+            # Exit: price moves below R1 level or volume confirmation fails
+            if close[i] < r1_aligned[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: EFI crosses above zero with volume confirmation
-            if efi[i] > 0 and efi[i-1] <= 0 and vol_ok:
+            # Enter long: price touches or goes below S3 with volume confirmation
+            if close[i] <= s3_aligned[i] and vol_ok:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: EFI crosses below zero with volume confirmation
-            elif efi[i] < 0 and efi[i-1] >= 0 and vol_ok:
+            # Enter short: price touches or goes above R3 with volume confirmation
+            elif close[i] >= r3_aligned[i] and vol_ok:
                 position = -1
                 signals[i] = -0.25
     
