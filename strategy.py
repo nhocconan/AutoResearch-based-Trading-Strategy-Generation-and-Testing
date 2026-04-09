@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v5
-# Hypothesis: 4-hour breakouts at daily Camarilla pivot levels (H4/L4) with volume confirmation (>2.0x 20-bar average volume).
-# Daily Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
-# Designed for 4h timeframe to capture medium-term moves with controlled trade frequency (target: 15-40/year).
+# 1d_1w_camarilla_breakout_v3
+# Hypothesis: Daily breakouts at weekly Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-day average volume).
+# Weekly Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
+# Designed for 1d timeframe to capture longer-term moves with low trade frequency (target: 10-20/year).
 # Works in bull markets (upward breaks above resistance) and bear markets (downward breaks below support).
-# Uses daily data for support/resistance levels, avoiding look-ahead bias via mtf_data helpers.
-# This version reduces trade frequency further by requiring stronger volume confirmation (2.0x) and H4/L4 levels (stronger than H3/L3).
+# Uses weekly data for support/resistance levels, avoiding look-ahead bias via mtf_data helpers.
+# Reduced trade frequency by requiring stronger volume confirmation and stricter entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v5"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,25 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily close for Camarilla levels
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate weekly close for Camarilla levels
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Camarilla levels: H4/L4 = C ± (H-L)*1.1
-    camarilla_h4 = daily_close + (daily_high - daily_low) * 1.1
-    camarilla_l4 = daily_close - (daily_high - daily_low) * 1.1
+    # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
+    camarilla_h3 = weekly_close + (weekly_high - weekly_low) * 1.1 / 2
+    camarilla_l3 = weekly_close - (weekly_high - weekly_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align Camarilla levels to daily timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-day average
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
@@ -58,32 +58,32 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: price returns to or below L3 level
+            if close[i] <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: price returns to or above H3 level
+            if close[i] >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 with volume confirmation
-            if close[i] > camarilla_h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
+            # Enter long: price breaks above H3 with volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 with volume confirmation
-            elif close[i] < camarilla_l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
+            # Enter short: price breaks below L3 with volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
                 position = -1
                 signals[i] = -0.25
     
