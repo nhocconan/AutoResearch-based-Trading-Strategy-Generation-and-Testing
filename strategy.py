@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v21
-# Hypothesis: 4-hour breakout of daily Camarilla levels with daily EMA50 trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
-# Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
-# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
-# Improved: Added stricter volume filter (2.0x) and trend filter confirmation to reduce trades.
+# 6h_1d_price_channel_breakout_v2
+# Hypothesis: 6-hour breakout of daily Donchian channels with daily volatility filter and volume confirmation.
+# Long when price breaks above daily Donchian upper band with volatility > 1.5x 50-period average and volume > 1.5x 20-bar average.
+# Short when price breaks below daily Donchian lower band with volatility > 1.5x 50-period average and volume > 1.5x 20-bar average.
+# Exit when price returns to opposite Donchian band or volatility drops below threshold.
+# Works in trending markets via breakout continuation and in ranging markets via mean reversion at channel extremes.
+# Uses volatility filter to avoid false breakouts in low volatility environments.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v21"
-timeframe = "4h"
+name = "6h_1d_price_channel_breakout_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,34 +30,47 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema = np.mean(close_1d[:50])  # Initialize with first 50-period average
-        multiplier = 2 / (50 + 1)
-        ema_50_1d[49] = ema
-        for i in range(50, len(close_1d)):
-            ema = (close_1d[i] - ema) * multiplier + ema
-            ema_50_1d[i] = ema
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = np.full(len(df_1d), np.nan)
+    donchian_low = np.full(len(df_1d), np.nan)
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
     for i in range(len(df_1d)):
-        c = df_1d['close'].iloc[i]
-        h = df_1d['high'].iloc[i]
-        l = df_1d['low'].iloc[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
+        if i >= 19:
+            donchian_high[i] = np.max(high_1d[i-19:i+1])
+            donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Calculate daily ATR (14-period) for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]))
+    low_close = np.abs(low_1d - np.concatenate([[low_1d[0]], low_1d[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = np.full(len(tr), np.nan)
+    
+    for i in range(len(tr)):
+        if i < 14:
+            atr_14[i] = np.nan
+        elif i == 14:
+            atr_14[i] = np.mean(tr[0:15])
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # Calculate 50-period average ATR for volatility threshold
+    atr_ma_50 = np.full(len(atr_14), np.nan)
+    atr_sum = 0
+    for i in range(len(atr_14)):
+        if not np.isnan(atr_14[i]):
+            atr_sum += atr_14[i]
+            if i >= 50:
+                atr_sum -= atr_14[i-50]
+            if i >= 49:
+                atr_ma_50[i] = atr_sum / 50
+    
+    # Align indicators to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    atr_ma_50_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_50)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -75,39 +87,44 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_ma_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: price returns to or below lower band OR volatility drops below threshold
+            if (close[i] <= donchian_low_aligned[i] or 
+                atr_ma_50_aligned[i] < np.mean(atr_ma_50_aligned[max(0, i-50):i]) * 0.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: price returns to or above upper band OR volatility drops below threshold
+            if (close[i] >= donchian_high_aligned[i] or 
+                atr_ma_50_aligned[i] < np.mean(atr_ma_50_aligned[max(0, i-50):i]) * 0.5):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 with trend and volume filters
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > vol_ma_20[i] * 2.0):
+            # Calculate current volatility relative to 50-period average
+            current_vol_ratio = atr_ma_50_aligned[i] / np.mean(atr_ma_50_aligned[max(0, i-50):i]) if i >= 50 else 1.0
+            
+            # Enter long: price breaks above upper band with volatility and volume filters
+            if (close[i] > donchian_high_aligned[i] and 
+                current_vol_ratio > 1.5 and 
+                volume[i] > vol_ma_20[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 with trend and volume filters
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > vol_ma_20[i] * 2.0):
+            # Enter short: price breaks below lower band with volatility and volume filters
+            elif (close[i] < donchian_low_aligned[i] and 
+                  current_vol_ratio > 1.5 and 
+                  volume[i] > vol_ma_20[i] * 1.5):
                 position = -1
                 signals[i] = -0.25
     
