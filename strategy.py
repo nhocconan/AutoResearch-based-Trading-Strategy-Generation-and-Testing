@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_elder_ray_regime_volume_v2
-# Hypothesis: 6h strategy using Elder Ray (Bull/Bear Power) with EMA200 trend filter and volume confirmation.
-# Long: Bull Power > 0, close > EMA200, volume > 1.5x 20-period average.
-# Short: Bear Power < 0, close < EMA200, volume > 1.5x 20-period average.
-# Exit: Opposite Elder Ray signal or volume divergence.
-# Uses 1d EMA200 for higher timeframe trend filter to avoid counter-trend trades.
-# Volume confirmation filters weak breakouts. Target: 12-37 trades/year (50-150 total over 4 years).
+# 12h_daily_camarilla_pivot_volume_trend_v1
+# Hypothesis: 12h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation and EMA50 trend filter.
+# Long: Price breaks above Camarilla H3 level, close > EMA50, volume > 1.5x 20-period average.
+# Short: Price breaks below Camarilla L3 level, close < EMA50, volume > 1.5x 20-period average.
+# Exit: Opposite pivot break or price crosses EMA50.
+# Uses 1d Camarilla pivots for structure, volume confirmation to filter weak breakouts, EMA50 for trend alignment.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_regime_volume_v2"
-timeframe = "6h"
+name = "12h_daily_camarilla_pivot_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA200 for trend filter (6h)
+    # EMA50 for trend filter (12h)
     close_s = pd.Series(close)
-    ema200 = close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Elder Ray components (6h)
-    ema13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
-    
-    # 1d EMA200 for higher timeframe trend filter
+    # Get 1d data for Camarilla pivots (HTF)
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivots from 1d OHLC
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
+    # But standard Camarilla for trading: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    close_s_1d = pd.Series(close_1d)
-    ema200_1d = close_s_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
+    
+    # Align HTF Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema200[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema200_1d_aligned[i])):
+        if (np.isnan(ema50[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+            np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
@@ -60,27 +68,27 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Bear Power turns negative OR volume divergence (price up but volume down)
-            if bear_power[i] >= 0 or (close[i] > close[i-1] and volume[i] < volume[i-1]):
+            # Exit: Price breaks below L3 OR closes below EMA50
+            if low[i] < camarilla_l3_aligned[i] or close[i] < ema50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bull Power turns positive OR volume divergence (price down but volume down)
-            if bull_power[i] <= 0 or (close[i] < close[i-1] and volume[i] < volume[i-1]):
+            # Exit: Price breaks above H3 OR closes above EMA50
+            if high[i] > camarilla_h3_aligned[i] or close[i] > ema50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Bull Power positive, price above EMA200, price above 1d EMA200, volume confirmed
-            if (bull_power[i] > 0 and close[i] > ema200[i] and close[i] > ema200_1d_aligned[i] and volume_confirmed):
+            # Long entry: Price breaks above H3, close above EMA50, volume confirmed
+            if (high[i] > camarilla_h3_aligned[i] and close[i] > ema50[i] and volume_confirmed):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bear Power negative, price below EMA200, price below 1d EMA200, volume confirmed
-            elif (bear_power[i] < 0 and close[i] < ema200[i] and close[i] < ema200_1d_aligned[i] and volume_confirmed):
+            # Short entry: Price breaks below L3, close below EMA50, volume confirmed
+            elif (low[i] < camarilla_l3_aligned[i] and close[i] < ema50[i] and volume_confirmed):
                 position = -1
                 signals[i] = -0.25
     
