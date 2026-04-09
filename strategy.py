@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR trailing stop
-# - Uses 4h Donchian channel (20-period high/low) for breakout signals
-# - Confirms with 1d volume > 2.0x its 20-period average (strong participation)
-# - Uses ATR(14) trailing stop: exits when price retraces 2.5x ATR from extreme
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR trailing stop
+# - Uses 1d Camarilla levels (H3/L3) as significant support/resistance from institutional order flow
+# - Breaks above H3 or below L3 with 1d volume > 2.0x 20-period average indicate strong participation
+# - ATR(14) trailing stop: exits when price retraces 2.5x ATR from extreme to manage risk
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
 # - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
-# - Donchian channels adapt to volatility and provide objective breakout levels
-# - Volume filter reduces false breakouts, ATR stop manages risk
+# - Works in bull markets (breakouts continue trends) and bear markets (breakdowns continue trends)
+# - Camarilla levels derived from prior day's range provide objective institutional levels
+# - Volume filter reduces false breakouts, ATR stop manages risk without look-ahead
 
-name = "4h_1d_donchian_volume_atr_v1"
+name = "4h_1d_camarilla_breakout_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute 1d indicators
@@ -47,9 +47,15 @@ def generate_signals(prices):
     avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_spike_1d = volume_1d > (2.0 * avg_volume_20)
     
+    # 1d Camarilla levels: H3/L3 = close +- 1.1*(high-low)/2
+    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2.0
+    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2.0
+    
     # Align 1d indicators to 4h
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     # 4h price data
     high = prices['high'].values
@@ -65,6 +71,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike_1d_aligned[i]) or
+            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
             atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
@@ -93,36 +100,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate 4h Donchian channels using 20-period lookback
-            # 20 periods of 4h = 5 periods of 1d (since 1d = 6 * 4h)
-            lookback_periods = 5  # 5 periods of 1d = 20 * 4h periods
-            
-            if i < lookback_periods:
-                signals[i] = 0.0
-                continue
-                
-            # Get recent 1d high/low aligned to current 4h bar
-            rolling_max_1d = pd.Series(high_1d).rolling(window=lookback_periods, min_periods=lookback_periods).max().values
-            rolling_min_1d = pd.Series(low_1d).rolling(window=lookback_periods, min_periods=lookback_periods).min().values
-            
-            # Align to 4h timeframe
-            donchian_high_aligned = align_htf_to_ltf(prices, df_1d, rolling_max_1d)
-            donchian_low_aligned = align_htf_to_ltf(prices, df_1d, rolling_min_1d)
-            
-            if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-                np.isnan(volume_spike_1d_aligned[i])):
-                signals[i] = 0.0
-                continue
-            
-            # Look for Donchian breakout with volume confirmation
-            if (high[i] >= donchian_high_aligned[i] and    # Break above upper band
+            # Look for Camarilla breakout with volume confirmation
+            if (high[i] >= camarilla_high_aligned[i] and    # Break above H3
                 volume_spike_1d_aligned[i]):               # Volume confirmation
                 position = 1
                 entry_price = high[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]  # Initialize for shorts
                 signals[i] = 0.25
-            elif (low[i] <= donchian_low_aligned[i] and    # Break below lower band
+            elif (low[i] <= camarilla_low_aligned[i] and    # Break below L3
                   volume_spike_1d_aligned[i]):             # Volume confirmation
                 position = -1
                 entry_price = low[i]
