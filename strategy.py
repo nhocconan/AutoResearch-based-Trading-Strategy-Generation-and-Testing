@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d ADX trend filter + volume confirmation
-# Williams %R(14) identifies overbought/oversold conditions on 6h chart
-# 1d ADX > 25 confirms strong trend direction for breakout continuation
-# Volume confirmation ensures breakouts have participation
-# In strong trends (ADX > 25): trade breakouts in direction of trend
-# In weak trends (ADX <= 25): avoid trading to prevent whipsaws
-# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
-# Works in bull/bear markets: ADX filter adapts to trend strength, Williams %R captures reversals within trends
+# Hypothesis: 12h Camarilla pivot breakout with 1w volume confirmation and trend filter
+# In trending markets (price > weekly EMA200): breakout above/below Camarilla H3/L3 levels with volume spike
+# In ranging markets (price near weekly EMA200): mean reversion at H3/L3 levels
+# Uses discrete position sizing 0.25 to target ~12-37 trades/year and minimize fee drag
+# Works in bull/bear markets: breakout captures trends, mean reversion captures ranging markets
 
-name = "6h_1d_williamsr_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +23,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
+    
+    # Calculate 1w EMA200 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate 1w average volume (20-period)
+    volume_1w_series = pd.Series(volume_1w)
+    avg_volume_1w = volume_1w_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d data for Camarilla pivots (more frequent than 1w)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -35,96 +50,99 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX(14)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1d Camarilla pivot levels (based on prior day to avoid look-ahead)
+    range_1d = high_1d - low_1d
+    h3_1d = close_1d + 1.1 * range_1d
+    l3_1d = close_1d - 1.1 * range_1d
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    # Align 1w indicators to 12h timeframe
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    avg_volume_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_volume_1w)
     
-    # Wilder's smoothing
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
+    # Align 1d indicators to 12h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
-    tr_smoothed = wilders_smoothing(tr, 14)
-    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
-    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed > 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
-    di_minus = np.where(tr_smoothed > 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1d = wilders_smoothing(dx, 14)
-    
-    # Calculate 6h Williams %R(14)
-    def williams_r(high, low, close, period):
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        wr = np.where((highest_high - lowest_low) != 0, 
-                      -100 * (highest_high - close) / (highest_high - lowest_low), 
-                      -50)
-        return wr
-    
-    wr_6h = williams_r(high, low, close, 14)
-    
-    # Calculate 6h average volume (20-period)
-    avg_volume_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > 1.5 * avg_volume_6h
-    
-    # Align 1d indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Pre-compute volume confirmation array
+    volume_confirmed = volume > 2.0 * avg_volume_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(wr_6h[i]) or 
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(avg_volume_1w_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
             np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when 1d ADX > 25 (strong trend)
-        strong_trend = adx_1d_aligned[i] > 25
+        # Trend filter: price relative to weekly EMA200
+        uptrend = close[i] > ema200_1w_aligned[i]
+        downtrend = close[i] < ema200_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit long if Williams %R rises above -20 (overbought) or trend weakens
-            if wr_6h[i] > -20 or not strong_trend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
+            if uptrend:
+                # Exit long if price breaks below H3 or trend turns down
+                if close[i] < h3_1d_aligned[i] or downtrend:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            else:  # ranging or downtrend
+                # Exit long if price rises above H4 or drops below L3
+                if close[i] > h4_1d_aligned[i] or close[i] < l3_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if Williams %R falls below -80 (oversold) or trend weakens
-            if wr_6h[i] < -80 or not strong_trend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            if downtrend:
+                # Exit short if price breaks above L3 or trend turns up
+                if close[i] > l3_1d_aligned[i] or uptrend:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:  # ranging or uptrend
+                # Exit short if price drops below L4 or rises above H3
+                if close[i] < l4_1d_aligned[i] or close[i] > h3_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Enter long when Williams %R < -80 (oversold) in strong uptrend with volume
-            if wr_6h[i] < -80 and strong_trend and volume_confirmed[i]:
-                position = 1
-                signals[i] = 0.25
-            # Enter short when Williams %R > -20 (overbought) in strong downtrend with volume
-            elif wr_6h[i] > -20 and strong_trend and volume_confirmed[i]:
-                position = -1
-                signals[i] = -0.25
+            if uptrend:
+                # Enter long on breakout above H3 with volume confirmation
+                if close[i] > h3_1d_aligned[i] and volume_confirmed[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Enter short on breakdown below L3 with volume confirmation
+                elif close[i] < l3_1d_aligned[i] and volume_confirmed[i]:
+                    position = -1
+                    signals[i] = -0.25
+            elif downtrend:
+                # Enter short on breakdown below L3 with volume confirmation
+                if close[i] < l3_1d_aligned[i] and volume_confirmed[i]:
+                    position = -1
+                    signals[i] = -0.25
+                # Enter long on breakout above H3 with volume confirmation
+                elif close[i] > h3_1d_aligned[i] and volume_confirmed[i]:
+                    position = 1
+                    signals[i] = 0.25
+            else:  # ranging market
+                # Mean reversion: buy near L3, sell near H3
+                if close[i] <= l3_1d_aligned[i] and volume_confirmed[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] >= h3_1d_aligned[i] and volume_confirmed[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
