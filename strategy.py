@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "6h_1d_ichimoku_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,31 +19,59 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:  # Need enough for Ichimoku
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    r4 = np.full(len(df_1d), np.nan)
-    s4 = np.full(len(df_1d), np.nan)
-    prev_high = np.full(len(df_1d), np.nan)
-    prev_low = np.full(len(df_1d), np.nan)
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(1, len(df_1d)):
-        ph = float(df_1d['high'].iloc[i-1])
-        pl = float(df_1d['low'].iloc[i-1])
-        pc = float(df_1d['close'].iloc[i-1])
-        r4[i] = pc + (ph - pl) * 1.1 / 2
-        s4[i] = pc - (ph - pl) * 1.1 / 2
-        prev_high[i] = ph
-        prev_low[i] = pl
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    tenkan = np.full(len(df_1d), np.nan)
+    for i in range(period_tenkan - 1, len(df_1d)):
+        tenkan[i] = (np.max(high_1d[i - period_tenkan + 1:i + 1]) + 
+                     np.min(low_1d[i - period_tenkan + 1:i + 1])) / 2
     
-    # Align 1d values to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
-    prev_high_12h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_12h = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    kijun = np.full(len(df_1d), np.nan)
+    for i in range(period_kijun - 1, len(df_1d)):
+        kijun[i] = (np.max(high_1d[i - period_kijun + 1:i + 1]) + 
+                    np.min(low_1d[i - period_kijun + 1:i + 1])) / 2
     
-    # Volume confirmation: 4-period average (48h)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
+    senkou_a = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            idx = i + period_kijun  # 26 periods ahead
+            if idx < len(df_1d):
+                senkou_a[idx] = (tenkan[i] + kijun[i]) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2, plotted 26 periods ahead
+    period_senkou_b = 52
+    senkou_b = np.full(len(df_1d), np.nan)
+    for i in range(period_senkou_b - 1, len(df_1d)):
+        senkou_b[i] = (np.max(high_1d[i - period_senkou_b + 1:i + 1]) + 
+                       np.min(low_1d[i - period_senkou_b + 1:i + 1])) / 2
+        idx = i + period_kijun  # 26 periods ahead
+        if idx < len(df_1d):
+            senkou_b[idx] = senkou_b[i]  # Assign the calculated value to the future position
+    
+    # Chikou Span (Lagging Span): Current close plotted 26 periods back
+    chikou = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d) - period_kijun):
+        chikou[i] = close_1d[i + period_kijun]
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    chikou_6h = align_htf_to_ltf(prices, df_1d, chikou)
+    
+    # Volume confirmation: 4-period average (24h)
     vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -56,39 +84,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(52, n):  # Start after warmup for Senkou B
         # Skip if any required data is invalid
-        if (np.isnan(r4_12h[i]) or 
-            np.isnan(s4_12h[i]) or 
-            np.isnan(prev_high_12h[i]) or 
-            np.isnan(prev_low_12h[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
+            np.isnan(chikou_6h[i]) or np.isnan(vol_ma_4[i])):
             signals[i] = 0.0
             continue
         
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
+        
         if position == 1:  # Long position
-            # Exit: price closes back inside previous day's range
-            if close[i] <= prev_high_12h[i] and close[i] >= prev_low_12h[i]:
+            # Exit: price closes below cloud OR Tenkan-Kijun cross down
+            if (close[i] < cloud_bottom) or (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside previous day's range
-            if close[i] <= prev_high_12h[i] and close[i] >= prev_low_12h[i]:
+            # Exit: price closes above cloud OR Tenkan-Kijun cross up
+            if (close[i] > cloud_top) or (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation
+            # Enter long: price above cloud, Tenkan > Kijun, Chikou above price from 26 periods ago
             vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
-            if close[i] > r4_12h[i] and vol_ratio > 2.0:
+            if (close[i] > cloud_top and 
+                tenkan_6h[i] > kijun_6h[i] and 
+                not np.isnan(chikou_6h[i]) and chikou_6h[i] > close[i] and
+                vol_ratio > 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation
-            elif close[i] < s4_12h[i] and vol_ratio > 2.0:
+            # Enter short: price below cloud, Tenkan < Kijun, Chikou below price from 26 periods ago
+            elif (close[i] < cloud_bottom and 
+                  tenkan_6h[i] < kijun_6h[i] and 
+                  not np.isnan(chikou_6h[i]) and chikou_6h[i] < close[i] and
+                  vol_ratio > 1.5):
                 position = -1
                 signals[i] = -0.25
     
