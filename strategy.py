@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_volume_confirmation_v1
-# Hypothesis: 6h strategy using weekly pivot points for structure, with volume confirmation.
-# Long when price breaks above weekly R1 with volume > 1.5x 20-period average.
-# Short when price breaks below weekly S1 with volume > 1.5x 20-period average.
-# Exit when price returns to weekly pivot point (PP).
-# Weekly pivot points calculated from prior week's OHLC: PP=(H+L+C)/3, R1=2*PP-L, S1=2*PP-H.
+# 12h_hma_volume_regime_v1
+# Hypothesis: 12h strategy using Hull Moving Average (HMA) for trend direction, volume confirmation, and chop regime filter.
+# Long when price > HMA(21) with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when price < HMA(21) with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when price crosses back through HMA(21).
 # Uses discrete position sizing (0.25) to minimize fee churn.
 # Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
-# Weekly pivot provides multi-timeframe structure from 1w timeframe.
-# Volume confirmation ensures breakouts have conviction.
-# Works in both bull and bear markets: captures breakouts in trending markets and mean reversion at extremes in ranging markets.
+# Works in both bull and bear markets: HMA captures trend with less lag, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
+# Multi-timeframe: 1d HMA trend filter for higher timeframe confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_volume_confirmation_v1"
-timeframe = "6h"
+name = "12h_hma_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,63 +31,99 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Multi-timeframe: get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Hull Moving Average (HMA) calculation
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    close_s = pd.Series(close)
+    n_half = int(21 / 2)
+    n_sqrt = int(np.sqrt(21))
     
-    # Calculate weekly pivot points from prior week's OHLC
-    # PP = (High + Low + Close) / 3
-    # R1 = (2 * PP) - Low
-    # S1 = (2 * PP) - High
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    wma_half = close_s.rolling(window=n_half, min_periods=n_half).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    wma_full = close_s.rolling(window=21, min_periods=21).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
     
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    r1 = (2 * pp) - low_1w
-    s1 = (2 * pp) - high_1w
+    raw_hma = 2 * wma_half - wma_full
+    hma = pd.Series(raw_hma).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
     
-    # Align weekly pivot levels to 6h timeframe (completed weekly bar only)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Choppiness Index regime filter (14-period)
+    atr_period = 14
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr_series = pd.Series(tr)
+    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
+    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
+    
+    # Multi-timeframe: 1d HMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    close_1d_s = pd.Series(close_1d)
+    wma_half_1d = close_1d_s.rolling(window=n_half, min_periods=n_half).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    wma_full_1d = close_1d_s.rolling(window=21, min_periods=21).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    raw_hma_1d = 2 * wma_half_1d - wma_full_1d
+    hma_1d = pd.Series(raw_hma_1d).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(hma[i]) or np.isnan(hma[i-1]) or 
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: chop < 61.8 indicates trending market
+        trending_market = chop[i] < 61.8
+        # HTF trend filter: price above/below 1d HMA
+        htf_uptrend = close[i] > hma_1d_aligned[i]
+        htf_downtrend = close[i] < hma_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to weekly pivot point (PP)
-            if close[i] <= pp_aligned[i]:
+            # Exit: price crosses below HMA(21)
+            if close[i] < hma[i] and close[i-1] >= hma[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to weekly pivot point (PP)
-            if close[i] >= pp_aligned[i]:
+            # Exit: price crosses above HMA(21)
+            if close[i] > hma[i] and close[i-1] <= hma[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation
-            bullish_breakout = (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]) and volume_confirmed
-            bearish_breakout = (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]) and volume_confirmed
+            # Check for price/HMA cross with volume, regime, and HTF confirmation
+            bullish_cross = (close[i] > hma[i] and close[i-1] <= hma[i-1]) and volume_confirmed and trending_market and htf_uptrend
+            bearish_cross = (close[i] < hma[i] and close[i-1] >= hma[i-1]) and volume_confirmed and trending_market and htf_downtrend
             
-            if bullish_breakout:
+            if bullish_cross:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_cross:
                 position = -1
                 signals[i] = -0.25
     
