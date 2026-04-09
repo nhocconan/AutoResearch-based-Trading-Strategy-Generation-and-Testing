@@ -1,158 +1,116 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_cloud_12h_v1
-# Hypothesis: 6h Ichimoku Cloud with 12h trend filter for high-probability trend continuation.
-# Uses 6h timeframe to balance trade frequency (target 12-37/year). Ichimoku provides
-# dynamic support/resistance (cloud) and momentum (TK cross). 12h timeframe acts as
-# trend filter: only take long signals when 12h is bullish (price above cloud) and
-# short signals when 12h is bearish (price below cloud). Volume confirmation filters
-# low-participation breakouts. Works in bull/bear markets: Ichimoku adapts to volatility,
-# 12h filter avoids counter-trend trades during ranging, volume confirms institutional interest.
+# 12h_camarilla_1d_hma_volume_v1
+# Hypothesis: 12h Camarilla H3/L3 levels from 1d pivot act as strong support/resistance with volume confirmation.
+# Uses 12h timeframe for lower trade frequency (12-37/year target). 1d Camarilla H3/L3 provides institutional bias levels.
+# Enter long when price breaks above 1d H3 with volume spike and 12h HMA(21) confirms uptrend.
+# Enter short when price breaks below 1d L3 with volume spike and 12h HMA(21) confirms downtrend.
+# Exit when price crosses 12h HMA(21) in opposite direction. Works in bull/bear: Camarilla filters counter-trend fakes,
+# volume spike confirms participation, HMA provides smooth trend with reduced lag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_12h_v1"
-timeframe = "6h"
+name = "12h_camarilla_1d_hma_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku Cloud components"""
-    if len(high) < kijun:
-        return (np.full_like(high, np.nan, dtype=float),
-                np.full_like(high, np.nan, dtype=float),
-                np.full_like(high, np.nan, dtype=float),
-                np.full_like(high, np.nan, dtype=float),
-                np.full_like(high, np.nan, dtype=float))
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max().values
-    period9_low = pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=kijun, min_periods=kijun).max().values
-    period26_low = pd.Series(low).rolling(window=kijun, min_periods=kijun).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=senkou, min_periods=senkou).max().values
-    period52_low = pd.Series(low).rolling(window=senkou, min_periods=senkou).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou_spans = np.roll(close, -kijun)
-    chikou_spans[-kijun:] = np.nan  # Will be handled by alignment
-    
-    return tenkan_sen, kijun_sen, senkou_a, senkou_b, chikou_spans
+    # WMA for half period using EWM as approximation
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean().values
+    # WMA for full period
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean().values
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Ichimoku calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 60:
-        return np.zeros(n)
-    
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    
-    # Calculate Ichimoku on 6h
-    tenkan_6h, kijun_6h, senkou_a_6h, senkou_b_6h, chikou_6h = calculate_ichimoku(high_6h, low_6h, close_6h)
-    
-    # Align Ichimoku components to 6h timeframe (completed 6h candle only)
-    tenkan_6h_aligned = align_htf_to_ltf(prices, df_6h, tenkan_6h)
-    kijun_6h_aligned = align_htf_to_ltf(prices, df_6h, kijun_6h)
-    senkou_a_6h_aligned = align_htf_to_ltf(prices, df_6h, senkou_a_6h)
-    senkou_b_6h_aligned = align_htf_to_ltf(prices, df_6h, senkou_b_6h)
-    chikou_6h_aligned = align_htf_to_ltf(prices, df_6h, chikou_6h)
-    
-    # Cloud: Senkou Span A and B
-    upper_cloud_6h = np.maximum(senkou_a_6h_aligned, senkou_b_6h_aligned)
-    lower_cloud_6h = np.minimum(senkou_a_6h_aligned, senkou_b_6h_aligned)
-    
-    # Get 12h HTF data ONCE before loop for trend filter
+    # Get 12h data for HMA calculation
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    if len(df_12h) < 30:  # Need enough for HMA(21)
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 12h HMA(21) for trend
     close_12h = df_12h['close'].values
+    hma_12h = calculate_hma(close_12h, 21)
     
-    # Calculate 12h Ichimoku for trend filter (simplified: just cloud)
-    tenkan_12h, kijun_12h, senkou_a_12h, senkou_b_12h, _ = calculate_ichimoku(high_12h, low_12h, close_12h)
+    # Align 12h HMA to 12h timeframe (completed 12h candle only)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Align 12h Ichimoku to 6h timeframe
-    tenkan_12h_aligned = align_htf_to_ltf(prices, df_12h, tenkan_12h)
-    kijun_12h_aligned = align_htf_to_ltf(prices, df_12h, kijun_12h)
-    senkou_a_12h_aligned = align_htf_to_ltf(prices, df_12h, senkou_a_12h)
-    senkou_b_12h_aligned = align_htf_to_ltf(prices, df_12h, senkou_b_12h)
+    # Get 1d HTF data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 12h Cloud
-    upper_cloud_12h = np.maximum(senkou_a_12h_aligned, senkou_b_12h_aligned)
-    lower_cloud_12h = np.minimum(senkou_a_12h_aligned, senkou_b_12h_aligned)
+    # Calculate Camarilla pivot levels for daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h Trend: price above/below cloud
-    # For 12h trend, we need to align the 12h close to 6h as well
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-    trend_bull_12h = close_12h_aligned > upper_cloud_12h
-    trend_bear_12h = close_12h_aligned < lower_cloud_12h
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Volume confirmation: 20-period volume average
+    # Camarilla H3/L3 levels (stronger bias filter than H4/L4)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe (completed daily candle only)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 1.5)
+    vol_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_6h_aligned[i]) or np.isnan(kijun_6h_aligned[i]) or
-            np.isnan(upper_cloud_6h[i]) or np.isnan(lower_cloud_6h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(hma_12h_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
+            np.isnan(l3_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 6h cloud OR TK cross turns bearish
-            if (close[i] < lower_cloud_6h[i]) or (tenkan_6h_aligned[i] < kijun_6h_aligned[i]):
+            # Exit: price closes below 12h HMA
+            if close[i] < hma_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 6h cloud OR TK cross turns bullish
-            if (close[i] > upper_cloud_6h[i]) or (tenkan_6h_aligned[i] > kijun_6h_aligned[i]):
+            # Exit: price closes above 12h HMA
+            if close[i] > hma_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price above 6h cloud, TK bullish, 12h bullish trend, volume spike
-            if (close[i] > upper_cloud_6h[i]) and \
-               (tenkan_6h_aligned[i] > kijun_6h_aligned[i]) and \
-               trend_bull_12h[i] and \
-               vol_spike[i]:
+            # Enter long: price closes above 12h HMA, above 1d H3, with volume spike
+            if (close[i] > hma_12h_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price below 6h cloud, TK bearish, 12h bearish trend, volume spike
-            elif (close[i] < lower_cloud_6h[i]) and \
-                 (tenkan_6h_aligned[i] < kijun_6h_aligned[i]) and \
-                 trend_bear_12h[i] and \
-                 vol_spike[i]:
+            # Enter short: price closes below 12h HMA, below 1d L3, with volume spike
+            elif (close[i] < hma_12h_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
