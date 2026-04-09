@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian channel breakouts with volume confirmation and ATR trailing stop
+# Hypothesis: 12h strategy using 1d Donchian channel breakouts with volume confirmation and ATR trailing stop
 # Donchian(20) from 1d provides clear trend structure with proven edge across market regimes
-# Volume confirmation (current 4h volume > 1.8x 20-period average) filters false breakouts
-# ATR trailing stop (2.0x ATR) manages risk and adapts to volatility
-# Designed for 4h timeframe targeting 20-40 trades/year (80-160 over 4 years)
+# Volume confirmation (current 12h volume > 2.0x 20-period average) filters false breakouts
+# ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
+# Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
 # Works in bull/bear: price reacts to 1d structure, volume confirms validity, ATR stop controls drawdown
 
-name = "4h_1d_donchian_volume_atr_v2"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,11 +38,11 @@ def generate_signals(prices):
     high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Donchian channels to 4h timeframe
+    # Align 1d Donchian channels to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Pre-compute ATR(14) for 4h timeframe
+    # Pre-compute ATR(14) for 12h timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -67,32 +67,32 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.8x average 4h volume
-        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
+        # Volume confirmation: current 12h volume > 2.0x average 12h volume
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             if close[i] > highest_since_long:
                 highest_since_long = close[i]
-            # ATR trailing stop: exit if price drops 2.0x ATR from highest
-            if close[i] < highest_since_long - 2.0 * atr[i]:
+            # ATR trailing stop: exit if price drops 2.5x ATR from highest
+            if close[i] < highest_since_long - 2.5 * atr[i]:
                 position = 0
                 highest_since_long = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Update lowest low since entry
             if close[i] < lowest_since_short:
                 lowest_since_short = close[i]
-            # ATR trailing stop: exit if price rises 2.0x ATR from lowest
-            if close[i] > lowest_since_short + 2.0 * atr[i]:
+            # ATR trailing stop: exit if price rises 2.5x ATR from lowest
+            if close[i] > lowest_since_short + 2.5 * atr[i]:
                 position = 0
                 lowest_since_short = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
             # Breakout trading with volume confirmation
             # Long on Donchian high breakout, Short on Donchian low breakout
@@ -100,10 +100,10 @@ def generate_signals(prices):
                 if close[i] > donchian_high_aligned[i]:
                     position = 1
                     highest_since_long = close[i]
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                 elif close[i] < donchian_low_aligned[i]:
                     position = -1
                     lowest_since_short = close[i]
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
