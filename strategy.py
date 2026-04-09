@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R + 4h EMA50 trend filter + volume confirmation + session filter (08-20 UTC)
-# - Primary signal: 1h Williams %R(14) < -80 (oversold) for long, > -20 (overbought) for short
-# - Trend filter: 4h EMA50 - price must be above EMA for longs, below for shorts
-# - Volume confirmation: 1h volume > 20-period median volume (avoid low-participation signals)
-# - Session filter: Only trade between 08:00-20:00 UTC to avoid low-liquidity periods
-# - Position size: 0.20 (discrete level) to minimize fee churn
-# - Target: 15-37 trades/year (60-150 total over 4 years) per 1h strategy guidelines
-# - Works in bull/bear: Williams %R captures mean reversion extremes, EMA50 filter ensures
-#   trades align with higher timeframe trend, reducing false signals in strong trends
+# Hypothesis: 6h Volume-Weighted Average Price (VWAP) deviation + 1w Supertrend filter
+# - Primary signal: Long when 6h price closes below VWAP by 1.5 ATR AND 1w Supertrend is bullish
+# - Short when 6h price closes above VWAP by 1.5 ATR AND 1w Supertrend is bearish
+# - VWAP reset daily, ATR calculated on 6h timeframe
+# - Supertrend uses ATR(10) multiplier 3.0 on weekly timeframe for robust trend filter
+# - Works in bull/bear: VWAP mean reversion captures short-term extremes, Supertrend ensures
+#   alignment with higher timeframe trend to avoid counter-trend whipsaws
+# - Target: 12-37 trades/year (50-150 total over 4 years) via tight entry conditions
 
-name = "1h_4h_williamsr_ema_volume_session_v1"
-timeframe = "1h"
+name = "6h_1w_vwap_supertrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,83 +22,120 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 4h indicators
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # Pre-compute 1w Supertrend
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # ATR calculation for Supertrend
+    tr1 = pd.Series(high_1w - low_1w)
+    tr2 = pd.Series(np.abs(high_1w - pd.Series(close_1w).shift(1)))
+    tr3 = pd.Series(np.abs(low_1w - pd.Series(close_1w).shift(1)))
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr_1w.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align 4h EMA50 to 1h timeframe (completed 4h bar only)
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Supertrend calculation
+    hl2_1w = (high_1w + low_1w) / 2
+    upper_band_1w = hl2_1w + (3.0 * atr_1w)
+    lower_band_1w = hl2_1w - (3.0 * atr_1w)
     
-    # 1h price data
+    supertrend_1w = np.zeros(len(close_1w))
+    direction_1w = np.ones(len(close_1w))  # 1 for uptrend, -1 for downtrend
+    
+    supertrend_1w[0] = upper_band_1w[0]
+    direction_1w[0] = 1
+    
+    for i in range(1, len(close_1w)):
+        if close_1w[i] > supertrend_1w[i-1]:
+            supertrend_1w[i] = upper_band_1w[i]
+            direction_1w[i] = 1
+        else:
+            supertrend_1w[i] = lower_band_1w[i]
+            direction_1w[i] = -1
+    
+    # Align 1w Supertrend direction to 6h timeframe
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_1w, direction_1w)
+    
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # 1h Williams %R(14)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high_14 - lowest_low_14) == 0,
-        -50.0,  # neutral when range is zero
-        ((highest_high_14 - close) / (highest_high_14 - lowest_low_14)) * -100
-    )
+    # 6h ATR for VWAP bands
+    tr1_6h = pd.Series(high - low)
+    tr2_6h = pd.Series(np.abs(high - pd.Series(close).shift(1)))
+    tr3_6h = pd.Series(np.abs(low - pd.Series(close).shift(1)))
+    tr_6h = pd.concat([tr1_6h, tr2_6h, tr3_6h], axis=1).max(axis=1)
+    atr_6h = tr_6h.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # 1h volume regime: volume > 20-period median volume
-    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    volume_regime = volume > median_volume_20
+    # Daily VWAP calculation (reset each day)
+    # Extract date from open_time for daily grouping
+    dates = pd.to_datetime(prices['open_time']).date
+    unique_dates = np.unique(dates)
     
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vwap = np.full(n, np.nan)
+    cumulative_tpv = 0.0
+    cumulative_volume = 0.0
+    current_date = dates[0] if len(dates) > 0 else None
+    
+    for i in range(n):
+        if dates[i] != current_date:
+            # Reset for new day
+            cumulative_tpv = 0.0
+            cumulative_volume = 0.0
+            current_date = dates[i]
+        
+        typical_price = (high[i] + low[i] + close[i]) / 3.0
+        cumulative_tpv += typical_price * volume[i]
+        cumulative_volume += volume[i]
+        
+        if cumulative_volume > 0:
+            vwap[i] = cumulative_tpv / cumulative_volume
+    
+    # VWAP deviation in ATR units
+    vwap_deviation = (close - vwap) / atr_6h
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(williams_r[i]) or
-            np.isnan(volume_regime[i]) or
-            not session_filter[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(supertrend_dir_aligned[i]) or
+            np.isnan(vwap_deviation[i]) or
+            np.isnan(atr_6h[i]) or
+            atr_6h[i] == 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Williams %R > -50 (exiting oversold) OR price crosses below EMA50
-            if williams_r[i] > -50.0 or close[i] < ema_50_aligned[i]:
+            # Exit: price reverts to VWAP OR Supertrend turns bearish
+            if vwap_deviation[i] >= -0.5 or supertrend_dir_aligned[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R < -50 (exiting overbought) OR price crosses above EMA50
-            if williams_r[i] < -50.0 or close[i] > ema_50_aligned[i]:
+            # Exit: price reverts to VWAP OR Supertrend turns bullish
+            if vwap_deviation[i] <= 0.5 or supertrend_dir_aligned[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Look for Williams %R extremes with volume confirmation and EMA50 filter
-            # Long: Williams %R < -80 (oversold) AND volume regime AND price above EMA50
-            if williams_r[i] < -80.0 and volume_regime[i] and close[i] > ema_50_aligned[i]:
+            # Look for VWAP extremes with Supertrend filter
+            # Long: price significantly below VWAP AND Supertrend bullish
+            if vwap_deviation[i] <= -1.5 and supertrend_dir_aligned[i] == 1:
                 position = 1
-                signals[i] = 0.20
-            # Short: Williams %R > -20 (overbought) AND volume regime AND price below EMA50
-            elif williams_r[i] > -20.0 and volume_regime[i] and close[i] < ema_50_aligned[i]:
+                signals[i] = 0.25
+            # Short: price significantly above VWAP AND Supertrend bearish
+            elif vwap_deviation[i] >= 1.5 and supertrend_dir_aligned[i] == -1:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
