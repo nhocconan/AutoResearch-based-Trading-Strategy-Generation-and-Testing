@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_regime_v2
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels for mean reversion in ranging markets,
-# volume confirmation for conviction, and choppiness filter to avoid trending markets.
-# Long when price touches Camarilla S3 with volume > 1.5x 20-period average and chop > 61.8 (ranging).
-# Short when price touches Camarilla R3 with volume > 1.5x 20-period average and chop > 61.8 (ranging).
-# Exit when price reverts to Camarilla H3/L3 levels or chop < 38.2 (trending market).
+# 4h_camarilla_pivot_volume_regime_v1
+# Hypothesis: 4h strategy using Camarilla pivot levels from 1d timeframe for structure, volume confirmation, and choppiness regime filter.
+# Long when price touches S3 level with volume > 1.3x 20-period average and chop > 61.8 (ranging market).
+# Short when price touches R3 level with volume > 1.3x 20-period average and chop > 61.8 (ranging market).
+# Exit when price moves back to H4/L4 levels or chop < 38.2 (trending market).
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 12-30 trades/year (50-120 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
-# Works in both bull and bear markets: mean reversion in ranging markets (chop > 61.8) avoids losses in trends.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Works in both bull and bear markets: Camarilla pivots provide dynamic support/resistance, volume confirms conviction at extremes,
+# chop filter ensures mean reversion only in ranging markets where pivots are most effective.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_regime_v2"
-timeframe = "12h"
+name = "4h_camarilla_pivot_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,31 +31,43 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d HTF data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d bar
-    # Camarilla uses previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values  # Shifted by 1 to use previous day
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # HLC = previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
     
-    # Camarilla levels
-    # H3/L3: (high - low) * 1.1/4 + close
-    # S3/R3: (high - low) * 1.1/6 + close
-    high_low_diff = prev_high - prev_low
-    camarilla_h3 = prev_close + high_low_diff * 1.1 / 4
-    camarilla_l3 = prev_close - high_low_diff * 1.1 / 4
-    camarilla_s3 = prev_close - high_low_diff * 1.1 / 6
-    camarilla_r3 = prev_close + high_low_diff * 1.1 / 6
+    # Camarilla pivot levels
+    # R4 = Close + ((High - Low) * 1.1/2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # R2 = Close + ((High - Low) * 1.1/6)
+    # R1 = Close + ((High - Low) * 1.1/12)
+    # PP = (High + Low + Close)/3
+    # S1 = Close - ((High - Low) * 1.1/12)
+    # S2 = Close - ((High - Low) * 1.1/6)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
     
-    # Align HTF Camarilla levels to LTF (12h)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    hl_range = prev_high - prev_low
+    camarilla_r3 = prev_close + (hl_range * 1.1 / 4)
+    camarilla_s3 = prev_close - (hl_range * 1.1 / 4)
+    camarilla_r4 = prev_close + (hl_range * 1.1 / 2)
+    camarilla_s4 = prev_close - (hl_range * 1.1 / 2)
+    camarilla_h4 = prev_close + (hl_range * 1.1 / 6)  # R2 equivalent
+    camarilla_l4 = prev_close - (hl_range * 1.1 / 6)  # S2 equivalent
+    
+    # Align HTF Camarilla levels to LTF
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Choppiness Index regime filter (14-period)
     atr_period = 14
@@ -70,54 +82,53 @@ def generate_signals(prices):
     highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
     lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / denominator)
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
+            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+            np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         # Regime filter: chop > 61.8 indicates ranging market (good for mean reversion)
         ranging_market = chop[i] > 61.8
-        # Exit regime: chop < 38.2 indicates trending market (exit positions)
-        trending_market = chop[i] < 38.2
+        # Exit regime: chop < 38.2 indicates strong trend (exit positions)
+        strong_trend = chop[i] < 38.2
         
         if position == 1:  # Long position
-            # Exit conditions: price reaches L3 or chop < 38.2 (trending)
-            if close[i] <= l3_aligned[i] or trending_market:
+            # Exit conditions: price reaches H4 level OR strong trend emerges
+            if high[i] >= camarilla_h4_aligned[i] or strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price reaches H3 or chop < 38.2 (trending)
-            if close[i] >= h3_aligned[i] or trending_market:
+            # Exit conditions: price reaches L4 level OR strong trend emerges
+            if low[i] <= camarilla_l4_aligned[i] or strong_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: price touches S3/R3 with volume confirmation in ranging market
-            long_entry = (close[i] <= s3_aligned[i]) and volume_confirmed and ranging_market
-            short_entry = (close[i] >= r3_aligned[i]) and volume_confirmed and ranging_market
+            # Entry conditions: price touches S3/R3 levels with volume confirmation in ranging market
+            bullish_entry = (low[i] <= camarilla_s3_aligned[i]) and volume_confirmed and ranging_market
+            bearish_entry = (high[i] >= camarilla_r3_aligned[i]) and volume_confirmed and ranging_market
             
-            if long_entry:
+            if bullish_entry:
                 position = 1
                 signals[i] = 0.25
-            elif short_entry:
+            elif bearish_entry:
                 position = -1
                 signals[i] = -0.25
     
