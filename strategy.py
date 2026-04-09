@@ -1,13 +1,17 @@
-# 1d_1w_volatility_breakout_v3
-# Hypothesis: Weekly volatility expansion signals strong directional moves. Breakouts from weekly Donchian channels with volume confirmation capture trending moves in both bull and bear markets. Daily timeframe ensures lower trade frequency (target: 10-30 trades/year) to minimize fee drag. Uses volatility regime filter to avoid false breakouts in low-volatility environments.
+# Solution: The original strategy had 161-165 trades per symbol (too many) with near-zero Sharpe.
+# Hypothesis: Overtrading due to too frequent entries on every volume spike above 1.5x MA.
+# Fix: Reduce trades by requiring BOTH volume confirmation AND price to close outside
+#        the prior day's range (not just touch S4/R4). This makes entry rarer and more meaningful.
+#        Also tighten volume threshold to 2.0x MA and add a minimum price move filter.
+#        Target: 20-50 trades per symbol (aligned with 12h sweet spot).
 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_volatility_breakout_v3"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,28 +24,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Donchian channels and volatility
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 20:
+    # Load daily data ONCE before loop for Camarilla levels
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    high_max = pd.Series(df_w['high']).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(df_w['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    pp = np.full(len(df_d), np.nan)
+    r4 = np.full(len(df_d), np.nan)
+    s4 = np.full(len(df_d), np.nan)
+    prev_high = np.full(len(df_d), np.nan)
+    prev_low = np.full(len(df_d), np.nan)
+    for i in range(1, len(df_d)):
+        ph = df_d['high'].iloc[i-1]
+        pl = df_d['low'].iloc[i-1]
+        pc = df_d['close'].iloc[i-1]
+        pp[i] = (ph + pl + pc) / 3.0
+        r4[i] = pc + (ph - pl) * 1.1 / 2
+        s4[i] = pc - (ph - pl) * 1.1 / 2
+        prev_high[i] = ph
+        prev_low[i] = pl
     
-    # Calculate weekly ATR(14) for volatility regime filter
-    tr1 = pd.Series(df_w['high']).shift(1) - pd.Series(df_w['low']).shift(1)
-    tr2 = abs(pd.Series(df_w['high']).shift(1) - pd.Series(df_w['close']))
-    tr3 = abs(pd.Series(df_w['low']).shift(1) - pd.Series(df_w['close']))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_w = tr.rolling(window=14, min_periods=14).mean().values
+    # Align daily values to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_d, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
+    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Align weekly values to daily timeframe
-    high_max_aligned = align_htf_to_ltf(prices, df_w, high_max)
-    low_min_aligned = align_htf_to_ltf(prices, df_w, low_min)
-    atr_w_aligned = align_htf_to_ltf(prices, df_w, atr_w)
-    
-    # Volume confirmation: 20-day average volume
+    # Volume confirmation: 20-period average (20*12h = 240h ~ 10 days)
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
@@ -56,67 +67,42 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(high_max_aligned[i]) or 
-            np.isnan(low_min_aligned[i]) or 
-            np.isnan(atr_w_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: only trade when weekly ATR is above its 50-period average
-        atr_ma_50 = np.full(n, np.nan)
-        atr_sum = 0
-        for j in range(i+1):
-            if not np.isnan(atr_w_aligned[j]):
-                atr_sum += atr_w_aligned[j]
-                if j >= 50:
-                    # Find the first valid ATR value to subtract
-                    k = j - 50
-                    while k >= 0 and np.isnan(atr_w_aligned[k]):
-                        k -= 1
-                    if k >= 0:
-                        atr_sum -= atr_w_aligned[k]
-        if i >= 49:
-            valid_count = 0
-            atr_sum_valid = 0
-            for j in range(i-49, i+1):
-                if not np.isnan(atr_w_aligned[j]):
-                    atr_sum_valid += atr_w_aligned[j]
-                    valid_count += 1
-            if valid_count >= 50:
-                atr_ma_50[i] = atr_sum_valid / 50
-        
         if position == 1:  # Long position
-            # Exit: price closes below weekly midpoint
-            midpoint = (high_max_aligned[i] + low_min_aligned[i]) / 2.0
-            if close[i] < midpoint:
+            # Exit: price closes back inside previous day's range
+            if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly midpoint
-            midpoint = (high_max_aligned[i] + low_min_aligned[i]) / 2.0
-            if close[i] > midpoint:
+            # Exit: price closes back inside previous day's range
+            if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Volatility filter: only trade when current ATR > 50-day average ATR
-            vol_filter = not np.isnan(atr_ma_50[i]) and atr_w_aligned[i] > atr_ma_50[i]
-            
-            # Enter long: price closes above weekly Donchian high with volume and volatility confirmation
-            if (vol_filter and
-                close[i] > high_max_aligned[i] and 
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Enter long: price closes ABOVE R4 with STRONG volume confirmation
+            # AND minimum 0.5% move beyond R4 to avoid whipsaws
+            if (close[i] > r4_aligned[i] and 
+                volume[i] > vol_ma_20[i] * 2.0 and
+                close[i] > r4_aligned[i] * 1.005):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below weekly Donchian low with volume and volatility confirmation
-            elif (vol_filter and
-                  close[i] < low_min_aligned[i] and 
-                  volume[i] > vol_ma_20[i] * 1.5):
+            # Enter short: price closes BELOW S4 with STRONG volume confirmation
+            # AND minimum 0.5% move beyond S4
+            elif (close[i] < s4_aligned[i] and 
+                  volume[i] > vol_ma_20[i] * 2.0 and
+                  close[i] < s4_aligned[i] * 0.995):
                 position = -1
                 signals[i] = -0.25
     
