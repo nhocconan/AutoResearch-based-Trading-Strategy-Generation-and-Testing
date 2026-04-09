@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# 6h_camarilla_1d_volume_v1
-# Hypothesis: 6h strategy using daily Camarilla pivot levels for mean reversion in ranging markets.
-# Long: price touches S3 level with volume confirmation and RSI < 30
-# Short: price touches R3 level with volume confirmation and RSI > 70
+# 12h_donchian_1w_trend_volume_v1
+# Hypothesis: 12h strategy using 1w Donchian breakouts for trend direction, volume confirmation for entry timing.
+# Long: price > 1w Donchian upper (20) + volume > 2.0x 20-period average
+# Short: price < 1w Donchian lower (20) + volume > 2.0x 20-period average
+# Exit: price crosses 1w Donchian midpoint (mean reversion) OR opposite Donchian breakout
 # Uses discrete sizing (±0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_1d_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,80 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 1w HTF data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 2
-    # S3 = C - (H - L) * 1.1 / 2
-    prev_high = pd.Series(high_1d).shift(1).values
-    prev_low = pd.Series(low_1d).shift(1).values
-    prev_close = pd.Series(close_1d).shift(1).values
+    # 1w Donchian channels (20-period)
+    period20_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_upper = period20_high
+    donchian_lower = period20_low
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Align Donchian channels to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
     
-    # Align pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # RSI(14) on 6h for overbought/oversold confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price moves back above S3 or RSI > 50 (mean reversion complete)
-            if close[i] > s3_aligned[i] or rsi_values[i] > 50:
+            # Exit: price crosses below midpoint OR breaks below lower Donchian (strong reversal)
+            if close[i] < donchian_mid_aligned[i] or close[i] < donchian_lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves back below R3 or RSI < 50 (mean reversion complete)
-            if close[i] < r3_aligned[i] or rsi_values[i] < 50:
+            # Exit: price crosses above midpoint OR breaks above upper Donchian (strong reversal)
+            if close[i] > donchian_mid_aligned[i] or close[i] > donchian_upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price touches or goes below S3 with RSI oversold
-                if close[i] <= s3_aligned[i] and rsi_values[i] < 30:
+                # Long: price breaks above upper Donchian
+                if close[i] > donchian_upper_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price touches or goes above R3 with RSI overbought
-                elif close[i] >= r3_aligned[i] and rsi_values[i] > 70:
+                # Short: price breaks below lower Donchian
+                elif close[i] < donchian_lower_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
