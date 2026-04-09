@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout for trend direction and 1d RSI for mean reversion timing
-# - Uses 4h HTF for Donchian channel (20-period): breakout above/below determines trend
-# - Uses 1d HTF for RSI(14): extreme readings (<30 or >70) signal mean reversion entries
-# - In bullish 4h trend (price > upper Donchian): look for long entries when 1d RSI < 30 (oversold pullback)
-# - In bearish 4h trend (price < lower Donchian): look for short entries when 1d RSI > 70 (overbought bounce)
-# - Session filter: only trade between 08:00-20:00 UTC to avoid low-liquidity periods
-# - Fixed position size 0.20 to control drawdown and minimize fee churn
-# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
+# Hypothesis: 6h strategy using 1w ATR-based volatility regime filter and 1d Donchian channel breakouts
+# - Uses 1w ATR(20) normalized by price to determine volatility regime (high/low vol)
+# - Uses 1d Donchian(20) for breakout signals in direction of 1w trend (EMA50)
+# - In high volatility regime ( ATR/price > 0.03 ): trade breakouts with 1w trend filter
+# - In low volatility regime ( ATR/price <= 0.03 ): fade Donchian touches (mean reversion)
+# - Volume confirmation: current 6h volume > 1.5x 20-period average to avoid low-volume false signals
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets via regime adaptation
 
-name = "1h_4h_1d_donchian_rsi_v1"
-timeframe = "1h"
+name = "6h_1d_1w_atr_regime_donchian_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,107 +27,130 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channel (20 periods)
-    period20_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = period20_high
-    donchian_lower = period20_low
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d RSI (14 periods)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate 1w ATR(20) for volatility regime
+    # True Range = max(high-low, abs(high-previous_close), abs(low-previous_close))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0  # first period has no previous close
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(true_range).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF data to 1h timeframe (wait for completed HTF bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Pre-compute session filter (08:00-20:00 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # 1d Donchian Channel (20 periods)
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_mid_20 = (donch_high_20 + donch_low_20) / 2
+    
+    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    donch_mid_20_aligned = align_htf_to_ltf(prices, df_1d, donch_mid_20)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(donch_mid_20_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            vol_ma_20[i] <= 0 or close[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volume confirmation: current 6h volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        if not in_session:
-            signals[i] = 0.0
-            continue
+        # Volatility regime: ATR/price ratio
+        atr_ratio = atr_1w_aligned[i] / close[i]
+        high_vol_regime = atr_ratio > 0.03  # High volatility regime
         
-        # Trend determination from 4h Donchian
-        bullish_4h_trend = close[i] > donchian_upper_aligned[i]
-        bearish_4h_trend = close[i] < donchian_lower_aligned[i]
+        # 1w trend filter: price above/below EMA50
+        bullish_trend_1w = close[i] > ema50_1w_aligned[i]
+        bearish_trend_1w = close[i] < ema50_1w_aligned[i]
         
-        # RSI extremes from 1d
-        oversold_1d = rsi_aligned[i] < 30
-        overbought_1d = rsi_aligned[i] > 70
+        # Donchian levels
+        upper_donch = donch_high_20_aligned[i]
+        lower_donch = donch_low_20_aligned[i]
         
         # Fixed position size
-        position_size = 0.20
+        position_size = 0.25
         
         if position == 1:  # Long position
             # Exit conditions
-            if bullish_4h_trend:
-                # In bullish 4h trend: exit when overbought or trend changes to bearish
-                if overbought_1d or bearish_4h_trend:
+            if high_vol_regime:
+                # High vol: exit on Donchian middle touch or trend change
+                if close[i] <= donch_mid_20_aligned[i] or not bullish_trend_1w:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = position_size
             else:
-                # Not in bullish 4h trend: exit
-                position = 0
-                signals[i] = 0.0
-                
+                # Low vol: exit on Donchian upper touch or trend change
+                if close[i] >= upper_donch or not bullish_trend_1w:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+                    
         elif position == -1:  # Short position
             # Exit conditions
-            if bearish_4h_trend:
-                # In bearish 4h trend: exit when oversold or trend changes to bullish
-                if oversold_1d or bullish_4h_trend:
+            if high_vol_regime:
+                # High vol: exit on Donchian middle touch or trend change
+                if close[i] >= donch_mid_20_aligned[i] or not bearish_trend_1w:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -position_size
             else:
-                # Not in bearish 4h trend: exit
-                position = 0
-                signals[i] = 0.0
+                # Low vol: exit on Donchian lower touch or trend change
+                if close[i] <= lower_donch or not bearish_trend_1w:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
         else:  # Flat
-            # Entry logic based on trend and RSI extremes
-            if bullish_4h_trend and oversold_1d:
-                # In bullish 4h trend, 1d oversold: long mean reversion
-                position = 1
-                signals[i] = position_size
-            elif bearish_4h_trend and overbought_1d:
-                # In bearish 4h trend, 1d overbought: short mean reversion
-                position = -1
-                signals[i] = -position_size
+            # Entry logic based on regime and Donchian breakout/fade
+            if volume_confirmed:
+                if high_vol_regime:
+                    # High volatility regime: trade breakouts with 1w trend
+                    if bullish_trend_1w and close[i] > upper_donch:
+                        position = 1
+                        signals[i] = position_size
+                    elif bearish_trend_1w and close[i] < lower_donch:
+                        position = -1
+                        signals[i] = -position_size
+                else:
+                    # Low volatility regime: fade Donchian touches (mean reversion)
+                    if close[i] <= lower_donch and bullish_trend_1w:
+                        # Near lower Donchian in bullish 1w trend: long mean reversion
+                        position = 1
+                        signals[i] = position_size
+                    elif close[i] >= upper_donch and bearish_trend_1w:
+                        # Near upper Donchian in bearish 1w trend: short mean reversion
+                        position = -1
+                        signals[i] = -position_size
     
     return signals
