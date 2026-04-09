@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 4h_12h_ema_cross_volume_v1
-# Hypothesis: 4h EMA crossover with 12h EMA trend filter and volume confirmation.
-# Long: 4h EMA(9) crosses above EMA(21) AND price > 12h EMA(50) AND volume > 1.5x 20-period average.
-# Short: 4h EMA(9) crosses below EMA(21) AND price < 12h EMA(50) AND volume > 1.5x 20-period average.
-# Exit: Opposite EMA cross or ATR trailing stop (2.0x ATR from extreme).
-# Uses 12h EMA for major trend filter, 4h for execution timing, volume for confirmation, ATR for dynamic stops.
-# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
+# 1d_1w_donchian_volume_regime_v1
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and ATR trailing stop.
+# Long: Price breaks above weekly Donchian(20) high with volume > 1.5x 20-period average, ATR trailing stop (2.0x ATR from high).
+# Short: Price breaks below weekly Donchian(20) low with volume > 1.5x 20-period average, ATR trailing stop (2.0x ATR from low).
+# Exit: Opposite Donchian breakout or ATR trailing stop.
+# Uses weekly Donchian for major structure, 1d for execution, volume for confirmation, ATR for dynamic stops.
+# Target: 7-25 trades/year (30-100 total over 4 years) on BTC/ETH/SOL.
+# Works in both bull and bear markets by capturing strong breakouts with volume confirmation and using ATR stops to limit losses.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_ema_cross_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +30,7 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for trailing stop
+    # ATR(14) for volatility filter and trailing stop
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     close_s = pd.Series(close)
@@ -39,22 +40,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # 4h EMA(9) and EMA(21) for crossover signal
-    close_s = pd.Series(close)
-    ema9 = close_s.ewm(span=9, min_periods=9, adjust=False).mean().values
-    ema21 = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # Get 12h data for EMA(50) trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
+    # Get 1w data for Donchian channel (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50)
-    close_12h = pd.Series(df_12h['close'].values)
-    ema50_12h = close_12h.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate weekly Donchian(20) channels
+    high_1w = pd.Series(df_1w['high'].values)
+    low_1w = pd.Series(df_1w['low'].values)
+    donchian_high = high_1w.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1w.rolling(window=20, min_periods=20).min().values
     
-    # Align HTF EMA50 to 4h timeframe (wait for completed 12h bar)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align HTF Donchian levels to 1d timeframe (wait for completed 1w bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -63,21 +62,14 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
             np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        
-        # EMA crossover signals
-        ema9_prev = ema9[i-1] if i > 0 else ema9[i]
-        ema21_prev = ema21[i-1] if i > 0 else ema21[i]
-        bullish_cross = (ema9[i] > ema21[i]) and (ema9_prev <= ema21_prev)
-        bearish_cross = (ema9[i] < ema21[i]) and (ema9_prev >= ema21_prev)
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -87,8 +79,8 @@ def generate_signals(prices):
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
-            # Exit: Bearish EMA crossover
-            elif bearish_cross:
+            # Exit: Price breaks below weekly Donchian low
+            elif close[i] < donchian_low_aligned[i]:
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
@@ -103,23 +95,23 @@ def generate_signals(prices):
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
-            # Exit: Bullish EMA crossover
-            elif bullish_cross:
+            # Exit: Price breaks above weekly Donchian high
+            elif close[i] > donchian_high_aligned[i]:
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for EMA crossover with volume confirmation and 12h trend filter
-            bullish_setup = bullish_cross and volume_confirmed and (close[i] > ema50_12h_aligned[i])
-            bearish_setup = bearish_cross and volume_confirmed and (close[i] < ema50_12h_aligned[i])
+            # Check for breakout with volume confirmation
+            bullish_breakout = (close[i] > donchian_high_aligned[i]) and volume_confirmed
+            bearish_breakout = (close[i] < donchian_low_aligned[i]) and volume_confirmed
             
-            if bullish_setup:
+            if bullish_breakout:
                 position = 1
                 long_high = high[i]
                 signals[i] = 0.25
-            elif bearish_setup:
+            elif bearish_breakout:
                 position = -1
                 short_low = low[i]
                 signals[i] = -0.25
