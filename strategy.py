@@ -1,19 +1,18 @@
-# USAGE: /mnt/data/genius_experiments/exp_27008/27008.py
 #!/usr/bin/env python3
-# 12h_1w_camarilla_breakout_v1
-# Hypothesis: 12-hour breakout of weekly Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
+# 4h_1d_camarilla_breakout_v8
+# Hypothesis: 4-hour breakout of daily Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
 # Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
 # Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
 # Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
+# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
 # Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v8"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,32 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly OHLC for Camarilla levels
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Calculate Camarilla levels from weekly OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1w), np.nan)
-    camarilla_l4 = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        c = weekly_close[i]
-        h = weekly_high[i]
-        l = weekly_low[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    
-    # Load daily data for EMA50 trend filter
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -67,8 +41,23 @@ def generate_signals(prices):
             ema = (close_1d[i] - ema) * multiplier + ema
             ema_50_1d[i] = ema
     
-    # Align 1d EMA50 to 12h timeframe
+    # Align 1d EMA50 to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Camarilla levels from 1d OHLC
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        c = df_1d['close'].iloc[i]
+        h = df_1d['high'].iloc[i]
+        l = df_1d['low'].iloc[i]
+        camarilla_h4[i] = c + 1.1 * (h - l) / 2
+        camarilla_l4[i] = c - 1.1 * (h - l) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
