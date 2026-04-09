@@ -3,21 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
-# - Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-day avg AND chop < 61.8 (trending)
-# - Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-day avg AND chop < 61.8 (trending)
-# - Exit when price touches Donchian(20) midpoint OR chop > 61.8 (range)
+# Hypothesis: 12h Camarilla pivot levels + 1d volume spike + 1w chop regime filter
+# - Uses 1d Camarilla pivot levels (H3, L3) for mean reversion entries
+# - Uses 1d volume spike (volume > 1.5x 20-period average) for confirmation
+# - Uses 1w chop regime (choppiness index > 61.8) to filter ranging markets
+# - Long when price touches L3 level from above in choppy market with volume spike
+# - Short when price touches H3 level from below in choppy market with volume spike
 # - Fixed position size 0.25 to control drawdown
-# - Works in bull markets via breakouts, avoids false signals in ranging markets via chop filter
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - ATR-based stoploss: exit when price moves 2.0x ATR against position
+# - Works in both bull and bear markets by using mean reversion in ranging regimes
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,7 +28,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -35,80 +38,121 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d 20-day average volume
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma_20)
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Camarilla levels: H3, H4, L3, L4
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # H3 = Pivot + Range * 1.1/2
+    # L3 = Pivot - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    h3_1d = pivot_1d + range_1d * 1.1 / 2.0
+    l3_1d = pivot_1d - range_1d * 1.1 / 2.0
     
-    # Calculate 1d Choppiness Index (CHOP)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]  # First bar
+    # Align Camarilla levels to 12h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    # Calculate 1d volume spike (volume > 1.5x 20-period average)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (vol_ma_1d * 1.5)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Load 1w data ONCE before loop for chop regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Choppiness Index: 100 * log10(sumTR14 / (HH14 - LL14)) / log10(14)
-    # Avoid division by zero
-    hl_range = hh_14 - ll_14
-    chop_1d = np.where(
-        (hl_range > 0) & (tr_sum_14 > 0),
-        100 * np.log10(tr_sum_14 / hl_range) / np.log10(14),
-        50.0  # Neutral value when range is zero
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w Choppiness Index (14-period)
+    # Chop = 100 * log10(sum(TR14) / (ATR14 * 14)) / log10(14)
+    tr1_w = high_1w - low_1w
+    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    tr_1w[0] = tr1_w[0]  # First bar
+    
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero and log of zero
+    denominator = atr_1w * 14
+    chop_1w = np.where(
+        (denominator > 0) & (sum_tr_14 > 0),
+        100 * np.log10(sum_tr_14 / denominator) / np.log10(14),
+        50.0  # neutral value when undefined
     )
     
-    # Align 1d indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Chop > 61.8 indicates ranging market (good for mean reversion)
+    chop_regime_1w = chop_1w > 61.8
+    chop_regime_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_regime_1w.astype(float))
     
-    # Calculate 4h Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Pre-compute ATR (14-period) for 12h timeframe stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_regime_1w_aligned[i]) or
+            np.isnan(atr[i]) or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when chop < 61.8 (trending market)
-        trending_regime = chop_1d_aligned[i] < 61.8
+        # Regime filters: choppy market AND volume spike
+        ranging_market = chop_regime_1w_aligned[i] > 0.5
+        vol_spike = volume_spike_1d_aligned[i] > 0.5
         
         if position == 1:  # Long position
-            # Exit conditions: price touches Donchian midpoint OR market becomes ranging
-            if (close[i] <= donchian_mid[i]) or (not trending_regime):
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            
+            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price touches Donchian midpoint OR market becomes ranging
-            if (close[i] >= donchian_mid[i]) or (not trending_regime):
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            
+            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if trending_regime and volume_spike_aligned[i]:
-                # Long entry: price breaks above Donchian high
-                if close[i] > highest_high[i]:
+            if ranging_market and vol_spike:
+                # Long entry: price touches L3 level from above
+                if low[i] <= l3_1d_aligned[i] and close[i] > l3_1d_aligned[i]:
                     position = 1
+                    highest_high_since_entry = high[i]
+                    lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: price breaks below Donchian low
-                elif close[i] < lowest_low[i]:
+                # Short entry: price touches H3 level from below
+                elif high[i] >= h3_1d_aligned[i] and close[i] < h3_1d_aligned[i]:
                     position = -1
+                    highest_high_since_entry = high[i]
+                    lowest_low_since_entry = low[i]
                     signals[i] = -0.25
     
     return signals
