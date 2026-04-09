@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
+name = "12h_1d_camarilla_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
+    # Load daily data ONCE before loop for Camarilla levels (using prior day's OHLC)
     df_d = get_htf_data(prices, '1d')
     if len(df_d) < 2:
         return np.zeros(n)
