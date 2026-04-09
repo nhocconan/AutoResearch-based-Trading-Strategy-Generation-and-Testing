@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_volume_chop_v1
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels for mean reversion entries,
-# with volume confirmation and 1d choppiness regime filter. Enters long at S3,
-# short at R3, exits at S4/R4 or opposite pivot touch. Designed for low trade
-# frequency (target: 20-50 total trades over 4 years) to avoid fee drag. Works in
-# bull/bear by using chop filter: CHOP > 61.8 = range (mean revert), CHOP < 38.2 = trending (avoid).
+# 4h_donchian_1d_volume_chop_v1
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and choppiness regime filter.
+# Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + CHOP > 61.8 (range).
+# Short when price breaks below Donchian(20) low + volume confirmation + CHOP > 61.8.
+# Uses discrete sizing (±0.25) to minimize fee drag. Designed for low trade frequency (target: 75-200 trades over 4 years).
+# Works in bull/bear markets by using choppiness filter to avoid whipsaws in strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_volume_chop_v1"
+name = "4h_donchian_1d_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots and choppiness filter
+    # 1d HTF data for volume and choppiness filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -32,90 +32,86 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # PP = (H + L + C) / 3
-    # S1 = C - (H - L) * 1.1 / 12
-    # S2 = C - (H - L) * 1.1 / 6
-    # S3 = C - (H - L) * 1.1 / 4
-    # S4 = C - (H - L) * 1.1 / 2
-    # R1 = C + (H - L) * 1.1 / 12
-    # R2 = C + (H - L) * 1.1 / 6
-    # R3 = C + (H - L) * 1.1 / 4
-    # R4 = C + (H - L) * 1.1 / 2
-    pp = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    
-    s3 = close_1d - range_hl * 1.1 / 4
-    s4 = close_1d - range_hl * 1.1 / 2
-    r3 = close_1d + range_hl * 1.1 / 4
-    r4 = close_1d + range_hl * 1.1 / 2
-    
-    # Align pivot levels to 4h timeframe (using previous day's levels)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    
-    # Calculate choppiness index (14-period) on 1d
-    # CHOP = 100 * log10(sum(ATR14) / (ATR(HH-LL))) / log10(14)
+    # Calculate 1d ATR (14-period) for choppiness
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
     tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
     tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # True range sum over 14 periods
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    # Calculate 1d ADX (14-period) for choppiness
+    up_move = pd.Series(high_1d) - pd.Series(high_1d).shift(1)
+    down_move = pd.Series(low_1d).shift(1) - pd.Series(low_1d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    hh_ll = hh - ll
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Avoid division by zero
-    chop = np.where(hh_ll > 0, 100 * np.log10(atr_sum / hh_ll) / np.log10(14), 50)
+    plus_di = 100 * plus_dm_smooth / (atr_1d + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr_1d + 1e-10)
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
+    # Simplified: CHOP = 100 * log10(atr_1d_sum / (rolling_max - rolling_min)) / log10(14)
+    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low + 1e-10)) / np.log10(14)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume confirmation: current 4h volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > 1.5 * volume_ma
+    # 1d volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume_1d > 1.5 * volume_ma
+    volume_confirmed_aligned = align_htf_to_ltf(prices, df_1d, volume_confirmed.astype(float))
+    
+    # 4h Donchian channels (20-period)
+    donchian_window = 20
+    dc_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    dc_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(donchian_window, n):
         # Skip if any required data is NaN
-        if (np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(volume_confirmed_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Determine breakout conditions
+        breakout_up = close[i] > dc_high[i-1]  # Break above previous Donchian high
+        breakout_down = close[i] < dc_low[i-1]  # Break below previous Donchian low
+        
+        # Regime filter: only trade in ranging markets (CHOP > 61.8)
+        ranging = chop_aligned[i] > 61.8
+        
         if position == 1:  # Long position
-            # Exit: price reaches S4 (take profit) or touches R3 (reverse signal)
-            if close[i] <= s4_aligned[i] or close[i] >= r3_aligned[i]:
+            # Exit: price re-enters Donchian channel OR breakout down
+            if close[i] < dc_high[i] or breakout_down:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches R4 (take profit) or touches S3 (reverse signal)
-            if close[i] >= r4_aligned[i] or close[i] <= s3_aligned[i]:
+            # Exit: price re-enters Donchian channel OR breakout up
+            if close[i] > dc_low[i] or breakout_up:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Only trade in ranging markets: CHOP > 61.8
-            if chop_aligned[i] > 61.8 and volume_confirmed[i]:
-                # Long at S3
-                if close[i] <= s3_aligned[i]:
+            if ranging and volume_confirmed_aligned[i] > 0.5:  # Volume confirmed
+                if breakout_up:
                     position = 1
                     signals[i] = 0.25
-                # Short at R3
-                elif close[i] >= r3_aligned[i]:
+                elif breakout_down:
                     position = -1
                     signals[i] = -0.25
     
