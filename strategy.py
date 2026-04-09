@@ -1,35 +1,29 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_regime_v2
-# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation (>1.5x 20-period average volume) and chop regime filter (CHOP(14) > 61.8 = ranging market for mean reversion). Enters long when price breaks above Donchian upper band with volume confirmation in chop regime; short when price breaks below Donchian lower band with volume confirmation in chop regime. Exits when price returns to Donchian midpoint. Designed for low turnover (target: 20-50 trades/year) to capture mean reversion in ranging markets while avoiding trending markets where breakouts fail. Works in both bull and bear markets by focusing on ranging regimes where price respects channels.
+# 1h_mtf_cci_trend_reversal_v1
+# Hypothesis: 1h strategy using Commodity Channel Index (CCI) for mean reversion entries with 4h/1d trend alignment. Enters long when CCI < -100 (oversold) and price > 4h EMA20 and 1d EMA50; short when CCI > 100 (overbought) and price < 4h EMA20 and 1d EMA50. Uses discrete position sizing (0.20) to limit fee drag and session filter (08-20 UTC) to reduce noise. Designed for low turnover (target: 15-37 trades/year) to work in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=float)
-    half_period = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-    wma1 = pd.Series(series).ewm(span=half_period, adjust=False, min_periods=half_period).mean()
-    wma2 = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean()
-    raw_hma = 2 * wma1 - wma2
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
-    return hma.values
-
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index"""
+def calculate_cci(high, low, close, period=20):
+    """Calculate Commodity Channel Index"""
     if len(close) < period:
         return np.full_like(close, np.nan, dtype=float)
-    atr = pd.Series(np.maximum(np.abs(high - low), np.maximum(np.abs(high - close.shift()), np.abs(low - close.shift())))).rolling(window=period, min_periods=period).sum()
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    chop = 100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(period)
-    return chop.values
+    tp = (high + low + close) / 3.0
+    ma = pd.Series(tp).rolling(window=period, min_periods=period).mean()
+    mad = pd.Series(tp).rolling(window=period, min_periods=period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp - ma) / (0.015 * mad)
+    return cci.values
 
-name = "4h_donchian_breakout_volume_chop_regime_v2"
-timeframe = "4h"
+def calculate_ema(series, period):
+    """Calculate Exponential Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+name = "1h_mtf_cci_trend_reversal_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,59 +34,62 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Calculate CCI on primary timeframe
+    cci = calculate_cci(high, low, close, 20)
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # 4h HTF trend filter: EMA20
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    ema_20_4h = calculate_ema(df_4h['close'], 20)
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Chop regime filter (14-period)
-    chop = calculate_chop(high, low, close, 14)
-    chop_regime = chop > 61.8  # Chop > 61.8 = ranging market (mean reversion favorable)
+    # 1d HTF trend filter: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    ema_50_1d = calculate_ema(df_1d['close'], 50)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(chop[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(cci[i]) or np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        
         if position == 1:  # Long position
-            # Exit: price returns to Donchian midpoint
-            if close[i] >= donchian_mid[i]:
+            # Exit: CCI crosses above -50 (mean reversion complete) or trend breaks
+            if cci[i] > -50 or close[i] < ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian midpoint
-            if close[i] <= donchian_mid[i]:
+            # Exit: CCI crosses below 50 (mean reversion complete) or trend breaks
+            if cci[i] < 50 or close[i] > ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter only with volume confirmation and chop regime (ranging market)
-            if volume_confirmed and chop_regime[i]:
-                # Long: price breaks above Donchian upper band
-                if close[i] > highest_high[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price breaks below Donchian lower band
-                elif close[i] < lowest_low[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter only with CCI extreme and both HTF trends aligned
+            if cci[i] < -100 and close[i] > ema_20_4h_aligned[i] and close[i] > ema_50_1d_aligned[i]:
+                # Oversold + bullish 4h + bullish 1d -> long
+                position = 1
+                signals[i] = 0.20
+            elif cci[i] > 100 and close[i] < ema_20_4h_aligned[i] and close[i] < ema_50_1d_aligned[i]:
+                # Overbought + bearish 4h + bearish 1d -> short
+                position = -1
+                signals[i] = -0.20
     
     return signals
