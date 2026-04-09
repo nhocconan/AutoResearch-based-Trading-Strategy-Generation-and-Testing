@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v2
-# Hypothesis: 4h Donchian breakout with volume confirmation and chop regime filter for entries.
-# Long: Price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + CHOP > 61.8 (range) for mean reversion setup.
-# Short: Price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + CHOP > 61.8 (range) for mean reversion setup.
+# 6h_donchian_breakout_weekly_pivot_volume_v1
+# Hypothesis: 6h strategy using Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Long: Price breaks above 6h Donchian(20) high with volume > 1.5x 20-period average and weekly pivot > weekly open (bullish bias).
+# Short: Price breaks below 6h Donchian(20) low with volume > 1.5x 20-period average and weekly pivot < weekly open (bearish bias).
 # Exit: Price returns to opposite Donchian level (long exits below Donchian low, short exits above Donchian high).
-# Uses 1d HTF for trend filter: only long when 1d close > 1d EMA50, only short when 1d close < 1d EMA50.
-# Target: 20-50 trades/year to minimize fee drag while maintaining edge.
-# Chop regime filter (CHOP > 61.8) identifies ranging markets where mean reversion at extremes works.
-# Donchian breakouts provide structure, volume confirms participation, 1d EMA50 ensures alignment with higher timeframe trend.
+# Uses weekly pivot from 1w data for directional filter: only long when weekly pivot > weekly open, only short when weekly pivot < weekly open.
+# Target: 12-37 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
+# Donchian channels provide clear breakout levels, weekly pivot adds higher-timeframe bias, volume confirms conviction.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v2"
-timeframe = "4h"
+name = "6h_donchian_breakout_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,8 +25,9 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_prices = prices['open'].values
     
-    # Donchian channels (20-period)
+    # Donchian(20) on 6h data
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     donchian_high = high_s.rolling(window=20, min_periods=20).max().values
@@ -37,29 +37,22 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    # Get 1w data for weekly pivot
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # 1d EMA50 for trend filter
-    close_1d_s = pd.Series(close_1d)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly pivot point: (high + low + close) / 3
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     
-    # Chop regime filter (14-period)
-    # CHOP = 100 * log10(sum(ATR(1)) / (max(high) - min(low))) / log10(n)
-    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # First period TR
-    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr1 * 14 / (max_high - min_low + 1e-10)) / np.log10(14)
-    chop = np.where((max_high - min_low) == 0, 50, chop)  # Handle division by zero
+    # Align weekly pivot and open to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    open_1w_aligned = align_htf_to_ltf(prices, df_1w, open_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -68,18 +61,17 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(volume_ma[i]) or np.isnan(close[i]) or
-            np.isnan(volume[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(chop[i])):
+            np.isnan(volume[i]) or np.isnan(open_prices[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(open_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Chop regime filter: CHOP > 61.8 = ranging market (favor mean reversion)
-        chop_ranging = chop[i] > 61.8
-        # 1d trend filter: close > EMA50 for uptrend, < EMA50 for downtrend
-        trend_1d_up = close[i] > ema_50_1d_aligned[i]  # Using current close for simplicity
-        trend_1d_down = close[i] < ema_50_1d_aligned[i]
+        # Weekly bullish bias: pivot > weekly open
+        weekly_bullish = weekly_pivot_aligned[i] > open_1w_aligned[i]
+        # Weekly bearish bias: pivot < weekly open
+        weekly_bearish = weekly_pivot_aligned[i] < open_1w_aligned[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to Donchian low
@@ -97,18 +89,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above Donchian high with volume, chop ranging, and uptrend
+            # Long entry: Price breaks above Donchian high with volume and weekly bullish bias
             if (close[i] > donchian_high[i] and    # Break above Donchian high
                 volume_confirmed and               # Volume spike
-                chop_ranging and                   # Chop ranging (mean reversion setup)
-                trend_1d_up):                      # 1d uptrend
+                weekly_bullish):                   # Weekly bullish bias
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low with volume, chop ranging, and downtrend
+            # Short entry: Price breaks below Donchian low with volume and weekly bearish bias
             elif (close[i] < donchian_low[i] and   # Break below Donchian low
                   volume_confirmed and             # Volume spike
-                  chop_ranging and                 # Chop ranging (mean reversion setup)
-                  trend_1d_down):                  # 1d downtrend
+                  weekly_bearish):                 # Weekly bearish bias
                 position = -1
                 signals[i] = -0.25
     
