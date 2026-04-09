@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v8
-# Hypothesis: 4-hour breakout of daily Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
-# Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
-# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
+# 1d_1w_volatility_breakout_v1
+# Hypothesis: Daily breakout above 1-week Donchian high/low with ATR-based position sizing.
+# Long when close > weekly Donchian high + volatility filter (ATR ratio > 1.2).
+# Short when close < weekly Donchian low + volatility filter (ATR ratio > 1.2).
+# Exit when price crosses weekly midpoint (mean of high/low).
+# Position size scaled by ATR volatility (0.2-0.3 range) to manage drawdown in bear markets.
+# Works in bull via breakout continuation and in bear via volatility filtering to avoid false breakouts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v8"
-timeframe = "4h"
+name = "1d_1w_volatility_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +23,102 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema = close_1d[49]  # Initialize with first 50-period average
-        multiplier = 2 / (50 + 1)
-        ema_50_1d[49] = ema
-        for i in range(50, len(close_1d)):
-            ema = (close_1d[i] - ema) * multiplier + ema
-            ema_50_1d[i] = ema
+    # Calculate 20-period weekly Donchian channels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = np.full(len(high_1w), np.nan)
+    donchian_low = np.full(len(low_1w), np.nan)
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    for i in range(len(high_1w)):
+        if i >= 19:  # 20-period lookback
+            donchian_high[i] = np.max(high_1w[i-19:i+1])
+            donchian_low[i] = np.min(low_1w[i-19:i+1])
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        c = df_1d['close'].iloc[i]
-        h = df_1d['high'].iloc[i]
-        l = df_1d['low'].iloc[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
+    # Align Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Calculate weekly midpoint for exit
+    donchian_mid = (donchian_high + donchian_low) / 2
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
     
-    # Volume confirmation: 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
+    # Calculate daily ATR(14) for volatility filter and position sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        atr[13] = np.nanmean(tr[1:15])  # Initialize with first 14-period average
+        for i in range(14, n):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Calculate ATR ratio (current ATR / 20-period average ATR) for volatility filter
+    atr_ma = np.full(n, np.nan)
+    if n >= 34:  # Need 14 + 20 for ATR and its MA
+        atr_sum = np.nansum(atr[14:34])  # Sum of first 20 ATR values after warmup
+        atr_ma[33] = atr_sum / 20
+        for i in range(34, n):
+            atr_sum = atr_sum - atr[i-20] + atr[i]
+            atr_ma[i] = atr_sum / 20
+    
+    atr_ratio = np.full(n, np.nan)
     for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if not np.isnan(atr[i]) and not np.isnan(atr_ma[i]) and atr_ma[i] > 0:
+            atr_ratio[i] = atr[i] / atr_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(34, n):  # Start after warmup (ATR(14) + ATR MA(20))
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or 
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: price crosses below weekly midpoint
+            if close[i] < donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                # Scale position by volatility (inverse volatility scaling)
+                vol_scale = min(0.3, max(0.2, 0.25 * (1.2 / atr_ratio[i])))
+                signals[i] = vol_scale
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: price crosses above weekly midpoint
+            if close[i] > donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                # Scale position by volatility (inverse volatility scaling)
+                vol_scale = min(0.3, max(0.2, 0.25 * (1.2 / atr_ratio[i])))
+                signals[i] = -vol_scale
         else:  # Flat
-            # Enter long: price breaks above H4 with trend and volume filters
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Enter long: price breaks above weekly Donchian high with volatility filter
+            if (close[i] > donchian_high_aligned[i] and 
+                atr_ratio[i] > 1.2):  # Volatility expansion filter
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below L4 with trend and volume filters
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > vol_ma_20[i] * 1.5):
+                # Scale position by volatility (inverse volatility scaling)
+                vol_scale = min(0.3, max(0.2, 0.25 * (1.2 / atr_ratio[i])))
+                signals[i] = vol_scale
+            # Enter short: price breaks below weekly Donchian low with volatility filter
+            elif (close[i] < donchian_low_aligned[i] and 
+                  atr_ratio[i] > 1.2):  # Volatility expansion filter
                 position = -1
-                signals[i] = -0.25
+                # Scale position by volatility (inverse volatility scaling)
+                vol_scale = min(0.3, max(0.2, 0.25 * (1.2 / atr_ratio[i])))
+                signals[i] = -vol_scale
     
     return signals
