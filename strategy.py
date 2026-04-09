@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and 1w ADX regime filter
-# In trending markets (ADX > 25): breakout long when price > H3 with volume > 1.5x average volume
-# In ranging markets (ADX < 20): mean revert at H3/L3 levels with volume confirmation
-# Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
+# Hypothesis: 12h strategy using 1d Donchian channel breakout with 1w ADX regime filter
+# Donchian breakout captures momentum; ADX > 25 confirms trending market
+# In trending regime: follow breakout direction (long on upper band break, short on lower band break)
+# In ranging regime (ADX < 20): mean revert at Donchian extremes (long at lower band, short at upper band)
+# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
 # Works in bull/bear markets: trend following in strong trends, mean reversion in ranging markets
 
-name = "4h_1d_1w_camarilla_pivot_volume_adx_v1"
-timeframe = "4h"
+name = "12h_1d_1w_donchian_adx_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,25 +33,36 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (High + Low + Close) / 3
-    # Range = High - Low
-    # H4 = Close + Range * 1.1/2
-    # H3 = Close + Range * 1.1/4
-    # H2 = Close + Range * 1.1/6
-    # H1 = Close + Range * 1.1/12
-    # L1 = Close - Range * 1.1/12
-    # L2 = Close - Range * 1.1/6
-    # L3 = Close - Range * 1.1/4
-    # L4 = Close - Range * 1.1/2
+    # Calculate 1d Donchian channels (20-period)
+    lookback = 20
+    upper_1d = np.full(len(high_1d), np.nan)
+    lower_1d = np.full(len(low_1d), np.nan)
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    for i in range(lookback, len(high_1d)):
+        upper_1d[i] = np.max(high_1d[i-lookback+1:i+1])
+        lower_1d[i] = np.min(low_1d[i-lookback+1:i+1])
     
-    h3_1d = close_1d + range_1d * 1.1 / 4.0
-    l3_1d = close_1d - range_1d * 1.1 / 4.0
-    h4_1d = close_1d + range_1d * 1.1 / 2.0
-    l4_1d = close_1d - range_1d * 1.1 / 2.0
+    # Calculate 1d ATR(14) for volatility normalization
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    atr_1d = wilders_smoothing(tr, 14)
+    
+    # Normalize Donchian width by ATR to make it comparable across volatility regimes
+    donchian_width_1d = upper_1d - lower_1d
+    norm_width_1d = np.where(atr_1d > 0, donchian_width_1d / atr_1d, 0)
     
     # Load 1w data for ADX regime filter
     df_1w = get_htf_data(prices, '1w')
@@ -62,23 +74,12 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Calculate 1w ADX(14)
-    def calculate_adx(high, low, close, period=14):
+    def calculate_dmi(high, low, close, period=14):
         # True Range
         tr1 = np.abs(high[1:] - low[:-1])
         tr2 = np.abs(high[1:] - close[:-1])
         tr3 = np.abs(low[1:] - close[:-1])
         tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        def wilders_smoothing(values, period):
-            if len(values) < period:
-                return np.full(len(values), np.nan)
-            alpha = 1.0 / period
-            result = np.full(len(values), np.nan)
-            result[period-1] = np.nanmean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-            return result
-        
         atr = wilders_smoothing(tr, period)
         
         # Directional Movement
@@ -101,43 +102,28 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w = calculate_dmi(high_1w, low_1w, close_1w, 14)
     
-    # Calculate average volume for confirmation (20-period SMA)
-    def sma(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        result = np.full(len(values), np.nan)
-        for i in range(period-1, len(values)):
-            result[i] = np.mean(values[i-period+1:i+1])
-        return result
+    # Align 1d indicators to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    norm_width_1d_aligned = align_htf_to_ltf(prices, df_1d, norm_width_1d)
     
-    avg_volume_1d = sma(volume, 20)  # Using current timeframe volume as proxy for 1d volume confirmation
-    
-    # Align 1d indicators to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    
-    # Align 1w ADX to 4h timeframe
+    # Align 1w ADX to 12h timeframe
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Align volume average to 4h timeframe
-    avg_volume_aligned = align_htf_to_ltf(prices, prices, avg_volume_1d)  # Self-align for same timeframe
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Threshold for Donchian breakout confirmation
+    breakout_threshold = 0.5  # 0.5 ATR above/below bands
+    
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or np.isnan(avg_volume_aligned[i])):
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
+            np.isnan(norm_width_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
         
         # Regime filter based on 1w ADX
         trending_regime = adx_1w_aligned[i] > 25
@@ -145,15 +131,16 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if price falls below H3
-                if close[i] <= h3_1d_aligned[i]:
+                # Exit long if price falls below lower Donchian band
+                if close[i] < lower_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price returns from H3 level
-                if close[i] >= h3_1d_aligned[i] * 0.995:  # Slight buffer to avoid whipsaw
+                # Exit long if price returns to mid-band
+                mid_band = (upper_1d_aligned[i] + lower_1d_aligned[i]) / 2
+                if close[i] > mid_band:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -161,35 +148,35 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if price rises above L3
-                if close[i] >= l3_1d_aligned[i]:
+                # Exit short if price rises above upper Donchian band
+                if close[i] > upper_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price returns from L3 level
-                if close[i] <= l3_1d_aligned[i] * 1.005:  # Slight buffer to avoid whipsaw
+                # Exit short if price returns to mid-band
+                mid_band = (upper_1d_aligned[i] + lower_1d_aligned[i]) / 2
+                if close[i] < mid_band:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            if trending_regime and volume_confirmed:
-                # Breakout long when price > H3 with volume confirmation
-                if close[i] > h3_1d_aligned[i]:
+            if trending_regime:
+                # Follow Donchian breakout in trending market
+                if close[i] > upper_1d_aligned[i] + breakout_threshold * atr_1d[-1] if len(atr_1d) > 0 and not np.isnan(atr_1d[-1]) else upper_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Breakout short when price < L3 with volume confirmation
-                elif close[i] < l3_1d_aligned[i]:
+                elif close[i] < lower_1d_aligned[i] - breakout_threshold * atr_1d[-1] if len(atr_1d) > 0 and not np.isnan(atr_1d[-1]) else lower_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
-            elif ranging_regime and volume_confirmed:
-                # Mean revert at extreme levels: long at L3, short at H3
-                if close[i] <= l3_1d_aligned[i]:
+            elif ranging_regime:
+                # Mean revert at Donchian extremes in ranging market
+                if close[i] < lower_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] >= h3_1d_aligned[i]:
+                elif close[i] > upper_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
