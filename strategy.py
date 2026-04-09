@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Camarilla pivot levels with volume confirmation and ATR trailing stop
-# Camarilla pivots from 1w provide strong weekly support/resistance levels proven in ranging and trending markets
-# Volume confirmation (current 12h volume > 2.0x 20-period average) filters false breakouts
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and ATR trailing stop
+# Camarilla pivots from 1d provide precise support/resistance levels proven in ranging and trending markets
+# Volume confirmation (current 4h volume > 2.0x 20-period average) filters false breakouts
 # ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
-# Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
-# Works in bull/bear: price reacts to 1w structure, volume confirms validity, ATR stop controls drawdown
-# Focus on BTC and ETH as primary symbols
+# Designed for 4h timeframe targeting 20-40 trades/year (80-160 over 4 years)
+# Works in bull/bear: price reacts to 1d structure, volume confirms validity, ATR stop controls drawdown
 
-name = "12h_1w_camarilla_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,36 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 25:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Camarilla pivot levels
+    # Calculate 1d Camarilla pivot levels
     # Pivot = (H + L + C) / 3
     # Range = H - L
     # Resistance levels: R1 = C + Range * 1.1/12, R2 = C + Range * 1.1/6, R3 = C + Range * 1.1/4, R4 = C + Range * 1.1/2
     # Support levels: S1 = C - Range * 1.1/12, S2 = C - Range * 1.1/6, S3 = C - Range * 1.1/4, S4 = C - Range * 1.1/2
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Key levels for trading: R3, R4, S3, S4 (stronger levels)
-    camarilla_r3 = close_1w + range_1w * 1.1 / 4.0
-    camarilla_r4 = close_1w + range_1w * 1.1 / 2.0
-    camarilla_s3 = close_1w - range_1w * 1.1 / 4.0
-    camarilla_s4 = close_1w - range_1w * 1.1 / 2.0
+    camarilla_r3 = close_1d + range_1d * 1.1 / 4.0
+    camarilla_r4 = close_1d + range_1d * 1.1 / 2.0
+    camarilla_s3 = close_1d - range_1d * 1.1 / 4.0
+    camarilla_s4 = close_1d - range_1d * 1.1 / 2.0
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Pre-compute ATR(14) for 12h timeframe
+    # Pre-compute ATR(14) for 4h timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -80,7 +79,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x average 12h volume
+        # Volume confirmation: current 4h volume > 2.0x average 4h volume
         volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
