@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams %R extremes with volume confirmation
-# Williams %R > -20 = overbought (short signal), < -80 = oversold (long signal) on 1d timeframe
-# Volume confirmation (current 6h volume > 1.8x 20-period average) filters false signals
-# Works in bull/bear: mean reversion from extremes captures reversals in all regimes
+# Hypothesis: 12h strategy using 1w Camarilla pivot levels with volume confirmation
+# Camarilla pivots from 1w provide strong weekly structure aligned with 12h timeframe
+# Volume confirmation (current 12h volume > 1.8x 20-period average) filters false breakouts
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Works in bull/bear: price reacts to weekly structure, volume confirms validity
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "6h_1d_williamsr_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Calculate 1w Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # Resistance levels: R1 = C + Range * 1.1/12, R2 = C + Range * 1.1/6, R3 = C + Range * 1.1/4, R4 = C + Range * 1.1/2
+    # Support levels: S1 = C - Range * 1.1/12, S2 = C - Range * 1.1/6, S3 = C - Range * 1.1/4, S4 = C - Range * 1.1/2
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # Align Williams %R to 6h timeframe (extra delay needed for confirmation)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r, additional_delay_bars=0)
+    # Key levels for trading: R3, R4, S3, S4 (stronger levels)
+    camarilla_r3 = close_1w + range_1w * 1.1 / 4.0
+    camarilla_r4 = close_1w + range_1w * 1.1 / 2.0
+    camarilla_s3 = close_1w - range_1w * 1.1 / 4.0
+    camarilla_s4 = close_1w - range_1w * 1.1 / 2.0
     
-    # Pre-compute volume confirmation (20-period average for 6h)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,37 +61,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.8x average 6h volume
+        # Volume confirmation: current 12h volume > 1.8x average 12h volume
         volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit when Williams %R returns above -50 (mean reversion complete)
-            if williams_r_aligned[i] > -50:
+            # Exit on Camarilla S3 retracement (mean reversion from strong level)
+            if close[i] < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when Williams %R returns below -50 (mean reversion complete)
-            if williams_r_aligned[i] < -50:
+            # Exit on Camarilla R3 retracement (mean reversion from strong level)
+            if close[i] > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Mean reversion entries with volume confirmation
-            # Long when oversold (< -80) and volume confirms
-            # Short when overbought (> -20) and volume confirms
+            # Breakout trading with volume confirmation
+            # Long on Camarilla R4 breakout, Short on Camarilla S4 breakout
             if volume_confirmed:
-                if williams_r_aligned[i] < -80:
+                if close[i] > r4_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif williams_r_aligned[i] > -20:
+                elif close[i] < s4_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
