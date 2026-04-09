@@ -1,106 +1,102 @@
 #!/usr/bin/env python3
-# 1h_rsi_pullback_4h1d_trend_v1
-# Hypothesis: 1h RSI pullback strategy with 4h/1d HTF trend alignment for BTC/ETH/SOL.
-# Long: RSI(14) < 30 (oversold) + price > 4h EMA(50) + price > 1d EMA(200) (bullish alignment)
-# Short: RSI(14) > 70 (overbought) + price < 4h EMA(50) + price < 1d EMA(200) (bearish alignment)
-# Exit: RSI crosses back to neutral zone (40-60) or opposite extreme RSI reached
-# Uses session filter (08-20 UTC) to avoid low-liquidity hours.
-# Position size: 0.20 discrete levels to minimize fee churn.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# 6h_weekly_pivot_breakout_v1
+# Hypothesis: 6h strategy using weekly Camarilla pivot levels for structure, with breakout confirmation on 6h closes. Long when price breaks above weekly R4 with volume > 1.5x 20-bar average; short when price breaks below weekly S4 with volume confirmation. Uses 1d EMA(50) for trend alignment to avoid counter-trend trades. Designed for low frequency (target: 12-37 trades/year) to minimize fee drag on 6s timeframe. Works in bull/bear: breakouts capture momentum, volume confirms conviction, HTF EMA filters weak breakouts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_pullback_4h1d_trend_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # RSI(14)
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # 4h EMA(50) for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    close_4h_s = pd.Series(close_4h)
-    ema_50_4h = close_4h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # 1d EMA(200) for long-term trend
+    # Multi-timeframe: 1d EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     close_1d_s = pd.Series(close_1d)
-    ema_200_1d = close_1d_s.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Multi-timeframe: weekly Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Camarilla levels for weekly
+    camarilla_h4 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_l4 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w) / 4
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w) / 4
+    camarilla_h2 = close_1w + 1.1 * (high_1w - low_1w) / 6
+    camarilla_l2 = close_1w - 1.1 * (high_1w - low_1w) / 6
+    camarilla_h1 = close_1w + 1.1 * (high_1w - low_1w) / 12
+    camarilla_l1 = close_1w - 1.1 * (high_1w - low_1w) / 12
+    camarilla_h4 = camarilla_h4  # R4
+    camarilla_l4 = camarilla_l4  # S4
+    camarilla_h3 = camarilla_h3  # R3
+    camarilla_l3 = camarilla_l3  # S3
+    
+    # Align weekly levels to 6h timeframe (using previous week's levels for forward-looking safety)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after warmup for 1d EMA(200)
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(rsi_values[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not in_session[i]:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # HTF trend filter: price above/below 1d EMA(50)
+        htf_uptrend = close[i] > ema_50_1d_aligned[i]
+        htf_downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI crosses above 40 (exit oversold) OR RSI > 70 (overbought reversal)
-            if rsi_values[i] > 40 or rsi_values[i] > 70:
+            # Exit: price closes below weekly R3 (profit taking or reversal)
+            if close[i] < camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 60 (exit overbought) OR RSI < 30 (oversold reversal)
-            if rsi_values[i] < 60 or rsi_values[i] < 30:
+            # Exit: price closes above weekly S3 (profit taking or reversal)
+            if close[i] > camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Long setup: RSI oversold + bullish HTF alignment
-            long_setup = (rsi_values[i] < 30) and (close[i] > ema_50_4h_aligned[i]) and (close[i] > ema_200_1d_aligned[i])
-            # Short setup: RSI overbought + bearish HTF alignment
-            short_setup = (rsi_values[i] > 70) and (close[i] < ema_50_4h_aligned[i]) and (close[i] < ema_200_1d_aligned[i])
+            # Check for breakout with volume and HTF confirmation
+            bullish_breakout = (close[i] > camarilla_h4_aligned[i]) and volume_confirmed and htf_uptrend
+            bearish_breakout = (close[i] < camarilla_l4_aligned[i]) and volume_confirmed and htf_downtrend
             
-            if long_setup:
+            if bullish_breakout:
                 position = 1
-                signals[i] = 0.20
-            elif short_setup:
+                signals[i] = 0.25
+            elif bearish_breakout:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
