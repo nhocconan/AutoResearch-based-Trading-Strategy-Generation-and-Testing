@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_donchian_volume_regime_v1
-# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation and ATR trailing stop.
-# Long: Price breaks above weekly Donchian(20) high with volume > 1.5x 20-period average, ATR trailing stop (2.0x ATR from high).
-# Short: Price breaks below weekly Donchian(20) low with volume > 1.5x 20-period average, ATR trailing stop (2.0x ATR from low).
-# Exit: Opposite Donchian breakout or ATR trailing stop.
-# Uses weekly Donchian for major structure, 1d for execution, volume for confirmation, ATR for dynamic stops.
-# Target: 7-25 trades/year (30-100 total over 4 years) on BTC/ETH/SOL.
-# Works in both bull and bear markets by capturing strong breakouts with volume confirmation and using ATR stops to limit losses.
+# 12h_1d_camarilla_pivot_volume_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ATR stoploss.
+# Long: Price touches Camarilla H3 level from below with volume > 1.5x 20-period average, ATR trailing stop.
+# Short: Price touches Camarilla L3 level from above with volume > 1.5x 20-period average, ATR trailing stop.
+# Exit: ATR trailing stop (2.0x ATR from extreme) or opposite Camarilla level touch.
+# Uses daily Camarilla for key support/resistance, 12h for execution, volume for confirmation, ATR for dynamic stops.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_volume_regime_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,20 +39,30 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for Donchian channel (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for Camarilla pivot levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly Donchian(20) channels
-    high_1w = pd.Series(df_1w['high'].values)
-    low_1w = pd.Series(df_1w['low'].values)
-    donchian_high = high_1w.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_1w.rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
     
-    # Align HTF Donchian levels to 1d timeframe (wait for completed 1w bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    h3 = pivot + (range_1d * 1.1 / 2)
+    l3 = pivot - (range_1d * 1.1 / 2)
+    h4 = pivot + (range_1d * 1.1)
+    l4 = pivot - (range_1d * 1.1)
+    
+    # Align HTF Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4.values)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4.values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -62,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
             np.isnan(volume[i])):
             signals[i] = 0.0
@@ -79,8 +88,8 @@ def generate_signals(prices):
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
-            # Exit: Price breaks below weekly Donchian low
-            elif close[i] < donchian_low_aligned[i]:
+            # Exit: Price touches or goes above Camarilla H4 level
+            elif close[i] >= h4_aligned[i]:
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
@@ -95,23 +104,25 @@ def generate_signals(prices):
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
-            # Exit: Price breaks above weekly Donchian high
-            elif close[i] > donchian_high_aligned[i]:
+            # Exit: Price touches or goes below Camarilla L4 level
+            elif close[i] <= l4_aligned[i]:
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation
-            bullish_breakout = (close[i] > donchian_high_aligned[i]) and volume_confirmed
-            bearish_breakout = (close[i] < donchian_low_aligned[i]) and volume_confirmed
+            # Check for Camarilla level touch with volume confirmation
+            # Long: Price touches H3 from below (close crosses above H3)
+            bullish_touch = (close[i] > h3_aligned[i]) and (close[i-1] <= h3_aligned[i-1] if i > 0 else False) and volume_confirmed
+            # Short: Price touches L3 from above (close crosses below L3)
+            bearish_touch = (close[i] < l3_aligned[i]) and (close[i-1] >= l3_aligned[i-1] if i > 0 else False) and volume_confirmed
             
-            if bullish_breakout:
+            if bullish_touch:
                 position = 1
                 long_high = high[i]
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_touch:
                 position = -1
                 short_low = low[i]
                 signals[i] = -0.25
