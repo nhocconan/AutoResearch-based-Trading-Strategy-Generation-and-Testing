@@ -3,114 +3,103 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ATR trailing stop using 12h HTF
-# - Uses 12h HTF for prior period's high/low to calculate Donchian(10) channels (shorter for more signals)
-# - Long when price closes above upper Donchian with volume > 1.3x 20-period average
-# - Short when price closes below lower Donchian with volume > 1.3x 20-period average
-# - ATR(10) trailing stop: exit long at 2.0x ATR below highest high since entry
-# - Fixed position size 0.25 to control drawdown
-# - Target: 30-60 trades/year on 4h timeframe (120-240 total over 4 years)
-# - Volume filter reduces false breakouts, ATR stop manages risk
-# - Works in both bull and bear markets by capturing breakouts in trending phases
+# Hypothesis: 1h mean reversion with 4h trend filter and 1d regime filter
+# - Uses 4h EMA(50) for trend direction (long when price > EMA50, short when price < EMA50)
+# - Uses 1d chop regime filter (choppiness > 61.8 = range = mean revert)
+# - 1h entry: RSI(14) < 30 for long, RSI(14) > 70 for short (only in ranging markets)
+# - Fixed position size 0.20 to control drawdown
+# - Target: 15-35 trades/year on 1h timeframe (60-140 total over 4 years)
+# - Works in bull markets via 4h trend filter, works in bear/ranging via chop regime + mean reversion
 
-name = "4h_12h_donchian_breakout_volume_atr_v1"
-timeframe = "4h"
+name = "1h_4h_1d_chop_regime_meanrev_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # Pre-compute session filter (08-20 UTC) - prices.index is DatetimeIndex
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h EMA(50) for trend direction
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 10-period Donchian channels on 12h data
-    # Upper band: highest high of last 10 periods
-    # Lower band: lowest low of last 10 periods
-    upper_10 = pd.Series(high_12h).rolling(window=10, min_periods=10).max().values
-    lower_10 = pd.Series(low_12h).rolling(window=10, min_periods=10).min().values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Align Donchian levels to 4h timeframe (wait for completed 12h bar)
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_10)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_10)
+    # Calculate 1d Choppiness Index (CHOP) for regime detection
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (HHV(high,14) - LLV(low,14))))
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
-    # Pre-compute volume confirmation (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    hh_14_1d = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    ll_14_1d = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    range_14_1d = hh_14_1d - ll_14_1d
     
-    # Pre-compute ATR (10-period) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Avoid division by zero
+    range_14_1d = np.where(range_14_1d == 0, 1e-10, range_14_1d)
+    
+    # Choppiness Index calculation
+    log_sum_atr = np.log10(atr_14_1d)
+    log_n = np.log10(14)
+    chop_1d = 100 * (log_sum_atr / (log_n * np.log10(range_14_1d)))
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Pre-compute 1h RSI(14) for entry signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
-    for i in range(50, n):
-        # Skip if any required data is invalid
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
-            vol_ma_20[i] <= 0 or atr[i] <= 0):
+    for i in range(100, n):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
+            np.isnan(rsi[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.3x average
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        # Regime filter: only trade in ranging markets (CHOP > 61.8)
+        if chop_1d_aligned[i] <= 61.8:
+            signals[i] = 0.0
+            continue
         
-        if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            
-            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
-                position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
-        elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            
-            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
-                position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat
-            # Entry logic: Donchian breakout + volume confirmation
-            if volume_confirmed:
-                # Long entry: price closes above upper Donchian
-                if close[i] > upper_aligned[i]:
-                    position = 1
-                    highest_high_since_entry = high[i]
-                    lowest_low_since_entry = low[i]
-                    signals[i] = 0.25
-                # Short entry: price closes below lower Donchian
-                elif close[i] < lower_aligned[i]:
-                    position = -1
-                    highest_high_since_entry = high[i]
-                    lowest_low_since_entry = low[i]
-                    signals[i] = -0.25
+        # Trend filter from 4h EMA(50)
+        price_above_ema = close[i] > ema_50_4h_aligned[i]
+        price_below_ema = close[i] < ema_50_4h_aligned[i]
+        
+        # Mean reversion entry signals from 1h RSI
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
+        # Long signal: ranging market + price above 4h EMA (uptrend bias) + RSI oversold
+        if rsi_oversold and price_above_ema:
+            signals[i] = 0.20
+        # Short signal: ranging market + price below 4h EMA (downtrend bias) + RSI overbought
+        elif rsi_overbought and price_below_ema:
+            signals[i] = -0.20
     
     return signals
