@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v3
-# Hypothesis: 4-hour breakouts at daily Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-bar average volume).
+# 4h_1d_camarilla_breakout_v4
+# Hypothesis: 4-hour breakouts at daily Camarilla pivot levels (H3/L3) with volume confirmation (>1.8x 20-bar average volume).
 # Daily Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
-# Designed for 4h timeframe to capture medium-term moves with controlled trade frequency (target: 20-50/year).
+# Designed for 4h timeframe to capture medium-term moves with controlled trade frequency (target: 15-40/year).
 # Works in bull markets (upward breaks above resistance) and bear markets (downward breaks below support).
 # Uses daily data for support/resistance levels, avoiding look-ahead bias via mtf_data helpers.
-# This version reduces trade frequency by requiring stronger volume confirmation (2.0x instead of 1.5x).
+# This version reduces trade frequency further by requiring stronger volume confirmation (1.8x -> 2.0x) and stricter entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_camarilla_breakout_v4"
 timeframe = "4h"
 leverage = 1.0
 
