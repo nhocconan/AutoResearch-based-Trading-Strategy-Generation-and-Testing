@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams Fractal breakouts with volume confirmation
-# Williams Fractals from 1d identify significant swing highs/lows that act as support/resistance
-# Volume confirmation (current 12h volume > 1.8x 20-period average) filters false breakouts
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# Works in bull/bear: price reacts to 1d structure, volume confirms validity
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and chop regime filter
+# Donchian breakouts provide clear structure for trend continuation in both bull/bear markets
+# 12h volume confirmation (>1.5x 20-period average) filters false breakouts
+# Chop regime filter (CHOP(14) > 61.8) avoids trading in strong trends where breakouts fail
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Works in bull/bear: breakouts capture trends, volume confirms validity, chop filter avoids whipsaws
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
 
-name = "12h_1d_williams_fractal_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +25,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 25:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d Williams Fractals
-    # Bearish fractal: high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
-    # Bullish fractal: low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
+    # Pre-compute indicators
+    # Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    for i in range(2, n_1d - 2):
-        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # 12h volume confirmation
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
     
-    # Williams fractals need 2 extra 1d bars after the center bar for confirmation
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Pre-compute volume confirmation (20-period average for 12h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Choppiness Index (14-period) for regime filter
+    atr_14 = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.append([np.nan], close[:-1]))), np.abs(low - np.append([np.nan], close[:-1])))).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((atr_14 * 14) / (np.log(highest_high_14 - lowest_low_14))) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.8x average 12h volume
-        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
+        # Volume confirmation: current 12h volume > 1.5x average 12h volume
+        volume_confirmed = volume_12h[i] > 1.5 * vol_ma_20_12h_aligned[i]
+        
+        # Chop regime filter: only trade when market is ranging/choppy (CHOP > 61.8)
+        chop_filter = chop[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit on bullish fractal retracement (mean reversion from support)
-            if close[i] > bullish_aligned[i]:
+            # Exit on Donchian lower band retracement
+            if close[i] < lowest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on bearish fractal retracement (mean reversion from resistance)
-            if close[i] < bearish_aligned[i]:
+            # Exit on Donchian upper band retracement
+            if close[i] > highest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout trading with volume confirmation
-            # Long on bullish fractal breakout, Short on bearish fractal breakout
-            if volume_confirmed:
-                if close[i] > bullish_aligned[i]:
+            # Breakout trading with volume and chop confirmation
+            # Long on Donchian upper breakout, Short on Donchian lower breakout
+            if volume_confirmed and chop_filter:
+                if close[i] > highest_20[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < bearish_aligned[i]:
+                elif close[i] < lowest_20[i]:
                     position = -1
                     signals[i] = -0.25
     
