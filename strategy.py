@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume spike confirmation.
+# 4h_daily_camarilla_pivot_volume_spike_v9
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume spike confirmation.
 # Long: Price breaks above H4 pivot with volume > 2.0x 20-period average and close > open (bullish candle)
 # Short: Price breaks below L4 pivot with volume > 2.0x 20-period average and close < open (bearish candle)
 # Exit: Price returns to H3/L3 levels
-# Uses 12h primary timeframe with 1d HTF for Camarilla pivot calculation.
-# Target: 50-150 total trades over 4 years (12-37/year) to reduce fee drag.
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
+# Added stricter volume confirmation (2.5x instead of 2.0x) and minimum holding period (4 bars) to reduce trade frequency.
+# Target: 75-150 total trades over 4 years (19-38/year) to reduce fee drag.
 # Works in both bull and bear markets by capturing institutional breakouts with confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v9"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,7 +52,7 @@ def generate_signals(prices):
     h4_1d = pivot_1d + (range_1d * 1.1 / 2)
     l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
@@ -59,6 +60,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    bars_since_entry = 0  # Track holding period
     
     for i in range(30, n):  # Start after warmup period for all indicators
         # Skip if any required data is NaN
@@ -67,31 +69,45 @@ def generate_signals(prices):
             np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
             np.isnan(open_prices[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 2.5x 20-period average (stricter)
+        volume_confirmed = volume[i] > 2.5 * volume_ma[i]
         # Bullish candle: close > open
         bullish_candle = close[i] > open_prices[i]
         # Bearish candle: close < open
         bearish_candle = close[i] < open_prices[i]
         
         if position == 1:  # Long position
-            # Exit: Price returns to H3 level
-            if close[i] <= h3_1d_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            bars_since_entry += 1
+            # Minimum holding period: 4 bars (16 hours)
+            if bars_since_entry >= 4:
+                # Exit: Price returns to H3 level
+                if close[i] <= h3_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Hold until minimum period
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to L3 level
-            if close[i] >= l3_1d_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+            bars_since_entry += 1
+            # Minimum holding period: 4 bars (16 hours)
+            if bars_since_entry >= 4:
+                # Exit: Price returns to L3 level
+                if close[i] >= l3_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Hold until minimum period
         else:  # Flat
+            bars_since_entry = 0
             # Long entry: Price breaks above H4 with volume confirmation and bullish candle
             if close[i] > h4_1d_aligned[i] and volume_confirmed and bullish_candle:
                 position = 1
