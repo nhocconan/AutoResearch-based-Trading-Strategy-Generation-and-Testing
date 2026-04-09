@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_volume_breakout_v1
-# Hypothesis: 6h strategy using 1w Camarilla pivot levels with volume confirmation.
-# Long: Price breaks above weekly H4 with volume > 2.0x 20-period average and close > open.
-# Short: Price breaks below weekly L4 with volume > 2.0x 20-period average and close < open.
-# Exit: Price returns to opposite weekly Camarilla level (H3 for longs, L3 for shorts).
-# Uses 6h primary timeframe with 1w HTF for Camarilla levels.
-# Designed for low trade frequency (~12-25/year) to minimize fee drag while capturing major weekly breakouts.
-# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
+# 12h_weekly_camarilla_pivot_volume_spike_v1
+# Hypothesis: 12h strategy using 1w Camarilla pivot levels with volume confirmation.
+# Long: Price breaks above H4 with volume > 2.0x 30-period average and close > open.
+# Short: Price breaks below L4 with volume > 2.0x 30-period average and close < open.
+# Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
+# Uses 12h primary timeframe with 1w HTF for Camarilla levels to reduce trade frequency and avoid fee drag.
+# Designed for low trade frequency (~12-37/year) to work in both bull (breakouts) and bear (fades from extremes).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_volume_breakout_v1"
-timeframe = "6h"
+name = "12h_weekly_camarilla_pivot_volume_spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,9 +26,9 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_prices = prices['open'].values
     
-    # Volume average for confirmation (20-period)
+    # Volume average for confirmation (30-period)
     volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma = volume_s.rolling(window=30, min_periods=30).mean().values
     
     # Get 1w data for Camarilla levels
     df_1w = get_htf_data(prices, '1w')
@@ -44,13 +43,13 @@ def generate_signals(prices):
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     range_1w = high_1w - low_1w
     
-    # Weekly Camarilla levels
+    # Camarilla levels
     h3_1w = pivot_1w + (range_1w * 1.1 / 4)
     l3_1w = pivot_1w - (range_1w * 1.1 / 4)
     h4_1w = pivot_1w + (range_1w * 1.1 / 2)
     l4_1w = pivot_1w - (range_1w * 1.1 / 2)
     
-    # Align 1w Camarilla levels to 6h
+    # Align 1w Camarilla levels to 12h
     h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
     l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
     h4_1w_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
@@ -68,7 +67,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
+        # Volume confirmation: current volume > 2.0x 30-period average
         volume_confirmed = volume[i] > 2.0 * volume_ma[i]
         # Bullish candle: close > open
         bullish_candle = close[i] > open_prices[i]
