@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels + volume confirmation + chop regime filter
-# Long when price touches Camarilla L3 support with volume confirmation in trending regime (CHOP < 38.2)
-# Short when price touches Camarilla H3 resistance with volume confirmation in trending regime
-# Uses discrete position sizing 0.25 to target ~25-40 trades/year and minimize fee drag
-# Works in bull/bear markets: mean reversion at strong pivot levels during trends avoids false breakouts
+# Hypothesis: 6h strategy using 1d Williams %R extremes with 1w trend filter and volume confirmation
+# Williams %R(14) on 1d identifies overbought/oversold conditions
+# Long when %R crosses above -80 from below AND price > 1w EMA200 (uptrend filter)
+# Short when %R crosses below -20 from above AND price < 1w EMA200 (downtrend filter)
+# Volume confirmation: current 6h volume > 1.8x average 6h volume (20-period)
+# Discrete position sizing 0.25 targets ~20-40 trades/year to minimize fee drag
+# Works in bull/bear markets: mean reversion in ranges, trend filter avoids counter-trend trades
 
-name = "4h_1d_camarilla_pivot_volume_chop_v5"
-timeframe = "4h"
+name = "6h_1d_1w_williamsr_trend_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,109 +24,83 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
-    # Actually: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Standard Camarilla: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Simplified: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Correct formula: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Actually standard: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Let's use: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Wait, standard Camarilla: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Actually: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Correct: H3 = close + 1.1*(high-low)*1.1/4, L3 = close - 1.1*(high-low)*1.1/4
-    # Let me verify: Standard Camarilla levels:
-    # H4 = close + 1.1*(high-low)*1.1/2
-    # H3 = close + 1.1*(high-low)*1.1/4
-    # L3 = close - 1.1*(high-low)*1.1/4
-    # L4 = close - 1.1*(high-low)*1.1/2
-    # So H3/L3 use multiplier 1.1*1.1/4 = 1.21/4 = 0.3025
-    # Actually: 1.1 * (high-low) * 1.1 / 4 = 1.21 * (high-low) / 4 = 0.3025 * (high-low)
+    # Calculate 1d Williams %R (14-period)
+    def williams_r(high_arr, low_arr, close_arr, window):
+        highest_high = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
+        wr = -100 * (highest_high - close_arr) / (highest_high - lowest_low)
+        return wr
     
-    camarilla_multiplier = 1.1 * 1.1 / 4  # 1.21/4 = 0.3025
-    H3_1d = close_1d + camarilla_multiplier * (high_1d - low_1d)
-    L3_1d = close_1d - camarilla_multiplier * (high_1d - low_1d)
+    wr_14 = williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Calculate 1d Choppiness Index (CHOP) for regime filter
-    def true_range(high, low, prev_close):
-        tr1 = high - low
-        tr2 = np.abs(high - prev_close)
-        tr3 = np.abs(low - prev_close)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1w EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate TR for 1d
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # first period
-    tr_1d = true_range(high_1d, low_1d, prev_close_1d)
+    # Align 1d indicators to 6h timeframe
+    wr_14_aligned = align_htf_to_ltf(prices, df_1d, wr_14)
     
-    # CHOP = 100 * log10(sum(TR,14) / (max(high,14) - min(low,14))) / log10(14)
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(atr_14_1d / (max_high_14_1d - min_low_14_1d)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop_1d = np.where((max_high_14_1d - min_low_14_1d) > 0, chop_1d, 50.0)
+    # Align 1w EMA200 to 6h timeframe
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Align 1d indicators to 4h timeframe
-    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Pre-compute 4h volume confirmation (20-period)
-    vol_s_4h = pd.Series(volume)
-    avg_vol_4h = vol_s_4h.rolling(window=20, min_periods=20).mean().values
+    # Pre-compute session filter (08-20 UTC) - optional but helps reduce noise
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_vol_4h[i])):
+        if (np.isnan(wr_14_aligned[i]) or np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume (20-period)
-        volume_confirmed = volume[i] > 1.5 * avg_vol_4h[i]
-        
-        # Regime filter: trending market (CHOP < 38.2)
-        trending_regime = chop_1d_aligned[i] < 38.2
+        # Volume confirmation: current 6h volume > 1.8x average 6h volume (20-period)
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
         
         if position == 1:  # Long position
-            # Exit long if price rises above H3 (mean reversion completion) or stops trending
-            if close[i] > H3_1d_aligned[i] or not trending_regime:
+            # Exit long if Williams %R crosses below -50 (momentum loss) or price < 1w EMA200
+            if wr_14_aligned[i] < -50 or close[i] < ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if price falls below L3 (mean reversion completion) or stops trending
-            if close[i] < L3_1d_aligned[i] or not trending_regime:
+            # Exit short if Williams %R crosses above -50 (momentum loss) or price > 1w EMA200
+            if wr_14_aligned[i] > -50 or close[i] > ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Mean reversion strategy: enter at Camarilla L3/H3 with volume confirmation in trending regime
-            if volume_confirmed and trending_regime:
-                # Long when price touches or falls below L3 support
-                if close[i] <= L3_1d_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short when price touches or rises above H3 resistance
-                elif close[i] >= H3_1d_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Mean reversion entries with trend filter and volume confirmation
+            # Long: Williams %R crosses above -80 from below (oversold bounce) in uptrend
+            wr_long_signal = (wr_14_aligned[i] > -80) and (wr_14_aligned[i-1] <= -80) if i > 0 else False
+            wr_short_signal = (wr_14_aligned[i] < -20) and (wr_14_aligned[i-1] >= -20) if i > 0 else False
+            
+            if wr_long_signal and close[i] > ema_200_1w_aligned[i] and volume_confirmed:
+                position = 1
+                signals[i] = 0.25
+            elif wr_short_signal and close[i] < ema_200_1w_aligned[i] and volume_confirmed:
+                position = -1
+                signals[i] = -0.25
     
     return signals
