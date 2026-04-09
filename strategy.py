@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR trailing stop
-# - Uses 1d HTF for prior day's high/low to calculate Donchian(20) channels
-# - Long when price closes above upper Donchian with volume > 1.5x 20-period average
-# - Short when price closes below lower Donchian with volume > 1.5x 20-period average
-# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry
-# - Fixed position size 0.25 to control drawdown
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Volume filter and ATR stop reduce false breakouts
-# - Works in both bull and bear markets by capturing breakouts with confirmation
+# Hypothesis: 1d KAMA trend with RSI filter and chop regime on 1w HTF
+# - KAMA(10) determines trend direction on daily timeframe
+# - RSI(14) > 50 for long, < 50 for short (momentum confirmation)
+# - Choppiness Index(14) on 1w: < 38.2 = trending (favor signals), > 61.8 = choppy (avoid)
+# - ATR(14) trailing stop: 2.5x ATR from extreme since entry
+# - Position size: 0.25 (discrete level to minimize fee churn)
+# - Target: 10-25 trades/year on 1d (40-100 total over 4 years)
+# - Uses 1w HTF for regime filter to avoid whipsaws in ranging markets
 
-name = "12h_1d_donchian_breakout_volume_atr_v1"
-timeframe = "12h"
+name = "1d_kama_rsi_chop_regime_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,57 +26,124 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop (primary timeframe)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Load 1w data ONCE before loop for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # --- 1d indicators ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on daily data
-    # Upper band: highest high of last 20 days
-    # Lower band: lowest low of last 20 days
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # KAMA(10) - Kaufman Adaptive Moving Average
+    def calculate_kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        # Handle first period values
+        change = np.concatenate([np.full(period, np.nan), change])
+        volatility = np.concatenate([np.full(period, np.nan), volatility])
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan)
+        kama[period] = close[period]
+        for i in range(period+1, len(close)):
+            if np.isnan(kama[i-1]):
+                kama[i] = close[i]
+            else:
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Align Donchian levels to 12h timeframe (wait for completed 1d bar)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    kama = calculate_kama(close_1d, 10, 2, 30)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Pre-compute volume confirmation (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI(14) on 1d
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close)
+        delta = np.concatenate([[np.nan], delta])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        
+        # First average
+        avg_gain[period] = np.nanmean(gain[1:period+1])
+        avg_loss[period] = np.nanmean(loss[1:period+1])
+        
+        # Wilder smoothing
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Pre-compute ATR (14-period) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    rsi = calculate_rsi(close_1d, 14)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # ATR(14) on 1d for stoploss
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(np.diff(high_1d, prepend=high_1d[0]))
+    tr3 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # --- 1w indicators for regime filter ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range for 1w
+    tr1_w = high_1w - low_1w
+    tr2_w = np.abs(np.diff(high_1w, prepend=high_1w[0]))
+    tr3_w = np.abs(np.diff(low_1w, prepend=low_1w[0]))
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    
+    # Choppiness Index(14) on 1w
+    def calculate_choppiness(high, low, close, period=14):
+        tr = np.maximum(high - low, np.maximum(np.abs(np.diff(high, prepend=high[0])), np.abs(np.diff(low, prepend=low[0]))))
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+        max_h = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        min_l = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        chop = 100 * np.log10(atr * period / (max_h - min_l)) / np.log10(period)
+        return chop
+    
+    chop_1w = calculate_choppiness(high_1w, low_1w, close_1w, 14)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_1w, additional_delay_bars=0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
-            vol_ma_20[i] <= 0 or atr[i] <= 0):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(chop_aligned[i]) or
+            atr_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Regime filter: only trade when not choppy (CHOP < 61.8)
+        # In choppy markets (CHOP > 61.8), avoid new entries but allow exits
+        if chop_aligned[i] > 61.8 and position == 0:
+            signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
             # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+            if close[i] < highest_high_since_entry - 2.5 * atr_aligned[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -90,7 +156,7 @@ def generate_signals(prices):
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
             # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+            if close[i] > lowest_low_since_entry + 2.5 * atr_aligned[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -98,16 +164,25 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Donchian breakout + volume confirmation
-            if volume_confirmed:
-                # Long entry: price closes above upper Donchian
-                if close[i] > upper_aligned[i]:
+            # Entry logic: KAMA trend + RSI momentum + regime filter
+            # Only enter when trend is aligned (price vs KAMA) AND RSI confirms momentum
+            kama_bullish = close[i] > kama_aligned[i]
+            kama_bearish = close[i] < kama_aligned[i]
+            rsi_bullish = rsi_aligned[i] > 50
+            rsi_bearish = rsi_aligned[i] < 50
+            
+            # Additional chop filter: avoid extreme chop
+            not_extreme_chop = chop_aligned[i] < 70
+            
+            if not_extreme_chop:
+                # Long entry: price above KAMA (bullish trend) AND RSI > 50 (bullish momentum)
+                if kama_bullish and rsi_bullish:
                     position = 1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: price closes below lower Donchian
-                elif close[i] < lower_aligned[i]:
+                # Short entry: price below KAMA (bearish trend) AND RSI < 50 (bearish momentum)
+                elif kama_bearish and rsi_bearish:
                     position = -1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
