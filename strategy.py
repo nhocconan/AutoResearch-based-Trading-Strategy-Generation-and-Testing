@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_weekly_donchian_breakout_volume_v1
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long: Price breaks above 20-day high AND weekly close > weekly EMA20 AND volume > 1.5x 20-day avg volume.
-# Short: Price breaks below 20-day low AND weekly close < weekly EMA20 AND volume > 1.5x 20-day avg volume.
-# Exit: Opposite Donchian breakout (long exits on 20-day low break, short exits on 20-day high break).
-# Uses weekly EMA for trend filter to avoid counter-trend trades in bear markets.
-# Volume confirmation ensures breakout legitimacy. Target: 7-25 trades/year (30-100 total over 4 years).
+# 6h_elder_ray_regime_volume_v2
+# Hypothesis: 6h strategy using Elder Ray (Bull/Bear Power) with EMA200 trend filter and volume confirmation.
+# Long: Bull Power > 0, close > EMA200, volume > 1.5x 20-period average.
+# Short: Bear Power < 0, close < EMA200, volume > 1.5x 20-period average.
+# Exit: Opposite Elder Ray signal or volume divergence.
+# Uses 1d EMA200 for higher timeframe trend filter to avoid counter-trend trades.
+# Volume confirmation filters weak breakouts. Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_elder_ray_regime_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,36 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # EMA200 for trend filter (6h)
+    close_s = pd.Series(close)
+    ema200 = close_s.ewm(span=200, min_periods=200, adjust=False).mean().values
+    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Donchian channels (20-period)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA20 for trend filter
-    close_1w_s = pd.Series(close_1w)
-    ema_20_1w = close_1w_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Elder Ray components (6h)
+    ema13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(ema200[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
@@ -62,31 +52,27 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price breaks below 20-day low
-            if close[i] < donchian_low[i]:
+            # Exit: Bear Power turns negative OR volume divergence (price up but volume down)
+            if bear_power[i] >= 0 or (close[i] > close[i-1] and volume[i] < volume[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price breaks above 20-day high
-            if close[i] > donchian_high[i]:
+            # Exit: Bull Power turns positive OR volume divergence (price down but volume down)
+            if bull_power[i] <= 0 or (close[i] < close[i-1] and volume[i] < volume[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above 20-day high AND weekly trend up AND volume confirmed
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_20_1w_aligned[i] and 
-                volume_confirmed):
+            # Long entry: Bull Power positive, price above EMA200, volume confirmed
+            if (bull_power[i] > 0 and close[i] > ema200[i] and volume_confirmed):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below 20-day low AND weekly trend down AND volume confirmed
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_20_1w_aligned[i] and 
-                  volume_confirmed):
+            # Short entry: Bear Power negative, price below EMA200, volume confirmed
+            elif (bear_power[i] < 0 and close[i] < ema200[i] and volume_confirmed):
                 position = -1
                 signals[i] = -0.25
     
