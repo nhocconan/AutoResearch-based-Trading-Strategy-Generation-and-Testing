@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v3
-# Hypothesis: 12h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation.
-# Works in bull/bear: 1d EMA50 defines institutional trend; Camarilla R3/S3/R4/S4 levels provide
-# precise entry/exit levels; volume confirms institutional participation. Target: 12-37 trades/year.
+# 4h_camarilla_1d_trend_volume_v1
+# Hypothesis: 4h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses 1d HTF for trend (EMA50) and pivot levels (R3/S3, R4/S4) from prior completed day.
+# Enters long when price breaks above R4 with bullish trend (close > EMA50_1d) and volume > 2x MA20.
+# Enters short when price breaks below S4 with bearish trend (close < EMA50_1d) and volume > 2x MA20.
+# Exits when price returns to R3/S3 or trend reverses.
+# Designed for 4h timeframe to target 20-50 trades/year (80-200 total over 4 years).
+# Works in bull/bear: 1d EMA50 defines institutional trend; Camarilla levels provide structure; volume confirms participation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v3"
-timeframe = "12h"
+name = "4h_camarilla_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,13 +54,13 @@ def generate_signals(prices):
     s3_1d = pivot_1d - range_1d * 1.1 / 4
     s4_1d = pivot_1d - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -86,7 +90,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
             if volume_confirmed:
                 # Long: price breaks above R4 with bullish trend
