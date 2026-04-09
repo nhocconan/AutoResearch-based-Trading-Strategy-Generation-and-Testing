@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_chop_v1
-# Hypothesis: 12h strategy using Donchian channel breakouts with volume confirmation and choppiness regime filter.
-# Long when price breaks above 20-bar Donchian high with volume > 1.5x average and CHOP > 61.8 (ranging market).
-# Short when price breaks below 20-bar Donchian low with volume > 1.5x average and CHOP > 61.8.
-# Uses 1d HTF data for Donchian channels and volume average, called ONCE before loop.
-# Discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 12-37 trades/year.
+# 4h_cci_trend_reversal_v1
+# Hypothesis: 4h strategy using CCI(20) for overbought/oversold conditions with trend filter from 12h EMA(50) and volume confirmation.
+# In bull markets: buy oversold dips in uptrend; in bear markets: sell overbought rallies in downtrend.
+# Volume confirmation filters weak moves. Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "4h_cci_trend_reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,81 +22,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Donchian channels and volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 12h HTF data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
-    volume_d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 20-period Donchian channels
-    donchian_high = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
+    # CCI(20) calculation
+    tp = (high + low + close) / 3.0  # Typical price
+    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    md_tp = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # Avoid division by zero
+    md_tp = np.where(md_tp == 0, 1e-10, md_tp)
+    cci = (tp - ma_tp) / (0.015 * md_tp)
     
-    # 20-period average volume for confirmation
-    volume_ma_d = pd.Series(volume_d).rolling(window=20, min_periods=20).mean().values
-    
-    # Choppiness Index (CHOP) on 1d - range: 0-100, >61.8 = ranging, <38.2 = trending
-    # True Range = max(high-low, abs(high-previous_close), abs(low-previous_close))
-    tr1 = high_d - low_d
-    tr2 = np.abs(high_d - np.roll(close_d, 1))
-    tr3 = np.abs(low_d - np.roll(close_d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low since no previous close
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Chop = 100 * log10(sum(tr) / (atr * 14)) / log10(14)
-    chop = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
-    
-    # Align all 1d data to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_ma_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma_aligned[i]
-        # Chop filter: CHOP > 61.8 indicates ranging market (good for mean reversion/breakouts in range)
-        chop_filter = chop_aligned[i] > 61.8
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches Donchian low or volume dries up or chop drops (trending starts)
-            if close[i] <= donchian_low_aligned[i] or not volume_confirmed or not chop_filter:
+            # Exit: CCI crosses above +100 (overbought) or volume dries up
+            if cci[i] > 100.0 or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches Donchian high or volume dries up or chop drops (trending starts)
-            if close[i] >= donchian_high_aligned[i] or not volume_confirmed or not chop_filter:
+            # Exit: CCI crosses below -100 (oversold) or volume dries up
+            if cci[i] < -100.0 or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed and chop_filter:
-                # Long breakout: price breaks above Donchian high with volume AND chop filter
-                if close[i] > donchian_high_aligned[i]:
+            if volume_confirmed:
+                # Long entry: CCI crosses above -100 from below (oversold bounce) AND uptrend filter (price > 12h EMA50)
+                if cci[i] > -100.0 and cci[i-1] <= -100.0 and close[i] > ema_50_12h_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakdown: price breaks below Donchian low with volume AND chop filter
-                elif close[i] < donchian_low_aligned[i]:
+                # Short entry: CCI crosses below +100 from above (overbought rejection) AND downtrend filter (price < 12h EMA50)
+                elif cci[i] < 100.0 and cci[i-1] >= 100.0 and close[i] < ema_50_12h_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
