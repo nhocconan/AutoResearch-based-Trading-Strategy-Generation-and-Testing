@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume spike and chop regime filter
-# - Primary signal: 12h price breaks above/below Donchian channel (20-period high/low)
-# - Volume confirmation: 1d volume > 1.5x 20-period average volume (avoid low-participation breakouts)
-# - Regime filter: 1d Choppiness Index > 61.8 (range market) for mean reversion at Donchian bounds
-# - Exit: Price returns to Donchian midpoint (mean reversion) or opposite breakout
+# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Primary signal: Price breaks above/below Camarilla pivot levels (H3/L3) calculated from prior 1d candle
+# - Trend filter: 1w EMA50 - ensures alignment with weekly trend (bullish for longs, bearish for shorts)
+# - Volume confirmation: 1d volume > 20-period median volume (avoid low-participation false breakouts)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Donchian breakouts capture trends, chop filter avoids false breakouts in ranges
+# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
+# - Works in bull/bear: Camarilla levels act as dynamic support/resistance; weekly EMA filter avoids counter-trend trades
+# - Exit: Price reverts to Camarilla pivot point (H4/L4) or weekly EMA50 crossover
 
-name = "12h_1d_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_pivot_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,92 +21,85 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load HTF data ONCE before loop: 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d average volume for volume confirmation
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_20_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20)
+    # Pre-compute 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pre-compute 1d high, low, close for Choppiness Index
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range for chop calculation
-    tr1 = pd.Series(high_1d - low_1d).values
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1))).values
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1))).values
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Set first TR to high-low (no previous close)
-    tr[0] = high_1d[0] - low_1d[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Choppiness Index = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = max_high_14 - min_low_14
-    chop = np.where(chop_denominator > 0,
-                    100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14),
-                    50)  # neutral when no range
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Pre-compute 12h Donchian channels (20-period)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Pre-compute 1d volume regime: volume > 20-period median volume
+    volume = prices['volume'].values
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > median_volume_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
+        # Need at least 2 days of data to calculate Camarilla levels (yesterday's OHLC)
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Get prior day's OHLC for Camarilla calculation
+        prev_high = prices['high'].iloc[i-1]
+        prev_low = prices['low'].iloc[i-1]
+        prev_close = prices['close'].iloc[i-1]
+        
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(avg_volume_20_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period average
-        volume_spike = volume_1d[i] > 1.5 * avg_volume_20_aligned[i] if not np.isnan(volume_1d[i]) else False
+        # Calculate Camarilla pivot levels from prior day's OHLC
+        range_val = prev_high - prev_low
+        if range_val <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # Camarilla levels
+        pivot = (prev_high + prev_low + prev_close) / 3
+        h3 = pivot + (range_val * 1.1 / 4)  # ~1.1 * range / 4
+        l3 = pivot - (range_val * 1.1 / 4)  # ~1.1 * range / 4
+        h4 = pivot + (range_val * 1.1 / 2)  # ~1.1 * range / 2
+        l4 = pivot - (range_val * 1.1 / 2)  # ~1.1 * range / 2
         
-        # Chop regime: > 61.8 = ranging market (good for mean reversion at Donchian bounds)
-        chop_regime = chop_aligned[i] > 61.8
+        # Current price
+        close_price = prices['close'].iloc[i]
         
         if position == 1:  # Long position
-            # Exit: price returns to Donchian midpoint OR breaks below Donchian low
-            if close_12h[i] <= donchian_mid[i] or close_12h[i] < donchian_low[i]:
+            # Exit: Price crosses below H4 (pivot point) OR weekly EMA50 turns bearish
+            if close_price < pivot or close_price < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to Donchian midpoint OR breaks above Donchian high
-            if close_12h[i] >= donchian_mid[i] or close_12h[i] > donchian_high[i]:
+            # Exit: Price crosses above L4 (pivot point) OR weekly EMA50 turns bullish
+            if close_price > pivot or close_price > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume confirmation and chop regime
-            # Long: price breaks above Donchian high WITH volume spike AND chop regime (range)
-            if (close_12h[i] > donchian_high[i] and 
-                volume_spike and 
-                chop_regime):
+            # Look for Camarilla breakouts with volume confirmation and weekly EMA50 filter
+            # Long: Price breaks above H3 with volume AND price above weekly EMA50 (bullish bias)
+            if (close_price > h3 and 
+                volume_regime[i] and 
+                close_price > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low WITH volume spike AND chop regime (range)
-            elif (close_12h[i] < donchian_low[i] and 
-                  volume_spike and 
-                  chop_regime):
+            # Short: Price breaks below L3 with volume AND price below weekly EMA50 (bearish bias)
+            elif (close_price < l3 and 
+                  volume_regime[i] and 
+                  close_price < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
