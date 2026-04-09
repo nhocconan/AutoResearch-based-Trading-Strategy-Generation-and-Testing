@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Uses 1d HTF for trend direction (EMA50 > EMA200 = uptrend, < = downtrend)
-# - 12h Camarilla pivot levels (R3, S3, R4, S4) from prior 1d bar
-# - Long on break above R4 in uptrend, short on break below S4 in downtrend
-# - Volume confirmation: current 12h volume > 1.5x 20-period average
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (EMA34 > EMA89) and volume confirmation
+# - Uses 1w HTF for trend direction (EMA34 > EMA89 = uptrend, < = downtrend)
+# - Long on break above 20-day high in uptrend, short on break below 20-day low in downtrend
+# - Volume confirmation: current 1d volume > 1.5x 20-period average
 # - Fixed position size 0.25 to control drawdown
-# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years)
+# - Target: 7-25 trades/year on 1d timeframe (28-100 total over 4 years)
 
-name = "12h_1d_camarilla_breakout_trend_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_breakout_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,41 +24,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 89:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMAs for trend filter
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1w EMAs for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_89_1w = pd.Series(close_1w).ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Calculate 1d Camarilla pivot levels from prior bar
-    # Typical price = (H + L + C) / 3
-    typical_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Align 1w EMAs to 1d timeframe (wait for completed 1w bar)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_89_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_89_1w)
     
-    # Camarilla levels
-    r3_1d = typical_1d + range_1d * 1.1 / 4
-    s3_1d = typical_1d - range_1d * 1.1 / 4
-    r4_1d = typical_1d + range_1d * 1.1 / 2
-    s4_1d = typical_1d - range_1d * 1.1 / 2
+    # Pre-compute 1d Donchian channels (20-period)
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align all 1d data to 12h timeframe (wait for completed 1d bar)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,34 +51,33 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            vol_ma_20[i] <= 0):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(ema_89_1w_aligned[i]) or
+            np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average
+        # Volume confirmation: current 1d volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Trend filter: 1d EMA50 > EMA200 = uptrend, < = downtrend
-        uptrend = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
-        downtrend = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
+        # Trend filter: 1w EMA34 > EMA89 = uptrend, < = downtrend
+        uptrend = ema_34_1w_aligned[i] > ema_89_1w_aligned[i]
+        downtrend = ema_34_1w_aligned[i] < ema_89_1w_aligned[i]
         
         # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit when price closes below 1d EMA50 (trend change)
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit when price closes below 20-day low
+            if close[i] < low_ma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit when price closes above 1d EMA50 (trend change)
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit when price closes above 20-day high
+            if close[i] > high_ma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,12 +85,12 @@ def generate_signals(prices):
         else:  # Flat
             # Breakout entry with volume confirmation and trend alignment
             if volume_confirmed:
-                # Long: break above R4 in uptrend
-                if uptrend and close[i] > r4_1d_aligned[i]:
+                # Long: break above 20-day high in uptrend
+                if uptrend and close[i] > high_ma_20[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: break below S4 in downtrend
-                elif downtrend and close[i] < s4_1d_aligned[i]:
+                # Short: break below 20-day low in downtrend
+                elif downtrend and close[i] < low_ma_20[i]:
                     position = -1
                     signals[i] = -position_size
     
