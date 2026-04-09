@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 4h_bollinger_breakout_volume_1dtrend_v1
-# Hypothesis: 4h Bollinger Band breakouts with volume confirmation and 1d trend filter work in both bull and bear markets.
-# Uses Bollinger Bands (20,2) - breakout above upper band for long, below lower band for short.
-# Requires volume > 1.5x 20-period average and 1d EMA50 trend alignment.
-# Target: 20-40 trades/year (80-160 over 4 years) with controlled risk.
+# 12h_rsi_volume_trend_v1
+# Hypothesis: On 12h timeframe, RSI extreme levels with volume confirmation and 1d trend filter capture mean reversion in both bull and bear markets.
+# Uses RSI(14) < 30 for long and > 70 for short with volume > 1.5x 20-period average.
+# 1d EMA50 trend filter ensures alignment with higher timeframe trend.
+# Target: 15-25 trades/year (60-100 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_bollinger_breakout_volume_1dtrend_v1"
-timeframe = "4h"
+name = "12h_rsi_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,18 +23,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = (bb_middle + 2 * bb_std).values
-    bb_lower = (bb_middle - 2 * bb_std).values
+    # Calculate RSI (14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma_20 * 1.5
     
-    # 1d trend filter: EMA50
+    # 1d trend filter: EMA50 on daily data
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -45,32 +48,32 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below middle band or 1d trend turns bearish
-            if close[i] < bb_middle.iloc[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: RSI > 50 (mean reversion complete) or daily trend turns bearish
+            if rsi[i] > 50 or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above middle band or 1d trend turns bullish
-            if close[i] > bb_middle.iloc[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: RSI < 50 (mean reversion complete) or daily trend turns bullish
+            if rsi[i] < 50 or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above upper band with volume confirmation and 1d uptrend
-            if close[i] > bb_upper[i] and volume[i] > vol_threshold[i] and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: RSI < 30 (oversold) with volume confirmation and daily uptrend
+            if rsi[i] < 30 and volume[i] > vol_threshold[i] and close[i] > ema_50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band with volume confirmation and 1d downtrend
-            elif close[i] < bb_lower[i] and volume[i] > vol_threshold[i] and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: RSI > 70 (overbought) with volume confirmation and daily downtrend
+            elif rsi[i] > 70 and volume[i] > vol_threshold[i] and close[i] < ema_50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
