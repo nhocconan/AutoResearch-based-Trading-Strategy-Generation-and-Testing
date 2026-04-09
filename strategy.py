@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 1d_weekly_kama_rsi_chop_v1
-# Hypothesis: 1d strategy combining weekly trend filter (price above/below weekly KAMA) with daily KAMA/RSI entries and choppiness regime filter.
-# Long: Weekly bullish trend (close > weekly KAMA) + daily KAMA rising + RSI < 30 + chop regime (CHOP > 61.8 = ranging)
-# Short: Weekly bearish trend (close < weekly KAMA) + daily KAMA falling + RSI > 70 + chop regime (CHOP > 61.8 = ranging)
-# Exit: Opposite signal or weekly trend flip.
-# Uses 1d primary timeframe with 1w HTF for trend and chop regime.
-# Designed for low trade frequency (~10-25/year) to minimize fee drag while capturing mean reversion in ranging markets and pullbacks in trends.
+# 12h_daily_camarilla_pivot_volume_spike_v1
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation.
+# Long: Price breaks above H4 (1.1*range/2 above daily pivot) with volume > 1.5x 20-period average.
+# Short: Price breaks below L4 (1.1*range/2 below daily pivot) with volume > 1.5x 20-period average.
+# Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
+# Uses 12h primary timeframe with 1d HTF for Camarilla levels.
+# Designed for low trade frequency (~12-37/year) to minimize fee drag while capturing institutional breakouts.
+# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "12h_daily_camarilla_pivot_volume_spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,122 +25,81 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_prices = prices['open'].values
     
-    # KAMA efficiency ratio calculation
-    def calculate_kama(arr, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(arr, period))
-        volatility = np.sum(np.abs(np.diff(arr)), axis=0) if arr.ndim > 1 else np.sum(np.abs(np.diff(arr)))
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.full_like(arr, np.nan, dtype=float)
-        kama[period] = arr[period]
-        for i in range(period+1, len(arr)):
-            kama[i] = kama[i-1] + sc[i] * (arr[i] - kama[i-1])
-        return kama
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index calculation
-    def calculate_chop(high, low, close, period=14):
-        atr = np.zeros_like(close)
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr[1:] = tr
-        atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        chop = np.where((highest_high - lowest_low) != 0,
-                        100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period),
-                        50)
-        return chop
-    
-    # Get 1w data for trend filter and chop regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly KAMA for trend filter
-    kama_1w = calculate_kama(close_1w, period=10, fast=2, slow=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
-    
-    # Weekly choppy regime filter
-    chop_1w = calculate_chop(high_1w, low_1w, close_1w, period=14)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w, additional_delay_bars=0)
-    
-    # Get 1d data for entry signals
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily KAMA for entry
-    kama_1d = calculate_kama(close_1d, period=10, fast=2, slow=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Daily pivot and range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Daily RSI for overbought/oversold
-    delta = pd.Series(close_1d).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    # Camarilla levels
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    
+    # Align 1d Camarilla levels to 12h
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(chop_1w_aligned[i]) or
-            np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(close[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(open_prices[i])):
             signals[i] = 0.0
             continue
         
-        # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
-        # We use chop regime as filter: only trade when ranging (CHOP > 61.8) for mean reversion
-        in_chop_regime = chop_1w_aligned[i] > 61.8
-        
-        # Daily KAMA direction
-        kama_rising = kama_1d_aligned[i] > kama_1d_aligned[i-1] if i > 0 else False
-        kama_falling = kama_1d_aligned[i] < kama_1d_aligned[i-1] if i > 0 else False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Bullish candle: close > open
+        bullish_candle = close[i] > open_prices[i]
+        # Bearish candle: close < open
+        bearish_candle = close[i] < open_prices[i]
         
         if position == 1:  # Long position
-            # Exit: Opposite signal or weekly trend turns bearish
-            if (close[i] < kama_1d_aligned[i] or  # Price below daily KAMA
-                close[i] < kama_1w_aligned[i]):   # Weekly trend turns bearish
+            # Exit: Price returns to H3
+            if close[i] <= h3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Opposite signal or weekly trend turns bullish
-            if (close[i] > kama_1d_aligned[i] or  # Price above daily KAMA
-                close[i] > kama_1w_aligned[i]):   # Weekly trend turns bullish
+            # Exit: Price returns to L3
+            if close[i] >= l3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Weekly bullish trend + daily KAMA rising + RSI oversold + chop regime
-            if (close[i] > kama_1w_aligned[i] and  # Weekly bullish trend
-                kama_rising and                    # Daily KAMA rising
-                rsi_1d_aligned[i] < 30 and         # RSI oversold
-                in_chop_regime):                   # Choppy/ranging regime
+            # Long entry: Price breaks above H4 with volume and bullish candle
+            if (close[i] > h4_1d_aligned[i] and    # Break above H4
+                volume_confirmed and               # Volume spike
+                bullish_candle):                   # Bullish candle
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Weekly bearish trend + daily KAMA falling + RSI overbought + chop regime
-            elif (close[i] < kama_1w_aligned[i] and  # Weekly bearish trend
-                  kama_falling and                   # Daily KAMA falling
-                  rsi_1d_aligned[i] > 70 and         # RSI overbought
-                  in_chop_regime):                   # Choppy/ranging regime
+            # Short entry: Price breaks below L4 with volume and bearish candle
+            elif (close[i] < l4_1d_aligned[i] and     # Break below L4
+                  volume_confirmed and                # Volume spike
+                  bearish_candle):                    # Bearish candle
                 position = -1
                 signals[i] = -0.25
     
