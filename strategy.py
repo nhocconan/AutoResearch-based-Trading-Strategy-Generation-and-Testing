@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_ema_bounce_v1
-# Hypothesis: Daily price bounces off 50-period EMA when aligned with weekly trend.
-# Long when price touches EMA50 from above with weekly EMA50 uptrend and volume > 1.5x average.
-# Short when price touches EMA50 from below with weekly EMA50 downtrend and volume > 1.5x average.
-# Uses EMA crossovers for trend confirmation to reduce whipsaw.
-# Position size fixed at 0.25 to balance risk and return.
-# Target: 10-25 trades/year (40-100 total over 4 years) by requiring trend alignment and volume confirmation.
+# 6h_12h_volume_breakout_v1
+# Hypothesis: 6-hour price breakouts with volume confirmation and 12-hour trend filter.
+# Long when price breaks above 24-period high with price > 12h EMA50 and volume > 2x average.
+# Short when price breaks below 24-period low with price < 12h EMA50 and volume > 2x average.
+# Uses 12h EMA50 for trend alignment to reduce counter-trend trades.
+# Volume filter requires 2x average volume to ensure institutional participation.
+# Position size fixed at 0.25 to balance risk and reward.
+# Target: 50-150 total trades over 4 years (12-37/year) with tight entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ema_bounce_v1"
-timeframe = "1d"
+name = "6h_12h_volume_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,82 +26,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema = close_1w[49]  # Initialize with first 50-period average
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema = close_12h[49]  # Initialize with first 50-period average
         multiplier = 2 / (50 + 1)
-        ema_50_1w[49] = ema
-        for i in range(50, len(close_1w)):
-            ema = (close_1w[i] - ema) * multiplier + ema
-            ema_50_1w[i] = ema
+        ema_50_12h[49] = ema
+        for i in range(50, len(close_12h)):
+            ema = (close_12h[i] - ema) * multiplier + ema
+            ema_50_12h[i] = ema
     
-    # Align weekly EMA50 to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 12h EMA50 to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily EMA50
-    ema_50 = np.full(n, np.nan)
-    if n >= 50:
-        ema = close[49]  # Initialize with first 50-period average
-        multiplier = 2 / (50 + 1)
-        ema_50[49] = ema
-        for i in range(50, n):
-            ema = (close[i] - ema) * multiplier + ema
-            ema_50[i] = ema
-    
-    # Volume confirmation: 20-period average
-    vol_ma_20 = np.full(n, np.nan)
+    # Volume confirmation: 24-period average
+    vol_ma_24 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if i >= 24:
+            vol_sum -= volume[i-24]
+        if i >= 23:
+            vol_ma_24[i] = vol_sum / 24
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(ema_50[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_24[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Calculate price channels (24-period high/low)
+        if i >= 24:
+            channel_high = np.max(high[i-24:i])
+            channel_low = np.min(low[i-24:i])
+        else:
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA50
-            if close[i] < ema_50[i]:
+            # Exit: price returns to or below 24-period low
+            if close[i] <= channel_low:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA50
-            if close[i] > ema_50[i]:
+            # Exit: price returns to or above 24-period high
+            if close[i] >= channel_high:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches EMA50 from above with weekly uptrend and volume confirmation
-            if (close[i] >= ema_50[i] and 
-                close[i-1] > ema_50[i-1] and  # Was above EMA yesterday
-                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and  # Weekly EMA rising
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Enter long: price breaks above channel high with trend and volume filters
+            if (close[i] > channel_high and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume[i] > vol_ma_24[i] * 2.0):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches EMA50 from below with weekly downtrend and volume confirmation
-            elif (close[i] <= ema_50[i] and 
-                  close[i-1] < ema_50[i-1] and  # Was below EMA yesterday
-                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and  # Weekly EMA falling
-                  volume[i] > vol_ma_20[i] * 1.5):
+            # Enter short: price breaks below channel low with trend and volume filters
+            elif (close[i] < channel_low and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume[i] > vol_ma_24[i] * 2.0):
                 position = -1
                 signals[i] = -0.25
     
