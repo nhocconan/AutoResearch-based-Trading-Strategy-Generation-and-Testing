@@ -1,19 +1,74 @@
 #!/usr/bin/env python3
-# 12h_1w_camarilla_breakout_v1
-# Hypothesis: 12-hour breakout of weekly Camarilla levels with daily EMA50 trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
-# Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
-# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
+# 1d_1w_rsi_divergence_v1
+# Hypothesis: Weekly RSI divergence on daily timeframe with volume confirmation and trend filter.
+# Bullish divergence: price makes lower low while RSI makes higher low on weekly chart → long when price closes above prior swing high.
+# Bearish divergence: price makes higher high while RSI makes lower high on weekly chart → short when price closes below prior swing low.
+# Works in bull markets via momentum continuation and in bear markets via mean reversion at exhaustion points.
+# Uses weekly RSI divergence as primary signal, daily EMA50 for trend filter, and volume > 1.5x 20-bar average for confirmation.
+# Position size: 0.25 to limit drawdown. Target: 30-100 total trades over 4 years (7-25/year).
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf  # Note: corrected import name
 
-name = "12h_1w_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
+def calculate_rsi(prices, period=14):
+    """Calculate RSI with proper Wilder's smoothing."""
+    delta = np.diff(prices)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(prices)
+    avg_loss = np.zeros_like(prices)
+    
+    # Initialize first average
+    if len(prices) > period:
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        # Wilder's smoothing
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def find_swing_points(high, low, window=2):
+    """Find swing highs and lows."""
+    swing_high = np.full_like(high, np.nan)
+    swing_low = np.full_like(low, np.nan)
+    
+    for i in range(window, len(high) - window):
+        if high[i] == np.max(high[i-window:i+window+1]):
+            swing_high[i] = high[i]
+        if low[i] == np.min(low[i-window:i+window+1]):
+            swing_low[i] = low[i]
+    
+    return swing_high, swing_low
+
+def detect_divergence(price, indicator, lookback=5):
+    """Detect bullish/bearish divergence."""
+    n = len(price)
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        # Look for lower low in price, higher low in indicator (bullish div)
+        if (price[i] < price[i-lookback] and 
+            indicator[i] > indicator[i-lookback] and
+            np.all(price[i-lookback+1:i] >= price[i-lookback]) and
+            np.all(indicator[i-lookback+1:i] <= indicator[i-lookback])):
+            bullish_div[i] = True
+            
+        # Look for higher high in price, lower high in indicator (bearish div)
+        if (price[i] > price[i-lookback] and 
+            indicator[i] < indicator[i-lookback] and
+            np.all(price[i-lookback+1:i] <= price[i-lookback]) and
+            np.all(indicator[i-lookback+1:i] >= indicator[i-lookback])):
+            bearish_div[i] = True
+    
+    return bullish_div, bearish_div
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,39 +80,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
+    # Calculate weekly RSI (14)
     close_1w = df_1w['close'].values
-    ema_50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema = close_1w[49]  # Initialize with first 50-period average
+    rsi_1w = calculate_rsi(close_1w, 14)
+    
+    # Align weekly RSI to daily timeframe
+    rsi_1w_aligned = align_ltf_to_htf(prices, df_1w, rsi_1w)
+    
+    # Calculate daily EMA50 for trend filter
+    ema_50 = np.full(n, np.nan)
+    if n >= 50:
+        ema = np.mean(close[:50])
+        ema_50[49] = ema
         multiplier = 2 / (50 + 1)
-        ema_50_1w[49] = ema
-        for i in range(50, len(close_1w)):
-            ema = (close_1w[i] - ema) * multiplier + ema
-            ema_50_1w[i] = ema
-    
-    # Align 1w EMA50 to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Camarilla levels from 1w OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1w), np.nan)
-    camarilla_l4 = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        c = df_1w['close'].iloc[i]
-        h = df_1w['high'].iloc[i]
-        l = df_1w['low'].iloc[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+        for i in range(50, n):
+            ema = (close[i] - ema) * multiplier + ema
+            ema_50[i] = ema
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -69,45 +112,66 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
+    # Detect swing points on weekly data for divergence confirmation
+    swing_high_1w, swing_low_1w = find_swing_points(
+        df_1w['high'].values, 
+        df_1w['low'].values, 
+        window=2
+    )
+    
+    # Align swing points to daily timeframe
+    swing_high_1w_aligned = align_ltf_to_htf(prices, df_1w, swing_high_1w)
+    swing_low_1w_aligned = align_ltf_to_htf(prices, df_1w, swing_low_1w)
+    
+    # Detect RSI divergence on weekly data
+    bullish_div, bearish_div = detect_divergence(close_1w, rsi_1w, lookback=5)
+    
+    # Align divergence signals to daily timeframe
+    bullish_div_aligned = align_ltf_to_htf(prices, df_1w, bullish_div.astype(float))
+    bearish_div_aligned = align_ltf_to_htf(prices, df_1w, bearish_div.astype(float))
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
+        if (np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(ema_50[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: RSI shows bearish divergence or price closes below EMA50
+            if (bearish_div_aligned[i] > 0.5 or close[i] < ema_50[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: RSI shows bullish divergence or price closes above EMA50
+            if (bullish_div_aligned[i] > 0.5 or close[i] > ema_50[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 with trend and volume filters
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Enter long: bullish divergence on weekly RSI with trend and volume filters
+            if (bullish_div_aligned[i] > 0.5 and 
+                close[i] > ema_50[i] and 
                 volume[i] > vol_ma_20[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 with trend and volume filters
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Enter short: bearish divergence on weekly RSI with trend and volume filters
+            elif (bearish_div_aligned[i] > 0.5 and 
+                  close[i] < ema_50[i] and 
                   volume[i] > vol_ma_20[i] * 1.5):
                 position = -1
                 signals[i] = -0.25
     
     return signals
+
+name = "1d_1w_rsi_divergence_v1"
+timeframe = "1d"
+leverage = 1.0
