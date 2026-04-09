@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-# Donchian breakouts capture momentum; 1d Camarilla pivots provide institutional reference levels
+# Hypothesis: 12h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
+# Donchian breakouts capture momentum; 1w Camarilla pivots provide institutional reference levels from weekly structure
 # Volume confirmation ensures breakout authenticity
-# Works in bull/bear: Camarilla pivots adapt to higher timeframe structure
+# Works in bull/bear: Weekly Camarilla pivots adapt to higher timeframe structure and reduce false breakouts
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "6h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,16 +23,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load 1w data ONCE before loop for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels from prior day's OHLC
-    # Camarilla levels: based on prior day's range
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Calculate 1w Camarilla pivot levels from prior week's OHLC
+    # Camarilla levels: based on prior week's range
+    prior_high = df_1w['high'].shift(1).values
+    prior_low = df_1w['low'].shift(1).values
+    prior_close = df_1w['close'].shift(1).values
     
     # Camarilla calculations
     camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
@@ -42,14 +42,14 @@ def generate_signals(prices):
     camarilla_h4 = camarilla_pivot + (camarilla_range * 1.1 / 2)
     camarilla_l4 = camarilla_pivot - (camarilla_range * 1.1 / 2)
     
-    # Align Camarilla data to 6h timeframe (wait for daily close)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align Camarilla data to 12h timeframe (wait for weekly close)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
