@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v3
+# 4h_1d_camarilla_breakout_v4
 # Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
 # Uses tighter entry conditions (volume > 2.5x 20-period average) to reduce trades and avoid fee drag.
 # Works in bull markets by catching breakouts, in bear markets by fading false breaks via pivot reversion.
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_camarilla_breakout_v4"
 timeframe = "4h"
 leverage = 1.0
 
