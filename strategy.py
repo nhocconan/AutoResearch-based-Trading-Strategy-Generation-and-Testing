@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v3
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels for structure, 1d EMA trend filter, and volume confirmation.
-# Long when price > EMA50, touches/breaks Camarilla H3 resistance with volume > 1.5x average.
-# Short when price < EMA50, touches/breaks Camarilla L3 support with volume > 1.5x average.
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# 1d_keltner_1w_trend_volume_v1
+# Hypothesis: 1d strategy using 1w Keltner Channel (EMA20 ± 2*ATR10) for trend and volatility bands,
+# with volume confirmation (>1.5x 20-period average) for entry timing.
+# In bull markets: price touches upper band + volume spike → long
+# In bear markets: price touches lower band + volume spike → short
+# The Keltner Channel adapts to volatility, providing dynamic support/resistance.
+# Discrete sizing (±0.25) minimizes fee churn. Target: 30-100 total trades over 4 years (7-25/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v3"
-timeframe = "12h"
+name = "1d_keltner_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,74 +25,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for Keltner Channel
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan  # First value has no previous
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Keltner Channel parameters
+    ema_period = 20
+    atr_period = 10
+    multiplier = 2.0
     
-    # Camarilla pivot levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # EMA of close
+    ema_close = pd.Series(close_1w).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    # Resistance levels
-    r4 = pivot + (range_hl * 1.1 / 2)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    r2 = pivot + (range_hl * 1.1 / 6)
-    r1 = pivot + (range_hl * 1.1 / 12)
+    # True Range and ATR
+    tr1 = pd.Series(high_1w).diff().abs()
+    tr2 = (pd.Series(high_1w) - pd.Series(close_1w).shift()).abs()
+    tr3 = (pd.Series(low_1w) - pd.Series(close_1w).shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Support levels
-    s1 = pivot - (range_hl * 1.1 / 12)
-    s2 = pivot - (range_hl * 1.1 / 6)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
+    # Keltner Channel bands
+    upper_band = ema_close + multiplier * atr
+    lower_band = ema_close - multiplier * atr
     
-    # EMA50 for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Keltner components to 1d timeframe
+    ema_close_aligned = align_htf_to_ltf(prices, df_1w, ema_close)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all 1d indicators to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_close_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below EMA50 (trend reversal) or below S3 (deep pullback)
-            if close[i] < ema_50_aligned[i] or close[i] < s3_aligned[i]:
+            # Exit: price closes below EMA (trend reversal)
+            if close[i] < ema_close_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above EMA50 (trend reversal) or above R3 (strong bounce)
-            if close[i] > ema_50_aligned[i] or close[i] > r3_aligned[i]:
+            # Exit: price closes above EMA (trend reversal)
+            if close[i] > ema_close_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,12 +91,12 @@ def generate_signals(prices):
             volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price > EMA50 (uptrend) and breaks above R3 resistance
-                if close[i] > ema_50_aligned[i] and close[i] > r3_aligned[i]:
+                # Long: price touches or crosses above upper band
+                if close[i] >= upper_band_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price < EMA50 (downtrend) and breaks below S3 support
-                elif close[i] < ema_50_aligned[i] and close[i] < s3_aligned[i]:
+                # Short: price touches or crosses below lower band
+                elif close[i] <= lower_band_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
