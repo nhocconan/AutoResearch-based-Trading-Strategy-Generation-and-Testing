@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian breakout with weekly trend filter and volume confirmation
-# Weekly trend: price above/below weekly 50 SMA determines long/short bias
-# Entry: price breaks Donchian(20) high/low with volume > 1.5x 6-period average
-# Exit: price crosses weekly 50 SMA or Donchian middle band
-# Target: 15-30 trades/year to minimize fee drag, works in bull/bear via trend filter
+# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1d volume confirmation
+# The Alligator identifies trends via three smoothed moving averages.
+# Jaw (13-period), Teeth (8-period), Lips (5-period) - all shifted forward.
+# In trending markets: Lips > Teeth > Jaw (bull) or Lips < Teeth < Jaw (bear)
+# In ranging markets: lines intertwine. Uses 12h timeframe for fewer trades (target: 12-37/year).
+# Works in bull/bear by capturing strong trends while avoiding chop via alignment.
+# Volume confirmation from 1d ensures institutional participation.
 
-name = "6h_1w_donchian_trend_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,83 +25,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly 50 SMA (simple moving average)
-    weekly_close = df_1w['close'].values
-    sma_50_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        if i >= 49:
-            sma_50_1w[i] = np.mean(weekly_close[i-49:i+1])
+    # Calculate 12h Williams Alligator (SMMA = smoothed moving average)
+    def smma(source, period):
+        """Smoothed Moving Average - Williams Alligator uses SMMA"""
+        result = np.full_like(source, np.nan)
+        if len(source) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT_VALUE) / PERIOD
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
     
-    # Align weekly SMA to 6h timeframe
-    sma_50_1w_6h = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    jaw = smma(close, 13)  # Jaw: 13-period SMMA
+    teeth = smma(close, 8)  # Teeth: 8-period SMMA
+    lips = smma(close, 5)   # Lips: 5-period SMMA
     
-    # Donchian channels (20-period) on 6h
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    donch_mid = np.full(n, np.nan)
-    for i in range(n):
+    # Shift forward as per Alligator specification
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # 1d volume confirmation: 20-period average
+    vol_20 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
         if i >= 19:
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
-            donch_mid[i] = (donch_high[i] + donch_low[i]) / 2
+            vol_20[i] = np.mean(df_1d['volume'].iloc[i-19:i+1])
     
-    # Volume confirmation: 6-period average (24h)
-    vol_ma_6 = np.full(n, np.nan)
-    vol_sum = 0.0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 6:
-            vol_sum -= volume[i-6]
-        if i >= 5:
-            vol_ma_6[i] = vol_sum / 6
+    # Align 1d volume to 12h timeframe
+    vol_20_12h = align_htf_to_ltf(prices, df_1d, vol_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup for SMMA
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or 
-            np.isnan(sma_50_1w_6h[i]) or 
-            np.isnan(vol_ma_6[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_20_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below weekly 50 SMA OR Donchian middle band
-            if close[i] < sma_50_1w_6h[i] or close[i] < donch_mid[i]:
+            # Exit: Lips cross below Teeth (trend weakening) OR insufficient volume
+            if lips[i] < teeth[i] or volume[i] < vol_20_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above weekly 50 SMA OR Donchian middle band
-            if close[i] > sma_50_1w_6h[i] or close[i] > donch_mid[i]:
+            # Exit: Lips cross above Teeth (trend weakening) OR insufficient volume
+            if lips[i] > teeth[i] or volume[i] < vol_20_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Volume ratio
-            vol_ratio = volume[i] / vol_ma_6[i] if vol_ma_6[i] > 0 else 0
-            
-            # Enter long: price breaks above Donchian high with volume confirmation AND above weekly SMA
-            if (close[i] > donch_high[i] and 
-                vol_ratio > 1.5 and 
-                close[i] > sma_50_1w_6h[i]):
+            # Enter strong trend: Lips > Teeth > Jaw with volume confirmation (bull)
+            # OR Lips < Teeth < Jaw with volume confirmation (bear)
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                volume[i] > vol_20_12h[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume confirmation AND below weekly SMA
-            elif (close[i] < donch_low[i] and 
-                  vol_ratio > 1.5 and 
-                  close[i] < sma_50_1w_6h[i]):
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
+                  volume[i] > vol_20_12h[i] * 1.5):
                 position = -1
                 signals[i] = -0.25
     
