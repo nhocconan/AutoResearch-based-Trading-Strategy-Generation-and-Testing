@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout + volume confirmation + ATR trailing stop
-# Donchian(20) breakout from 1d captures medium-term trend with proven edge on SOL/ETH
-# Volume confirmation filters false breakouts (current 4h volume > 2x 20-period average)
+# Hypothesis: 1d strategy using 1w Donchian breakout + volume confirmation + ATR trailing stop
+# Donchian(20) breakout from 1w captures long-term trend with proven edge on BTC/ETH
+# Volume confirmation filters false breakouts (current 1d volume > 2x 20-period average)
 # ATR trailing stop (3x ATR) manages risk and reduces whipsaw in bear markets
-# Designed for 4h timeframe targeting 20-50 trades/year (80-200 over 4 years)
+# Designed for 1d timeframe targeting 20-50 trades/year (80-200 over 4 years)
 # Works in bull/bear: breakout follows trends, volume confirms validity, ATR stop adapts to volatility
 
-name = "4h_1d_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,24 +24,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w Donchian channels (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Donchian to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align 1w Donchian to 1d timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Pre-compute ATR(14) for 4h timeframe
+    # Pre-compute ATR(14) for 1d timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,7 +66,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 2x average 4h volume
+        # Volume confirmation: current 1d volume > 2x average 1d volume
         volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
