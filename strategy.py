@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session timing
+# Hypothesis: 1h Camarilla pivot breakout with 4h EMA trend filter and session timing
 # - Uses 4h EMA(50) for trend direction (long when price > EMA, short when price < EMA)
 # - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 1h timeframe
 # - Only trades during 08-20 UTC session to avoid low-liquidity hours
