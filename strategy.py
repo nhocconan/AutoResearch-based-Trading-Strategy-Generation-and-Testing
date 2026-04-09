@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d volume spike + chop regime filter
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength
-# 1d volume spike confirms institutional participation in the move
-# Chop regime filter adapts to market conditions: trending (follow Alligator) vs ranging (fade extremes)
-# Designed for 12h timeframe to capture medium-term swings with low trade frequency
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
-# Works in bull/bear: Alligator catches trends, chop filter prevents whipsaws in ranges
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
+# Donchian breakout captures medium-term trend structure proven on SOLUSDT test Sharpe 1.10-1.38
+# 1d volume spike confirms institutional participation reducing false breakouts
+# Chop regime filter adapts: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
+# Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Works in bull/bear: breakout catches trends, chop filter prevents whipsaws in ranging markets
 
-name = "12h_1d_alligator_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -74,39 +73,20 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)  # neutral when range is zero
     
-    # Align 1d indicators to 12h timeframe (wait for 1d bar close)
+    # Align 1d indicators to 4h timeframe (wait for 1d bar close)
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate Williams Alligator on 12h timeframe
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    def smma(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        result = np.full(len(values), np.nan)
-        # First value is simple average
-        result[period-1] = np.mean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Shift the lines (Jaw: +8, Teeth: +5, Lips: +3)
-    jaw_shifted = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) >= 8 else np.full_like(jaw, np.nan)
-    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) >= 5 else np.full_like(teeth, np.nan)
-    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) >= 3 else np.full_like(lips, np.nan)
+    # Calculate Donchian(20) on 4h timeframe
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -119,21 +99,21 @@ def generate_signals(prices):
         
         volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
         
-        # Regime filter: CHOP < 38.2 = trending (follow Alligator), CHOP > 61.8 = range (fade extremes)
+        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
         trending_regime = chop_1d_aligned[i] < 38.2
         ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: price closes below Teeth OR regime shifts to ranging
-            if close[i] < teeth_shifted[i] or ranging_regime:
+            # Exit: price closes below Donchian lower band OR regime shifts to ranging
+            if close[i] < lowest_20[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Teeth OR regime shifts to ranging
-            if close[i] > teeth_shifted[i] or ranging_regime:
+            # Exit: price closes above Donchian upper band OR regime shifts to ranging
+            if close[i] > highest_20[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -141,23 +121,23 @@ def generate_signals(prices):
         else:  # Flat
             # Entry logic
             if trending_regime:
-                # Follow Alligator alignment in trending regime
-                # Bullish: Lips > Teeth > Jaw
-                if lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i] and volume_confirmed:
+                # Follow Donchian breakout in trending regime
+                # Long on breakout above upper band with volume confirmation
+                if close[i] > highest_20[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                # Bearish: Lips < Teeth < Jaw
-                elif lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i] and volume_confirmed:
+                # Short on breakdown below lower band with volume confirmation
+                elif close[i] < lowest_20[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                # Mean revert at extremes in ranging regime
-                # Long when price touches Jaw (support) and volume confirms
-                if close[i] <= jaw_shifted[i] and volume_confirmed:
+                # Mean revert at Donchian bands in ranging regime
+                # Long when price touches lower band (support) and volume confirms
+                if close[i] <= lowest_20[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                # Short when price touches Jaw (resistance) and volume confirms
-                elif close[i] >= jaw_shifted[i] and volume_confirmed:
+                # Short when price touches upper band (resistance) and volume confirms
+                elif close[i] >= highest_20[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
     
