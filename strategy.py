@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_regime_v1
-# Hypothesis: 12h strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 4h_kama_volume_chop_regime_v1
+# Hypothesis: 4h strategy using Kaufman Adaptive Moving Average (KAMA) for trend direction, volume confirmation (>1.3x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). KAMA adapts to market noise, reducing whipsaws in ranging conditions. Volume confirms breakout conviction. Chop filter avoids false signals in ranging markets. Discrete position sizing (0.25) minimizes fee churn. Target: 19-50 trades/year (75-200 total over 4 years). Works in bull/bear: KAMA follows trends, volume validates momentum, chop regime prevents overtrading in sideways markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_regime_v1"
-timeframe = "12h"
+name = "4h_kama_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,11 +20,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Kaufman Adaptive Moving Average (KAMA) - 10/2/30
+    close_s = pd.Series(close)
+    direction = np.abs(close_s - close_s.shift(10))
+    volatility = np.abs(close_s - close_s.shift(1)).rolling(window=10, min_periods=10).sum()
+    er = direction / volatility
+    er = np.where(volatility == 0, 0, er)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
@@ -38,65 +44,55 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     tr_series = pd.Series(tr)
     atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
+    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
     denominator = np.log10(atr_period) * (highest_high - lowest_low)
     denominator = np.where(denominator == 0, np.nan, denominator)
     chop = 100 * np.log10(atr_sum / denominator)
     
-    # Multi-timeframe: 1d EMA(50) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(chop[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 1d EMA(50)
-        htf_uptrend = close[i] > ema_50_1d_aligned[i]
-        htf_downtrend = close[i] < ema_50_1d_aligned[i]
+        # KAMA trend: price above/below KAMA
+        kama_uptrend = close[i] > kama[i]
+        kama_downtrend = close[i] < kama[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low (20)
-            if close[i] < donchian_low[i]:
+            # Exit: price closes below KAMA
+            if close[i] < kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high (20)
-            if close[i] > donchian_high[i]:
+            # Exit: price closes above KAMA
+            if close[i] > kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for Donchian breakout with volume, regime, and HTF confirmation
-            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
+            # Check for KAMA cross with volume and regime confirmation
+            bullish_signal = (close[i] > kama[i]) and (close[i-1] <= kama[i-1]) and volume_confirmed and trending_market
+            bearish_signal = (close[i] < kama[i]) and (close[i-1] >= kama[i-1]) and volume_confirmed and trending_market
             
-            if bullish_breakout:
+            if bullish_signal:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_signal:
                 position = -1
                 signals[i] = -0.25
     
