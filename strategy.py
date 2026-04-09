@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_volume_v1
-# Hypothesis: 4h strategy using daily Camarilla pivot levels (H3/L3) with volume confirmation and ATR-based stoploss.
-# Long: Price breaks above daily H3, volume > 1.8x 20-period average, and ATR(14) > 0.015*close (volatility filter).
-# Short: Price breaks below daily L3, volume > 1.8x 20-period average, and ATR(14) > 0.015*close.
-# Exit: Opposite pivot break (L3 for long, H3 for short) or ATR trailing stop (2.5x ATR from extreme).
-# Uses daily Camarilla for structure, volume to confirm conviction, ATR for dynamic stops.
-# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
+# 1d_1w_camarilla_pivot_volume_v1
+# Hypothesis: 1d strategy using weekly Camarilla pivot levels (H3/L3) with volume confirmation and ATR stoploss.
+# Long: Price breaks above weekly H3, volume > 1.5x 20-period average, and ATR(14) > 0.01*close (volatility filter).
+# Short: Price breaks below weekly L3, volume > 1.5x 20-period average, and ATR(14) > 0.01*close.
+# Exit: Opposite pivot break (L3 for long, H3 for short) or ATR trailing stop (2.0x ATR from extreme).
+# Uses weekly Camarilla for structure, volume to confirm conviction, ATR for dynamic stops.
+# Target: 10-30 trades/year (40-120 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,23 +39,23 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get 1w data for Camarilla pivots (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from 1d OHLC
+    # Calculate Camarilla pivots from 1w OHLC
     # Camarilla: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w)
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w)
     
-    # Align HTF Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align HTF Camarilla levels to 1d timeframe (wait for completed 1w bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,17 +70,17 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Volatility filter: ATR > 1.5% of price (avoid low-vol chop)
-        vol_filter = atr[i] > 0.015 * close[i]
+        # Volatility filter: ATR > 1.0% of price (avoid low-vol chop)
+        vol_filter = atr[i] > 0.01 * close[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             long_high = max(long_high, high[i])
-            # ATR trailing stop: exit if price drops 2.5*ATR from high
-            if long_high > 0 and close[i] < long_high - 2.5 * atr[i]:
+            # ATR trailing stop: exit if price drops 2.0*ATR from high
+            if long_high > 0 and close[i] < long_high - 2.0 * atr[i]:
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
@@ -95,8 +95,8 @@ def generate_signals(prices):
         elif position == -1:  # Short position
             # Update lowest low since entry
             short_low = min(short_low, low[i])
-            # ATR trailing stop: exit if price rises 2.5*ATR from low
-            if short_low > 0 and close[i] > short_low + 2.5 * atr[i]:
+            # ATR trailing stop: exit if price rises 2.0*ATR from low
+            if short_low > 0 and close[i] > short_low + 2.0 * atr[i]:
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
