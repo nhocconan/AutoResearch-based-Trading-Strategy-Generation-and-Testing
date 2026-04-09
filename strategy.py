@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Hypothesis: 4-hour Camarilla pivot level breaks with 1-day trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > 1d EMA50 and volume > 1.5x average.
-# Short when price breaks below L4 support with price < 1d EMA50 and volume > 1.5x average.
-# Uses Camarilla levels from daily timeframe for key support/resistance.
-# Trend filter uses 1-day EMA50 to align with higher timeframe direction.
-# Volume filter requires 1.5x average volume to filter weak breakouts.
-# Position size fixed at 0.25 to balance risk and reward.
-# Target: 75-200 total trades over 4 years (19-50/year) with tight entry conditions.
+# 4h_1d_camarilla_breakout_v2
+# Hypothesis: 4-hour Camarilla pivot breakout with 1-day trend filter (EMA50) and volume confirmation (1.5x average).
+# Long when price breaks above H4 resistance, price > 1d EMA50, and volume > 1.5x average volume.
+# Short when price breaks below L4 support, price < 1d EMA50, and volume > 1.5x average volume.
+# Exit when price returns to or beyond the opposite Camarilla level (L4 for longs, H4 for shorts).
+# Position size fixed at 0.25 to limit risk. Designed for 4h timeframe with tight entries to avoid overtrading.
+# Uses actual 1d Camarilla levels from daily timeframe for key support/resistance.
+# Works in both bull and bear markets by requiring trend alignment and volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,9 +35,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_50_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
-        ema = close_1d[49]  # Initialize with first 50-period average
-        multiplier = 2 / (50 + 1)
+        # Initialize EMA with simple average of first 50 values
+        ema = np.mean(close_1d[:50])
         ema_50_1d[49] = ema
+        multiplier = 2 / (50 + 1)
         for i in range(50, len(close_1d)):
             ema = (close_1d[i] - ema) * multiplier + ema
             ema_50_1d[i] = ema
@@ -46,8 +46,7 @@ def generate_signals(prices):
     # Align 1d EMA50 to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # Calculate Camarilla levels from 1d OHLC: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
     camarilla_h4 = np.full(len(df_1d), np.nan)
     camarilla_l4 = np.full(len(df_1d), np.nan)
     for i in range(len(df_1d)):
