@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_reversal_volume_v1
-# Hypothesis: 12h mean reversion at daily Camarilla pivot levels with volume confirmation.
-# Long when price touches or breaks below daily S3 with volume > 1.5x 20-period average.
-# Short when price touches or breaks above daily R3 with volume > 1.5x 20-period average.
-# Exit when price returns to daily pivot level or opposite S1/R1 level.
+# 4h_donchian_breakout_volume_chop_v1
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
+# Long when price breaks above 20-period Donchian high with volume > 1.5x average and CHOP > 61.8 (ranging market).
+# Short when price breaks below 20-period Donchian low with volume > 1.5x average and CHOP > 61.8.
+# Exit when price closes back inside the Donchian channel (opposite side) or CHOP < 38.2 (strong trend).
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Designed to capture reversals in ranging markets and avoid strong trends.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# Designed to capture mean-reversion breakouts in ranging markets while avoiding strong trends.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_reversal_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,79 +30,62 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get daily data for pivot levels (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    pivot_1d = typical_price_1d
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align daily levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Choppiness Index (14-period)
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * max(high-low))) / log10(n)
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr1 = np.maximum(tr1, np.absolute(low - np.roll(close, 1)))
+    tr1[0] = high[0] - low[0]  # first TR
+    atr1 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    max_min_range = pd.Series(high - low).rolling(window=14, min_periods=14).max().values
+    chop = 100 * (np.log10(atr1) - np.log10(14 * max_min_range)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i]) or 
+            np.isnan(volume[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
+        # Regime filter: CHOP > 61.8 for ranging market (mean reversion)
+        ranging_market = chop[i] > 61.8
+        
         if position == 1:  # Long position
-            # Exit: Price returns to daily pivot or breaks above R1 (take profit)
-            if close[i] >= pivot_1d_aligned[i] or close[i] >= r1_1d_aligned[i]:
+            # Exit: Price closes back below Donchian low or CHOP < 38.2 (strong trend)
+            if close[i] < donchian_low[i] or chop[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to daily pivot or breaks below S1 (take profit)
-            if close[i] <= pivot_1d_aligned[i] or close[i] <= s1_1d_aligned[i]:
+            # Exit: Price closes back above Donchian high or CHOP < 38.2 (strong trend)
+            if close[i] > donchian_high[i] or chop[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for reversal at S3/R3 with volume confirmation
-            bullish_reversal = (close[i] <= s3_1d_aligned[i]) and volume_confirmed
-            bearish_reversal = (close[i] >= r3_1d_aligned[i]) and volume_confirmed
+            # Check for breakout with volume confirmation and ranging market
+            bullish_breakout = (close[i] > donchian_high[i]) and volume_confirmed and ranging_market
+            bearish_breakout = (close[i] < donchian_low[i]) and volume_confirmed and ranging_market
             
-            if bullish_reversal:
+            if bullish_breakout:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_reversal:
+            elif bearish_breakout:
                 position = -1
                 signals[i] = -0.25
     
