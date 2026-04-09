@@ -3,20 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Williams %R Volume Confirmation
-# - Uses 1d Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) to measure trend strength
-# - Uses 1d Williams %R (14-period) for overbought/oversold conditions
-# - Requires volume > 1.5x 20-period average for confirmation
-# - Long when Bull Power > 0 AND Williams %R < -80 AND volume spike (strong bullish momentum from oversold)
-# - Short when Bear Power > 0 AND Williams %R > -20 AND volume spike (strong bearish momentum from overbought)
-# - ATR(14) trailing stop at 2.5x ATR from extreme
-# - Position size: 0.25 (discrete level to minimize fee churn)
-# - Target: ~20 trades/year (80 total over 4 years) to stay well under fee drag threshold
-# - Elder Ray captures trend strength, Williams %R identifies exhaustion points, volume confirms conviction
-# - Designed to work in BOTH bull markets (buy strength on dips) and bear markets (sell weakness on rallies)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume spike confirmation
+# - Uses 12h Donchian channel breakout (20-period) for entries in direction of 1d EMA trend
+# - Requires volume > 2.0x 20-period average to confirm breakout strength (stricter than prior)
+# - ATR(14) trailing stop at 2.0x ATR from extreme (tighter stop for better risk control)
+# - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
+# - Target: ~25 trades/year (100 total over 4 years) to stay well under fee drag threshold
+# - Donchian breakouts capture strong trends, 1d EMA filter avoids counter-trend trades in bear markets, volume confirmation improves quality
+# - Designed to work in BOTH bull markets (long breakouts) and bear markets (short breakdowns) with proper risk management
 
-name = "6h_1d_elderray_williamsr_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_ema1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,44 +23,31 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Pre-compute 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA(13) for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d Elder Ray components
-    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA13
-    bear_power_1d = ema_13_1d - low_1d   # Bear Power = EMA13 - Low
-    
-    # 1d Williams %R (14-period)
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero
-    williams_r_1d = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r_1d)
-    
-    # Align HTF indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
-    
-    # 6h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h volume > 1.5x 20-period average for confirmation
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume_20)
+    # 12h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h ATR(14) for trailing stop
+    # 12h volume > 2.0x 20-period average (stricter volume confirmation)
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * avg_volume_20)
+    
+    # 12h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -78,9 +62,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(williams_r_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
             np.isnan(volume_spike[i]) or
             np.isnan(atr[i]) or
             atr[i] <= 0):
@@ -92,8 +76,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.5x ATR from high
-            if low[i] <= highest_since_entry - (2.5 * atr[i]):
+            # Exit conditions: price retraces 2.0x ATR from high (tighter stop)
+            if low[i] <= highest_since_entry - (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,25 +88,25 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.5x ATR from low
-            if high[i] >= lowest_since_entry + (2.5 * atr[i]):
+            # Exit conditions: price retraces 2.0x ATR from low (tighter stop)
+            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Elder Ray + Williams %R signals with volume confirmation
-            # Long: Bull Power > 0 (strong bullish momentum) AND Williams %R < -80 (oversold) AND volume spike
-            if (bull_power_aligned[i] > 0 and 
-                williams_r_aligned[i] < -80 and
+            # Look for Donchian breakout with volume confirmation and 1d EMA trend filter
+            # Long: price breaks above Donchian high AND price > 1d EMA50 AND volume spike
+            if (high[i] >= donchian_high[i] and 
+                close[i] > ema_50_1d_aligned[i] and
                 volume_spike[i]):
                 position = 1
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]  # Initialize for shorts
                 signals[i] = 0.25
-            # Short: Bear Power > 0 (strong bearish momentum) AND Williams %R > -20 (overbought) AND volume spike
-            elif (bear_power_aligned[i] > 0 and 
-                  williams_r_aligned[i] > -20 and
+            # Short: price breaks below Donchian low AND price < 1d EMA50 AND volume spike
+            elif (low[i] <= donchian_low[i] and 
+                  close[i] < ema_50_1d_aligned[i] and
                   volume_spike[i]):
                 position = -1
                 highest_since_entry = low[i]  # Initialize for longs
