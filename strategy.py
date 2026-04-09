@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ATR trailing stop
-# - Uses 4h Donchian(20) breakout for entry signals (structure-based)
-# - Confirms with 1d volume > 1.8x its 20-period average (strong participation)
+# Hypothesis: 1d Donchian channel breakout with 1w volume confirmation and ATR trailing stop
+# - Uses weekly Donchian channel (20-period) for breakout signals
+# - Confirms with 1d volume > 1.8x its 20-period average (strong participation) 
 # - Uses ATR(14) trailing stop: exits when price retraces 2.0x ATR from extreme
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Donchian breakouts capture momentum in both trending and ranging markets
-# - Volume filter reduces false breakouts, ATR stop manages risk in volatile markets
-# - Designed to work in BOTH bull (breakouts continue) and bear (breakdowns continue) markets
+# - Target: 10-25 trades/year on 1d timeframe (40-100 total over 4 years)
+# - Donchian breakouts capture strong trends, volume filter reduces false signals,
+#   ATR stop manages risk in volatile markets. Works in both bull and bear markets
+#   by capturing directional moves regardless of overall market direction.
 
-name = "4h_1d_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,36 +23,38 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
-    volume_1d = df_1d['volume'].values
+    # Pre-compute 1w indicators
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1d Volume > 1.8x 20-period average (stricter for fewer trades)
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.8 * avg_volume_20)
+    # 1w True Range for ATR
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr_1w[0]
     
-    # Align 1d indicators to 4h
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    # 1w ATR(14) for volatility and stoploss
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # 4h price data
+    # 1w Volume > 1.8x 20-period average (stricter for fewer trades)
+    avg_volume_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1w = volume_1w > (1.8 * avg_volume_20)
+    
+    # Align 1w indicators to 1d
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    volume_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_1w.astype(float))
+    
+    # 1d price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # 4h Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 4h ATR(14) for volatility and stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -62,8 +64,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(volume_spike_1d_aligned[i]) or np.isnan(atr[i]) or
-            atr[i] <= 0 or np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(volume_spike_1w_aligned[i]) or
+            atr_1w_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -73,7 +75,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
             
             # Exit conditions: price retraces 2.0x ATR from high
-            if low[i] <= highest_since_entry - (2.0 * atr[i]):
+            if low[i] <= highest_since_entry - (2.0 * atr_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,22 +87,73 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
             
             # Exit conditions: price retraces 2.0x ATR from low
-            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
+            if high[i] >= lowest_since_entry + (2.0 * atr_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
+            # Calculate 1w Donchian channel levels using previous 1w bar
+            # Need at least 1 previous 1w bar
+            if i < 7:  # Need at least 7 days to get previous 1w bar
+                signals[i] = 0.0
+                continue
+                
+            # Get previous 1w bar's high, low, close
+            prev_idx_1w = (i // 7) - 1  # 7x 1d bars = 1x 1w bar, subtract 1 for previous
+            if prev_idx_1w < 0:
+                signals[i] = 0.0
+                continue
+                
+            # Get the actual previous 1w bar values
+            ph = high_1w[prev_idx_1w]
+            pl = low_1w[prev_idx_1w]
+            pc = close_1w[prev_idx_1w]
+            
+            # Calculate Donchian channel (20-period) for the previous 1w bar
+            # We need 20 previous 1w bars to calculate the channel
+            lookback_start = max(0, prev_idx_1w - 19)
+            lookback_end = prev_idx_1w + 1
+            
+            if lookback_end - lookback_start < 20:
+                signals[i] = 0.0
+                continue
+                
+            # Calculate highest high and lowest low over the lookback period
+            highest_high = np.max(high_1w[lookback_start:lookback_end])
+            lowest_low = np.min(low_1w[lookback_start:lookback_end])
+            
+            # Align Donchian levels to 1d timeframe (they're constant within the 1w bar)
+            # Create arrays of Donchian values for each 1w bar, then align
+            upper_array = np.full_like(high_1w, np.nan)
+            lower_array = np.full_like(low_1w, np.nan)
+            
+            for j in range(len(high_1w)):
+                lookback_start_j = max(0, j - 19)
+                lookback_end_j = j + 1
+                if lookback_end_j - lookback_start_j >= 20:
+                    upper_array[j] = np.max(high_1w[lookback_start_j:lookback_end_j])
+                    lower_array[j] = np.min(low_1w[lookback_start_j:lookback_end_j])
+            
+            # Align to 1d
+            upper_aligned = align_htf_to_ltf(prices, df_1w, upper_array)
+            lower_aligned = align_htf_to_ltf(prices, df_1w, lower_array)
+            
+            if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+                np.isnan(volume_spike_1w_aligned[i])):
+                signals[i] = 0.0
+                continue
+            
             # Look for Donchian breakout with volume confirmation
-            if (high[i] >= highest_20[i] and    # Break above upper Donchian
-                volume_spike_1d_aligned[i]):    # Volume confirmation
+            if (high[i] >= upper_aligned[i] and    # Break above upper channel
+                volume_spike_1w_aligned[i]):       # Volume confirmation
                 position = 1
                 entry_price = high[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]  # Initialize for shorts
                 signals[i] = 0.25
-            elif (low[i] <= lowest_20[i] and    # Break below lower Donchian
-                  volume_spike_1d_aligned[i]):  # Volume confirmation
+            elif (low[i] <= lower_aligned[i] and    # Break below lower channel
+                  volume_spike_1w_aligned[i]):      # Volume confirmation
                 position = -1
                 entry_price = low[i]
                 highest_since_entry = low[i]  # Initialize for longs
