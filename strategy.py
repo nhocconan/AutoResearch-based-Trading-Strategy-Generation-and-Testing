@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Donchian breakout with 1w trend filter and volume confirmation
-# In bull/bear markets: Donchian(20) breakout on 1d captures major moves; 1w EMA50 filter ensures we trade with higher timeframe trend
-# Volume confirmation reduces false breakouts. Discrete sizing 0.25 limits trades to ~12-37/year.
-# Works in bull markets (breakouts up) and bear markets (breakouts down) with trend filter preventing counter-trend entries.
+# Hypothesis: 12h Donchian breakout with 1d volume spike and ATR filter
+# In trending regimes: breakout above/below Donchian(20) channels with volume > 1.5x average
+# Uses ATR(14) for volatility normalization and stoploss
+# Discrete position sizing 0.25 to limit trades and reduce fee drag
+# Works in bull/bear markets: breakout catches momentum, volume filter avoids false signals
 
-name = "6h_1d_1w_donchian_breakout_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,66 +33,80 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 1d ATR(14)
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    close_1w = df_1w['close'].values
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Calculate 1d Donchian channels (20-period) - use prior close to avoid look-ahead
-    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
+    atr_1d = wilders_smoothing(tr, 14)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 1d average volume (20-period) for confirmation
+    # Calculate 1d average volume (20-period)
     volume_s_1d = pd.Series(volume_1d)
     avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Align all 1d and 1w indicators to 6h timeframe
-    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1d Donchian channels (20-period) based on prior day to avoid look-ahead
+    # Shift by 1 to use only completed daily bars
+    high_shift = np.concatenate([[np.nan], high_1d[:-1]])
+    low_shift = np.concatenate([[np.nan], low_1d[:-1]])
+    
+    # Donchian upper: highest high over past 20 completed days
+    donch_high_1d = pd.Series(high_shift).rolling(window=20, min_periods=20).max().values
+    # Donchian lower: lowest low over past 20 completed days
+    donch_low_1d = pd.Series(low_shift).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d indicators to 12h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    
+    # Volume confirmation: current 12h volume > 1.5x average 1d volume
+    volume_confirmed = volume > 1.5 * avg_volume_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(donch_high_1d_aligned[i]) or 
+            np.isnan(donch_low_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average 1d volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit long if price breaks below Donchian lower band or trend turns bearish
-            if close[i] < lowest_20_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long if price breaks below Donchian low or ATR-based stoploss
+            if close[i] < donch_low_1d_aligned[i] or close[i] < donch_high_1d_aligned[i] - 2.0 * atr_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
-                
+        
         elif position == -1:  # Short position
-            # Exit short if price breaks above Donchian upper band or trend turns bullish
-            if close[i] > highest_20_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short if price breaks above Donchian high or ATR-based stoploss
+            if close[i] > donch_high_1d_aligned[i] or close[i] > donch_low_1d_aligned[i] + 2.0 * atr_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
+        
         else:  # Flat
-            # Enter long on breakout above upper band with volume confirmation and bullish trend
-            if close[i] > highest_20_aligned[i] and volume_confirmed and close[i] > ema50_1w_aligned[i]:
+            # Enter long on breakout above Donchian high with volume confirmation
+            if close[i] > donch_high_1d_aligned[i] and volume_confirmed[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short on breakout below lower band with volume confirmation and bearish trend
-            elif close[i] < lowest_20_aligned[i] and volume_confirmed and close[i] < ema50_1w_aligned[i]:
+            # Enter short on breakout below Donchian low with volume confirmation
+            elif close[i] < donch_low_1d_aligned[i] and volume_confirmed[i]:
                 position = -1
                 signals[i] = -0.25
     
