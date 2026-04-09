@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakouts at Camarilla pivot levels (H3/L3) from daily timeframe with volume confirmation (>2x 20-bar average volume).
-# Camarilla levels act as support/resistance; breaks signal momentum continuation.
+# 4h_1d_camarilla_breakout_v19
+# Hypothesis: 4-hour breakouts at Camarilla pivot levels (H3/L3) from daily timeframe with volume confirmation (>2x 20-bar average volume).
+# Camarilla levels act as intraday support/resistance; breaks signal momentum continuation.
 # Volume filter reduces false breakouts. Works in bull markets (upward breaks) and bear markets (downward breaks).
-# Target: 12-30 trades per year per symbol (~48-120 total over 4 years).
+# Target: 20-50 trades per year per symbol (~80-200 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v19"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +37,7 @@ def generate_signals(prices):
     camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
     camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
