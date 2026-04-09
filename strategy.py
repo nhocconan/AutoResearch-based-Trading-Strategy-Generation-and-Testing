@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_1d_volume_v1
-# Hypothesis: 12h Camarilla pivot levels with 1d volume confirmation. Camarilla levels act as intraday support/resistance; price reverts to mean between levels. Volume spike confirms institutional participation at key levels. Works in bull/bear markets: mean reversion in ranges, breakouts in trends. Target: 12-37 trades/year (50-150 over 4 years).
+# 4h_rsi2_ema13_volume_v1
+# Hypothesis: 4h RSI(2) pullback with EMA13 trend and volume confirmation.
+# RSI(2) identifies extreme short-term reversals (oversold <10, overbought >90).
+# EMA13 provides trend filter to avoid counter-trend trades.
+# Volume spike confirms momentum behind the move.
+# Designed for 15-30 trades/year (60-120 over 4 years) with tight entry conditions.
+# Works in bull/bear markets: RSI reversals work in pullbacks within trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_volume_v1"
-timeframe = "12h"
+name = "4h_rsi2_ema13_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,79 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for EMA13 and RSI(2)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 13:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate Camarilla levels from previous 1d candle
-    # H4 = Close + 1.5*(High-Low), L4 = Close - 1.5*(High-Low)
-    # H3 = Close + 1.0*(High-Low), L3 = Close - 1.0*(High-Low)
-    # H2 = Close + 0.5*(High-Low), L2 = Close - 0.5*(High-Low)
-    # H1 = Close + 0.25*(High-Low), L1 = Close - 0.25*(High-Low)
-    pivot_range = high_1d - low_1d
-    h4 = close_1d + 1.5 * pivot_range
-    l4 = close_1d - 1.5 * pivot_range
-    h3 = close_1d + 1.0 * pivot_range
-    l3 = close_1d - 1.0 * pivot_range
-    h2 = close_1d + 0.5 * pivot_range
-    l2 = close_1d - 0.5 * pivot_range
-    h1 = close_1d + 0.25 * pivot_range
-    l1 = close_1d - 0.25 * pivot_range
+    # Calculate 4h EMA13
+    ema13 = pd.Series(close_4h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_aligned = align_htf_to_ltf(prices, df_4h, ema13)
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, h2)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, l2)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, l1)
+    # Calculate 4h RSI(2)
+    delta = pd.Series(close_4h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss
+    rsi2 = 100 - (100 / (1 + rs))
+    rsi2_values = rsi2.fillna(100).values  # Fill NaN with 100 (no loss = max RSI)
+    rsi2_aligned = align_htf_to_ltf(prices, df_4h, rsi2_values)
     
-    # 1d volume confirmation (volume > 1.5x 20-day average)
+    # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirmed = volume > (vol_ma_20 * 1.5)
+    vol_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h2_aligned[i]) or np.isnan(l2_aligned[i]) or
-            np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
+        if (np.isnan(ema13_aligned[i]) or np.isnan(rsi2_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches H3 or H4 resistance
-            if close[i] >= h3_aligned[i]:
+            # Exit: RSI(2) crosses above 50 (momentum fading)
+            if rsi2_aligned[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches L3 or L4 support
-            if close[i] <= l3_aligned[i]:
+            # Exit: RSI(2) crosses below 50 (momentum fading)
+            if rsi2_aligned[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price touches L1 or L2 support with volume confirmation
-            if (close[i] <= l2_aligned[i]) and vol_confirmed[i]:
+            # Enter long: RSI(2) < 10 (oversold), price > EMA13 (uptrend), volume spike
+            if (rsi2_aligned[i] < 10) and (close[i] > ema13_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price touches H1 or H2 resistance with volume confirmation
-            elif (close[i] >= h2_aligned[i]) and vol_confirmed[i]:
+            # Enter short: RSI(2) > 90 (overbought), price < EMA13 (downtrend), volume spike
+            elif (rsi2_aligned[i] > 90) and (close[i] < ema13_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
