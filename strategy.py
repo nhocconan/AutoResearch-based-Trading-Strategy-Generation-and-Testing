@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Ichimoku Cloud with volume confirmation
-# Ichimoku provides multi-component trend/cloud structure (Tenkan, Kijun, Senkou A/B, Chikou)
-# Price above/below cloud determines trend bias; TK cross provides entry timing
-# Volume confirmation (current 6h volume > 2.0x 20-period average) filters false signals
-# Works in bull/bear: cloud acts as dynamic support/resistance, TK cross captures momentum
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# Hypothesis: 12h strategy using 1d Williams Fractal breakouts with volume confirmation
+# Williams Fractals from 1d identify significant swing highs/lows that act as support/resistance
+# Volume confirmation (current 12h volume > 1.8x 20-period average) filters false breakouts
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Works in bull/bear: price reacts to 1d structure, volume confirms validity
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
 
-name = "6h_1d_ichimoku_volume_v1"
-timeframe = "6h"
+name = "12h_1d_williams_fractal_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,42 +26,33 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2.0
+    # Calculate 1d Williams Fractals
+    # Bearish fractal: high[n] > high[n-2] and high[n] > high[n-1] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal: low[n] < low[n-2] and low[n] < low[n-1] and low[n] < low[n+1] and low[n] < low[n+2]
+    n_1d = len(high_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2.0
+    for i in range(2, n_1d - 2):
+        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2.0)
+    # Williams fractals need 2 extra 1d bars after the center bar for confirmation
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2.0
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Pre-compute volume confirmation (20-period average for 6h)
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -70,55 +60,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+        if (np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 2.0x average 6h volume
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
-        
-        # Determine cloud boundaries (Senkou A and B)
-        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        # Volume confirmation: current 12h volume > 1.8x average 12h volume
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit when price closes below cloud (trend reversal)
-            if close[i] < lower_cloud:
+            # Exit on bullish fractal retracement (mean reversion from support)
+            if close[i] > bullish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price closes above cloud (trend reversal)
-            if close[i] > upper_cloud:
+            # Exit on bearish fractal retracement (mean reversion from resistance)
+            if close[i] < bearish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter on TK cross with volume confirmation and cloud filter
-            # Bullish TK cross: Tenkan crosses above Kijun
-            # Bearish TK cross: Tenkan crosses below Kijun
-            if i > 100:  # Need previous values for crossover
-                tenkan_prev = tenkan_aligned[i-1]
-                kijun_prev = kijun_aligned[i-1]
-                tenkan_curr = tenkan_aligned[i]
-                kijun_curr = kijun_aligned[i]
-                
-                bullish_tk = (tenkan_prev <= kijun_prev) and (tenkan_curr > kijun_curr)
-                bearish_tk = (tenkan_prev >= kijun_prev) and (tenkan_curr < kijun_curr)
-                
-                if volume_confirmed:
-                    if bullish_tk and close[i] > upper_cloud:
-                        # Strong bullish signal: price above cloud + bullish TK cross
-                        position = 1
-                        signals[i] = 0.25
-                    elif bearish_tk and close[i] < lower_cloud:
-                        # Strong bearish signal: price below cloud + bearish TK cross
-                        position = -1
-                        signals[i] = -0.25
+            # Breakout trading with volume confirmation
+            # Long on bullish fractal breakout, Short on bearish fractal breakout
+            if volume_confirmed:
+                if close[i] > bullish_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < bearish_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
