@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 6h_ema200_rsi_pullback_1d_v1
-# Hypothesis: 6h EMA200 trend + RSI(14) pullback with 1d EMA50 filter.
-# Works in bull/bear: 1d EMA50 defines higher-timeframe trend; 6h EMA200 defines intermediate trend;
-# RSI pullbacks (long when RSI<40 in uptrend, short when RSI>60 in downtrend) capture mean reversion within trend.
-# Volume confirmation ensures institutional participation. Target: 12-37 trades/year.
+# 4h_donchian_1d_trend_volume_v1
+# Hypothesis: 4h Donchian breakout with 1-day trend filter (EMA50) and volume confirmation.
+# Works in bull/bear: 1d EMA50 defines short-term institutional trend; Donchian(20) breakouts capture momentum;
+# volume confirms institutional participation. Target: 20-50 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema200_rsi_pullback_1d_v1"
-timeframe = "6h"
+name = "4h_donchian_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,9 +22,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA50 trend filter
+    # 1d HTF data for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,19 +33,12 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 6h EMA200 for intermediate trend
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # RSI(14) on 6h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,37 +46,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200[i]) or np.isnan(rsi[i]) or
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below EMA200 OR RSI > 70 (overbought)
-            if close[i] < ema200[i] or rsi[i] > 70:
+            # Exit: price closes below Donchian midpoint OR trend turns bearish
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < midpoint or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above EMA200 OR RSI < 30 (oversold)
-            if close[i] > ema200[i] or rsi[i] < 30:
+            # Exit: price closes above Donchian midpoint OR trend turns bullish
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > midpoint or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price above both EMAs AND RSI pullback from oversold (<40)
-                if close[i] > ema200[i] and close[i] > ema50_1d_aligned[i] and rsi[i] < 40:
+                # Long: price breaks above Donchian high with bullish trend
+                if close[i] > highest_high[i] and close[i] > ema50_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price below both EMAs AND RSI pullback from overbought (>60)
-                elif close[i] < ema200[i] and close[i] < ema50_1d_aligned[i] and rsi[i] > 60:
+                # Short: price breaks below Donchian low with bearish trend
+                elif close[i] < lowest_low[i] and close[i] < ema50_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
