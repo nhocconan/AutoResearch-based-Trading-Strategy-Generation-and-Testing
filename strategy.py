@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
-# - In trending regime (1d ADX > 25): trade Donchian breakouts in direction of 1d EMA50 trend
-# - In ranging regime (1d ADX < 20): mean revert at Donchian midpoint
-# - Volume confirmation: current 4h volume > 1.5x 20-period average
-# - Fixed position size 0.25 to control drawdown and reduce fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Uses discrete position sizes to minimize fee drag from signal changes
+# Hypothesis: 6h strategy using 1d Ichimoku cloud for trend direction and 1w Williams %R for mean reversion extremes
+# - Uses 1d HTF for Ichimoku: price above/below cloud determines trend
+# - Uses 1w HTF for Williams %R: extreme readings (>80 or <20) signal mean reversion opportunities
+# - In bullish trend (price > cloud): look for long entries when weekly Williams %R < 20 (oversold)
+# - In bearish trend (price < cloud): look for short entries when weekly Williams %R > 80 (overbought)
+# - Volume confirmation: current 6h volume > 1.3x 20-period average to avoid low-volume false signals
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_donchian_adx_regime_v1"
-timeframe = "4h"
+name = "6h_1d_1w_ichimoku_williams_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,73 +26,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMAs for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ADX for regime filter
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1d Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Smoothed values
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr == 0, 1, atr)
-    di_minus = 100 * dm_minus_smooth / np.where(atr == 0, 1, atr)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
     
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    # The cloud is between Senkou Span A and Senkou Span B
+    # For trend determination: price above cloud = bullish, below cloud = bearish
     
-    # Calculate 1d Donchian channels (20-period) from prior completed bar
-    # Donchian upper = max(high_1d over last 20 periods)
-    # Donchian lower = min(low_1d over last 20 periods)
-    # Donchian midpoint = (upper + lower) / 2
-    lookback = 20
-    donch_h_1d = pd.Series(high_1d).rolling(window=lookback, min_periods=lookback).max().values
-    donch_l_1d = pd.Series(low_1d).rolling(window=lookback, min_periods=lookback).min().values
-    donch_m_1d = (donch_h_1d + donch_l_1d) / 2.0
+    # Calculate 1w Williams %R (14 periods)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    period14_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    period14_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    williams_r = (period14_high - close_1w) / (period14_high - period14_low + 1e-10) * -100
     
-    # Align all 1d data to 4h timeframe (wait for completed 1d bar)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    donch_h_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_h_1d)
-    donch_l_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_l_1d)
-    donch_m_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_m_1d)
+    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
-    # Pre-compute 4h Donchian channels (20-period) for breakout entries
-    donch_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -99,79 +83,68 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(donch_h_1d_aligned[i]) or
-            np.isnan(donch_l_1d_aligned[i]) or np.isnan(donch_m_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(donch_h[i]) or np.isnan(donch_l[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20[i]) or
             vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        # Determine Ichimoku cloud boundaries
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Trend direction: 1d EMA50 > EMA200 = uptrend, < = downtrend
-        uptrend = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
-        downtrend = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
+        # Trend determination: price above/below cloud
+        bullish_trend = close[i] > upper_cloud
+        bearish_trend = close[i] < lower_cloud
+        
+        # Williams %R extremes: <20 = oversold, >80 = overbought
+        oversold = williams_r_aligned[i] < 20
+        overbought = williams_r_aligned[i] > 80
         
         # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
             # Exit conditions
-            if trending:
-                # In trending regime: exit when trend changes or price < Donchian lower
-                if not uptrend or close[i] < donch_l_1d_aligned[i]:
+            if bullish_trend:
+                # In bullish trend: exit when overbought or trend changes to bearish
+                if overbought or bearish_trend:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = position_size
-            else:  # ranging regime
-                # In ranging regime: exit when price > Donchian midpoint (take profit) or < Donchian lower (stop)
-                if close[i] > donch_m_1d_aligned[i] or close[i] < donch_l_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-                    
+            else:
+                # Not in bullish trend: exit
+                position = 0
+                signals[i] = 0.0
+                
         elif position == -1:  # Short position
             # Exit conditions
-            if trending:
-                # In trending regime: exit when trend changes or price > Donchian upper
-                if not downtrend or close[i] > donch_h_1d_aligned[i]:
+            if bearish_trend:
+                # In bearish trend: exit when oversold or trend changes to bullish
+                if oversold or bullish_trend:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -position_size
-            else:  # ranging regime
-                # In ranging regime: exit when price < Donchian midpoint (take profit) or > Donchian upper (stop)
-                if close[i] < donch_m_1d_aligned[i] or close[i] > donch_h_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
+            else:
+                # Not in bearish trend: exit
+                position = 0
+                signals[i] = 0.0
         else:  # Flat
-            # Entry logic based on regime
+            # Entry logic based on trend and Williams %R extremes
             if volume_confirmed:
-                if trending:
-                    # In trending regime: trade Donchian breakouts in trend direction
-                    if uptrend and close[i] > donch_h[i]:
-                        position = 1
-                        signals[i] = position_size
-                    elif downtrend and close[i] < donch_l[i]:
-                        position = -1
-                        signals[i] = -position_size
-                elif ranging:
-                    # In ranging regime: mean revert at Donchian bands
-                    if close[i] > donch_h[i]:
-                        position = -1  # short at upper band
-                        signals[i] = -position_size
-                    elif close[i] < donch_l[i]:
-                        position = 1   # long at lower band
-                        signals[i] = position_size
+                if bullish_trend and oversold:
+                    # In bullish trend, weekly oversold: long mean reversion
+                    position = 1
+                    signals[i] = position_size
+                elif bearish_trend and overbought:
+                    # In bearish trend, weekly overbought: short mean reversion
+                    position = -1
+                    signals[i] = -position_size
     
     return signals
