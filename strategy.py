@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_v1"
+name = "4h_12h_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -54,7 +54,7 @@ def generate_signals(prices):
         if i >= 3:
             vol_ma_4[i] = vol_sum / 4
     
-    # Choppiness regime filter (14-period)
+    # Choppiness regime filter (14-period) - simplified for speed
     chop = np.full(n, np.nan)
     for i in range(n):
         if i >= 13:
