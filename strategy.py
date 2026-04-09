@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1h_4h1d_rsi_ema_pullback_v1
-# Hypothesis: Pullback to EMA21 on 4h/1d trend with RSI(14) oversold/overbought on 1h for entry.
-# Trend: EMA21 on 4h and 1d must agree (both bullish or both bearish).
-# Entry: In uptrend, go long when 1h RSI < 30 and price > 4h EMA21; in downtrend, go short when 1h RSI > 70 and price < 4h EMA21.
-# Exit: When RSI returns to neutral (40-60 range) or trend changes.
-# Works in bull markets by buying dips in uptrend; in bear markets by selling rallies in downtrend.
-# Target: 15-35 trades/year (60-140 total over 4 years) with strict entry conditions.
+# 6h_1w_1d_camarilla_breakout_v1
+# Hypothesis: Breakout above/below 1d Camarilla pivot levels (H4/L4) on 6h chart with volume confirmation and volatility filter.
+# Long when price closes above H4 (bullish breakout), short when price closes below L4 (bearish breakout).
+# Exit when price returns to pivot point (mean reversion) or volatility filter fails.
+# Uses 1w trend filter: only take long trades when price > 1w EMA(40), only short trades when price < 1w EMA(40).
+# Target: 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_rsi_ema_pullback_v1"
-timeframe = "1h"
+name = "6h_1w_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,81 +24,111 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Calculate 1d EMA21 for trend confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    # Calculate ATR(14) for volatility filter
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        hl = high[i] - low[i]
+        hc = abs(high[i] - close[i-1])
+        lc = abs(low[i] - close[i-1])
+        tr[i] = max(hl, hc, lc)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    atr = np.zeros(n)
+    atr[0] = tr[0]
+    for i in range(1, n):
+        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Load 1d data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for previous day
+    ph = df_1d['high'].values  # previous day high
+    pl = df_1d['low'].values   # previous day low
+    pc = df_1d['close'].values # previous day close
+    
+    range_1d = ph - pl
+    # H4 = close + 1.5 * (high - low) * 1.1/2
+    # L4 = close - 1.5 * (high - low) * 1.1/2
+    h4 = pc + 1.5 * range_1d * 1.1 / 2
+    l4 = pc - 1.5 * range_1d * 1.1 / 2
+    # Pivot point = (high + low + close) / 3
+    pp = (ph + pl + pc) / 3
+    
+    # Align Camarilla levels to 6h timeframe (wait for previous day's close)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA(40)
+    close_1w = df_1w['close'].values
+    ema_1w = np.zeros_like(close_1w, dtype=float)
+    ema_1w[0] = close_1w[0]
+    alpha = 2.0 / (40 + 1)
+    for i in range(1, len(close_1w)):
+        ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
+    
+    # Align 1w EMA to 6h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation - 20 period average
+    vol_ma_20 = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volatility filter: avoid extremely high volatility
+        vol_filter = atr[i] < 0.06 * close[i]  # ATR less than 6% of price
         
-        # Trend alignment: both 4h and 1d EMA21 must agree
-        uptrend = (close[i] > ema_4h_aligned[i]) and (close[i] > ema_1d_aligned[i])
-        downtrend = (close[i] < ema_4h_aligned[i]) and (close[i] < ema_1d_aligned[i])
+        # Volume confirmation: current volume > 1.25x 20-period average
+        vol_ok = volume[i] > vol_ma_20[i] * 1.25
+        
+        # Trend filter: price > 1w EMA for longs, price < 1w EMA for shorts
+        trend_long = close[i] > ema_1w_aligned[i]
+        trend_short = close[i] < ema_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral or trend changes
-            if rsi[i] >= 40 or not uptrend:
+            # Exit: price closes below pivot point (mean reversion)
+            if close[i] < pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral or trend changes
-            if rsi[i] <= 60 or not downtrend:
+            # Exit: price closes above pivot point (mean reversion)
+            if close[i] > pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Enter long: uptrend + RSI oversold + in session
-            if uptrend and rsi[i] < 30 and in_session:
+            # Enter long: price closes above H4 with volume confirmation, volatility filter, and trend filter
+            if close[i] > h4_aligned[i] and vol_ok and vol_filter and trend_long:
                 position = 1
-                signals[i] = 0.20
-            # Enter short: downtrend + RSI overbought + in session
-            elif downtrend and rsi[i] > 70 and in_session:
+                signals[i] = 0.25
+            # Enter short: price closes below L4 with volume confirmation, volatility filter, and trend filter
+            elif close[i] < l4_aligned[i] and vol_ok and vol_filter and trend_short:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
