@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_daily_pivot_breakout_volume_chop_v1
-# Hypothesis: 12h strategy using daily pivot levels with volume confirmation and chop filter.
-# Long when price breaks above daily R4 with volume > 1.3x 20-period average and CHOP > 61.8 (range market).
-# Short when price breaks below daily S4 with volume > 1.3x 20-period average and CHOP > 61.8.
+# 4h_camarilla_breakout_volume_v1
+# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation.
+# Long when price breaks above daily R4 with volume > 1.5x 20-period average.
+# Short when price breaks below daily S4 with volume > 1.5x 20-period average.
 # Exit when price closes back inside daily R3/S3 levels.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Designed to capture strong breakouts in range markets (chop regime) while avoiding false signals in trends.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# Designed to capture strong breakouts in both bull and bear markets while avoiding false signals.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_pivot_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "4h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,7 +53,7 @@ def generate_signals(prices):
     r4_1d = close_1d + (range_1d * 1.1 / 2)
     s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align daily levels to 12h timeframe
+    # Align all levels to 4h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -64,27 +64,6 @@ def generate_signals(prices):
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Calculate Choppiness Index (14-period) on 12h timeframe
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_s = pd.Series(tr)
-    atr_val = atr_s.rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    max_high_s = pd.Series(high)
-    min_low_s = pd.Series(low)
-    max_high = max_high_s.rolling(window=atr_period, min_periods=atr_period).max().values
-    min_low = min_low_s.rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    chop = np.zeros(n)
-    for i in range(n):
-        if np.isnan(atr_val[i]) or np.isnan(max_high[i]) or np.isnan(min_low[i]) or max_high[i] == min_low[i]:
-            chop[i] = np.nan
-        else:
-            chop[i] = 100 * np.log10(atr_val[i] * np.sqrt(atr_period) / (max_high[i] - min_low[i])) / np.log10(atr_period)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
@@ -92,15 +71,12 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
             np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(chop[i])):
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
-        # Chop filter: CHOP > 61.8 indicates range market (good for mean reversion/breakouts)
-        chop_filter = chop[i] > 61.8
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price closes back below daily R3 (take profit) or below daily S4 (stop)
@@ -118,9 +94,9 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume and chop confirmation
-            bullish_breakout = (close[i] > r4_1d_aligned[i]) and volume_confirmed and chop_filter
-            bearish_breakout = (close[i] < s4_1d_aligned[i]) and volume_confirmed and chop_filter
+            # Check for breakout with volume confirmation
+            bullish_breakout = (close[i] > r4_1d_aligned[i]) and volume_confirmed
+            bearish_breakout = (close[i] < s4_1d_aligned[i]) and volume_confirmed
             
             if bullish_breakout:
                 position = 1
