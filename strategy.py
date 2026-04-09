@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 1d_1w_donchian_breakout_v1
-# Hypothesis: 1-day breakout of weekly Donchian channels (20-period) with volume confirmation (>2x 20-day average volume).
-# Weekly Donchian levels act as strong support/resistance; breaks signal momentum continuation.
-# Volume filter reduces false breakouts. Works in bull markets (upward breaks) and bear markets (downward breaks).
-# Target: 15-30 trades per year per symbol (~60-120 total over 4 years).
+# 12h_1d_camarilla_breakout_v1
+# Hypothesis: 12-hour breakouts at Camarilla pivot levels (H3/L3) from daily timeframe with volume confirmation (>2x 20-bar average volume).
+# Camarilla levels act as support/resistance; breaks signal momentum continuation.
+# Volume filter reduces false breakouts. Works in bull (upward breaks) and bear (downward breaks) markets.
+# Target: 12-37 trades per year per symbol (~48-148 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +23,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Calculate daily close for Camarilla levels
+    daily_close = df_1d['close'].values
     
-    # Calculate rolling max/min for Donchian channels
-    donchian_high = np.full(len(weekly_high), np.nan)
-    donchian_low = np.full(len(weekly_low), np.nan)
+    # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    for i in range(len(weekly_high)):
-        if i >= 19:  # 20-period lookback
-            donchian_high[i] = np.max(weekly_high[i-19:i+1])
-            donchian_low[i] = np.min(weekly_low[i-19:i+1])
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Align weekly Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Volume confirmation: 20-day average
+    # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
@@ -60,32 +56,32 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below weekly Donchian low
-            if close[i] <= donchian_low_aligned[i]:
+            # Exit: price returns to or below L3 level
+            if close[i] <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above weekly Donchian high
-            if close[i] >= donchian_high_aligned[i]:
+            # Exit: price returns to or above H3 level
+            if close[i] >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above weekly Donchian high with volume confirmation
-            if close[i] > donchian_high_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
+            # Enter long: price breaks above H3 with volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below weekly Donchian low with volume confirmation
-            elif close[i] < donchian_low_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
+            # Enter short: price breaks below L3 with volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = -1
                 signals[i] = -0.25
     
