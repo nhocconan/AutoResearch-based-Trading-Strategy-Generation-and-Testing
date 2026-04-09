@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Primary signal: Price breaks above/below Camarilla pivot levels (H3/L3) from 1d timeframe
-# - Trend filter: 1w EMA50 - price must be above/below EMA for alignment with higher timeframe trend
-# - Volume confirmation: 12h volume > 30-period median volume (avoid low-participation signals)
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+# - Primary signal: Donchian channel breakout on 4h timeframe - long when price > upper band, short when price < lower band
+# - Trend filter: 1d EMA50 - ensures alignment with higher timeframe trend (long only above EMA50, short only below)
+# - Volume confirmation: 4h volume > 20-period median volume to avoid low-participation false breakouts
+# - Exit: Donchian middle band (20-period mean) or opposing breakout
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Camarilla levels act as support/resistance in ranges, EMA50 filter ensures trend alignment
+# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Donchian captures trends, EMA50 filter avoids counter-trend trades, volume confirmation reduces whipsaws
 
-name = "12h_1d_1w_camarilla_pivot_ema_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,82 +23,70 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla pivot levels (H3, L3, H4, L4)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate ranges
-    range_hl = high_1d - low_1d
+    # Pre-compute Donchian(20) on 4h timeframe
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Camarilla levels
-    h3 = pp + (range_hl * 1.1 / 4)
-    l3 = pp - (range_hl * 1.1 / 4)
-    h4 = pp + (range_hl * 1.1 / 2)
-    l4 = pp - (range_hl * 1.1 / 2)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Pre-compute 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # 12h volume regime: volume > 30-period median volume
+    # 4h volume regime: volume > 20-period median volume
     volume = prices['volume'].values
-    median_volume_30 = pd.Series(volume).rolling(window=30, min_periods=30).median().values
-    volume_regime = volume > median_volume_30
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > median_volume_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(ema_50_aligned[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
+            np.isnan(donchian_middle[i]) or
             np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Price crosses below L3 OR closes below 1w EMA50
-            if prices['close'].iloc[i] < l3_aligned[i] or prices['close'].iloc[i] < ema_50_aligned[i]:
+            # Exit: price crosses below Donchian middle OR Donchian lower band breaks (strong reversal)
+            if close[i] < donchian_middle[i] or close[i] < donchian_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above H3 OR closes above 1w EMA50
-            if prices['close'].iloc[i] > h3_aligned[i] or prices['close'].iloc[i] > ema_50_aligned[i]:
+            # Exit: price crosses above Donchian middle OR Donchian upper band breaks (strong reversal)
+            if close[i] > donchian_middle[i] or close[i] > donchian_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with volume confirmation and 1w EMA50 filter
-            # Long: Price breaks above H3 AND volume regime AND price above 1w EMA50
-            if (prices['close'].iloc[i] > h3_aligned[i] and 
+            # Look for Donchian breakout with volume confirmation and 1d EMA50 filter
+            # Long: price > Donchian upper AND volume regime AND price above 1d EMA50
+            if (close[i] > donchian_upper[i] and 
                 volume_regime[i] and 
-                prices['close'].iloc[i] > ema_50_aligned[i]):
+                close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: Price breaks below L3 AND volume regime AND price below 1w EMA50
-            elif (prices['close'].iloc[i] < l3_aligned[i] and 
+            # Short: price < Donchian lower AND volume regime AND price below 1d EMA50
+            elif (close[i] < donchian_lower[i] and 
                   volume_regime[i] and 
-                  prices['close'].iloc[i] < ema_50_aligned[i]):
+                  close[i] < ema_50_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
