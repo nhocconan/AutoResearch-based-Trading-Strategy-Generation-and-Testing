@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 4h_camarilla_breakout_volume_v1
-# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation.
-# Long when price breaks above daily R4 with volume > 1.5x 20-period average.
-# Short when price breaks below daily S4 with volume > 1.5x 20-period average.
+# 12h_camarilla_breakout_volume_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ATR filter.
+# Long when price breaks above daily R4 with volume > 1.5x 20-period average and ATR > ATR_ma.
+# Short when price breaks below daily S4 with volume > 1.5x 20-period average and ATR > ATR_ma.
 # Exit when price closes back inside daily R3/S3 levels.
 # Uses discrete position sizing (0.25) to minimize fee churn.
 # Designed to capture strong breakouts in both bull and bear markets while avoiding false signals.
-# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,6 +29,15 @@ def generate_signals(prices):
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     
     # Get daily data for pivot levels (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -53,7 +62,7 @@ def generate_signals(prices):
     r4_1d = close_1d + (range_1d * 1.1 / 2)
     s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align all levels to 4h timeframe
+    # Align all levels to 12h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -71,12 +80,15 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
             np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+            np.isnan(volume_ma[i]) or np.isnan(atr_ma[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # ATR filter: current ATR > 20-period average ATR (ensures sufficient volatility)
+        atr_filter = atr[i] > atr_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price closes back below daily R3 (take profit) or below daily S4 (stop)
@@ -94,9 +106,9 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation
-            bullish_breakout = (close[i] > r4_1d_aligned[i]) and volume_confirmed
-            bearish_breakout = (close[i] < s4_1d_aligned[i]) and volume_confirmed
+            # Check for breakout with volume confirmation and ATR filter
+            bullish_breakout = (close[i] > r4_1d_aligned[i]) and volume_confirmed and atr_filter
+            bearish_breakout = (close[i] < s4_1d_aligned[i]) and volume_confirmed and atr_filter
             
             if bullish_breakout:
                 position = 1
