@@ -1,86 +1,37 @@
 #!/usr/bin/env python3
-# 1d_kama_rsi_chop_v2
-# Hypothesis: 1d Kaufman Adaptive Moving Average (KAMA) trend with RSI mean reversion and choppiness filter.
-# Uses 1d timeframe for low trade frequency (target: 20-80 over 4 years). KAMA adapts to market noise,
-# providing reliable trend signals with reduced whipsaw. RSI(14) < 30 for long, > 70 for short entries
-# only when price is near KAMA (mean reversion within trend). Choppiness Index (CHOP) > 50 ensures
-# ranging/mean-reverting conditions, avoiding strong trends where mean reversion fails.
-# Works in bull/bear markets: KAMA captures trend direction, RSI provides timely entries,
-# chop filter avoids false signals in strong trends.
+# 12h_hma_1d_camarilla_volume_v1
+# Hypothesis: 12h Hull Moving Average (HMA) crossover with 1d Camarilla H3/L3 filter and volume confirmation.
+# Uses 12h timeframe for lower trade frequency (target: 12-37/year). HMA provides smooth trend signals with reduced lag.
+# Camarilla H3/L3 from 1d acts as strong directional filter (only trade in direction of daily extremes).
+# Volume spike confirms institutional participation. Designed to work in both bull and bear markets:
+# - In bull markets: HMA uptrend + price > 1d H3 + volume = long
+# - In bear markets: HMA downtrend + price < 1d L3 + volume = short
+# - In ranging markets: filters prevent entries as price fails to breach H3/L3 levels
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_v2"
-timeframe = "1d"
+name = "12h_hma_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    if len(close) < er_period:
-        return np.full_like(close, np.nan, dtype=float)
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    close_series = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_series.diff(er_period))
-    volatility = close_series.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0).values
-    
-    # Smoothing constants
-    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index"""
-    if len(close) < period + 1:
-        return np.full_like(close, np.nan, dtype=float)
-    
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50).values
-
-def calculate_choppiness(high, low, close, period=14):
-    """Calculate Choppiness Index"""
-    if len(close) < period:
-        return np.full_like(close, np.nan, dtype=float)
-    
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    
-    # True Range
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift())
-    tr3 = abs(low_series - close_series.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Sum of True Range over period
-    atr_sum = tr.rolling(window=period, min_periods=period).sum()
-    
-    # Highest high and lowest low over period
-    hh = high_series.rolling(window=period, min_periods=period).max()
-    ll = low_series.rolling(window=period, min_periods=period).min()
-    
-    # Choppiness Index
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
-    return chop.fillna(50).values
+    # WMA for half period using EWM as proxy
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean().values
+    # WMA for full period
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean().values
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -90,58 +41,77 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d HTF data ONCE before loop for KAMA, RSI, Chop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for HMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 55:  # Need enough for HMA(55)
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate 12h HMA(55) for trend
+    close_12h = df_12h['close'].values
+    hma_12h = calculate_hma(close_12h, 55)
+    
+    # Align 12h HMA to 12h timeframe (completed 12h candle only)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    
+    # Get 1d HTF data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels for daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d indicators
-    kama_1d = calculate_kama(close_1d, er_period=10, fast_period=2, slow_period=30)
-    rsi_1d = calculate_rsi(close_1d, period=14)
-    chop_1d = calculate_choppiness(high_1d, low_1d, close_1d, period=14)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align 1d indicators to 1d timeframe (completed daily candle only)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Camarilla H3/L3 levels (stronger bias filter than H4/L4)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe (completed daily candle only)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Volume spike detection (20-period volume average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(hma_12h_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
+            np.isnan(l3_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 60 or price > KAMA * 1.02 (take profit)
-            if (rsi_1d_aligned[i] > 60) or (close[i] > kama_1d_aligned[i] * 1.02):
+            # Exit: price closes below 12h HMA
+            if close[i] < hma_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 40 or price < KAMA * 0.98 (take profit)
-            if (rsi_1d_aligned[i] < 40) or (close[i] < kama_1d_aligned[i] * 0.98):
+            # Exit: price closes above 12h HMA
+            if close[i] > hma_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price < KAMA (mean reversion), RSI < 30, chop > 50 (ranging)
-            if (close[i] < kama_1d_aligned[i]) and (rsi_1d_aligned[i] < 30) and (chop_1d_aligned[i] > 50):
+            # Enter long: price closes above 12h HMA, above 1d H3, with volume spike
+            if (close[i] > hma_12h_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price > KAMA (mean reversion), RSI > 70, chop > 50 (ranging)
-            elif (close[i] > kama_1d_aligned[i]) and (rsi_1d_aligned[i] > 70) and (chop_1d_aligned[i] > 50):
+            # Enter short: price closes below 12h HMA, below 1d L3, with volume spike
+            elif (close[i] < hma_12h_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
