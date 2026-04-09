@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# Uses 1d Donchian breakout in direction of 1w HMA(21) trend
-# Enters only when volume > 1.5x 20-period average for confirmation
-# Exits when price closes opposite Donchian band
-# Position size 0.25 to limit drawdown
-# Target: 7-25 trades/year per symbol (30-100 total over 4 years) to minimize fee drag
-# Works in both bull/bear: Donchian captures breakouts, 1w HMA filter avoids counter-trend trades
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
+# Uses 1d Camarilla pivot levels (R3, R4, S3, S4) calculated from prior day's OHLC
+# Enters long on break above R4 with volume > 1.5x 20-period 6h average
+# Enters short on break below S4 with volume > 1.5x 20-period 6h average
+# Exits when price returns to R3 (for longs) or S3 (for shorts)
+# Works in both bull/bear: Camarilla levels adapt to volatility, breakouts capture momentum
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag
 
-name = "1d_1w_donchian_hma_vol_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,53 +27,39 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
-    
-    # Calculate 1d Donchian channel (20-period)
+    # Calculate 1d Camarilla pivot levels (based on prior day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    donch_high_1d = np.full(len(df_1d), np.nan)
-    donch_low_1d = np.full(len(df_1d), np.nan)
+    # Camarilla levels: based on prior day's range
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_r4 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
+    camarilla_s4 = np.full(len(df_1d), np.nan)
     
-    for i in range(20, len(df_1d)):
-        donch_high_1d[i] = np.max(high_1d[i-20:i])
-        donch_low_1d[i] = np.min(low_1d[i-20:i])
+    for i in range(1, len(df_1d)):
+        # Use prior day's OHLC (i-1) to calculate today's levels
+        prior_high = high_1d[i-1]
+        prior_low = low_1d[i-1]
+        prior_close = close_1d[i-1]
+        range_val = prior_high - prior_low
+        
+        camarilla_r4[i] = prior_close + range_val * 1.1 / 2
+        camarilla_r3[i] = prior_close + range_val * 1.1 / 4
+        camarilla_s3[i] = prior_close - range_val * 1.1 / 4
+        camarilla_s4[i] = prior_close - range_val * 1.1 / 2
     
-    # Align 1d Donchian to 1d timeframe (only use completed daily bars)
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    # Align Camarilla levels to 6h timeframe (only use completed daily bars)
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Calculate 1w HMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
-    
-    hma_1w = np.full(len(df_1w), np.nan)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    
-    if len(close_1w) >= 21:
-        wma_half = wma(close_1w, half_len)
-        wma_full = wma(close_1w, 21)
-        wma_2x_diff = 2 * wma_half[-len(wma_full):] - wma_full
-        if len(wma_2x_diff) >= sqrt_len:
-            hma_values = wma(wma_2x_diff, sqrt_len)
-            hma_1w[half_len + sqrt_len - 1:] = hma_values
-    
-    # Align 1w HMA to 1d timeframe (only use completed weekly bars)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    
-    # Volume confirmation: 20-period average on 1d (~20 days)
+    # Volume confirmation: 20-period average on 6h (~5 days)
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -86,52 +72,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):  # Start after volume MA warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_1d_aligned[i]) or 
-            np.isnan(donch_low_1d_aligned[i]) or 
-            np.isnan(hma_1w_aligned[i]) or 
+        if (np.isnan(camarilla_r3_6h[i]) or 
+            np.isnan(camarilla_r4_6h[i]) or 
+            np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(camarilla_s4_6h[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 1d Donchian low
-            if close[i] <= donch_low_1d_aligned[i]:
+            # Exit: price closes back below R3 (take profit at first resistance level)
+            if close[i] < camarilla_r3_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 1d Donchian high
-            if close[i] >= donch_high_1d_aligned[i]:
+            # Exit: price closes back above S3 (take profit at first support level)
+            if close[i] > camarilla_s3_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Determine trend direction from 1w HMA
-            # Need previous HMA value to determine slope
-            if i > 0 and not np.isnan(hma_1w_aligned[i-1]):
-                hma_rising = hma_1w_aligned[i] > hma_1w_aligned[i-1]
-                hma_falling = hma_1w_aligned[i] < hma_1w_aligned[i-1]
-            else:
-                hma_rising = False
-                hma_falling = False
-            
             vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            
-            # Enter long: price closes above 1d Donchian high with volume confirmation and uptrend
-            if (close[i] > donch_high_1d_aligned[i] and 
-                vol_ratio > 1.5 and 
-                hma_rising):
+            # Enter long: price breaks above R4 with volume confirmation
+            if (close[i] > camarilla_r4_6h[i] and 
+                vol_ratio > 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 1d Donchian low with volume confirmation and downtrend
-            elif (close[i] < donch_low_1d_aligned[i] and 
-                  vol_ratio > 1.5 and 
-                  hma_falling):
+            # Enter short: price breaks below S4 with volume confirmation
+            elif (close[i] < camarilla_s4_6h[i] and 
+                  vol_ratio > 1.5):
                 position = -1
                 signals[i] = -0.25
     
