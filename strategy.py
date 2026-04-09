@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,32 +36,32 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 4h timeframe
+    # Align daily values to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 3-period average (3*4h = 12h)
-    vol_ma_3 = np.full(n, np.nan)
+    # Volume confirmation: 2-period average (2*12h = 24h)
+    vol_ma_2 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 3:
-            vol_sum -= volume[i-3]
         if i >= 2:
-            vol_ma_3[i] = vol_sum / 3
+            vol_sum -= volume[i-2]
+        if i >= 1:
+            vol_ma_2[i] = vol_sum / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or 
             np.isnan(prev_high_aligned[i]) or 
             np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_3[i])):
+            np.isnan(vol_ma_2[i])):
             signals[i] = 0.0
             continue
         
@@ -82,12 +82,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Enter long: price closes above R4 with volume confirmation
-            vol_ratio = volume[i] / vol_ma_3[i] if vol_ma_3[i] > 0 else 0
-            if close[i] > r4_aligned[i] and vol_ratio > 2.0:
+            vol_ratio = volume[i] / vol_ma_2[i] if vol_ma_2[i] > 0 else 0
+            if close[i] > r4_aligned[i] and vol_ratio > 1.8:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price closes below S4 with volume confirmation
-            elif close[i] < s4_aligned[i] and vol_ratio > 2.0:
+            elif close[i] < s4_aligned[i] and vol_ratio > 1.8:
                 position = -1
                 signals[i] = -0.25
     
