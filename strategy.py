@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R reversal + 1d EMA trend filter + volume spike confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion entries
-# 1d EMA provides higher timeframe trend bias to avoid counter-trend trades
-# Volume spike confirms institutional participation at reversal points
-# Works in bull/bear: EMA filter adapts to higher timeframe direction
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# Donchian breakouts capture momentum; 1w EMA50 ensures alignment with weekly trend
+# Volume confirmation filters for authentic breakouts
+# Works in bull/bear: weekly EMA50 adapts to higher timeframe bias
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25-0.30
 
-name = "12h_1d_williamsr_ema_volume_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_ema50_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +23,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d 50-period EMA for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA50
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_50_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 12h Williams %R (14-period)
-    williams_r = np.full(n, np.nan)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
     for i in range(n):
-        if i < 14:
-            williams_r[i] = np.nan
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
+        if i < 20:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
         else:
-            highest_high[i] = np.max(high[i-14:i])
-            lowest_low[i] = np.min(low[i-14:i])
-            if highest_high[i] == lowest_low[i]:
-                williams_r[i] = -50.0  # Avoid division by zero
-            else:
-                williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
     
-    # Calculate 12h 20-period average volume for volume confirmation
+    # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -65,38 +58,38 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * avg_volume[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: Williams %R > -20 (overbought) OR price < 1d EMA (trend change)
-            if williams_r[i] > -20 or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price < Donchian low OR price < weekly EMA50 (trend change vs weekly structure)
+            if close[i] < donchian_low[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R < -80 (oversold) OR price > 1d EMA (trend change)
-            if williams_r[i] < -80 or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price > Donchian high OR price > weekly EMA50 (trend change vs weekly structure)
+            if close[i] > donchian_high[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Williams %R extremes + EMA filter
+            # Entry logic with volume confirmation and Donchian breakout + weekly EMA50 filter
             if volume_confirmed:
-                # Long entry: Williams %R < -80 (oversold) AND price > 1d EMA (bullish alignment)
-                if williams_r[i] < -80 and close[i] > ema_50_1d_aligned[i]:
+                # Long entry: price > Donchian high AND price > weekly EMA50 (bullish breakout above weekly trend)
+                if close[i] > donchian_high[i] and close[i] > ema_50_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: Williams %R > -20 (overbought) AND price < 1d EMA (bearish alignment)
-                elif williams_r[i] > -20 and close[i] < ema_50_1d_aligned[i]:
+                # Short entry: price < Donchian low AND price < weekly EMA50 (bearish breakout below weekly trend)
+                elif close[i] < donchian_low[i] and close[i] < ema_50_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
