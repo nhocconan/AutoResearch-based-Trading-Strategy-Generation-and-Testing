@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Ichimoku cloud with TK cross and volume confirmation
-# Ichimoku cloud from 1d provides strong support/resistance aligned with 6h timeframe
-# Tenkan-Kijun cross signals momentum shifts, cloud acts as dynamic filter
-# Volume confirmation (current 6h volume > 1.8x 30-period average) ensures breakout validity
-# Works in bull/bear: price respects Ichimoku structure, TK cross catches reversals
-# Discrete position sizing: 0.0, ±0.25 to minimize fee churn
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# Hypothesis: 1h strategy using 4h/1d Camarilla pivot levels with volume confirmation
+# 4h/1d pivots provide structure aligned with 1h timeframe
+# Volume confirmation (current 1h volume > 2.0x 20-period average) filters false breakouts
+# Session filter (08-20 UTC) reduces noise trades
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h
+# Works in bull/bear: price reacts to 4h/1d structure, volume confirms validity
+# Discrete position sizing: 0.0, ±0.20 to minimize fee churn
 
-name = "6h_1d_ichimoku_tk_volume_v1"
-timeframe = "6h"
+name = "1h_4h_1d_camarilla_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,89 +25,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Pre-compute session filter (08-20 UTC) - prices.index is already DatetimeIndex
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need enough for Ichimoku calculations
+    if len(df_4h) < 25 or len(df_1d) < 25:
         return np.zeros(n)
     
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on 1d
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max()
-    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()
-    tenkan = (high_tenkan + low_tenkan) / 2.0
+    # Calculate 4h Camarilla pivot levels
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
+    camarilla_r4_4h = close_4h + range_4h * 1.1 / 2.0  # R4
+    camarilla_s4_4h = close_4h - range_4h * 1.1 / 2.0  # S4
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max()
-    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()
-    kijun = (high_kijun + low_kijun) / 2.0
+    # Calculate 1d Camarilla pivot levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_r4_1d = close_1d + range_1d * 1.1 / 2.0  # R4
+    camarilla_s4_1d = close_1d - range_1d * 1.1 / 2.0  # S4
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2.0)
+    # Align Camarilla levels to 1h timeframe
+    r4_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r4_4h)
+    s4_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s4_4h)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max()
-    low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()
-    senkou_b = ((high_senkou_b + low_senkou_b) / 2.0)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun.values)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
-    
-    # Determine cloud top and bottom (Senkou Span A and B)
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
-    
-    # Pre-compute volume confirmation (30-period average for 6h)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Pre-compute volume confirmation (20-period average for 1h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(r4_4h_aligned[i]) or np.isnan(s4_4h_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.8x average 6h volume
-        volume_confirmed = volume[i] > 1.8 * vol_ma_30[i]
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current 1h volume > 2.0x average 1h volume
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit when price closes below cloud or TK cross turns bearish
-            if close[i] < cloud_bottom[i] or (tenkan_aligned[i] < kijun_aligned[i] and close[i] < tenkan_aligned[i]):
+            # Exit on 4h S4 retracement (mean reversion from strong level)
+            if close[i] < s4_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit when price closes above cloud or TK cross turns bullish
-            if close[i] > cloud_top[i] or (tenkan_aligned[i] > kijun_aligned[i] and close[i] > tenkan_aligned[i]):
+            # Exit on 4h R4 retracement (mean reversion from strong level)
+            if close[i] > r4_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter on TK cross with volume confirmation and price outside cloud
+            # Breakout trading with volume confirmation AND 1d level alignment
+            # Require both 4h breakout AND price beyond 1d level for stronger signal
             if volume_confirmed:
-                # Bullish TK cross: Tenkan crosses above Kijun
-                if tenkan_aligned[i] > kijun_aligned[i] and close[i] > cloud_top[i]:
+                # Long on 4h R4 breakout AND price above 1d R4
+                if close[i] > r4_4h_aligned[i] and close[i] > r4_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Bearish TK cross: Tenkan crosses below Kijun
-                elif tenkan_aligned[i] < kijun_aligned[i] and close[i] < cloud_bottom[i]:
+                    signals[i] = 0.20
+                # Short on 4h S4 breakout AND price below 1d S4
+                elif close[i] < s4_4h_aligned[i] and close[i] < s4_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
