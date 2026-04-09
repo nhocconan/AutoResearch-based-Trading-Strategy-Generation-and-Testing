@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and ATR filter
-# 1d Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
+# Hypothesis: 4h strategy using 1w Camarilla pivot levels with volume confirmation and ATR filter
+# Weekly Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
 # Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 12h volume > 1.3x 20-period average) filters false signals
+# Volume confirmation (current 4h volume > 1.3x 20-period average) filters false signals
 # ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
 # Position size scales with volatility (inverse ATR) to maintain consistent risk
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "12h_1d_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1w_camarilla_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,45 +25,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Camarilla pivot levels
+    # Calculate 1w Camarilla pivot levels
     # Pivot point = (H + L + C) / 3
     # Range = H - L
     # R4 = C + (H-L) * 1.1/2
     # R3 = C + (H-L) * 1.1/4
     # S3 = C - (H-L) * 1.1/4
     # S4 = C - (H-L) * 1.1/2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + range_1d * 1.1 / 2.0
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r4_1w = close_1w + range_1w * 1.1 / 2.0
+    r3_1w = close_1w + range_1w * 1.1 / 4.0
+    s3_1w = close_1w - range_1w * 1.1 / 4.0
+    s4_1w = close_1w - range_1w * 1.1 / 2.0
     
-    # Calculate 1d ATR (14-period) for volatility filtering and position sizing
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate 1w ATR (14-period) for volatility filtering and position sizing
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period has no previous close
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align Camarilla levels and ATR to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    atr_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average for 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -78,7 +78,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x average 12h volume
+        # Volume confirmation: current 4h volume > 1.3x average 4h volume
         volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low-vol chop)
