@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_v1
-# Hypothesis: Daily breakouts above/below weekly Camarilla pivot levels (H4/L4) with volume confirmation.
-# Long when price breaks above H4 with volume > 1.5x average.
-# Short when price breaks below L4 with volume > 1.5x average.
-# Exit when price returns to the weekly pivot point (PW).
-# Weekly trend filter avoids counter-trend trades.
-# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
+# 4h_1d_camarilla_breakout_v3
+# Hypothesis: 4-hour breakouts above/below daily Camarilla H4/L4 levels with volume confirmation (volume > 1.5x 20-bar average).
+# Long when price breaks above H4 with volume confirmation. Short when price breaks below L4 with volume confirmation.
+# Exit when price returns to the daily pivot point (PP).
+# Uses only daily Camarilla levels for simplicity and focus, reducing overtrading.
+# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivot levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Camarilla formulas
-    pw_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # H4 and L4 levels (stronger breakout levels)
-    h4_1w = close_1w + (range_1w * 1.1 / 2)
-    l4_1w = close_1w - (range_1w * 1.1 / 2)
+    h4_1d = close_1d + (range_1d * 1.1 / 2)
+    l4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align weekly levels to daily timeframe
-    pw_aligned = align_htf_to_ltf(prices, df_1w, pw_1w)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4_1w)
+    # Align 1d levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.full(n, np.nan)
@@ -61,23 +60,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(pw_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below weekly pivot point
-            if close[i] <= pw_aligned[i]:
+            # Exit: price returns to or below Pivot Point
+            if close[i] <= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above weekly pivot point
-            if close[i] >= pw_aligned[i]:
+            # Exit: price returns to or above Pivot Point
+            if close[i] >= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
