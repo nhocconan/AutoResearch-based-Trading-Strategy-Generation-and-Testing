@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and volatility filter
-# - Uses 4h Donchian channel (20-period high/low) derived from 1d data for breakout signals
-# - Confirms with 1d volume > 2.0x its 20-period average (strong institutional participation)
-# - Confirms with 1d ATR(14) > 1.5x its 50-period average (high volatility regime)
-# - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme
+# Hypothesis: 4h Williams Fractal breakout with 1d volume/volatility confirmation
+# - Uses 1d Williams Fractals (bearish/bullish) to identify key swing points
+# - Break above recent bullish fractal or below recent bearish fractal on 4h
+# - Confirmed by 1d volume > 1.8x its 20-period average and 1d ATR > 1.3x its 50-period average
+# - ATR(14) trailing stop: exits when price retraces 2.5x ATR from extreme
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to minimize fee drag
-# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
-# - Donchian channels adapt to volatility and provide objective breakout levels
-# - Stricter filters reduce trade frequency while maintaining edge
+# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
+# - Works in bull markets (fractal breakouts continue) and bear markets (breakdowns continue)
+# - Williams Fractals provide objective swing high/low levels with built-in confirmation delay
+# - Stricter volume/volatility filters reduce trade frequency while maintaining edge
 
-name = "4h_1d_donchian_atr_volume_v3"
+name = "4h_1d_williams_fractal_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -47,14 +47,30 @@ def generate_signals(prices):
     # 1d ATR(50) average for volatility regime filter
     atr_50_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 1d Volume > 2.0x 20-period average (stricter for fewer trades)
+    # 1d Volume > 1.8x 20-period average (balanced for trade frequency)
     avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * avg_volume_20)
+    volume_spike_1d = volume_1d > (1.8 * avg_volume_20)
     
-    # Align 1d indicators to 4h
+    # Williams Fractals on 1d (requires 5 bars: 2 left, 2 right)
+    # Bearish fractal: high[2] is highest of [high[0], high[1], high[2], high[3], high[4]]
+    # Bullish fractal: low[2] is lowest of [low[0], low[1], low[2], low[3], low[4]]
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
+    
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Align 1d indicators to 4h with extra delay for fractals (need 2 bars for confirmation)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     atr_50_avg_aligned = align_htf_to_ltf(prices, df_1d, atr_50_avg)
     volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
     # 4h price data
     high = prices['high'].values
@@ -71,6 +87,7 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_50_avg_aligned[i]) or 
             np.isnan(volume_spike_1d_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
             atr_1d_aligned[i] <= 0 or atr_50_avg_aligned[i] <= 0):
             signals[i] = 0.0
             continue
@@ -80,8 +97,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 3.0x ATR from high (wider stop)
-            if low[i] <= highest_since_entry - (3.0 * atr_1d_aligned[i]):
+            # Exit conditions: price retraces 2.5x ATR from high
+            if low[i] <= highest_since_entry - (2.5 * atr_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,52 +109,30 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 3.0x ATR from low (wider stop)
-            if high[i] >= lowest_since_entry + (3.0 * atr_1d_aligned[i]):
+            # Exit conditions: price retraces 2.5x ATR from low
+            if high[i] >= lowest_since_entry + (2.5 * atr_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate 4h Donchian channels using 20-period lookback
-            # 20 periods of 4h = 10 periods of 1d (since 1d = 6 * 4h)
-            lookback_periods = 10  # 10 days = ~20 * 4h periods
-            
-            if i < lookback_periods:
-                signals[i] = 0.0
-                continue
-                
-            # Get recent 1d high/low aligned to current 4h bar
-            rolling_max_1d = pd.Series(high_1d).rolling(window=lookback_periods, min_periods=lookback_periods).max().values
-            rolling_min_1d = pd.Series(low_1d).rolling(window=lookback_periods, min_periods=lookback_periods).min().values
-            
-            # Align to 4h timeframe
-            donchian_high_aligned = align_htf_to_ltf(prices, df_1d, rolling_max_1d)
-            donchian_low_aligned = align_htf_to_ltf(prices, df_1d, rolling_min_1d)
-            
-            if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-                np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
-                signals[i] = 0.0
-                continue
-            
-            # Volatility regime filter: only trade when current ATR > 1.5x its 50-day average (stricter)
-            volatility_filter = atr_1d_aligned[i] > (1.5 * atr_50_avg_aligned[i])
-            
-            # Look for Donchian breakout with volume and volatility confirmation
-            if (high[i] >= donchian_high_aligned[i] and    # Break above upper band
+            # Look for fractal breakouts with volume and volatility confirmation
+            # Bullish breakout: price > recent bullish fractal
+            if (high[i] > bullish_fractal_aligned[i] and    # Break above bullish fractal
                 volume_spike_1d_aligned[i] and             # Volume confirmation
-                volatility_filter):                        # High volatility regime
+                atr_1d_aligned[i] > (1.3 * atr_50_avg_aligned[i])):  # High volatility regime
                 position = 1
                 entry_price = high[i]
                 highest_since_entry = high[i]
-                lowest_since_entry = high[i]  # Initialize for shorts
+                lowest_since_entry = high[i]
                 signals[i] = 0.25
-            elif (low[i] <= donchian_low_aligned[i] and    # Break below lower band
-                  volume_spike_1d_aligned[i] and           # Volume confirmation
-                  volatility_filter):                      # High volatility regime
+            # Bearish breakout: price < recent bearish fractal
+            elif (low[i] < bearish_fractal_aligned[i] and   # Break below bearish fractal
+                  volume_spike_1d_aligned[i] and            # Volume confirmation
+                  atr_1d_aligned[i] > (1.3 * atr_50_avg_aligned[i])):  # High volatility regime
                 position = -1
                 entry_price = low[i]
-                highest_since_entry = low[i]  # Initialize for longs
+                highest_since_entry = low[i]
                 lowest_since_entry = low[i]
                 signals[i] = -0.25
     
