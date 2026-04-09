@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w ATR-based volatility regime filter and 1d Donchian channel breakouts
-# - Uses 1w ATR(20) normalized by price to determine volatility regime (high/low vol)
-# - Uses 1d Donchian(20) for breakout signals in direction of 1w trend (EMA50)
-# - In high volatility regime ( ATR/price > 0.03 ): trade breakouts with 1w trend filter
-# - In low volatility regime ( ATR/price <= 0.03 ): fade Donchian touches (mean reversion)
-# - Volume confirmation: current 6h volume > 1.5x 20-period average to avoid low-volume false signals
+# Hypothesis: 12h strategy using 1d Donchian breakout with volume confirmation and chop regime filter
+# - Uses 1d HTF for Donchian(20) breakout: price > 20-period high = bullish, < 20-period low = bearish
+# - Volume confirmation: current 12h volume > 1.5x 20-period average to avoid low-volume false signals
+# - Chop regime filter: only trade when choppiness index > 61.8 (ranging market) for mean reversion at extremes
+# - In ranging markets: fade Donchian breakouts (short at upper band, long at lower band)
+# - In trending markets (chop < 38.2): don't trade (avoid whipsaws)
 # - Fixed position size 0.25 to control drawdown
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets via regime adaptation
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "6h_1d_1w_atr_regime_donchian_v2"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,130 +26,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d Donchian channels (20 periods)
+    period20_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1w ATR(20) for volatility regime
-    # True Range = max(high-low, abs(high-previous_close), abs(low-previous_close))
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # first period has no previous close
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(true_range).rolling(window=20, min_periods=20).mean().values
+    # Align HTF data to 12h timeframe (wait for completed 1d bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, period20_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, period20_low)
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # 1d Donchian Channel (20 periods)
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid_20 = (donch_high_20 + donch_low_20) / 2
-    
-    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    donch_mid_20_aligned = align_htf_to_ltf(prices, df_1d, donch_mid_20)
-    
-    # Pre-compute volume confirmation (20-period average for 6h)
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute choppiness index (14 periods) on 12h timeframe
+    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    atr_values = np.zeros(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with indices
+    
+    atr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    chop_denominator = highest_high - lowest_low
+    chop = np.where(chop_denominator > 0, 
+                    100 * np.log10(pd.Series(atr_ma).rolling(window=14, min_periods=14).sum().values / chop_denominator) / np.log10(14),
+                    50)  # neutral when denominator is 0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    position_size = 0.25
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(donch_mid_20_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            vol_ma_20[i] <= 0 or close[i] <= 0):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(chop[i]) or
+            vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x average
+        # Volume confirmation: current 12h volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volatility regime: ATR/price ratio
-        atr_ratio = atr_1w_aligned[i] / close[i]
-        high_vol_regime = atr_ratio > 0.03  # High volatility regime
-        
-        # 1w trend filter: price above/below EMA50
-        bullish_trend_1w = close[i] > ema50_1w_aligned[i]
-        bearish_trend_1w = close[i] < ema50_1w_aligned[i]
-        
-        # Donchian levels
-        upper_donch = donch_high_20_aligned[i]
-        lower_donch = donch_low_20_aligned[i]
-        
-        # Fixed position size
-        position_size = 0.25
+        # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending (don't trade)
+        ranging_market = chop[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit conditions
-            if high_vol_regime:
-                # High vol: exit on Donchian middle touch or trend change
-                if close[i] <= donch_mid_20_aligned[i] or not bullish_trend_1w:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
+            # Exit conditions: price reaches Donchian low or volume fails
+            if close[i] <= donchian_low_aligned[i] or not volume_confirmed:
+                position = 0
+                signals[i] = 0.0
             else:
-                # Low vol: exit on Donchian upper touch or trend change
-                if close[i] >= upper_donch or not bullish_trend_1w:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-                    
+                signals[i] = position_size
+                
         elif position == -1:  # Short position
-            # Exit conditions
-            if high_vol_regime:
-                # High vol: exit on Donchian middle touch or trend change
-                if close[i] >= donch_mid_20_aligned[i] or not bearish_trend_1w:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
+            # Exit conditions: price reaches Donchian high or volume fails
+            if close[i] >= donchian_high_aligned[i] or not volume_confirmed:
+                position = 0
+                signals[i] = 0.0
             else:
-                # Low vol: exit on Donchian lower touch or trend change
-                if close[i] <= lower_donch or not bearish_trend_1w:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
+                signals[i] = -position_size
         else:  # Flat
-            # Entry logic based on regime and Donchian breakout/fade
-            if volume_confirmed:
-                if high_vol_regime:
-                    # High volatility regime: trade breakouts with 1w trend
-                    if bullish_trend_1w and close[i] > upper_donch:
-                        position = 1
-                        signals[i] = position_size
-                    elif bearish_trend_1w and close[i] < lower_donch:
-                        position = -1
-                        signals[i] = -position_size
-                else:
-                    # Low volatility regime: fade Donchian touches (mean reversion)
-                    if close[i] <= lower_donch and bullish_trend_1w:
-                        # Near lower Donchian in bullish 1w trend: long mean reversion
-                        position = 1
-                        signals[i] = position_size
-                    elif close[i] >= upper_donch and bearish_trend_1w:
-                        # Near upper Donchian in bearish 1w trend: short mean reversion
-                        position = -1
-                        signals[i] = -position_size
+            # Entry logic: only in ranging markets with volume confirmation
+            if volume_confirmed and ranging_market:
+                if close[i] >= donchian_high_aligned[i]:
+                    # Price at upper Donchian band: short mean reversion
+                    position = -1
+                    signals[i] = -position_size
+                elif close[i] <= donchian_low_aligned[i]:
+                    # Price at lower Donchian band: long mean reversion
+                    position = 1
+                    signals[i] = position_size
     
     return signals
