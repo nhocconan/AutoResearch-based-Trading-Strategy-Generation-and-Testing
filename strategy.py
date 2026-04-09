@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA200 trend + volume confirmation
-# - Primary signal: Donchian(20) breakout on 1d timeframe - long when price breaks above upper band, short when breaks below lower band
-# - Trend filter: 1w EMA200 - price must be above EMA for longs, below for shorts (higher timeframe alignment)
-# - Volume confirmation: 1d volume > 20-period median volume (avoid low-participation signals)
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + ATR regime filter
+# - Primary signal: Donchian breakout on 12h timeframe - long when price breaks above 20-bar high, short when breaks below 20-bar low
+# - Trend filter: 1d ATR ratio (ATR(7)/ATR(30)) < 1.2 to avoid high volatility chop
+# - Volume confirmation: 12h volume > 1.5 * 20-period median volume (ensures participation)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
-# - Works in bull/bear: Donchian breakouts capture trends, EMA200 filter avoids counter-trend trades, volume confirms validity
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - Works in bull/bear: Donchian breakouts capture trends, volume/ATR filters avoid false signals in low-participation or choppy markets
 
-name = "1d_1w_donchian_ema200_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,70 +21,80 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Pre-compute 1d ATR ratio for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Donchian(20) on 1d timeframe
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
     
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # ATR(7) and ATR(30)
+    atr7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = np.where(atr30 != 0, atr7 / atr30, 1.0)  # avoid division by zero
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # 1d volume regime: volume > 20-period median volume
+    # Pre-compute 12h Donchian channels
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # 12h volume regime: volume > 1.5 * 20-period median volume
     volume = prices['volume'].values
     median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    volume_regime = volume > median_volume_20
+    volume_regime = volume > (1.5 * median_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_200_aligned[i]) or
-            np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i]) or
+        if (np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(atr_ratio_aligned[i]) or
             np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian middle OR price crosses below 1w EMA200
-            if close[i] < donchian_middle[i] or close[i] < ema_200_aligned[i]:
+            # Exit: price breaks below Donchian low OR ATR ratio > 1.5 (high volatility)
+            if close_12h[i] < donchian_low[i] or atr_ratio_aligned[i] > 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian middle OR price crosses above 1w EMA200
-            if close[i] > donchian_middle[i] or close[i] > ema_200_aligned[i]:
+            # Exit: price breaks above Donchian high OR ATR ratio > 1.5 (high volatility)
+            if close_12h[i] > donchian_high[i] or atr_ratio_aligned[i] > 1.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume confirmation and 1w EMA200 filter
-            # Long: price breaks above Donchian upper AND volume regime AND price above 1w EMA200
-            if (close[i] > donchian_upper[i] and 
+            # Look for Donchian breakouts with volume confirmation and ATR regime filter
+            # Long: price breaks above Donchian high AND volume regime AND ATR ratio < 1.2 (low volatility)
+            if (close_12h[i] > donchian_high[i] and 
                 volume_regime[i] and 
-                close[i] > ema_200_aligned[i]):
+                atr_ratio_aligned[i] < 1.2):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian lower AND volume regime AND price below 1w EMA200
-            elif (close[i] < donchian_lower[i] and 
+            # Short: price breaks below Donchian low AND volume regime AND ATR ratio < 1.2 (low volatility)
+            elif (close_12h[i] < donchian_low[i] and 
                   volume_regime[i] and 
-                  close[i] < ema_200_aligned[i]):
+                  atr_ratio_aligned[i] < 1.2):
                 position = -1
                 signals[i] = -0.25
     
