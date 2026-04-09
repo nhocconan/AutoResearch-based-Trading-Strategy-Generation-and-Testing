@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR-based volatility filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and volatility filter
 # - Uses 4h Donchian channel (20-period high/low) derived from 1d data for breakout signals
-# - Confirms with 1d volume > 2.0x its 20-period average (strong institutional participation, stricter)
-# - Confirms with 1d ATR(14) > 1.5x its 50-period average (high volatility regime, stricter)
-# - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme (wider stop to reduce whipsaw)
+# - Confirms with 1d volume > 2.0x its 20-period average (strong institutional participation)
+# - Confirms with 1d ATR(14) > 1.5x its 50-period average (high volatility regime)
+# - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
 # - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to minimize fee drag
 # - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
