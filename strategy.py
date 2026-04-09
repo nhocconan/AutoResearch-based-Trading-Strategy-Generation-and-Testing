@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v4
-# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
-# Uses tighter entry conditions (volume > 2x 20-period average + price must close beyond level) to reduce trades and avoid fee drag.
+# 4h_1d_camarilla_breakout_v5
+# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
+# Uses tighter entry conditions (volume > 2.0x 20-period average) to limit trades and avoid fee drag.
 # Works in bull markets by catching breakouts, in bear markets by fading false breaks via pivot reversion.
-# Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v4"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +40,7 @@ def generate_signals(prices):
     h4_1d = close_1d + (range_1d * 1.1 / 2)
     l4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
@@ -81,11 +80,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above H4 level with strong volume confirmation
+            # Enter long: price breaks above H4 level with volume confirmation
             if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below L4 level with strong volume confirmation
+            # Enter short: price breaks below L4 level with volume confirmation
             elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = -1
                 signals[i] = -0.25
