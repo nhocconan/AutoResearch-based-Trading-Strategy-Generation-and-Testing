@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot + 1d volume spike + chop regime filter
-# - Primary signal: 12h price touching Camarilla H3 (short) or L3 (long) levels from 1d
-# - Volume confirmation: 1d volume > 1.5x 20-period average volume (avoid low-participation)
-# - Regime filter: 1d choppiness index > 61.8 (range market) for mean reversion at pivots
+# Hypothesis: 4h Camarilla pivot levels from 1d + volume confirmation + chop regime filter
+# - Primary signal: Price touches Camarilla H3 (resistance) for short or L3 (support) for long on 4h
+# - Trend filter: 12h ADX < 25 (range market) - Camarilla works best in ranging conditions
+# - Volume confirmation: 4h volume > 1.5x 20-period median volume (avoid false breakouts)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Camarilla pivots work in ranges, volume spike confirms participation, chop filter avoids trends
+# - Target: 20-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Camarilla pivots effective in ranges, ADX filter avoids trending markets where pivots fail
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,87 +21,106 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla levels (based on previous day)
+    # Pre-compute 12h ADX for regime filter (range market: ADX < 25)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]),
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]),
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed DM
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / (atr_12h + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr_12h + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx_12h = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Pre-compute 1d OHLC for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for today using yesterday's OHLC
-    # H3 = Close + 1.1*(High-Low)/2, L3 = Close - 1.1*(High-Low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Camarilla levels: based on previous day's range
+    # H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
+    # L4 = close - 1.5*(high-low), L3 = close - 1.1*(high-low), etc.
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * range_1d  # Resistance
+    camarilla_l3 = close_1d - 1.1 * range_1d  # Support
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Pre-compute 1d volume regime: volume > 1.5x 20-period average
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_regime = volume_1d > (1.5 * avg_volume_20)
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
-    
-    # Pre-compute 1d choppiness index: CHOP > 61.8 = range (mean revert)
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(range(14))) / log10(14)
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(abs(high_1d - close_1d.shift(1)))
-    tr3 = pd.Series(abs(low_1d - close_1d.shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).sum().values
-    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = high_14 - low_14
-    chop = np.where(range_14 != 0,
-                    100 * np.log10(atr_14 / range_14) / np.log10(14),
-                    50)  # neutral when no range
-    chop_regime = chop > 61.8  # range market
-    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
+    # 4h volume regime: volume > 1.5x 20-period median volume
+    volume = prices['volume'].values
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > (1.5 * median_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or
+        if (np.isnan(adx_12h_aligned[i]) or
+            np.isnan(camarilla_h3_aligned[i]) or
             np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_regime_aligned[i]) or
-            np.isnan(chop_regime_aligned[i])):
+            np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
-        close_price = prices['close'].iloc[i]
-        
         if position == 1:  # Long position
-            # Exit: price crosses above H3 (take profit) or below L3 (stop)
-            if close_price > camarilla_h3_aligned[i] or close_price < camarilla_l3_aligned[i]:
+            # Exit: price crosses above Camarilla H3 (resistance) OR ADX > 25 (trending market)
+            if (prices['close'].iloc[i] >= camarilla_h3_aligned[i] or 
+                adx_12h_aligned[i] > 25):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses below L3 (take profit) or above H3 (stop)
-            if close_price < camarilla_l3_aligned[i] or close_price > camarilla_h3_aligned[i]:
+            # Exit: price crosses below Camarilla L3 (support) OR ADX > 25 (trending market)
+            if (prices['close'].iloc[i] <= camarilla_l3_aligned[i] or 
+                adx_12h_aligned[i] > 25):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla level touches with volume and chop confirmation
-            # Long: price touches L3 from above AND volume regime AND chop regime (range)
-            if (abs(close_price - camarilla_l3_aligned[i]) < 0.001 * close_price and  # touch L3
-                volume_regime_aligned[i] and 
-                chop_regime_aligned[i]):
+            # Look for Camarilla level touches with volume confirmation and range filter
+            # Long: price touches or crosses above Camarilla L3 (support) AND volume regime AND ADX < 25 (range)
+            if (prices['close'].iloc[i] >= camarilla_l3_aligned[i] and 
+                volume_regime[i] and 
+                adx_12h_aligned[i] < 25):
                 position = 1
                 signals[i] = 0.25
-            # Short: price touches H3 from below AND volume regime AND chop regime (range)
-            elif (abs(close_price - camarilla_h3_aligned[i]) < 0.001 * close_price and  # touch H3
-                  volume_regime_aligned[i] and 
-                  chop_regime_aligned[i]):
+            # Short: price touches or crosses below Camarilla H3 (resistance) AND volume regime AND ADX < 25 (range)
+            elif (prices['close'].iloc[i] <= camarilla_h3_aligned[i] and 
+                  volume_regime[i] and 
+                  adx_12h_aligned[i] < 25):
                 position = -1
                 signals[i] = -0.25
     
