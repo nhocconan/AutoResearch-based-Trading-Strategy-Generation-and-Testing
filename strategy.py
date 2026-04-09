@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extreme levels with volume confirmation and ATR trailing stop
-# Williams %R identifies overbought/oversold conditions on 1d timeframe, effective in both bull and bear markets
-# Volume confirmation (current 4h volume > 1.8x 24-period average) filters false signals
+# Hypothesis: 12h strategy using 1d Williams %R extreme readings with volume confirmation and ATR trailing stop
+# Williams %R identifies overbought/oversold conditions on 1d timeframe; extreme readings (>80 or <20) 
+# combined with volume spikes provide high-probability mean reversal entries in ranging markets
 # ATR trailing stop (2.0x ATR) manages risk and adapts to volatility
-# Target: 20-35 trades/year (80-140 over 4 years) to minimize fee drag
-# Works in bull/bear: %R extremes signal reversals, volume confirms validity, ATR stop controls drawdown
+# Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+# Works in bull/bear: mean reversion at extremes works in all regimes, volume filters noise, ATR stop controls drawdown
 
-name = "4h_1d_williamsr_volume_atr_v1"
-timeframe = "4h"
+name = "12h_1d_williamsr_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,25 +26,25 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Calculate 1d Williams %R(14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          (highest_high - close_1d) / (highest_high - lowest_low) * -100,
-                          -50.0)  # neutral when no range
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Replace division by zero with neutral value
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align Williams %R to 4h timeframe
+    # Align Williams %R to 12h timeframe
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Pre-compute ATR(14) for 4h timeframe
+    # Pre-compute ATR(14) for 12h timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -54,8 +54,8 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation (24-period average)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Pre-compute volume confirmation (20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -64,14 +64,12 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.8x average 4h volume
-        volume_confirmed = volume[i] > 1.8 * vol_ma_24[i]
+        # Volume confirmation: current 12h volume > 1.8x average 12h volume
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -97,14 +95,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Mean reversion from Williams %R extremes with volume confirmation
-            # Long when %R < -80 (oversold), Short when %R > -20 (overbought)
+            # Mean reversion at Williams %R extremes with volume confirmation
+            # Long when oversold (< -80) and volume confirmed
+            # Short when overbought (> -20) and volume confirmed
             if volume_confirmed:
-                if williams_r_aligned[i] < -80.0:
+                if williams_r_aligned[i] < -80:
                     position = 1
                     highest_since_long = close[i]
                     signals[i] = 0.25
-                elif williams_r_aligned[i] > -20.0:
+                elif williams_r_aligned[i] > -20:
                     position = -1
                     lowest_since_short = close[i]
                     signals[i] = -0.25
