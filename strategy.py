@@ -3,19 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with 1w volume confirmation and chop regime filter
-# - Uses Kaufman Adaptive Moving Average (KAMA) on 1d to determine trend direction
-# - Requires 1w volume > 1.5 * 20-period volume average for confirmation (reduces false signals)
-# - Uses Choppiness Index (CHOP) on 1d to filter ranging markets (CHOP > 61.8 = range, avoid trend signals)
-# - Long when: price > KAMA(1d) AND volume_confirm AND CHOP <= 61.8 (trending)
-# - Short when: price < KAMA(1d) AND volume_confirm AND CHOP <= 61.8 (trending)
-# - ATR-based stoploss (2.5 * ATR) to manage risk
-# - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Designed to work in both bull and bear markets by following the adaptive trend
-# - Target: 15-30 trades/year on 1d timeframe (60-120 total over 4 years) to minimize fee drag
+# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and ATR stoploss
+# - Uses Williams %R(14) on 12h for oversold/overbought signals (long when %R < -80, short when %R > -20)
+# - Requires 1d EMA(50) trend filter (long only when price > EMA50, short only when price < EMA50)
+# - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
+# - Designed for range-bound markets with clear reversion to mean after extreme moves
+# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years) to avoid fee drag
+# - Williams %R provides timely reversal signals; EMA50 filter avoids counter-trend trades
 
-name = "1d_1w_kama_volume_chop_v1"
-timeframe = "1d"
+name = "12h_1d_williamsr_meanrev_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,120 +21,72 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w volume confirmation: volume > 1.5 * 20-period average
-    volume_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1w = volume_1w > (1.5 * vol_ma_1w)
-    volume_confirm_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm_1w)
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 1d KAMA (trend indicator)
-    close = prices['close'].values
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # approximate for vectorized
-    # Correct volatility calculation: sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # start after 10 periods
-    for i in range(10, n):
-        if not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = close[i]
-    
-    # Pre-compute 1d Choppiness Index (regime filter)
+    # Pre-compute 12h Williams %R(14)
     high = prices['high'].values
     low = prices['low'].values
-    # True Range over 14 periods
+    close = prices['close'].values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Pre-compute 12h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Sum of TR over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # MaxHigh - MinLow over 14 periods
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    # Choppiness Index: CHOP = 100 * log10(sum_tr_14 / range_14) / log10(14)
-    chop = np.where(range_14 > 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
-    chop_filter = chop <= 61.8  # trending market
-    
-    # Pre-compute 1d ATR for stoploss
-    atr = atr_14  # already computed above
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(volume_confirm_1w_aligned[i]) or
-            np.isnan(chop_filter[i]) or np.isnan(atr[i]) or atr[i] <= 0):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(atr[i]) or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            
-            # Exit conditions: stoploss or trend reversal
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: stoploss or mean reversion reversal
+            if close[i] < prices['close'][i-1] - 2.5 * atr[i]:  # ATR stop
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < kama[i]:  # trend reversal (price below KAMA)
+            elif williams_r[i] > -20:  # Overbought - exit long
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            
-            # Exit conditions: stoploss or trend reversal
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: stoploss or mean reversion reversal
+            if close[i] > prices['close'][i-1] + 2.5 * atr[i]:  # ATR stop
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > kama[i]:  # trend reversal (price above KAMA)
+            elif williams_r[i] < -80:  # Oversold - exit short
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for trend entries with volume confirmation and trending regime
-            if close[i] > kama[i] and volume_confirm_1w_aligned[i] and chop_filter[i]:
+            # Look for mean reversion entries with trend filter
+            if williams_r[i] < -80 and close[i] > ema_50_aligned[i]:  # Oversold + uptrend
                 position = 1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif close[i] < kama[i] and volume_confirm_1w_aligned[i] and chop_filter[i]:
+            elif williams_r[i] > -20 and close[i] < ema_50_aligned[i]:  # Overbought + downtrend
                 position = -1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
                 signals[i] = -0.25
     
     return signals
