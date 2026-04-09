@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_v9
+# 4h_1d_camarilla_pivot_v10
 # Hypothesis: Uses Camarilla pivot levels from 1d timeframe on 4h chart with volume confirmation and ATR stoploss.
 # Long when price crosses above L4 (support) with volume > 1.3x average; short when price crosses below H4 (resistance) with volume > 1.3x average.
 # Includes volatility filter using ATR to avoid choppy markets. Designed to work in both bull and bear markets by fading overextensions at key levels.
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v9"
+name = "4h_1d_camarilla_pivot_v10"
 timeframe = "4h"
 leverage = 1.0
 
