@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout + 1d trend filter + volume confirmation
-# 4h Donchian(20) captures medium-term breakouts; 1d EMA(50) defines trend direction
-# Volume confirmation ensures breakout authenticity; session filter (08-20 UTC) reduces noise
-# Discrete sizing 0.20 limits drawdown; target 60-150 trades over 4 years (15-37/year)
-# Works in bull/bear: trend filter adapts, breakouts work in both directions
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d EMA200 trend filter + volume confirmation
+# Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# 1d EMA200 defines long-term trend: only take longs above EMA200, shorts below EMA200
+# Volume confirmation ensures breakout authenticity
+# Works in bull/bear: trend filter adapts, Elder Ray captures momentum shifts
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "1h_4h_1d_donchian_ema_volume_v1"
-timeframe = "1h"
+name = "6h_1d_elder_ray_ema200_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,92 +24,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) for efficiency
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_4h = np.full(len(df_4h), np.nan)
-    donchian_low_4h = np.full(len(df_4h), np.nan)
-    
-    for i in range(len(df_4h)):
-        if i < 20:
-            donchian_high_4h[i] = np.nan
-            donchian_low_4h[i] = np.nan
-        else:
-            donchian_high_4h[i] = np.max(high_4h[i-20:i])
-            donchian_low_4h[i] = np.min(low_4h[i-20:i])
-    
-    # Align 4h Donchian to 1h timeframe (wait for 4h bar close)
-    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
-    
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for EMA200 calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
+    # Calculate 1d EMA200
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d EMA to 1h timeframe (wait for 1d bar close)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 1d EMA200 to 6h timeframe (wait for 1d bar close)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Calculate 20-period average volume for volume confirmation (1h timeframe)
-    avg_volume = np.full(n, np.nan)
-    for i in range(n):
-        if i < 20:
-            avg_volume[i] = np.nan
-        else:
-            avg_volume[i] = np.mean(volume[i-20:i])
+    # Calculate 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power: High - EMA13
+    bear_power = low - ema_13   # Bear Power: Low - EMA13
+    
+    # Calculate 20-period average volume for volume confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if outside trading session or any required data is invalid
-        if not in_session[i] or \
-           (np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price < 4h Donchian low OR price < 1d EMA (trend change)
-            if close[i] < donchian_low_4h_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: Bear Power turns negative OR price < 1d EMA200 (trend change)
+            if bear_power[i] >= 0 or close[i] < ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > 4h Donchian high OR price > 1d EMA (trend change)
-            if close[i] > donchian_high_4h_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: Bull Power turns positive OR price > 1d EMA200 (trend change)
+            if bull_power[i] <= 0 or close[i] > ema_200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Donchian breakout + 1d EMA filter
-            if volume_confirmed and in_session[i]:
-                # Long entry: price > 4h Donchian high AND price > 1d EMA (bullish alignment)
-                if close[i] > donchian_high_4h_aligned[i] and close[i] > ema_1d_aligned[i]:
+            # Entry logic with volume confirmation and Elder Ray + 1d EMA200 filter
+            if volume_confirmed:
+                # Long entry: Bull Power > 0 AND price > 1d EMA200 (bullish alignment)
+                if bull_power[i] > 0 and close[i] > ema_200_aligned[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Short entry: price < 4h Donchian low AND price < 1d EMA (bearish alignment)
-                elif close[i] < donchian_low_4h_aligned[i] and close[i] < ema_1d_aligned[i]:
+                    signals[i] = 0.25
+                # Short entry: Bear Power < 0 AND price < 1d EMA200 (bearish alignment)
+                elif bear_power[i] < 0 and close[i] < ema_200_aligned[i]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
