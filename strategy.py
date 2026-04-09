@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 4h_volume_weighted_camarilla_v1
-# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume-weighted breakout confirmation.
-# Long when price breaks above daily R4 with volume > 1.3x 20-period volume average.
-# Short when price breaks below daily S4 with volume > 1.3x 20-period volume average.
+# 12h_daily_camarilla_breakout_volume_v3
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation.
+# Long when price breaks above daily R4 with volume > 1.5x 20-period volume average.
+# Short when price breaks below daily S4 with volume > 1.5x 20-period volume average.
 # Exit when price closes back inside daily R3/S3 levels.
 # Uses discrete position sizing (0.25) to minimize fee churn.
 # Designed to capture strong breakouts in both bull and bear markets while avoiding false signals.
-# Target: 15-35 trades/year (60-140 total over 4 years) on BTC/ETH/SOL.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volume_weighted_camarilla_v1"
-timeframe = "4h"
+name = "12h_daily_camarilla_breakout_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,7 +53,7 @@ def generate_signals(prices):
     r4_1d = close_1d + (range_1d * 1.1 / 2)
     s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align all levels to 4h timeframe
+    # Align all levels to 12h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -75,8 +75,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price closes back below daily R3 (take profit) or below daily S4 (stop)
