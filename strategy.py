@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 4h choppiness regime filter
-# - Primary signal: Donchian(20) breakout on 4h close (long: close > upper band, short: close < lower band)
-# - Volume confirmation: 1d volume > 1.5 * 20-period average volume (ensures participation)
-# - Regime filter: 4h choppiness index > 61.8 (range market) for mean reversion, < 38.2 for trend continuation
-# - Exit: Donchian(10) opposite band touch or choppiness regime shift
-# - Position size: 0.25 discrete level to minimize fee churn
-# - Target: 20-50 trades/year (80-200 total over 4 years) per 4h strategy guidelines
-# - Works in bull/bear: Donchian captures breakouts, volume confirms validity, chop filter adapts to regime
+# Hypothesis: 1d Williams %R + 1w EMA50 trend filter + volume confirmation
+# - Primary signal: 1d Williams %R(14) < -80 (oversold) for long, > -20 (overbought) for short
+# - Trend filter: 1w EMA50 - price must be above EMA for longs, below for shorts
+# - Volume confirmation: 1d volume > 20-period median volume (avoid low-participation signals)
+# - Position size: 0.25 (discrete level) to minimize fee churn
+# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
+# - Works in bull/bear: Williams %R captures mean reversion extremes, EMA50 filter ensures
+#   trades align with higher timeframe trend, reducing false signals in strong trends
 
-name = "4h_1d_donchian_volume_chop_v2"
-timeframe = "4h"
+name = "1d_1w_williamsr_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,82 +22,76 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
-    volume_1d = df_1d['volume'].values
+    # Pre-compute 1w indicators
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1d volume regime: volume > 1.5 * 20-period average
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * avg_volume_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # 1w EMA50 for trend direction
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h price data
+    # Align 1w EMA50 to 1d timeframe (completed 1w bar only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1d price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels
-    upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    lower_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # 1d Williams %R(14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high_14 - lowest_low_14) == 0,
+        -50.0,  # neutral when range is zero
+        ((highest_high_14 - close) / (highest_high_14 - lowest_low_14)) * -100
+    )
     
-    # 4h choppiness index
-    def calculate_choppiness(high, low, close, window=14):
-        atr = np.maximum(high - low, 
-                         np.maximum(np.abs(high - np.roll(close, 1)), 
-                                    np.absolute(np.roll(low, 1) - close)))
-        atr = pd.Series(atr).rolling(window=window, min_periods=1).sum().values
-        highest_high = pd.Series(high).rolling(window=window, min_periods=1).max().values
-        lowest_low = pd.Series(low).rolling(window=window, min_periods=1).min().values
-        chop = np.where(
-            (highest_high - lowest_low) == 0,
-            50.0,
-            100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(window)
-        )
-        return chop
-    
-    chop = calculate_choppiness(high, low, close, 14)
-    chop_range = chop > 61.8  # range market
-    chop_trend = chop < 38.2  # trending market
+    # 1d volume regime: volume > 20-period median volume
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > median_volume_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
-            np.isnan(upper_10[i]) or np.isnan(lower_10[i]) or
-            np.isnan(chop[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or
+            np.isnan(williams_r[i]) or
+            np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price touches lower Donchian(10) OR chop shifts to strong trend
-            if close[i] <= lower_10[i] or (chop_trend[i] and not chop_range[i-1]):
+            # Exit: Williams %R > -50 (exiting oversold) OR price crosses below EMA50
+            if williams_r[i] > -50.0 or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches upper Donchian(10) OR chop shifts to strong trend
-            if close[i] >= upper_10[i] or (chop_trend[i] and not chop_range[i-1]):
+            # Exit: Williams %R < -50 (exiting overbought) OR price crosses above EMA50
+            if williams_r[i] < -50.0 or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian(20) upper AND volume spike AND in range regime
-            if close[i] > upper_20[i] and volume_spike_aligned[i] and chop_range[i]:
+            # Look for Williams %R extremes with volume confirmation and EMA50 filter
+            # Long: Williams %R < -80 (oversold) AND volume regime AND price above EMA50
+            if williams_r[i] < -80.0 and volume_regime[i] and close[i] > ema_50_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian(20) lower AND volume spike AND in range regime
-            elif close[i] < lower_20[i] and volume_spike_aligned[i] and chop_range[i]:
+            # Short: Williams %R > -20 (overbought) AND volume regime AND price below EMA50
+            elif williams_r[i] > -20.0 and volume_regime[i] and close[i] < ema_50_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
