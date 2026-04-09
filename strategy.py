@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-# 4h_donchian_1d_camarilla_volume_v1
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (H3/L3) as directional filter and 4h Donchian(20) breakout for entry timing, with volume confirmation.
-# Enters long when price breaks above 4h Donchian upper band AND price > 1d H3 level AND volume > 1.3x 20-period average.
-# Enters short when price breaks below 4h Donchian lower band AND price < 1d L3 level AND volume > 1.3x average.
-# Uses discrete position sizing (±0.25) to minimize fee churn. Works in bull/bear via Donchian structure and pivot direction filter.
-# Target: 75-200 total trades over 4 years (19-50/year). HARD MAX: 400 total.
+# 4h_donchian_1d_camarilla_volume_v2
+# Hypothesis: Tighten entry conditions from v1 by requiring volume spike AND price close beyond Donchian band (not just intrabar) to reduce false breakouts. Keep 1d Camarilla H3/L3 as directional filter. Target 75-150 trades over 4 years to avoid fee drag. Works in bull/bear via Donchian breakouts with pivot bias.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1d_camarilla_volume_v1"
+name = "4h_donchian_1d_camarilla_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -63,7 +59,7 @@ def generate_signals(prices):
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 1.3)  # Volume at least 1.3x average
+    vol_spike = volume > (vol_ma_20 * 1.5)  # Increased threshold to reduce trades
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -77,7 +73,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below 4h Donchian lower band
+            # Exit: price closes below 4h Donchian lower band
             if close[i] < donchian_lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -85,18 +81,18 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above 4h Donchian upper band
+            # Exit: price closes above 4h Donchian upper band
             if close[i] > donchian_upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above 4h Donchian upper, above 1d H3, with volume spike
+            # Enter long: price closes above 4h Donchian upper, above 1d H3, with volume spike
             if (close[i] > donchian_upper_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below 4h Donchian lower, below 1d L3, with volume spike
+            # Enter short: price closes below 4h Donchian lower, below 1d L3, with volume spike
             elif (close[i] < donchian_lower_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
