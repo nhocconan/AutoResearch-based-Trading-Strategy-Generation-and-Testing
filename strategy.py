@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_1d_ema_volume_v1
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and 12h volume confirmation.
-# Daily EMA(50) determines primary trend (only long above, short below).
-# 12h Donchian(20) breakout provides entry in trend direction.
-# 12h volume > 1.8x 20-period average confirms institutional participation.
-# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-37 trades/year.
-# Uses daily HTF and 12h data called ONCE before loop.
+# 4h_higher_high_lower_low_12h_ema_volume_v1
+# Hypothesis: 4h higher high/lower low breakout with 12h EMA(34) trend filter and 4h volume confirmation.
+# 12h EMA(34) determines primary trend (only long above, short below).
+# 4h breakout above recent swing high (higher high) or below recent swing low (lower low) provides entry.
+# 4h volume > 1.6x 20-period average confirms institutional participation.
+# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-50 trades/year.
+# Works in bull/bear: EMA filter avoids counter-trend trades, volume ensures momentum validity.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_1d_ema_volume_v1"
-timeframe = "12h"
+name = "4h_higher_high_lower_low_12h_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +25,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily HTF data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 12h data for Donchian channels and volume
+    # 12h HTF data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # 4h data for swing high/low detection and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Swing high: highest high in last 20 4h bars
+    swing_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Swing low: lowest low in last 20 4h bars
+    swing_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation
-    volume_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Align all 12h indicators to primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    volume_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_12h)
+    # Align all 4h indicators to primary timeframe
+    swing_high_4h_aligned = align_htf_to_ltf(prices, df_4h, swing_high_4h)
+    swing_low_4h_aligned = align_htf_to_ltf(prices, df_4h, swing_low_4h)
+    volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_ma_12h_aligned[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(swing_high_4h_aligned[i]) or
+            np.isnan(swing_low_4h_aligned[i]) or np.isnan(volume_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below Donchian low OR daily EMA turns bearish (price < EMA)
-            if close[i] < donchian_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price falls below swing low OR 12h EMA turns bearish (price < EMA)
+            if close[i] < swing_low_4h_aligned[i] or close[i] < ema_34_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian high OR daily EMA turns bullish (price > EMA)
-            if close[i] > donchian_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price rises above swing high OR 12h EMA turns bullish (price > EMA)
+            if close[i] > swing_high_4h_aligned[i] or close[i] > ema_34_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Volume confirmation: current volume > 1.8x 20-period average of 12h volume
-            volume_confirmed = volume[i] > 1.8 * volume_ma_12h_aligned[i]
+            # Volume confirmation: current volume > 1.6x 20-period average of 4h volume
+            volume_confirmed = volume[i] > 1.6 * volume_ma_4h_aligned[i]
             
             if volume_confirmed:
-                # Long entry: price breaks above Donchian high AND above daily EMA (uptrend)
-                if close[i] > donchian_high_aligned[i] and close[i] > ema_50_1d_aligned[i]:
+                # Long entry: price breaks above swing high (higher high) AND above 12h EMA (uptrend)
+                if close[i] > swing_high_4h_aligned[i] and close[i] > ema_34_12h_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price breaks below Donchian low AND below daily EMA (downtrend)
-                elif close[i] < donchian_low_aligned[i] and close[i] < ema_50_1d_aligned[i]:
+                # Short entry: price breaks below swing low (lower low) AND below 12h EMA (downtrend)
+                elif close[i] < swing_low_4h_aligned[i] and close[i] < ema_34_12h_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
