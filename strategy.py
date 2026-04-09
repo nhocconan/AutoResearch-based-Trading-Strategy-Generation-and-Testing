@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_reversal_volume_v2
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and reversal entry.
-# Long: Price touches or crosses below Camarilla L3 level on 1d, then reverses upward with volume > 1.5x 20-period average on 12h.
-# Short: Price touches or crosses above Camarilla H3 level on 1d, then reverses downward with volume > 1.5x 20-period average on 12h.
-# Exit: Opposite Camarilla level touch or ATR trailing stop (2.5x ATR from extreme).
-# Uses daily Camarilla for structure, 12h price action for reversal entry, volume for confirmation, ATR for dynamic stops.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# 4h_donchian_breakout_volume_regime_v2
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and chop regime filter.
+# Long: Price breaks above 4h Donchian(20) high, volume > 1.3x 20-period average, and choppy market (CHOP > 61.8).
+# Short: Price breaks below 4h Donchian(20) low, volume > 1.3x 20-period average, and choppy market (CHOP > 61.8).
+# Exit: Opposite Donchian breakout or ATR trailing stop (2.5x ATR from extreme).
+# Uses 4h Donchian for structure, volume for confirmation, CHOP regime filter to avoid trending markets.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_reversal_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,13 +24,12 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # ATR(14) for volatility filter and trailing stop
+    # ATR(14) for volatility and trailing stop
     high_s = pd.Series(high)
     low_s = pd.Series(low)
     close_s = pd.Series(close)
@@ -40,48 +39,39 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for Camarilla pivot levels (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
+    # 4h Donchian(20) channels
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    h3 = pivot + (range_1d * 1.1 / 4.0)
-    l3 = pivot - (range_1d * 1.1 / 4.0)
-    h4 = pivot + (range_1d * 1.1 / 2.0)
-    l4 = pivot - (range_1d * 1.1 / 2.0)
-    
-    # Align HTF Camarilla levels to 12h timeframe (wait for completed 1d bar)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Choppiness Index (CHOP) regime filter
+    # CHOP > 61.8 = choppy/range (good for mean reversion/breakout fade)
+    # We use CHOP > 61.8 to filter for ranging markets where breakouts are more likely to fail and reverse
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high = high_s.rolling(window=14, min_periods=14).max().values
+    lowest_low = low_s.rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    # Handle division by zero or invalid values
+    chop = np.where((highest_high - lowest_low) == 0, 100, chop)
+    chop = np.where(np.isnan(chop), 100, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     long_high = 0.0   # highest high since long entry
     short_low = 0.0   # lowest low since short entry
-    long_triggered = False  # flag to wait for reversal after L3 touch
-    short_triggered = False  # flag to wait for reversal after H3 touch
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(open_price[i]) or np.isnan(volume[i])):
+            np.isnan(volume[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        
+        # Regime filter: choppy market (CHOP > 61.8)
+        regime_filter = chop[i] > 61.8
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -90,13 +80,11 @@ def generate_signals(prices):
             if long_high > 0 and close[i] < long_high - 2.5 * atr[i]:
                 position = 0
                 long_high = 0.0
-                long_triggered = False
                 signals[i] = 0.0
-            # Exit: Price touches or crosses above H3 level
-            elif high[i] >= h3_aligned[i]:
+            # Exit: Price breaks below 4h Donchian low
+            elif close[i] < donchian_low[i]:
                 position = 0
                 long_high = 0.0
-                long_triggered = False
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
@@ -108,39 +96,24 @@ def generate_signals(prices):
             if short_low > 0 and close[i] > short_low + 2.5 * atr[i]:
                 position = 0
                 short_low = 0.0
-                short_triggered = False
                 signals[i] = 0.0
-            # Exit: Price touches or crosses below L3 level
-            elif low[i] <= l3_aligned[i]:
+            # Exit: Price breaks above 4h Donchian high
+            elif close[i] > donchian_high[i]:
                 position = 0
                 short_low = 0.0
-                short_triggered = False
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for L3 touch (long setup) or H3 touch (short setup)
-            long_setup = (low[i] <= l3_aligned[i]) and volume_confirmed
-            short_setup = (high[i] >= h3_aligned[i]) and volume_confirmed
-            
-            if long_setup:
-                long_triggered = True
-                short_triggered = False
-            elif short_setup:
-                short_triggered = True
-                long_triggered = False
-            
-            # Long entry: after L3 touch, price reverses upward (close above open)
-            if long_triggered and close[i] > open_price[i]:
+            # Long entry: Donchian high breakout with volume and regime filter
+            if (close[i] > donchian_high[i]) and volume_confirmed and regime_filter:
                 position = 1
                 long_high = high[i]
-                long_triggered = False
                 signals[i] = 0.25
-            # Short entry: after H3 touch, price reverses downward (close below open)
-            elif short_triggered and close[i] < open_price[i]:
+            # Short entry: Donchian low breakout with volume and regime filter
+            elif (close[i] < donchian_low[i]) and volume_confirmed and regime_filter:
                 position = -1
                 short_low = low[i]
-                short_triggered = False
                 signals[i] = -0.25
     
     return signals
