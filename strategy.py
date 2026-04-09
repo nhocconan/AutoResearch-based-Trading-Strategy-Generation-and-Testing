@@ -3,179 +3,118 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d ADX regime filter
-# In strong trending regimes (1d ADX > 25): Williams %R mean reversion (long < -80, short > -20)
-# In weak/range regimes (1d ADX <= 25): Williams %R trend following (long > -20, short < -80)
-# Volume confirmation on entries to reduce false signals
-# Works in bull/bear markets: adapts to regime, avoids whipsaws in ranging markets, captures trends
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 12h KAMA trend direction with 1d RSI filter and volume confirmation
+# Uses Kaufman Adaptive Moving Average (KAMA) to identify trend direction
+# Enters long when price > KAMA and RSI < 30 (oversold pullback in uptrend)
+# Enters short when price < KAMA and RSI > 70 (overbought pullback in downtrend)
+# Volume confirmation ensures institutional participation
+# Discrete position sizing 0.25 to limit trades and reduce fee drag
+# Works in bull/bear markets: KAMA adapts to changing market conditions
 
-name = "6h_1d_williamsr_adx_regime_v1"
-timeframe = "6h"
+name = "12h_1d_kama_rsi_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = np.where(
-        (highest_high_1d - lowest_low_1d) != 0,
-        ((highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)) * -100,
-        -50  # neutral when range is zero
-    )
+    # Calculate 1d RSI(14)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 1d ADX (14-period) for trend strength
-    def calculate_atr(high, low, close, period):
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        def wilders_smoothing(values, period):
-            if len(values) < period:
-                return np.full(len(values), np.nan)
-            alpha = 1.0 / period
-            result = np.full(len(values), np.nan)
-            result[period-1] = np.nanmean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-            return result
-        
-        atr = wilders_smoothing(tr, period)
-        return atr
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    # Wilder's smoothing for RSI
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # +DM and -DM
-    up_move = np.concatenate([[np.nan], high_1d[1:] - high_1d[:-1]])
-    down_move = np.concatenate([[np.nan], low_1d[:-1] - low_1d[1:]])
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 1d average volume (20-period)
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Smooth +DM, -DM, and TR
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
+    # Calculate 12h Kaufman Adaptive Moving Average (KAMA)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, 10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
     
-    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
-    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
-    tr_smooth = wilders_smoothing(np.concatenate([[np.nan], 
-                                                  np.absolute(high_1d[1:] - low_1d[1:]),
-                                                  np.absolute(high_1d[1:] - close_1d[:-1]),
-                                                  np.absolute(low_1d[1:] - close_1d[:-1])]), 14)
-    # Fix TR smoothing - recalculate properly
-    tr_calc = np.concatenate([[np.nan], 
-                              np.maximum(np.abs(high_1d[1:] - low_1d[1:]),
-                                         np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                                    np.abs(low_1d[1:] - close_1d[:-1])))])
-    tr_smooth = wilders_smoothing(tr_calc, 14)
+    # Smoothing constants
+    fastest = 2.0 / (2 + 1)   # EMA(2)
+    slowest = 2.0 / (30 + 1)  # EMA(30)
+    sc = np.square(er * (fastest - slowest) + slowest)
     
-    # +DI and -DI
-    plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
-    minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start with first close
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 
-                  np.abs((plus_di - minus_di) / (plus_di + minus_di)) * 100, 
-                  0)
-    adx_1d = wilders_smoothing(dx, 14)
+    # Align 1d indicators to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
-    # Align 1d indicators to 6h timeframe
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume confirmation: 6h volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > 1.5 * volume_ma
+    # Volume confirmation: current volume > 1.5x average volume
+    volume_confirmed = volume > 1.5 * avg_volume_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(kama[i]) or
             np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        williams_r = williams_r_1d_aligned[i]
-        adx = adx_1d_aligned[i]
-        
         if position == 1:  # Long position
-            if adx > 25:  # Strong trend - mean reversion
-                # Exit long if Williams %R rises above -20 (overbought)
-                if williams_r > -20:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # Weak trend/range - trend following
-                # Exit long if Williams %R falls below -80 (oversold) or reverses
-                if williams_r < -80:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
+            # Exit long if price crosses below KAMA or RSI becomes overbought
+            if close[i] <= kama[i] or rsi_1d_aligned[i] > 70:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            if adx > 25:  # Strong trend - mean reversion
-                # Exit short if Williams %R falls below -80 (oversold)
-                if williams_r < -80:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-            else:  # Weak trend/range - trend following
-                # Exit short if Williams %R rises above -20 (overbought) or reverses
-                if williams_r > -20:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit short if price crosses above KAMA or RSI becomes oversold
+            if close[i] >= kama[i] or rsi_1d_aligned[i] < 30:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
         else:  # Flat
-            if adx > 25:  # Strong trend - mean reversion entries
-                # Enter long when Williams %R < -80 (oversold) with volume confirmation
-                if williams_r < -80 and volume_confirmed[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Enter short when Williams %R > -20 (overbought) with volume confirmation
-                elif williams_r > -20 and volume_confirmed[i]:
-                    position = -1
-                    signals[i] = -0.25
-            else:  # Weak trend/range - trend following entries
-                # Enter long when Williams %R > -20 (overbought) with volume confirmation
-                if williams_r > -20 and volume_confirmed[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Enter short when Williams %R < -80 (oversold) with volume confirmation
-                elif williams_r < -80 and volume_confirmed[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long: price above KAMA, RSI oversold (<30), volume confirmation
+            if close[i] > kama[i] and rsi_1d_aligned[i] < 30 and volume_confirmed[i]:
+                position = 1
+                signals[i] = 0.25
+            # Enter short: price below KAMA, RSI overbought (>70), volume confirmation
+            elif close[i] < kama[i] and rsi_1d_aligned[i] > 70 and volume_confirmed[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
