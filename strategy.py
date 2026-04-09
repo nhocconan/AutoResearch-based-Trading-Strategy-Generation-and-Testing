@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_donchian_breakout_volume_chop_regime_v1
-# Hypothesis: 1d strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses 1w HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 7-25 trades/year (30-100 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 6h_ichimoku_cloud_funding_v1
+# Hypothesis: 6h strategy using Ichimoku cloud from 1d HTF for trend direction, combined with funding rate mean reversion for entry timing. Long when price > 1d Kumo cloud AND funding rate < -0.02% (extreme negative = long pressure). Short when price < 1d Kumo cloud AND funding rate > +0.02% (extreme positive = short pressure). Uses discrete position sizing (0.25) to limit drawdown. Works in bull/bear: Ichimoku filter ensures alignment with higher timeframe trend, funding rate provides contrarian entries during excessive leverage bias. Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_volume_chop_regime_v1"
-timeframe = "1d"
+name = "6h_ichimoku_cloud_funding_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,85 +18,100 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Ichimoku Cloud components from 1d HTF
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Conversion Line (Tenkan-sen): (9-period high + 9-period low)/2
+    high_1d_s = pd.Series(high_1d)
+    low_1d_s = pd.Series(low_1d)
+    tenkan_sen = (high_1d_s.rolling(window=9, min_periods=9).max() + 
+                  low_1d_s.rolling(window=9, min_periods=9).min()) / 2
     
-    # Choppiness Index regime filter (14-period)
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
-    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = np.log10(atr_period) * (highest_high - lowest_low)
-    denominator = np.where(denominator == 0, np.nan, denominator)
-    chop = 100 * np.log10(atr_sum / denominator)
+    # Base Line (Kijun-sen): (26-period high + 26-period low)/2
+    kijun_sen = (high_1d_s.rolling(window=26, min_periods=26).max() + 
+                 low_1d_s.rolling(window=26, min_periods=26).min()) / 2
     
-    # Multi-timeframe: 1w EMA(50) trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_s = pd.Series(close_1w)
-    ema_50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Leading Span A (Senkou Span A): (Conversion Line + Base Line)/2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(2)
+    
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2
+    senkou_span_b = ((high_1d_s.rolling(window=52, min_periods=52).max() + 
+                      low_1d_s.rolling(window=52, min_periods=52).min()) / 2).shift(2)
+    
+    # Align Ichimoku components to 6h timeframe (completed 1d bar only)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Kumo cloud boundaries (Senkou Span A/B)
+    upper_cloud = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    lower_cloud = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    # Price relative to cloud
+    price_above_cloud = close > upper_cloud
+    price_below_cloud = close < lower_cloud
+    
+    # Funding rate data (8h intervals)
+    funding_path = "/mnt/shared/funding/data/processed/funding/BTCUSDT.parquet"
+    try:
+        funding_df = pd.read_parquet(funding_path)
+        funding_rate = funding_df['funding_rate'].values
+        funding_time = funding_df['timestamp'].values
+        
+        # Align funding rate to 6h timeframe (use previous completed 8h funding rate)
+        funding_aligned = np.full(n, np.nan)
+        j = 0
+        for i in range(n):
+            while j < len(funding_time) - 1 and funding_time[j+1] <= prices['open_time'].iloc[i]:
+                j += 1
+            if j < len(funding_time):
+                funding_aligned[i] = funding_rate[j]
+    except:
+        # Fallback if funding data unavailable
+        funding_aligned = np.zeros(n)
+    
+    # Extreme funding rate thresholds (contrarian signal)
+    funding_extreme_long = funding_aligned < -0.0002  # <-0.02%
+    funding_extreme_short = funding_aligned > 0.0002   # >+0.02%
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(funding_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 1w EMA(50)
-        htf_uptrend = close[i] > ema_50_1w_aligned[i]
-        htf_downtrend = close[i] < ema_50_1w_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low (20)
-            if close[i] < donchian_low[i]:
+            # Exit: price closes below Kumo cloud OR funding becomes excessively positive
+            if close[i] < upper_cloud[i] or funding_aligned[i] > 0.0005:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high (20)
-            if close[i] > donchian_high[i]:
+            # Exit: price closes above Kumo cloud OR funding becomes excessively negative
+            if close[i] > lower_cloud[i] or funding_aligned[i] < -0.0005:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for Donchian breakout with volume, regime, and HTF confirmation
-            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
-            
-            if bullish_breakout:
+            # Enter long: price above cloud + extremely negative funding (contrarian long)
+            if price_above_cloud[i] and funding_extreme_long[i]:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            # Enter short: price below cloud + extremely positive funding (contrarian short)
+            elif price_below_cloud[i] and funding_extreme_short[i]:
                 position = -1
                 signals[i] = -0.25
     
