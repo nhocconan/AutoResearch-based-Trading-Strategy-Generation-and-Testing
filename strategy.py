@@ -1,11 +1,10 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v2"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,34 +17,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for context
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Load daily data ONCE before loop for Camarilla levels
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA for trend filter
-    close_w = df_w['close'].values
-    ema_w = np.full(len(df_w), np.nan)
-    if len(close_w) >= 21:
-        ema_w = pd.Series(close_w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align weekly EMA to daily
-    ema_w_aligned = align_htf_to_ltf(prices, df_w, ema_w)
-    
-    # Calculate daily data for Camarilla levels (using prior day's OHLC)
-    df_d = pd.DataFrame({
-        'high': high,
-        'low': low,
-        'close': close
-    })
-    
     # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    r4 = np.full(n, np.nan)
-    s4 = np.full(n, np.nan)
-    prev_high = np.full(n, np.nan)
-    prev_low = np.full(n, np.nan)
-    
-    for i in range(1, n):
+    r4 = np.full(len(df_d), np.nan)
+    s4 = np.full(len(df_d), np.nan)
+    prev_high = np.full(len(df_d), np.nan)
+    prev_low = np.full(len(df_d), np.nan)
+    for i in range(1, len(df_d)):
         ph = float(df_d['high'].iloc[i-1])
         pl = float(df_d['low'].iloc[i-1])
         pc = float(df_d['close'].iloc[i-1])
@@ -54,60 +36,79 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Volume confirmation: 20-day average
-    vol_ma_20 = np.full(n, np.nan)
+    # Align daily values to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
+    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
+    
+    # Volume confirmation: 4-period average (24h)
+    vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if i >= 4:
+            vol_sum -= volume[i-4]
+        if i >= 3:
+            vol_ma_4[i] = vol_sum / 4
+    
+    # Choppiness regime filter (14-period)
+    chop = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 13:
+            high_max = np.max(high[i-13:i+1])
+            low_min = np.min(low[i-13:i+1])
+            sum_true_range = 0.0
+            for j in range(14):
+                tr = max(high[i-j] - low[i-j], 
+                         abs(high[i-j] - close[i-j-1]) if i-j-1 >= 0 else high[i-j] - low[i-j],
+                         abs(low[i-j] - close[i-j-1]) if i-j-1 >= 0 else high[i-j] - low[i-j])
+                sum_true_range += tr
+            if sum_true_range > 0:
+                chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4[i]) or 
-            np.isnan(s4[i]) or 
-            np.isnan(prev_high[i]) or 
-            np.isnan(prev_low[i]) or 
-            np.isnan(vol_ma_20[i]) or 
-            np.isnan(ema_w_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or 
+            np.isnan(vol_ma_4[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes back inside previous day's range OR weekly trend turns bearish
-            if (close[i] <= prev_high[i] and close[i] >= prev_low[i]) or close[i] < ema_w_aligned[i]:
+            # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
+            if (close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside previous day's range OR weekly trend turns bullish
-            if (close[i] <= prev_high[i] and close[i] >= prev_low[i]) or close[i] > ema_w_aligned[i]:
+            # Exit: price closes back inside previous day's range OR chop > 61.8
+            if (close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation AND weekly trend bullish
-            vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > r4[i] and 
+            # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
+            vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
+            if (close[i] > r4_aligned[i] and 
                 vol_ratio > 2.0 and 
-                close[i] > ema_w_aligned[i]):
+                chop[i] < 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation AND weekly trend bearish
-            elif (close[i] < s4[i] and 
+            # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
+            elif (close[i] < s4_aligned[i] and 
                   vol_ratio > 2.0 and 
-                  close[i] < ema_w_aligned[i]):
+                  chop[i] < 61.8):
                 position = -1
                 signals[i] = -0.25
     
     return signals
-
-# %%
