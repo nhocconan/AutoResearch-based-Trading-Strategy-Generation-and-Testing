@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-# mtf_1h_supertrend_ema_volume_v1
-# Hypothesis: 1h strategy using 4h Supertrend for trend direction and 1d EMA200 for institutional bias.
-# Enters on pullbacks to EMA21 with volume confirmation during London/NY session (08-20 UTC).
-# Works in bull/bear: 4h Supertrend catches major trends, 1d EMA200 filters counter-trend noise.
-# Target: 15-35 trades/year by requiring confluence of 4h trend, 1d bias, EMA pullback, volume, and session.
+# 6h_camarilla_1d_trend_volume_v2
+# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter (EMA50) and volume confirmation.
+# Uses tighter volume confirmation (2.2x) and requires trend alignment for entry.
+# Exits on opposite Camarilla level (S3/R3) or trend reversal. Target: 12-37 trades/year.
+# Works in bull/bear: 1d EMA50 defines institutional trend; Camarilla R3/S3/R4/S4 levels provide
+# precise entry/exit levels; volume confirms institutional participation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_supertrend_ema_volume_v1"
-timeframe = "1h"
+name = "6h_camarilla_1d_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,69 +24,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    
-    # 4h HTF data for Supertrend trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # 4h ATR(10) for Supertrend
-    tr_4h = np.maximum(np.maximum(high_4h[1:] - low_4h[1:], np.abs(high_4h[1:] - close_4h[:-1])), np.abs(low_4h[1:] - close_4h[:-1]))
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = pd.Series(tr_4h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # 4h Supertrend calculation
-    hl2_4h = (high_4h + low_4h) / 2
-    upper_4h = hl2_4h + 3.0 * atr_4h
-    lower_4h = hl2_4h - 3.0 * atr_4h
-    
-    upper_4h[0] = np.nan
-    lower_4h[0] = np.nan
-    
-    for i in range(1, len(close_4h)):
-        if close_4h[i-1] <= upper_4h[i-1]:
-            upper_4h[i] = min(upper_4h[i], upper_4h[i-1])
-        else:
-            upper_4h[i] = upper_4h[i]
-        if close_4h[i-1] >= lower_4h[i-1]:
-            lower_4h[i] = max(lower_4h[i], lower_4h[i-1])
-        else:
-            lower_4h[i] = lower_4h[i]
-    
-    supertrend_4h = np.full(len(close_4h), np.nan)
-    for i in range(len(close_4h)):
-        if np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]):
-            supertrend_4h[i] = np.nan
-        elif i == 0:
-            supertrend_4h[i] = np.nan
-        elif supertrend_4h[i-1] == upper_4h[i-1]:
-            supertrend_4h[i] = lower_4h[i] if close_4h[i] > upper_4h[i] else upper_4h[i]
-        else:
-            supertrend_4h[i] = upper_4h[i] if close_4h[i] < lower_4h[i] else lower_4h[i]
-    
-    # Align 4h Supertrend to 1h (trend direction: 1=uptrend, -1=downtrend)
-    supertrend_dir_4h = np.where(close_4h > supertrend_4h, 1, -1)
-    supertrend_dir_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_dir_4h)
-    
-    # 1d HTF data for EMA200 institutional bias
+    # 1d HTF data for EMA trend and pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 1h EMA21 for dynamic support/resistance
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1h volume confirmation: current volume > 1.5x 20-period average
+    # Previous day's Camarilla pivot levels (using completed 1d bar)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = Pivot + Range * 1.1/2
+    # R3 = Pivot + Range * 1.1/4
+    # S3 = Pivot - Range * 1.1/4
+    # S4 = Pivot - Range * 1.1/2
+    
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r4_1d = pivot_1d + range_1d * 1.1 / 2
+    r3_1d = pivot_1d + range_1d * 1.1 / 4
+    s3_1d = pivot_1d - range_1d * 1.1 / 4
+    s4_1d = pivot_1d - range_1d * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe (completed 1d bar only)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Volume confirmation: current volume > 2.2x 20-period average (tighter)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -93,53 +66,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_dir_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(ema21[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                # Exit outside session
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: trend turns bearish OR price breaks below EMA21
-            if supertrend_dir_4h_aligned[i] == -1 or close[i] < ema21[i]:
+            # Exit: price closes below S3 OR trend turns bearish
+            if close[i] < s3_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend turns bullish OR price breaks above EMA21
-            if supertrend_dir_4h_aligned[i] == 1 or close[i] > ema21[i]:
+            # Exit: price closes above R3 OR trend turns bullish
+            if close[i] > r3_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.2 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: 4h uptrend, price above 1d EMA200, pullback to EMA21
-                if (supertrend_dir_4h_aligned[i] == 1 and 
-                    close[i] > ema200_1d_aligned[i] and 
-                    close[i] <= ema21[i] * 1.005):  # Within 0.5% above EMA21 (pullback)
+                # Long: price breaks above R4 with bullish trend
+                if close[i] > r4_aligned[i] and close[i] > ema50_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Short: 4h downtrend, price below 1d EMA200, pullback to EMA21
-                elif (supertrend_dir_4h_aligned[i] == -1 and 
-                      close[i] < ema200_1d_aligned[i] and 
-                      close[i] >= ema21[i] * 0.995):  # Within 0.5% below EMA21 (pullback)
+                    signals[i] = 0.25
+                # Short: price breaks below S4 with bearish trend
+                elif close[i] < s4_aligned[i] and close[i] < ema50_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
