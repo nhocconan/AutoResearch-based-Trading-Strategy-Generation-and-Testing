@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_regime_v3
-# Hypothesis: 4h Donchian channel breakout with volume confirmation (>1.3x 20-period average) and chop regime filter (CHOP(14) between 38.2 and 61.8 for ranging markets). Enters long on upper band breakout with volume and chop filter; short on lower band breakout with volume and chop filter. Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 20-50 trades/year) to work in both bull and bear markets by trading ranges with structure.
+# 12h_hma_volatility_breakout_v1
+# Hypothesis: 12h strategy using HMA(21) as dynamic trend filter with volatility-based breakout detection. Enters long when price breaks above HMA(21) + 0.5*ATR(14) with volume confirmation (>1.3x 20-period average) and bullish 1d trend (price > 20-period EMA on 1d). Enters short when price breaks below HMA(21) - 0.5*ATR(14) with volume confirmation and bearish 1d trend. Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 15-35 trades/year) by requiring volatility expansion and HTF alignment, reducing whipsaws in ranging markets while capturing strong trends in both bull and bear regimes.
 
 import numpy as np
 import pandas as pd
@@ -18,24 +18,24 @@ def calculate_hma(series, period):
     hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
     return hma.values
 
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index"""
-    if len(close) < period:
-        return np.full_like(close, np.nan, dtype=float)
-    atr = pd.Series(np.maximum(np.abs(high - low), np.maximum(np.abs(high - close.shift()), np.abs(low - close.shift())))).rolling(window=period, min_periods=period).mean().values
-    sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(period)
-    return chop
+def calculate_atr(high, low, close, period):
+    """Calculate Average True Range"""
+    if len(high) < period + 1:
+        return np.full_like(high, np.nan, dtype=float)
+    tr1 = pd.Series(high).diff().abs()
+    tr2 = (pd.Series(high) - pd.Series(close).shift(1)).abs()
+    tr3 = (pd.Series(low) - pd.Series(close).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    return atr.values
 
-name = "4h_donchian_breakout_volume_chop_regime_v3"
-timeframe = "4h"
+name = "12h_hma_volatility_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -47,12 +47,11 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # HMA(21) on primary timeframe
+    hma_21 = calculate_hma(close, 21)
     
-    # Chop regime filter (14-period)
-    chop = calculate_chop(high, low, close, 14)
+    # ATR(14) for volatility-based breakout bands
+    atr_14 = calculate_atr(high, low, close, 14)
     
     # 1d HTF trend filter: 20-period EMA on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
@@ -65,43 +64,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or np.isnan(chop[i]) or np.isnan(ema_20_1d_aligned[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(hma_21[i]) or
+            np.isnan(atr_14[i]) or np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.3x 20-period average
         volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
-        # Chop regime filter: ranging market (38.2 <= CHOP <= 61.8)
-        chop_filter = (chop[i] >= 38.2) and (chop[i] <= 61.8)
+        # Dynamic breakout levels
+        upper_breakout = hma_21[i] + 0.5 * atr_14[i]
+        lower_breakout = hma_21[i] - 0.5 * atr_14[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian lower band
-            if close[i] < lowest_low[i]:
+            # Exit: price crosses below HMA (trend reversal)
+            if close[i] < hma_21[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian upper band
-            if close[i] > highest_high[i]:
+            # Exit: price crosses above HMA (trend reversal)
+            if close[i] > hma_21[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter only with volume confirmation and chop regime filter
-            if volume_confirmed and chop_filter:
-                # Long: price breaks above upper Donchian band
-                if close[i] > highest_high[i]:
+            # Enter only with volume confirmation, volatility breakout, and 1d trend alignment
+            if volume_confirmed:
+                # Bullish 1d trend: price above 20-period EMA
+                bullish_trend = close[i] > ema_20_1d_aligned[i]
+                # Bearish 1d trend: price below 20-period EMA
+                bearish_trend = close[i] < ema_20_1d_aligned[i]
+                
+                # Long: price breaks above HMA + 0.5*ATR with volume and bullish 1d trend
+                if close[i] > upper_breakout and bullish_trend:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below lower Donchian band
-                elif close[i] < lowest_low[i]:
+                # Short: price breaks below HMA - 0.5*ATR with volume and bearish 1d trend
+                elif close[i] < lower_breakout and bearish_trend:
                     position = -1
                     signals[i] = -0.25
     
