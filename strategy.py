@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_v1
-# Hypothesis: Breakout above/below weekly Camarilla pivot levels (H3/L3) on daily chart with volume confirmation and volatility filter.
-# Only take long when price breaks above weekly H3 level, short when breaks below weekly L3 level.
-# Exit when price returns to weekly Pivot Point (PP) level.
-# Uses volatility filter (ATR < 2.5% of price) and volume confirmation (volume > 1.5x 20-period avg).
-# Target: 10-20 trades/year (40-80 total over 4 years) with strict entry conditions.
-# Works in both bull and bear markets due to weekly pivot levels adapting to volatility and volume/vol filters reducing whipsaw.
+# 12h_1d_camarilla_breakout_v5
+# Hypothesis: Breakout above/below 1-day Camarilla pivot levels (H3/L3) on 12h chart with volume confirmation and volatility filter.
+# Only take long when price breaks above H3 level, short when breaks below L3 level.
+# Exit when price returns to Pivot Point (PP) level.
+# Uses volatility filter (ATR < 3.5% of price) and volume confirmation (volume > 1.3x 20-period avg).
+# Target: 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
+# Works in both bull and bear markets due to pivot levels adapting to volatility and volume/vol filters reducing whipsaw.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v5"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,36 +39,36 @@ def generate_signals(prices):
     for i in range(1, n):
         atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # Load weekly data ONCE before loop for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each weekly bar
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivot levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Camarilla formulas
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Resistance levels
-    r1_1w = close_1w + (range_1w * 1.1 / 12)
-    r2_1w = close_1w + (range_1w * 1.1 / 6)
-    r3_1w = close_1w + (range_1w * 1.1 / 4)
-    r4_1w = close_1w + (range_1w * 1.1 / 2)
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    r4_1d = close_1d + (range_1d * 1.1 / 2)
     
     # Support levels
-    s1_1w = close_1w - (range_1w * 1.1 / 12)
-    s2_1w = close_1w - (range_1w * 1.1 / 6)
-    s3_1w = close_1w - (range_1w * 1.1 / 4)
-    s4_1w = close_1w - (range_1w * 1.1 / 2)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align weekly levels to daily timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)  # S3 is L3 in Camarilla
+    # Align 1d levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)  # S3 is L3 in Camarilla
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.full(n, np.nan)
@@ -90,10 +90,10 @@ def generate_signals(prices):
             continue
         
         # Volatility filter: avoid extremely high volatility
-        vol_filter = atr[i] < 0.025 * close[i]  # ATR less than 2.5% of price
+        vol_filter = atr[i] < 0.035 * close[i]  # ATR less than 3.5% of price
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_ok = volume[i] > vol_ma_20[i] * 1.3
         
         if position == 1:  # Long position
             # Exit: price returns to or below Pivot Point
