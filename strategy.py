@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 1h_camarilla_4h1d_trend_volume_v1
-# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter, executed on 1h timeframe.
+# 1h_camarilla_4h1d_trend_volume_v2
+# Hypothesis: 1h strategy using 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
 # Uses 4h/1d for signal direction, 1h only for entry timing. Session filter (08-20 UTC) reduces noise.
 # Discrete position sizing (0.0, ±0.20) to minimize fee churn. Target: 15-37 trades/year.
+# Improvements: Added ATR-based volatility regime filter to avoid whipsaws in low vol, tightened volume confirmation to 2.5x average.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_camarilla_4h1d_trend_volume_v1"
+name = "1h_camarilla_4h1d_trend_volume_v2"
 timeframe = "1h"
 leverage = 1.0
 
@@ -62,8 +63,11 @@ def generate_signals(prices):
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 2.5x 20-period average (tighter)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Volatility filter: ATR ratio (current vs 50-period MA)
+    atr_ma = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=50).mean().values
     
     # Session filter: 08-20 UTC (pre-compute hour array)
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -80,13 +84,12 @@ def generate_signals(prices):
         
         # Skip if any required data is NaN
         if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(atr14_1d_aligned[i])):
+            np.isnan(volume_ma[i]) or np.isnan(atr14_1d_aligned[i]) or np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volatility filter: avoid low volatility conditions that cause whipsaws
-        atr_ma = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=50).mean().values
-        if np.isnan(atr_ma[i]) or atr14_1d_aligned[i] < 0.4 * atr_ma[i]:
+        if atr14_1d_aligned[i] < 0.5 * atr_ma[i]:
             signals[i] = 0.0
             continue
         
@@ -107,7 +110,7 @@ def generate_signals(prices):
                 signals[i] = -0.20
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.5 * volume_ma[i]
             
             if volume_confirmed:
                 # Long: price breaks above H3 with bullish trend
