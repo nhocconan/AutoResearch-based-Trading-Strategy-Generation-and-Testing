@@ -1,119 +1,106 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_regime_v2
-# Hypothesis: 4h Donchian breakout with volume confirmation (>1.5x 20-bar avg volume) and chop regime filter (CHOP<61.8 = trending). Uses 12h HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Tightened entry conditions by requiring close > previous Donchian high/low (not just touching) and added minimum holding period of 3 bars to reduce churn. Target: 19-50 trades/year (75-200 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 1h_rsi_pullback_4h1d_trend_v1
+# Hypothesis: 1h RSI pullback strategy with 4h/1d HTF trend alignment for BTC/ETH/SOL.
+# Long: RSI(14) < 30 (oversold) + price > 4h EMA(50) + price > 1d EMA(200) (bullish alignment)
+# Short: RSI(14) > 70 (overbought) + price < 4h EMA(50) + price < 1d EMA(200) (bearish alignment)
+# Exit: RSI crosses back to neutral zone (40-60) or opposite extreme RSI reached
+# Uses session filter (08-20 UTC) to avoid low-liquidity hours.
+# Position size: 0.20 discrete levels to minimize fee churn.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_regime_v2"
-timeframe = "4h"
+name = "1h_rsi_pullback_4h1d_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # RSI(14)
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Choppiness Index regime filter (14-period)
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
-    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = np.log10(atr_period) * (highest_high - lowest_low)
-    denominator = np.where(denominator == 0, np.nan, denominator)
-    chop = 100 * np.log10(atr_sum / denominator)
+    # 4h EMA(50) for trend
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    close_4h_s = pd.Series(close_4h)
+    ema_50_4h = close_4h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Multi-timeframe: 12h EMA(50) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    close_12h_s = pd.Series(close_12h)
-    ema_50_12h = close_12h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA(200) for long-term trend
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    close_1d_s = pd.Series(close_1d)
+    ema_200_1d = close_1d_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    bars_since_entry = 0  # Track holding period
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(200, n):  # Start after warmup for 1d EMA(200)
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(rsi_values[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(close[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 12h EMA(50)
-        htf_uptrend = close[i] > ema_50_12h_aligned[i]
-        htf_downtrend = close[i] < ema_50_12h_aligned[i]
+        # Session filter: only trade 08-20 UTC
+        if not in_session[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            bars_since_entry += 1
-            # Exit: price closes below Donchian low (20) OR minimum holding period met with reversal signal
-            if close[i] < donchian_low[i]:
+            # Exit: RSI crosses above 40 (exit oversold) OR RSI > 70 (overbought reversal)
+            if rsi_values[i] > 40 or rsi_values[i] > 70:
                 position = 0
                 signals[i] = 0.0
-                bars_since_entry = 0
-            elif bars_since_entry >= 3 and close[i] < donchian_high[i-1]:  # Early exit on pullback
-                position = 0
-                signals[i] = 0.0
-                bars_since_entry = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            bars_since_entry += 1
-            # Exit: price closes above Donchian high (20) OR minimum holding period met with reversal signal
-            if close[i] > donchian_high[i]:
+            # Exit: RSI crosses below 60 (exit overbought) OR RSI < 30 (oversold reversal)
+            if rsi_values[i] < 60 or rsi_values[i] < 30:
                 position = 0
                 signals[i] = 0.0
-                bars_since_entry = 0
-            elif bars_since_entry >= 3 and close[i] > donchian_low[i-1]:  # Early exit on pullback
-                position = 0
-                signals[i] = 0.0
-                bars_since_entry = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            bars_since_entry = 0
-            # Check for Donchian breakout with volume, regime, and HTF confirmation
-            # Require close to exceed previous Donchian level (not just touch)
-            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
+            # Long setup: RSI oversold + bullish HTF alignment
+            long_setup = (rsi_values[i] < 30) and (close[i] > ema_50_4h_aligned[i]) and (close[i] > ema_200_1d_aligned[i])
+            # Short setup: RSI overbought + bearish HTF alignment
+            short_setup = (rsi_values[i] > 70) and (close[i] < ema_50_4h_aligned[i]) and (close[i] < ema_200_1d_aligned[i])
             
-            if bullish_breakout:
+            if long_setup:
                 position = 1
-                signals[i] = 0.25
-            elif bearish_breakout:
+                signals[i] = 0.20
+            elif short_setup:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
