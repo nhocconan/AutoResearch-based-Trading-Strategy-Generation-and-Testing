@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-# 6h_camarilla_pivot_volume_v1
-# Hypothesis: 6h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation. Enters long when price breaks above R4 with volume > 1.5x 20-period average (breakout continuation); enters short when price breaks below S4 with volume confirmation. Uses discrete position sizing (0.25) to limit fee drag. Targets 12-37 trades/year by requiring strict breakout conditions. Works in both bull and bear markets by capturing strong momentum moves aligned with volume spikes.
+# 4h_donchian_breakout_volume_chop_regime_v3
+# Hypothesis: 4h Donchian channel breakout with volume confirmation (>1.3x 20-period average) and chop regime filter (CHOP(14) between 38.2 and 61.8 for ranging markets). Enters long on upper band breakout with volume and chop filter; short on lower band breakout with volume and chop filter. Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 20-50 trades/year) to work in both bull and bear markets by trading ranges with structure.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    pivot = (high + low + close) / 3.0
-    range_ = high - low
-    r4 = pivot + range_ * 1.1 / 2
-    r3 = pivot + range_ * 1.1 / 4
-    r2 = pivot + range_ * 1.1 / 6
-    r1 = pivot + range_ * 1.1 / 12
-    s1 = pivot - range_ * 1.1 / 12
-    s2 = pivot - range_ * 1.1 / 6
-    s3 = pivot - range_ * 1.1 / 4
-    s4 = pivot - range_ * 1.1 / 2
-    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = int(period / 2)
+    sqrt_period = int(np.sqrt(period))
+    wma1 = pd.Series(series).ewm(span=half_period, adjust=False, min_periods=half_period).mean()
+    wma2 = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
+    return hma.values
 
-name = "6h_camarilla_pivot_volume_v1"
-timeframe = "6h"
+def calculate_chop(high, low, close, period=14):
+    """Calculate Choppiness Index"""
+    if len(close) < period:
+        return np.full_like(close, np.nan, dtype=float)
+    atr = pd.Series(np.maximum(np.abs(high - low), np.maximum(np.abs(high - close.shift()), np.abs(low - close.shift())))).rolling(window=period, min_periods=period).mean().values
+    sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(period)
+    return chop
+
+name = "4h_donchian_breakout_volume_chop_regime_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,67 +47,61 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d HTF data for Camarilla pivots
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Chop regime filter (14-period)
+    chop = calculate_chop(high, low, close, 14)
+    
+    # 1d HTF trend filter: 20-period EMA on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Initialize arrays for Camarilla levels
-    r4_1d = np.full_like(close_1d, np.nan)
-    s4_1d = np.full_like(close_1d, np.nan)
-    
-    # Calculate Camarilla levels for each 1d bar
-    for i in range(len(df_1d)):
-        r4, _, _, _, _, _, _, _, s4 = calculate_camarilla_pivot(high_1d[i], low_1d[i], close_1d[i])
-        r4_1d[i] = r4
-        s4_1d[i] = s4
-    
-    # Align Camarilla levels to 6h timeframe (with 1-bar delay for completed 1d bar)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or 
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or np.isnan(chop[i]) or np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        
+        # Chop regime filter: ranging market (38.2 <= CHOP <= 61.8)
+        chop_filter = (chop[i] >= 38.2) and (chop[i] <= 61.8)
         
         if position == 1:  # Long position
-            # Exit: price drops below R3 (take profit) or reverses below R4 (stop)
-            if close[i] < r4_1d_aligned[i]:
+            # Exit: price crosses below Donchian lower band
+            if close[i] < lowest_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above S3 (take profit) or reverses above S4 (stop)
-            if close[i] > s4_1d_aligned[i]:
+            # Exit: price crosses above Donchian upper band
+            if close[i] > highest_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter only with volume confirmation and Camarilla breakout
-            if volume_confirmed:
-                # Long: price breaks above R4 with volume
-                if close[i] > r4_1d_aligned[i]:
+            # Enter only with volume confirmation and chop regime filter
+            if volume_confirmed and chop_filter:
+                # Long: price breaks above upper Donchian band
+                if close[i] > highest_high[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below S4 with volume
-                elif close[i] < s4_1d_aligned[i]:
+                # Short: price breaks below lower Donchian band
+                elif close[i] < lowest_low[i]:
                     position = -1
                     signals[i] = -0.25
     
