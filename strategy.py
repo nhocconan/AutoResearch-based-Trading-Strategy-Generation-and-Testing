@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_breakout_volume_v2
-# Hypothesis: 6h strategy using weekly pivot points (R1/S1, R2/S2) from prior week as key support/resistance.
-# Breakout above weekly R2 with volume confirmation = long; breakdown below weekly S2 with volume = short.
-# Weekly pivot provides structural levels that work in both bull/bear markets as institutional reference points.
-# Volume > 1.5x 20-period average filters weak breakouts. Discrete sizing (±0.25) to minimize fees.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# 4h_donchian_20_volume_chop_regime_v3
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and choppiness regime filter.
+# In trending markets (CHOP < 38.2): breakout above/below Donchian(20) with volume > 1.5x 20-period average.
+# In ranging markets (CHOP > 61.8): mean reversion at Donchian(20) bands with volume confirmation.
+# Uses discrete position sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout_volume_v2"
-timeframe = "6h"
+name = "4h_donchian_20_volume_chop_regime_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +23,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for weekly pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (highest_high_20 + lowest_low_20) / 2
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Choppiness Index (14-period)
+    def choppiness_index(high, low, close, window=14):
+        atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=window, min_periods=window).sum()
+        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max()
+        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min()
+        chop = 100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(window)
+        return chop.fillna(50).values
     
-    # Weekly pivot points (using prior week's OHLC)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = np.nan
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    
-    pivot_point = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    weekly_range = prev_high_1w - prev_low_1w
-    
-    # Weekly R1, S1, R2, S2 levels
-    r1 = 2 * pivot_point - prev_low_1w
-    s1 = 2 * pivot_point - prev_high_1w
-    r2 = pivot_point + weekly_range
-    s2 = pivot_point - weekly_range
-    
-    # Align weekly pivot levels to 6h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    chop = choppiness_index(high, low, close, 14)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,41 +46,45 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
+            np.isnan(donchian_middle[i]) or np.isnan(chop[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly R1 (support fails)
-            if close[i] < r1[i]:
+            # Exit: price closes below Donchian middle OR stoploss via signal=0
+            if close[i] < donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly S1 (resistance fails)
-            if close[i] > s1[i]:
+            # Exit: price closes above Donchian middle OR stoploss via signal=0
+            if close[i] > donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation
             volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price breaks above weekly R2
-                if close[i] > r2_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price breaks below weekly S2
-                elif close[i] < s2_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+                # Trending regime: CHOP < 38.2 -> breakout
+                if chop[i] < 38.2:
+                    if close[i] > highest_high_20[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    elif close[i] < lowest_low_20[i]:
+                        position = -1
+                        signals[i] = -0.25
+                # Ranging regime: CHOP > 61.8 -> mean reversion at bands
+                elif chop[i] > 61.8:
+                    if close[i] < lowest_low_20[i] and close[i] < donchian_middle[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    elif close[i] > highest_high_20[i] and close[i] > donchian_middle[i]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
-
-# Note: R1 and S1 are used for exit conditions and accessed via df_1w alignment implicitly through index i
-# For cleaner code, we could pre-align R1/S1 as well, but using direct index is acceptable since
-# these are derived from the same weekly data and aligned to the same 6h bars via the weekly index mapping.
