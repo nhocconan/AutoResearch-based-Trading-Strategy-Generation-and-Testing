@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v2
-# Hypothesis: 4h strategy using Donchian(20) breakouts with volume confirmation and chop regime filter.
+# 1d_donchian_breakout_volume_regime_v1
+# Hypothesis: Daily Donchian(20) breakouts with volume confirmation and choppiness regime filter.
 # In ranging markets (2025+), price tends to revert from Donchian channel extremes.
 # Volume confirmation filters false breakouts. Chop filter ensures ranging conditions.
-# Discrete sizing (0.0, ±0.30) minimizes fee churn. Target: 20-50 trades/year.
+# Discrete sizing (0.0, ±0.30) minimizes fee churn. Target: 7-25 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v2"
-timeframe = "4h"
+name = "1d_donchian_breakout_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,31 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 1w HTF data for chop regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Calculate Donchian channels (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate chop regime (14-period) from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate chop regime (14-period) from 1w data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
+    high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    atr_14 = pd.Series(high_1w - low_1w).rolling(window=14, min_periods=14).sum().values
     
     # Avoid division by zero
     chop_denom = np.log10(atr_14) * np.log10(14)
     chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
     chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
     
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align chop to 1d timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
