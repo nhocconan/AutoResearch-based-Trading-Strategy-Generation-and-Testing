@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d + volume confirmation + choppiness regime filter
-# Camarilla pivots identify key support/resistance levels where price often reverses or breaks out
-# Volume confirmation ensures breakouts have conviction
-# Choppiness regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend) adapts strategy to market conditions
-# In ranging markets: mean revert at Camarilla H3/L3 levels
-# In trending markets: breakout through H4/L4 levels with volume
-# Works in bull/bear: regime filter prevents false signals in wrong market conditions
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume confirmation (1.5x 20-period avg)
+# Donchian breakouts capture strong momentum moves; 12h EMA50 ensures we trade with higher timeframe trend
+# Volume confirmation filters weak breakouts
+# Works in bull/bear: EMA50 trend filter avoids counter-trend whipsaws in ranging markets
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_ema50_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,75 +23,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and choppiness filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    camarilla_h4 = np.full(n, np.nan)
-    camarilla_l4 = np.full(n, np.nan)
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
-    camarilla_h6 = np.full(n, np.nan)
-    camarilla_l6 = np.full(n, np.nan)
+    # Calculate 12h EMA50 for trend direction
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
     for i in range(n):
-        if i < 1:
-            camarilla_h4[i] = np.nan
-            camarilla_l4[i] = np.nan
-            camarilla_h3[i] = np.nan
-            camarilla_l3[i] = np.nan
-            camarilla_h6[i] = np.nan
-            camarilla_l6[i] = np.nan
+        if i < 20:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
         else:
-            # Previous day's OHLC
-            phigh = df_1d['high'].values[i-1]
-            plow = df_1d['low'].values[i-1]
-            pclose = df_1d['close'].values[i-1]
-            
-            pivot = (phigh + plow + pclose) / 3
-            range_val = phigh - plow
-            
-            camarilla_h4[i] = pivot + range_val * 1.1 / 2
-            camarilla_l4[i] = pivot - range_val * 1.1 / 2
-            camarilla_h3[i] = pivot + range_val * 1.1 / 4
-            camarilla_l3[i] = pivot - range_val * 1.1 / 4
-            camarilla_h6[i] = pivot + range_val * 1.1 / 6
-            camarilla_l6[i] = pivot - range_val * 1.1 / 6
-    
-    # Align Camarilla levels to 12h timeframe (already aligned by get_htf_data + align_htf_to_ltf logic in helper)
-    # Actually, get_htf_data gives us 1d data, we need to align our calculated values
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h6_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h6)
-    camarilla_l6_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l6)
-    
-    # Calculate 1d choppiness index for regime filter
-    chop = np.full(n, np.nan)
-    for i in range(n):
-        if i < 14:
-            chop[i] = np.nan
-        else:
-            # True range calculation
-            tr1 = df_1d['high'].values[i-14:i] - df_1d['low'].values[i-14:i]
-            tr2 = np.abs(df_1d['high'].values[i-14:i] - df_1d['close'].values[i-15:i-1])
-            tr3 = np.abs(df_1d['low'].values[i-14:i] - df_1d['close'].values[i-15:i-1])
-            tr = np.maximum(np.maximum(tr1, tr2), tr3)
-            
-            atr = np.mean(tr)
-            max_high = np.max(df_1d['high'].values[i-14:i])
-            min_low = np.min(df_1d['low'].values[i-14:i])
-            
-            if atr == 0:
-                chop[i] = 50
-            else:
-                chop[i] = 100 * np.log10(atr / (max_high - min_low)) / np.log10(14)
-    
-    # Align choppiness to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -109,74 +58,39 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
-        # Regime filter: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (breakout)
-        is_ranging = chop_aligned[i] > 61.8
-        is_trending = chop_aligned[i] < 38.2
-        
         if position == 1:  # Long position
-            # Exit logic
-            if is_ranging:
-                # In ranging market: exit at L3 (profit target) or H4 (stop loss)
-                if close[i] <= camarilla_l3_aligned[i] or close[i] >= camarilla_h4_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # trending market
-                # In trending market: exit at L4 (stop loss) or H6 (profit target)
-                if close[i] <= camarilla_l4_aligned[i] or close[i] >= camarilla_h6_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
+            # Exit: price < Donchian low OR price < 12h EMA50 (trend change)
+            if close[i] < donchian_low[i] or close[i] < ema_50_12h_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit logic
-            if is_ranging:
-                # In ranging market: exit at H3 (profit target) or L4 (stop loss)
-                if close[i] >= camarilla_h3_aligned[i] or close[i] <= camarilla_l4_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-            else:  # trending market
-                # In trending market: exit at H4 (stop loss) or L6 (profit target)
-                if close[i] >= camarilla_h4_aligned[i] or close[i] <= camarilla_l6_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit: price > Donchian high OR price > 12h EMA50 (trend change)
+            if close[i] > donchian_high[i] or close[i] > ema_50_12h_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
         else:  # Flat
-            # Entry logic
+            # Entry logic with volume confirmation and Donchian breakout + EMA50 trend filter
             if volume_confirmed:
-                if is_ranging:
-                    # In ranging market: mean revert at H3/L3 levels
-                    if close[i] <= camarilla_l3_aligned[i] and close[i] > camarilla_l4_aligned[i]:
-                        # Long near L3 with stop at L4
-                        position = 1
-                        signals[i] = 0.25
-                    elif close[i] >= camarilla_h3_aligned[i] and close[i] < camarilla_h4_aligned[i]:
-                        # Short near H3 with stop at H4
-                        position = -1
-                        signals[i] = -0.25
-                else:  # is_trending
-                    # In trending market: breakout through H4/L4 levels
-                    if close[i] > camarilla_h4_aligned[i] and close[i] > camarilla_h6_aligned[i]:
-                        # Strong breakout above H4
-                        position = 1
-                        signals[i] = 0.25
-                    elif close[i] < camarilla_l4_aligned[i] and close[i] < camarilla_l6_aligned[i]:
-                        # Strong breakdown below L4
-                        position = -1
-                        signals[i] = -0.25
+                # Long entry: price > Donchian high AND price > 12h EMA50 (bullish breakout + uptrend)
+                if close[i] > donchian_high[i] and close[i] > ema_50_12h_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: price < Donchian low AND price < 12h EMA50 (bearish breakout + downtrend)
+                elif close[i] < donchian_low[i] and close[i] < ema_50_12h_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
