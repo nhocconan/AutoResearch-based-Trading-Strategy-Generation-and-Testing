@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v28"
+name = "4h_1d_camarilla_breakout_v29"
 timeframe = "4h"
 leverage = 1.0
 
@@ -53,19 +53,22 @@ def generate_signals(prices):
         if i >= 3:
             vol_ma_4[i] = vol_sum / 4
     
-    # Choppiness regime filter (14-period)
+    # Choppiness regime filter (14-period) - optimized version
     chop = np.full(n, np.nan)
     for i in range(13, n):
         high_max = np.max(high[i-13:i+1])
         low_min = np.min(low[i-13:i+1])
+        if high_max <= low_min:
+            chop[i] = np.nan
+            continue
         sum_true_range = 0.0
         for j in range(14):
             idx = i - j
-            tr = max(high[idx] - low[idx],
-                     abs(high[idx] - close[idx-1]) if idx-1 >= 0 else high[idx] - low[idx],
-                     abs(low[idx] - close[idx-1]) if idx-1 >= 0 else high[idx] - low[idx])
+            tr = high[idx] - low[idx]
+            if idx > 0:
+                tr = max(tr, abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
             sum_true_range += tr
-        if sum_true_range > 0 and high_max > low_min:
+        if sum_true_range > 0:
             chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
     
     signals = np.zeros(n)
