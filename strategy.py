@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+# Hypothesis: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
 # Donchian breakouts capture momentum; 1d Camarilla pivots provide institutional reference levels
 # Volume confirmation ensures breakout authenticity
 # Works in bull/bear: Camarilla pivots adapt to higher timeframe structure
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "6h_1d_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,14 +42,14 @@ def generate_signals(prices):
     camarilla_h4 = camarilla_pivot + (camarilla_range * 1.1 / 2)
     camarilla_l4 = camarilla_pivot - (camarilla_range * 1.1 / 2)
     
-    # Align Camarilla data to 4h timeframe (wait for daily close)
+    # Align Camarilla data to 6h timeframe (wait for daily close)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 6h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
