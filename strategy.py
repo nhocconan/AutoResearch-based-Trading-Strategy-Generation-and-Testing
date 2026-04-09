@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d EMA50 trend filter
-# Uses 12h Donchian channels for breakout signals, confirmed by volume spike (>1.5x 20-period avg volume)
-# Only takes breakouts in direction of daily EMA50 trend to avoid counter-trend whipsaws
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 12h EMA50 trend filter
+# Uses 4h Donchian channels for breakout signals, confirmed by volume spike (>1.5x 20-period avg volume)
+# Only takes breakouts in direction of 12h EMA50 trend to avoid counter-trend whipsaws
 # Position size 0.25 to manage drawdown in bear markets
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag
-# Works in both bull/bear: daily EMA filter ensures we only trade with the dominant trend
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
+# Works in both bull/bear: 12h EMA filter ensures we only trade with the dominant trend
 
-name = "12h_1d_donchian_volume_trend_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +24,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = np.full(len(df_1d), np.nan)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50 = np.full(len(df_12h), np.nan)
     multiplier = 2 / (50 + 1)
-    ema_50[0] = close_1d[0]
-    for i in range(1, len(df_1d)):
-        ema_50[i] = (close_1d[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
+    ema_50[0] = close_12h[0]
+    for i in range(1, len(df_12h)):
+        ema_50[i] = (close_12h[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align 12h EMA50 to 4h timeframe
+    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Calculate Donchian channels (20-period) on 12h data
+    # Calculate Donchian channels (20-period) on 4h data
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
@@ -60,7 +60,7 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_12h[i]) or 
+            np.isnan(ema_50_4h[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -70,7 +70,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit conditions: price closes below Donchian lower band OR trend turns bearish
-            if close[i] < lowest_low[i] or close[i] < ema_50_12h[i]:
+            if close[i] < lowest_low[i] or close[i] < ema_50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -78,7 +78,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions: price closes above Donchian upper band OR trend turns bullish
-            if close[i] > highest_high[i] or close[i] > ema_50_12h[i]:
+            if close[i] > highest_high[i] or close[i] > ema_50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -86,12 +86,12 @@ def generate_signals(prices):
         else:  # Flat
             # Entry logic: Donchian breakout with volume confirmation and trend filter
             if volume_confirm:
-                # Long breakout: price closes above upper Donchian band AND daily trend is bullish
-                if close[i] > highest_high[i] and close[i] > ema_50_12h[i]:
+                # Long breakout: price closes above upper Donchian band AND 12h trend is bullish
+                if close[i] > highest_high[i] and close[i] > ema_50_4h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below lower Donchian band AND daily trend is bearish
-                elif close[i] < lowest_low[i] and close[i] < ema_50_12h[i]:
+                # Short breakout: price closes below lower Donchian band AND 12h trend is bearish
+                elif close[i] < lowest_low[i] and close[i] < ema_50_4h[i]:
                     position = -1
                     signals[i] = -0.25
     
