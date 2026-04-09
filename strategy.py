@@ -3,23 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with volume confirmation and ATR trailing stop
-# - Primary timeframe: 1d, HTF: 1w for regime filter (ADX > 25 = trending)
-# - Long when price closes above upper Donchian with volume > 1.5x 20-day average AND weekly ADX > 25
-# - Short when price closes below lower Donchian with volume > 1.5x 20-day average AND weekly ADX > 25
-# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry (short symmetric)
+# Hypothesis: 6h Camarilla pivot breakout with 1d HTF regime filter
+# - Uses 12h HTF for trend direction via EMA(20) > EMA(50) (bullish) or < (bearish)
+# - Uses 1d HTF for Camarilla pivot levels (R3, R4, S3, S4)
+# - Long when: 12h EMA20 > EMA50 AND price breaks above 1d R4 with volume > 1.5x 20-period average
+# - Short when: 12h EMA20 < EMA50 AND price breaks below 1d S4 with volume > 1.5x 20-period average
+# - Exit when price returns to 1d R3 (for longs) or S3 (for shorts) OR opposite pivot break occurs
 # - Fixed position size 0.25 to control drawdown
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Volume filter and ATR stop reduce false breakouts; weekly ADX ensures we only trade in trending regimes
-# - Works in both bull and bear markets by capturing strong breakouts during trending phases
+# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years)
+# - Combines HTF trend alignment with intraday pivot structure for high-probability breaks
+# - Volume confirmation reduces false breakouts
+# - Works in bull markets (long bias) and bear markets (short bias) via 12h trend filter
 
-name = "1d_donchian_breakout_volume_adx_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_breakout_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,142 +29,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need enough for ADX calculation
+    # Load 12h data ONCE before loop for trend regime
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 14-period ADX on weekly data
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w[0] = tr1[0]
+    # Calculate 12h EMA20 and EMA50 for trend regime
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align 12h EMAs to 6h timeframe
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Smoothed TR, DM+ and DM- using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def WilderSmoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr_1w = WilderSmoothing(tr_1w, 14)
-    dm_plus_smooth = WilderSmoothing(dm_plus, 14)
-    dm_minus_smooth = WilderSmoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
-    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = WilderSmoothing(dx, 14)
-    
-    # Align weekly ADX to daily timeframe (wait for completed weekly bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Load daily data for Donchian channels and volume
+    # Load 1d data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels on daily data
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels
+    # Pivot point = (high + low + close) / 3
+    # Range = high - low
+    # R4 = close + range * 1.1/2
+    # R3 = close + range * 1.1/4
+    # S3 = close - range * 1.1/4
+    # S4 = close - range * 1.1/2
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    rng = high_1d - low_1d
+    r4 = close_1d + rng * 1.1 / 2.0
+    r3 = close_1d + rng * 1.1 / 4.0
+    s3 = close_1d - rng * 1.1 / 4.0
+    s4 = close_1d - rng * 1.1 / 2.0
     
-    # Align Donchian levels to daily timeframe (though already daily, this ensures proper alignment)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Pre-compute volume confirmation (20-day average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute ATR (14-period) for stoploss on daily data
-    tr1_d = high_1d - low_1d
-    tr2_d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    tr_d[0] = tr1_d[0]
-    atr_d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute volume confirmation (20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr_d[i]) or np.isnan(adx_aligned[i]) or
-            vol_ma_20[i] <= 0 or atr_d[i] <= 0):
+        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Regime filter: weekly ADX > 25 indicates trending market
-        is_trending = adx_aligned[i] > 25
-        
-        # Volume confirmation: current daily volume > 1.5x 20-day average
-        volume_confirmed = volume_1d[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high_1d[i])
-            
-            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
-            if close_1d[i] < highest_high_since_entry - 2.5 * atr_d[i]:
+            # Exit conditions: price returns to R3 OR short breakout occurs
+            if close[i] <= r3_aligned[i] or (volume_confirmed and close[i] < s4_aligned[i]):
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low_1d[i])
-            
-            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
-            if close_1d[i] > lowest_low_since_entry + 2.5 * atr_d[i]:
+            # Exit conditions: price returns to S3 OR long breakout occurs
+            if close[i] >= s3_aligned[i] or (volume_confirmed and close[i] > r4_aligned[i]):
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Donchian breakout + volume confirmation + trend regime
-            if volume_confirmed and is_trending:
-                # Long entry: price closes above upper Donchian
-                if close_1d[i] > upper_aligned[i]:
+            # Entry logic: 12h trend alignment + 1d Camarilla breakout + volume
+            if volume_confirmed:
+                bullish_regime = ema_20_12h_aligned[i] > ema_50_12h_aligned[i]
+                bearish_regime = ema_20_12h_aligned[i] < ema_50_12h_aligned[i]
+                
+                # Long entry: bullish 12h regime AND price breaks above 1d R4
+                if bullish_regime and close[i] > r4_aligned[i]:
                     position = 1
-                    highest_high_since_entry = high_1d[i]
-                    lowest_low_since_entry = low_1d[i]
                     signals[i] = 0.25
-                # Short entry: price closes below lower Donchian
-                elif close_1d[i] < lower_aligned[i]:
+                # Short entry: bearish 12h regime AND price breaks below 1d S4
+                elif bearish_regime and close[i] < s4_aligned[i]:
                     position = -1
-                    highest_high_since_entry = high_1d[i]
-                    lowest_low_since_entry = low_1d[i]
                     signals[i] = -0.25
     
     return signals
