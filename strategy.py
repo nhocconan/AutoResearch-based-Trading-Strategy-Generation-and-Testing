@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
-# - Uses 1d Donchian channels for breakout signals (long above 20-day high, short below 20-day low)
-# - Confirms with 1d volume > 1.5x 20-period average (institutional participation)
-# - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range) or CHOP < 38.2 (trend)
-# - Exits when price touches opposite Donchian level or ATR-based stoploss (2x ATR)
+# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and choppiness regime filter
+# - Uses 1d Williams %R(14) for mean reversion signals: long when %R < -80 (oversold), short when %R > -20 (overbought)
+# - Confirms with 1d volume > 1.8x 20-period average (strong participation)
+# - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range-bound) to avoid whipsaws in strong trends
+# - Exits when price reverses to 50% of the Williams %R range or ATR-based stoploss (1.5x ATR)
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 15-40 trades/year on 4h timeframe (60-160 total over 4 years) to minimize fee drag
-# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
-# - Donchian channels provide robust structure that adapts to volatility regimes
+# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years) to minimize fee drag
+# - Works in bull markets (mean reversion in pullbacks) and bear markets (mean reversion in bounces)
+# - Williams %R identifies exhaustion points that work across market regimes when combined with volume and chop filters
 
-name = "4h_1d_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "12h_1d_williamsr_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,13 +43,18 @@ def generate_signals(prices):
     # 1d ATR(14) for stoploss
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # 1d Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high_14 - lowest_low_14) > 0,
+        ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100,
+        -50.0  # neutral when range is zero
+    )
     
-    # 1d Volume > 1.5x 20-period average
+    # 1d Volume > 1.8x 20-period average
     avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * avg_volume_20)
+    volume_spike = volume_1d > (1.8 * avg_volume_20)
     
     # 1d Choppiness Index(14)
     sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
@@ -57,18 +62,15 @@ def generate_signals(prices):
     lowest_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     chop_denom = np.where((highest_14 - lowest_14) > 0, highest_14 - lowest_14, 1e-10)
     chop = 100 * np.log10(sum_tr_14 / chop_denom) / np.log10(14)
-    chop_range = chop > 61.8  # range-bound market
-    chop_trend = chop < 38.2  # trending market
+    chop_range = chop > 61.8  # range-bound market (favor mean reversion)
     
-    # Align all 1d indicators to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align all 1d indicators to 12h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -77,51 +79,53 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     atr_stop = 0.0
+    williams_high = -20.0  # overbought threshold
+    williams_low = -80.0   # oversold threshold
+    williams_exit = -50.0  # midpoint exit
     
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_range_aligned[i]) or
-            np.isnan(chop_trend_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
+            np.isnan(chop_range_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
             atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: opposite Donchian touch (low) or ATR stoploss
-            if low[i] <= donchian_low_aligned[i]:  # Touch opposite band
+            # Exit conditions: Williams %R midpoint or ATR stoploss
+            if williams_r_aligned[i] >= williams_exit:  # Return to midpoint
                 position = 0
                 signals[i] = 0.0
-            elif high[i] >= entry_price + (2.0 * atr_stop):  # ATR stoploss
+            elif low[i] <= entry_price - (1.5 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: opposite Donchian touch (high) or ATR stoploss
-            if high[i] >= donchian_high_aligned[i]:  # Touch opposite band
+            # Exit conditions: Williams %R midpoint or ATR stoploss
+            if williams_r_aligned[i] <= williams_exit:  # Return to midpoint
                 position = 0
                 signals[i] = 0.0
-            elif low[i] <= entry_price - (2.0 * atr_stop):  # ATR stoploss
+            elif high[i] >= entry_price + (1.5 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with volume confirmation and regime filter
-            if (high[i] >= donchian_high_aligned[i] and  # Break above upper band
-                volume_spike_aligned[i] and         # Volume confirmation
-                (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
+            # Look for Williams %R extreme with volume confirmation and chop filter
+            if (williams_r_aligned[i] <= williams_low and      # Oversold
+                volume_spike_aligned[i] and                 # Volume confirmation
+                chop_range_aligned[i]):                     # Range-bound regime
                 position = 1
-                entry_price = high[i]
+                entry_price = low[i]
                 atr_stop = atr_1d_aligned[i]
                 signals[i] = 0.25
-            elif (low[i] <= donchian_low_aligned[i] and   # Break below lower band
-                  volume_spike_aligned[i] and         # Volume confirmation
-                  (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
+            elif (williams_r_aligned[i] >= williams_high and   # Overbought
+                  volume_spike_aligned[i] and              # Volume confirmation
+                  chop_range_aligned[i]):                  # Range-bound regime
                 position = -1
-                entry_price = low[i]
+                entry_price = high[i]
                 atr_stop = atr_1d_aligned[i]
                 signals[i] = -0.25
     
