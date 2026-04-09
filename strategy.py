@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v4
+# 4h_camarilla_1d_trend_volume_v5
 # Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
-# Uses discrete position sizing (0.0, ±0.30) to minimize fee churn. Target: 20-50 trades/year.
+# Reduced trade frequency by tightening volume confirmation (2.5x) and requiring close beyond pivot.
+# Uses discrete position sizing (0.0, ±0.30) to minimize fee churn. Target: 20-40 trades/year.
 # Works in bull/bear by aligning with 1d trend via EMA50. Volume confirms institutional participation.
-# Improved: Added ATR-based volatility filter to reduce whipsaws and overtrading.
+# Added ATR-based volatility filter to reduce whipsaws and overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v4"
+name = "4h_camarilla_1d_trend_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -63,7 +64,7 @@ def generate_signals(prices):
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 2.5x 20-period average (tighter)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -100,7 +101,7 @@ def generate_signals(prices):
                 signals[i] = -0.30
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.5 * volume_ma[i]
             
             if volume_confirmed:
                 # Long: price breaks above H3 with bullish trend
