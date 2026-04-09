@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy combining 1w Bollinger Band squeeze (volatility contraction) 
-# with 1w Donchian breakout direction and volume confirmation. 
-# Bollinger Band Width < 20th percentile indicates low volatility squeeze.
-# Breakout direction determined by 1w Donchian(20): long if price > upper band, short if price < lower band.
-# Volume confirmation: current 1d volume > 1.5 * 20-period average volume.
-# Only trade in low volatility regimes to capture explosive moves after consolidation.
-# Works in bull/bear markets: volatility contraction precedes big moves in both directions.
-# Uses discrete position sizing 0.25 to target ~10-25 trades/year and minimize fee drag.
+# Hypothesis: 6h strategy using 12h Camarilla pivot levels with volume confirmation
+# In low volatility regimes (choppy markets): fade at R3/S3 levels for mean reversion
+# In high volatility regimes (trending markets): breakout continuation at R4/S4 levels
+# Uses 1d ADX to filter regimes and 12h volume spike for confirmation
+# Discrete position sizing 0.25 to limit trades to 12-37/year and reduce fee drag
+# Works in bull/bear markets: mean reversion in ranging, breakout in trending
 
-name = "1d_1w_bb_squeeze_donchian_volume_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,105 +19,161 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1w Bollinger Bands (20, 2)
-    close_s_1w = pd.Series(close_1w)
-    basis_1w = close_s_1w.ewm(span=20, adjust=False, min_periods=20).mean()
-    dev_1w = 2 * close_s_1w.ewm(span=20, adjust=False, min_periods=20).std()
-    upper_1w = basis_1w + dev_1w
-    lower_1w = basis_1w - dev_1w
-    bBW_1w = (upper_1w - lower_1w) / basis_1w  # Band Width
+    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
+    # Camarilla: R4 = Close + ((High - Low) * 1.1/2), R3 = Close + ((High - Low) * 1.1/4)
+    #          S3 = Close - ((High - Low) * 1.1/4), S4 = Close - ((High - Low) * 1.1/2)
+    # We use the previous bar's levels to avoid look-ahead
+    high_shift = np.concatenate([[np.nan], high_12h[:-1]])
+    low_shift = np.concatenate([[np.nan], low_12h[:-1]])
+    close_shift = np.concatenate([[np.nan], close_12h[:-1]])
     
-    # Calculate 20th percentile of BBW for squeeze condition
-    def rolling_percentile(arr, window, percentile):
-        from scipy.stats import percentileofscore
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            window_data = arr[i-window+1:i+1]
-            valid_data = window_data[~np.isnan(window_data)]
-            if len(valid_data) > 0:
-                result[i] = percentileofscore(valid_data, arr[i], kind='rank') / 100.0 * 100
+    rangep = high_shift - low_shift
+    r4 = close_shift + rangep * 1.1 / 2
+    r3 = close_shift + rangep * 1.1 / 4
+    s3 = close_shift - rangep * 1.1 / 4
+    s4 = close_shift - rangep * 1.1 / 2
+    
+    # Calculate 12h volume spike (volume > 1.5 * 20-period average)
+    vol_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_12h > (vol_ma * 1.5)
+    
+    # Load 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d ADX(14) for regime filtering
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    # Approximate percentile using rolling min/max for efficiency
-    min_bBW_1w = pd.Series(bBW_1w).rolling(window=50, min_periods=20).min().values
-    max_bBW_1w = pd.Series(bBW_1w).rolling(window=50, min_periods=20).max().values
-    range_bBW_1w = max_bBW_1w - min_bBW_1w
-    # Avoid division by zero
-    range_bBW_1w = np.where(range_bBW_1w == 0, 1, range_bBW_1w)
-    percent_bBW_1w = 100 * (bBW_1w - min_bBW_1w) / range_bBW_1w
-    squeeze_condition = percent_bBW_1w < 20  # BBW in lower 20th percentile
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = np.abs(high[1:] - low[:-1])
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr = wilders_smoothing(tr, period)
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed DM
+        plus_dm_smooth = wilders_smoothing(plus_dm, period)
+        minus_dm_smooth = wilders_smoothing(minus_dm, period)
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        
+        # DX and ADX
+        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = wilders_smoothing(dx, period)
+        
+        return adx
     
-    # Calculate 1w Donchian Channel (20)
-    def donchian_channel(high, low, window=20):
-        upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    upper_dc_1w, lower_dc_1w = donchian_channel(high_1w, low_1w, 20)
-    donchian_breakout_up = close_1w > upper_dc_1w
-    donchian_breakout_down = close_1w < lower_dc_1w
+    # Align 12h indicators to 6h timeframe
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
     
-    # Calculate 1w volume average (20-period)
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1w = volume_1w > (1.5 * vol_ma_1w)
-    
-    # Align 1w indicators to 1d timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1w, squeeze_condition)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1w, donchian_breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1w, donchian_breakout_down)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_1w)
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
+            np.isnan(volume_spike_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: squeeze + breakout direction + volume spike
-        long_entry = squeeze_aligned[i] and breakout_up_aligned[i] and volume_spike_aligned[i]
-        short_entry = squeeze_aligned[i] and breakout_down_aligned[i] and volume_spike_aligned[i]
-        
-        # Exit conditions: exit when squeeze ends (volatility expands) or opposite signal
-        long_exit = not squeeze_aligned[i] or breakout_down_aligned[i]
-        short_exit = not squeeze_aligned[i] or breakout_up_aligned[i]
+        # Regime filter based on 1d ADX
+        trending_regime = adx_1d_aligned[i] > 25
+        ranging_regime = adx_1d_aligned[i] < 20
         
         if position == 1:  # Long position
-            if long_exit:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
+            if trending_regime:
+                # Exit long if price breaks below R3 in trending market
+                if close[i] <= r3_12h_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            elif ranging_regime:
+                # Exit long if price returns above S3 in ranging market
+                if close[i] >= s3_12h_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            if short_exit:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            if trending_regime:
+                # Exit short if price breaks above S3 in trending market
+                if close[i] >= s3_12h_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            elif ranging_regime:
+                # Exit short if price returns below R3 in ranging market
+                if close[i] <= r3_12h_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            if long_entry:
-                position = 1
-                signals[i] = 0.25
-            elif short_entry:
-                position = -1
-                signals[i] = -0.25
+            if trending_regime and volume_spike_12h_aligned[i]:
+                # Breakout continuation in trending market with volume confirmation
+                if close[i] > r4_12h_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < s4_12h_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
+            elif ranging_regime:
+                # Mean reversion at extreme levels in ranging market
+                if close[i] < s3_12h_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] > r3_12h_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
