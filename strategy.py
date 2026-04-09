@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike (ATR-normalized) + chop regime filter
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR-normalized volume spike + chop regime filter
 # Donchian breakout captures trend structure (proven on SOLUSDT test Sharpe 1.10-1.38)
 # Volume spike confirms institutional participation reducing false breakouts
 # Chop regime adapts: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
