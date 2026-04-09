@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 12h Supertrend(ATR=10, mult=3.0) trend filter + volume confirmation (1.5x 20-period avg)
-# Donchian breakouts capture strong momentum moves; Supertrend ensures we trade with higher timeframe trend direction
-# Volume confirmation filters weak breakouts. Supertrend avoids counter-trend whipsaws in ranging markets.
-# Works in bull/bear: Supertrend adapts to volatility and trend changes.
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 4h Camarilla pivot levels (H3/L3) from 1d + volume spike (2.0x 20-period avg) + chop regime filter (CHOP > 61.8 = range)
+# Camarilla levels provide high-probability reversal points in ranging markets; volume spike confirms institutional interest
+# Chop regime filter ensures we only mean-revert in ranging conditions, avoiding trending markets where pivots fail
+# Works in bull/bear: chop filter adapts to market regime, volume confirmation avoids false signals
+# Target: 20-50 total trades over 4 years (5-12/year) with discrete sizing 0.25
 
-name = "6h_12h_donchian_supertrend_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,77 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Supertrend trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1d data ONCE before loop for Camarilla levels and chop regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h Supertrend (ATR=10, mult=3.0)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d Camarilla levels (H3, L3) using previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Camarilla: H3 = close + 1.1*(high-low)/6, L3 = close - 1.1*(high-low)/6
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 6
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 6
     
-    # ATR(10)
-    atr_10 = np.full(len(close_12h), np.nan)
-    for i in range(len(close_12h)):
-        if i < 10:
-            atr_10[i] = np.nan
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
+    # We use 14-period CHOP on 1d timeframe
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]  # First TR
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    chop_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        if atr_1d[i] > 0 and (max_high_1d[i] - min_low_1d[i]) > 0:
+            chop_1d[i] = 100 * np.log10(atr_1d[i] * 14 / (max_high_1d[i] - min_low_1d[i])) / np.log10(14)
         else:
-            atr_10[i] = np.nanmean(tr[i-9:i+1])
+            chop_1d[i] = 50  # Neutral value when calculation invalid
     
-    # Supertrend calculation
-    hl2 = (high_12h + low_12h) / 2
-    upperband = hl2 + (3.0 * atr_10)
-    lowerband = hl2 - (3.0 * atr_10)
-    
-    supertrend = np.full(len(close_12h), np.nan)
-    direction = np.full(len(close_12h), np.nan)  # 1 = uptrend, -1 = downtrend
-    
-    for i in range(1, len(close_12h)):
-        if np.isnan(atr_10[i]) or np.isnan(close_12h[i-1]):
-            supertrend[i] = np.nan
-            direction[i] = np.nan
-        else:
-            if close_12h[i-1] > supertrend[i-1]:
-                upperband[i] = min(upperband[i], upperband[i-1])
-            else:
-                lowerband[i] = max(lowerband[i], lowerband[i-1])
-            
-            if close_12h[i] > upperband[i]:
-                direction[i] = 1
-            elif close_12h[i] < lowerband[i]:
-                direction[i] = -1
-            else:
-                direction[i] = direction[i-1]
-                if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
-                    lowerband[i] = lowerband[i-1]
-                if direction[i] == -1 and upperband[i] > upperband[i-1]:
-                    upperband[i] = upperband[i-1]
-            
-            supertrend[i] = lowerband[i] if direction[i] == 1 else upperband[i]
-    
-    # Align Supertrend and direction to 6h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
-        else:
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -108,39 +75,41 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
-            np.isnan(avg_volume[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (strict filter)
+        volume_confirmed = volume[i] > 2.0 * avg_volume[i]
+        
+        # Chop regime filter: only trade when CHOP > 61.8 (strong ranging market)
+        chop_filter = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: price < Donchian low OR Supertrend turns bearish
-            if close[i] < donchian_low[i] or direction_aligned[i] == -1:
+            # Exit: price >= Camarilla H3 (profit target) OR chop regime ends
+            if close[i] >= camarilla_h3_aligned[i] or chop_1d_aligned[i] <= 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high OR Supertrend turns bullish
-            if close[i] > donchian_high[i] or direction_aligned[i] == 1:
+            # Exit: price <= Camarilla L3 (profit target) OR chop regime ends
+            if close[i] <= camarilla_l3_aligned[i] or chop_1d_aligned[i] <= 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Donchian breakout + Supertrend trend filter
-            if volume_confirmed:
-                # Long entry: price > Donchian high AND Supertrend bullish (uptrend)
-                if close[i] > donchian_high[i] and direction_aligned[i] == 1:
+            # Entry logic with volume confirmation, chop regime, and Camarilla touch
+            if volume_confirmed and chop_filter:
+                # Long entry: price touches or crosses above Camarilla L3 AND below H3 (long bias in range)
+                if low[i] <= camarilla_l3_aligned[i] and high[i] < camarilla_h3_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low AND Supertrend bearish (downtrend)
-                elif close[i] < donchian_low[i] and direction_aligned[i] == -1:
+                # Short entry: price touches or crosses below Camarilla H3 AND above L3 (short bias in range)
+                elif high[i] >= camarilla_h3_aligned[i] and low[i] > camarilla_l3_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
