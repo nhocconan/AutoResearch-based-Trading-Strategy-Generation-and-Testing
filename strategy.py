@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d volume spike and choppiness regime filter
-# Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
-# In trending regimes (CHOP < 38.2): Alligator lines aligned (Jaw>Teeth>Lips for long, reverse for short)
-# In ranging regimes (CHOP > 61.8): trade mean reversion at extreme deviations from Alligator
-# Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
-# Works in bull/bear markets: trend following catches sustained moves, chop filter avoids whipsaws
+# Hypothesis: 1d KAMA trend direction + RSI(14) mean reversion + chop regime filter
+# In trending regimes (CHOP < 38.2): trade in direction of KAMA with RSI pullback
+# In ranging regimes (CHOP > 61.8): mean reversion at RSI extremes
+# Uses discrete position sizing 0.25 to limit trades to ~20-50/year
+# Works in bull/bear markets: trend following in trends, mean reversion in ranges
 
-name = "4h_1d_alligator_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,109 +18,106 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1d ATR(14) for volatility normalization
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1w KAMA ( Kaufman Adaptive Moving Average )
+    def calculate_kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan)
+        kama[period] = close[period]
+        for i in range(period+1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
+    kama_1w = calculate_kama(close_1w, period=10, fast=2, slow=30)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    atr_1d = wilders_smoothing(tr, 14)
+    # Calculate 1w RSI(14)
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate 1d average volume (20-period) normalized by ATR
-    volume_s_1d = pd.Series(volume_1d)
-    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.where(atr_1d > 0, avg_volume_1d / atr_1d, np.nan)
-    avg_vol_ratio_1d = pd.Series(vol_ratio_1d).rolling(window=20, min_periods=20).mean().values
+    rsi_1w = calculate_rsi(close_1w, period=14)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate 1d Choppiness Index (CHOP)
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    range_14 = hh_1d - ll_1d
-    chop_1d = np.where(range_14 != 0, 
-                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
-                       50)
+    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    def calculate_chop(high, low, close, period=14):
+        tr1 = np.abs(high[1:] - low[:-1])
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr = np.full_like(close, np.nan)
+        for i in range(1, len(atr)):
+            atr[i] = np.nansum(tr[max(0, i-period+1):i+1]) / period
+        hh = np.full_like(high, np.nan)
+        ll = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            hh[i] = np.max(high[i-period+1:i+1])
+            ll[i] = np.min(low[i-period+1:i+1])
+        range_hl = hh - ll
+        chop = np.where(range_hl != 0, 
+                        100 * np.log10(atr * period / range_hl) / np.log10(period), 
+                        50)
+        return chop
     
-    # Calculate Williams Alligator on 1d median price
-    median_price_1d = (high_1d + low_1d) / 2.0
-    jaw_1d = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values
-    jaw_1d = pd.Series(jaw_1d).rolling(window=8, min_periods=8).mean().values  # Smoothed with 8-period
-    teeth_1d = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values
-    teeth_1d = pd.Series(teeth_1d).rolling(window=5, min_periods=5).mean().values  # Smoothed with 5-period
-    lips_1d = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
-    lips_1d = pd.Series(lips_1d).rolling(window=3, min_periods=3).mean().values  # Smoothed with 3-period
+    chop_1d = calculate_chop(high, low, close, period=14)
     
-    # Calculate 1d ATR-based deviation bands for ranging regime
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    upper_dev_1d = close_1d + 1.5 * atr_ma_1d
-    lower_dev_1d = close_1d - 1.5 * atr_ma_1d
-    
-    # Align 1d indicators to 4h timeframe
-    avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    upper_dev_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_dev_1d)
-    lower_dev_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_dev_1d)
-    
-    # Pre-compute volume confirmation array
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-    volume_confirmed = volume > 2.0 * avg_volume_1d_aligned
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_s = pd.Series(volume)
+    avg_volume = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.5 * avg_volume
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or
-            np.isnan(lips_1d_aligned[i]) or np.isnan(upper_dev_1d_aligned[i]) or
-            np.isnan(lower_dev_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(chop_1d[i]) or np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
         # Regime filter
-        trending_regime = chop_1d_aligned[i] < 38.2
-        ranging_regime = chop_1d_aligned[i] > 61.8
+        trending_regime = chop_1d[i] < 38.2
+        ranging_regime = chop_1d[i] > 61.8
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if Alligator lines diverge wrong way or we enter ranging regime
-                if not (jaw_1d_aligned[i] > teeth_1d_aligned[i] > lips_1d_aligned[i]) or ranging_regime:
+                # Exit long if price crosses below KAMA or RSI > 70 (overbought)
+                if close[i] < kama_1w_aligned[i] or rsi_1w_aligned[i] > 70:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price rises above upper deviation or drops below lips
-                if close[i] > upper_dev_1d_aligned[i] or close[i] < lips_1d_aligned[i]:
+                # Exit long if RSI > 50 (mean reversion exit)
+                if rsi_1w_aligned[i] > 50:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -129,35 +125,35 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if Alligator lines diverge wrong way or we enter ranging regime
-                if not (jaw_1d_aligned[i] < teeth_1d_aligned[i] < lips_1d_aligned[i]) or ranging_regime:
+                # Exit short if price crosses above KAMA or RSI < 30 (oversold)
+                if close[i] > kama_1w_aligned[i] or rsi_1w_aligned[i] < 30:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price drops below lower deviation or rises above lips
-                if close[i] < lower_dev_1d_aligned[i] or close[i] > lips_1d_aligned[i]:
+                # Exit short if RSI < 50 (mean reversion exit)
+                if rsi_1w_aligned[i] < 50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                # Enter long when Alligator aligned bullish with volume confirmation
-                if jaw_1d_aligned[i] > teeth_1d_aligned[i] > lips_1d_aligned[i] and volume_confirmed[i]:
+                # Enter long on pullback to KAMA with RSI < 40 and volume confirmation
+                if close[i] > kama_1w_aligned[i] and rsi_1w_aligned[i] < 40 and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short when Alligator aligned bearish with volume confirmation
-                elif jaw_1d_aligned[i] < teeth_1d_aligned[i] < lips_1d_aligned[i] and volume_confirmed[i]:
+                # Enter short on pullback to KAMA with RSI > 60 and volume confirmation
+                elif close[i] < kama_1w_aligned[i] and rsi_1w_aligned[i] > 60 and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                # Mean reversion: buy near lower deviation, sell near upper deviation
-                if close[i] <= lower_dev_1d_aligned[i] and volume_confirmed[i]:
+                # Mean reversion: buy oversold, sell overbought
+                if rsi_1w_aligned[i] < 30 and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] >= upper_dev_1d_aligned[i] and volume_confirmed[i]:
+                elif rsi_1w_aligned[i] > 70 and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
     
