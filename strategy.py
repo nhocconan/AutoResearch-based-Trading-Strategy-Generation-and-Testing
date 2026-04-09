@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_atr_v1
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and ATR-based trend filter.
-# Works in bull markets by capturing upside breakouts and in bear markets by capturing downside breakdowns.
-# Volume confirmation reduces false breakouts. ATR trend filter ensures trades align with medium-term momentum.
-# Discrete position sizing (0.0, ±0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
+# 1d_williams_fractal_breakout_v1
+# Hypothesis: Daily strategy using Williams fractals for breakout detection with 1w HTF trend filter.
+# Williams fractals identify potential reversal/continuation points. Long when bullish fractal forms
+# above price with 1w uptrend, short when bearish fractal forms below price with 1w downtrend.
+# Volume confirmation filters false signals. Discrete sizing (0.0, ±0.25) minimizes fee churn.
+# Target: 30-100 total trades over 4 years by requiring fractal breakout + volume + 1w trend alignment.
+# Primary timeframe: 1d, HTF: 1w for trend filter.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
-name = "4h_donchian_breakout_volume_atr_v1"
-timeframe = "4h"
+name = "1d_williams_fractal_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,40 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ATR for trend filter (20-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # 12h HTF data for trend filter (EMA30)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 1w HTF data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA30 for trend filter
-    close_12h = df_12h['close'].values
-    ema_30_12h = pd.Series(close_12h).ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema_30_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_30_12h)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1w EMA34 aligned to 1d timeframe (completed 1w bar only)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate Williams fractals on 1d data
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high, low)
+    # Williams fractals need 2 extra 1d bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, prices[['high','low']], bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, prices[['high','low']], bullish_fractal, additional_delay_bars=2)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_ma[i]) or np.isnan(ema_30_12h_aligned[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -64,28 +60,32 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower OR trend turns bearish
-            if close[i] < lowest_low[i] or close[i] < ema_30_12h_aligned[i]:
+            # Exit: price closes below bearish fractal level OR 1w trend turns bearish
+            if close[i] < bearish_fractal_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper OR trend turns bullish
-            if close[i] > highest_high[i] or close[i] > ema_30_12h_aligned[i]:
+            # Exit: price closes above bullish fractal level OR 1w trend turns bullish
+            if close[i] > bullish_fractal_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             if volume_confirmed:
-                # Long breakout: price breaks above Donchian upper with volume
-                if close[i] > highest_high[i] and close[i] > ema_30_12h_aligned[i]:
+                # Long breakout: bullish fractal forms above price with 1w uptrend
+                if (bullish_fractal_aligned[i] > 0 and  # bullish fractal present
+                    close[i] > bullish_fractal_aligned[i] and  # price above fractal level
+                    close[i] > ema_34_1w_aligned[i]):  # 1w uptrend
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price breaks below Donchian lower with volume
-                elif close[i] < lowest_low[i] and close[i] < ema_30_12h_aligned[i]:
+                # Short breakout: bearish fractal forms below price with 1w downtrend
+                elif (bearish_fractal_aligned[i] > 0 and  # bearish fractal present
+                      close[i] < bearish_fractal_aligned[i] and  # price below fractal level
+                      close[i] < ema_34_1w_aligned[i]):  # 1w downtrend
                     position = -1
                     signals[i] = -0.25
     
