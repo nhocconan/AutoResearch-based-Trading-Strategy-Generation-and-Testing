@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams Alligator with volume confirmation
-# Williams Alligator (Jaw/Teeth/Lips) from 1d defines trend structure aligned with 12h timeframe
-# Volume confirmation (current 12h volume > 1.5x 30-period average) filters false signals
-# Long when price > Lips and Lips > Teeth > Jaw (bullish alignment)
-# Short when price < Lips and Lips < Teeth < Jaw (bearish alignment)
-# Works in bull/bear: Alligator adapts to trending markets, volume confirms validity
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Hypothesis: 6h strategy using 1d Williams %R extremes with 12h EMA trend filter
+# Williams %R identifies overbought/oversold conditions on 1d timeframe
+# Extreme readings (< -90 or > -10) combined with 12h EMA(21) trend direction
+# Volume confirmation (current 6h volume > 1.8x 20-period average) filters false signals
+# Works in bull/bear: mean reversion from extremes with trend alignment
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
 
-name = "12h_1d_alligator_volume_v1"
-timeframe = "12h"
+name = "6h_12h_1d_williamsr_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,91 +25,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_1d) < 20 or len(df_12h) < 25:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Williams Alligator (SMMA = smoothed moving average)
-    def smma(data, period):
-        """Smoothed Moving Average"""
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        result = np.full_like(data, np.nan)
-        # First value is SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CURRENT_PRICE) / PERIOD
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Calculate 1d Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
     
-    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw_1d = smma(close_1d, 13)
-    teeth_1d = smma(close_1d, 8)
-    lips_1d = smma(close_1d, 5)
+    # Extreme levels: oversold < -90, overbought > -10
+    williams_oversold = williams_r < -90
+    williams_overbought = williams_r > -10
     
-    # Shift to avoid look-ahead (Alligator uses future data for smoothing)
-    jaw_1d = np.roll(jaw_1d, 8)
-    teeth_1d = np.roll(teeth_1d, 5)
-    lips_1d = np.roll(lips_1d, 3)
+    # Calculate 12h EMA(21) for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_prev = np.roll(ema_12h, 1)  # Previous bar close for trend
+    ema_12h_prev[0] = ema_12h[0]  # First bar
+    ema_trend_up = ema_12h > ema_12h_prev
+    ema_trend_down = ema_12h < ema_12h_prev
     
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    # Align HTF indicators to 6h timeframe
+    oversold_aligned = align_htf_to_ltf(prices, df_1d, williams_oversold.astype(float))
+    overbought_aligned = align_htf_to_ltf(prices, df_1d, williams_overbought.astype(float))
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, ema_trend_up.astype(float))
+    trend_down_aligned = align_htf_to_ltf(prices, df_12h, ema_trend_down.astype(float))
     
-    # Pre-compute volume confirmation (30-period average for 12h)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Pre-compute volume confirmation (20-period average for 6h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(oversold_aligned[i]) or np.isnan(overbought_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 12h volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_30[i]
+        # Volume confirmation: current 6h volume > 1.8x average 6h volume
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit when Alligator closes (Lips < Teeth or Teeth < Jaw) or price < Lips
-            if (lips_aligned[i] < teeth_aligned[i] or 
-                teeth_aligned[i] < jaw_aligned[i] or
-                close[i] < lips_aligned[i]):
+            # Exit on overbought condition or trend reversal
+            if overbought_aligned[i] > 0.5 or not trend_up_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when Alligator closes (Lips > Teeth or Teeth > Jaw) or price > Lips
-            if (lips_aligned[i] > teeth_aligned[i] or 
-                teeth_aligned[i] > jaw_aligned[i] or
-                close[i] > lips_aligned[i]):
+            # Exit on oversold condition or trend reversal
+            if oversold_aligned[i] > 0.5 or not trend_down_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Alligator alignment with volume confirmation
-            # Bullish: Lips > Teeth > Jaw and price > Lips
-            # Bearish: Lips < Teeth < Jaw and price < Lips
+            # Mean reversion from extremes with trend alignment and volume
             if volume_confirmed:
-                if (lips_aligned[i] > teeth_aligned[i] and 
-                    teeth_aligned[i] > jaw_aligned[i] and
-                    close[i] > lips_aligned[i]):
+                # Long: oversold + uptrend
+                if oversold_aligned[i] > 0.5 and trend_up_aligned[i] > 0.5:
                     position = 1
                     signals[i] = 0.25
-                elif (lips_aligned[i] < teeth_aligned[i] and 
-                      teeth_aligned[i] < jaw_aligned[i] and
-                      close[i] < lips_aligned[i]):
+                # Short: overbought + downtrend
+                elif overbought_aligned[i] > 0.5 and trend_down_aligned[i] > 0.5:
                     position = -1
                     signals[i] = -0.25
     
