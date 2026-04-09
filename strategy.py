@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) + 1d ADX regime filter + volume confirmation
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13) measures buying/selling pressure
-# ADX > 25 = trending regime (follow Elder Ray signals), ADX < 20 = ranging regime (fade extremes)
-# Volume confirmation: 6h volume > 1.5x 1d average volume to avoid low-volume false signals
-# Works in bull/bear: regime filter adapts, Elder Ray captures momentum exhaustion and continuation
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR-based volume spike + chop regime filter
+# Uses 1d ATR to normalize volume spike detection (more robust than fixed multiplier)
+# Chop regime: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (fade breakout)
+# Discrete sizing 0.25 to limit fee drift. Target: 75-200 trades over 4 years.
 
-name = "6h_1d_elder_ray_volume_adx_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_atr_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,119 +22,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX and volume calculation
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(13) for Elder Ray
-    close_1d = df_1d['close'].values
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Calculate 1d ADX (14-period)
+    # --- 1d Indicators ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range
+    # 1d ATR(14) using Wilder's smoothing
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed TR, +DM, -DM using Wilder's smoothing
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
         alpha = 1.0 / period
         result = np.full(len(values), np.nan)
-        # First value is simple average
         result[period-1] = np.nanmean(values[:period])
         for i in range(period, len(values)):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
     atr_1d = wilders_smoothing(tr, 14)
-    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
-    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
     
-    # DI+ and DI-
-    plus_di_1d = 100 * plus_dm_smooth / atr_1d
-    minus_di_1d = 100 * minus_dm_smooth / atr_1d
-    
-    # DX and ADX
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, 14)
-    
-    # Calculate 1d average volume (20-period)
-    volume_1d = df_1d['volume'].values
+    # 1d average volume (20-period)
     volume_s_1d = pd.Series(volume_1d)
     avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 6h timeframe (wait for 1d bar close)
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    # Volume spike: current 1d volume > 2.0 x 20-day average volume
+    volume_spike_1d = volume_1d > (2.0 * avg_volume_1d)
     
-    # Calculate 6h Elder Ray Index
-    ema_13_6h = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13_6h  # Buying pressure
-    bear_power = low - ema_13_6h   # Selling pressure (negative values)
+    # 1d Choppiness Index (CHOP) over 14 periods
+    atr_14_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0,
+                       100 * np.log10(atr_14_sum / range_14) / np.log10(14),
+                       50)
+    
+    # Align 1d indicators to 4h (wait for 1d bar close)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # --- 4h Donchian Channels (20-period) ---
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 1d average volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
-        
-        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
-        trending_regime = adx_1d_aligned[i] > 25
-        ranging_regime = adx_1d_aligned[i] < 20
-        
         if position == 1:  # Long position
-            # Exit: Bear Power turns negative (selling pressure) OR regime shifts to ranging
-            if bear_power[i] > -50 or ranging_regime:  # Bear Power still negative enough
+            # Exit: price closes below Donchian lower band OR regime shifts to ranging
+            if close[i] < lowest_low[i] or chop_1d_aligned[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bull Power turns positive (buying pressure) OR regime shifts to ranging
-            if bull_power[i] < 50 or ranging_regime:  # Bull Power still positive enough
+            # Exit: price closes above Donchian upper band OR regime shifts to ranging
+            if close[i] > highest_high[i] or chop_1d_aligned[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic
-            if trending_regime and volume_confirmed:
-                # Follow Elder Ray signals in trending regime
-                if bull_power[i] > 100 and bear_power[i] < -50:  # Strong bullish momentum
+            # Volume confirmation: 1d volume spike
+            vol_confirmed = volume_spike_1d_aligned[i]
+            
+            if chop_1d_aligned[i] < 38.2:  # Trending regime: follow breakout
+                if close[i] > highest_high[i] and vol_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif bear_power[i] < -100 and bull_power[i] > 50:  # Strong bearish momentum
+                elif close[i] < lowest_low[i] and vol_confirmed:
                     position = -1
                     signals[i] = -0.25
-            elif ranging_regime and volume_confirmed:
-                # Fade extremes in ranging regime
-                if bull_power[i] < -50 and bear_power[i] > -150:  # Oversold bounce
+            elif chop_1d_aligned[i] > 61.8:  # Ranging regime: fade breakout
+                if close[i] < lowest_low[i] and vol_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif bull_power[i] > 150 and bear_power[i] < 50:  # Overbought fade
+                elif close[i] > highest_high[i] and vol_confirmed:
                     position = -1
                     signals[i] = -0.25
     
