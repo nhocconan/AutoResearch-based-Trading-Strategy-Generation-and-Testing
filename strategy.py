@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 1h_macd_rsi_4h1d_trend_v1
-# Hypothesis: 1h strategy using MACD histogram cross + RSI pullback for entry timing,
-# with 4h EMA trend filter and 1d ADX regime filter. Designed for low trade frequency
-# (target: 60-150 total trades over 4 years) to avoid fee drag. Works in bull/bear
-# by using trend filter (4h EMA) and regime filter (1d ADX < 25 = range, > 25 = trend).
-# Uses discrete sizing (±0.20) to minimize fee churn.
+# 6h_donchian_1w_pullback_volume_v1
+# Hypothesis: 6h Donchian(20) breakout with pullback to 20EMA, weekly trend filter from 1w close > 200EMA,
+# and volume confirmation (>1.5x 20-period average). Designed for low trade frequency
+# (target: 50-150 total trades over 4 years) to avoid fee drag. Works in bull/bear
+# by using weekly trend filter (only long in weekly uptrend, short in weekly downtrend)
+# and waiting for pullbacks to reduce false breakouts. Uses discrete sizing (±0.25)
+# to minimize fee churn.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_macd_rsi_4h1d_trend_v1"
-timeframe = "1h"
+name = "6h_donchian_1w_pullback_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,115 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h HTF data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # 1d HTF data for ADX regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate weekly trend: close > 200EMA = uptrend, close < 200EMA = downtrend
+    weekly_uptrend = close_1w > ema_200_1w_aligned[:len(close_1w)] if len(ema_200_1w_aligned) >= len(close_1w) else close_1w > ema_200_1w_aligned[-1]
+    weekly_downtrend = close_1w < ema_200_1w_aligned[:len(close_1w)] if len(ema_200_1w_aligned) >= len(close_1w) else close_1w < ema_200_1w_aligned[-1]
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 6h indicators for entry timing
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ADX (14-period)
-    # True Range
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 20-period EMA for pullback
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(high_1d) - pd.Series(high_1d).shift(1)
-    down_move = pd.Series(low_1d).shift(1) - pd.Series(low_1d)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_1d
-    minus_di = 100 * minus_dm_smooth / atr_1d
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 1h indicators for entry timing
-    # MACD (12,26,9)
-    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema_fast - ema_slow
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
-    
-    # RSI (14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(macd_hist[i]) or np.isnan(signal_line[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(ema_20[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 4h EMA
-        trend_up = close[i] > ema_4h_aligned[i]
-        trend_down = close[i] < ema_4h_aligned[i]
-        
-        # Determine regime from 1d ADX
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] <= 25
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: trend reversal OR MACD histogram turns negative
-            if not trend_up or macd_hist[i] < 0:
+            # Exit: price breaks below 20EMA OR weekly trend changes to downtrend
+            if close[i] < ema_20[i] or weekly_downtrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend reversal OR MACD histogram turns positive
-            if not trend_down or macd_hist[i] > 0:
+            # Exit: price breaks above 20EMA OR weekly trend changes to uptrend
+            if close[i] > ema_20[i] or weekly_uptrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Volume confirmation: current volume > 1.5x 20-period average
-            volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i] if not np.isnan(volume_ma[i]) else False
-            
             if volume_confirmed:
-                # Long conditions: uptrend + MACD bullish cross + RSI pullback (not overbought)
-                if trend_up and macd_hist[i] > 0 and macd_hist[i-1] <= 0 and rsi[i] < 70:
+                # Long conditions: weekly uptrend + price breaks above Donchian high + pullback to 20EMA
+                if (weekly_uptrend_aligned[i] > 0.5 and 
+                    high[i] > high_20[i] and 
+                    close[i] <= ema_20[i] * 1.02):  # Allow small overshoot above EMA
                     position = 1
-                    signals[i] = 0.20
-                # Short conditions: downtrend + MACD bearish cross + RSI pullback (not oversold)
-                elif trend_down and macd_hist[i] < 0 and macd_hist[i-1] >= 0 and rsi[i] > 30:
+                    signals[i] = 0.25
+                # Short conditions: weekly downtrend + price breaks below Donchian low + pullback to 20EMA
+                elif (weekly_downtrend_aligned[i] > 0.5 and 
+                      low[i] < low_20[i] and 
+                      close[i] >= ema_20[i] * 0.98):  # Allow small undershoot below EMA
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
