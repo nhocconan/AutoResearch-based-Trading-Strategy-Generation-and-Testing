@@ -1,53 +1,34 @@
 #!/usr/bin/env python3
-# mtf_1h_hull_rsi_divergence_v1
-# Hypothesis: 1h Hull Moving Average (HMA) with 4h RSI divergence filter and volume confirmation.
-# Uses 1h timeframe for entry timing with 4h trend direction from HMA crossover.
-# 4h RSI divergence (price making new high/low while RSI does not) filters false breakouts.
-# Volume spike confirms institutional participation. Designed for 15-37 trades/year (60-150 over 4 years).
-# Works in bull/bear markets: HMA captures trends with less lag, RSI divergence avoids exhaustion moves,
-# volume filter ensures conviction. Session filter (08-20 UTC) reduces off-hours noise.
+# 6h_rsi2_ema13_volume_v1
+# Hypothesis: 6h RSI(2) extreme reversals with 6h EMA(13) trend filter and volume confirmation.
+# RSI(2) captures short-term overextensions (bull/bear), EMA(13) filters counter-trend noise,
+# volume spike confirms institutional participation. Designed for 12-37 trades/year (50-150 over 4 years).
+# Works in bull/bear markets: mean reversion in ranging, trend-filtered in directional moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hull_rsi_divergence_v1"
-timeframe = "1h"
+name = "6h_rsi2_ema13_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
+def rsi(series, period):
+    """Calculate RSI with Wilder's smoothing"""
     if len(series) < period:
         return np.full_like(series, np.nan, dtype=float)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA for half period
-    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean().values
-    # WMA for full period
-    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean().values
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    # Final HMA: WMA of raw_hma with sqrt_period
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-    return hma
-
-def calculate_rsi(series, period):
-    """Calculate Relative Strength Index"""
-    if len(series) < period + 1:
-        return np.full_like(series, np.nan, dtype=float)
-    delta = pd.Series(series).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss
+    delta = np.diff(series, prepend=series[0])
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    roll_up = pd.Series(up).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    roll_down = pd.Series(down).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = np.where(roll_down != 0, roll_up / roll_down, 0)
     rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -55,83 +36,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for HMA trend and RSI divergence
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:  # Need enough for HMA(30) and RSI(14)
+    # Get 6h data for calculations
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h HMA(30) for trend
-    close_4h = df_4h['close'].values
-    hma_4h = calculate_hma(close_4h, 30)
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
     
-    # Align 4h HMA to 1h timeframe (completed 4h candle only)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Calculate 6h RSI(2)
+    rsi_2 = rsi(close_6h, 2)
+    # Calculate 6h EMA(13)
+    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 4h RSI(14) for divergence detection
-    rsi_4h = calculate_rsi(close_4h, 14)
-    
-    # Align 4h RSI to 1h timeframe
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Align 6h indicators to 6h timeframe (completed 6h candle only)
+    rsi_2_aligned = align_htf_to_ltf(prices, df_6h, rsi_2)
+    ema_13_aligned = align_htf_to_ltf(prices, df_6h, ema_13)
     
     # Volume spike detection (20-period volume average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 2.0)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_6h > (vol_ma_20 * 2.0)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_6h, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_4h_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or not in_session[i]):
+    for i in range(20, n):
+        # Skip if any required data is NaN
+        if (np.isnan(rsi_2_aligned[i]) or np.isnan(ema_13_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h HMA OR RSI shows bearish divergence (price higher high, RSI lower high)
-            if close[i] < hma_4h_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif (i >= 2 and 
-                  high[i] > high[i-1] and high[i-1] > high[i-2] and  # Price making higher high
-                  rsi_4h_aligned[i] < rsi_4h_aligned[i-1] and rsi_4h_aligned[i-1] < rsi_4h_aligned[i-2]):  # RSI making lower high
+            # Exit: RSI(2) > 80 (overbought) or price closes below EMA(13)
+            if rsi_2_aligned[i] > 80 or close[i] < ema_13_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h HMA OR RSI shows bullish divergence (price lower low, RSI higher low)
-            if close[i] > hma_4h_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif (i >= 2 and 
-                  low[i] < low[i-1] and low[i-1] < low[i-2] and  # Price making lower low
-                  rsi_4h_aligned[i] > rsi_4h_aligned[i-1] and rsi_4h_aligned[i-1] > rsi_4h_aligned[i-2]):  # RSI making higher low
+            # Exit: RSI(2) < 20 (oversold) or price closes above EMA(13)
+            if rsi_2_aligned[i] < 20 or close[i] > ema_13_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 4h HMA, bullish RSI divergence, with volume spike
-            if (i >= 2 and
-                close[i] > hma_4h_aligned[i] and
-                low[i] < low[i-1] and low[i-1] < low[i-2] and  # Price making lower low
-                rsi_4h_aligned[i] > rsi_4h_aligned[i-1] and rsi_4h_aligned[i-1] > rsi_4h_aligned[i-2] and  # RSI making higher low (bullish div)
-                vol_spike[i]):
+            # Enter long: RSI(2) < 10 (extreme oversold), price above EMA(13), volume spike
+            if (rsi_2_aligned[i] < 10) and (close[i] > ema_13_aligned[i]) and vol_spike_aligned[i]:
                 position = 1
-                signals[i] = 0.20
-            # Enter short: price closes below 4h HMA, bearish RSI divergence, with volume spike
-            elif (i >= 2 and
-                  close[i] < hma_4h_aligned[i] and
-                  high[i] > high[i-1] and high[i-1] > high[i-2] and  # Price making higher high
-                  rsi_4h_aligned[i] < rsi_4h_aligned[i-1] and rsi_4h_aligned[i-1] < rsi_4h_aligned[i-2] and  # RSI making lower high (bearish div)
-                  vol_spike[i]):
+                signals[i] = 0.25
+            # Enter short: RSI(2) > 90 (extreme overbought), price below EMA(13), volume spike
+            elif (rsi_2_aligned[i] > 90) and (close[i] < ema_13_aligned[i]) and vol_spike_aligned[i]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
