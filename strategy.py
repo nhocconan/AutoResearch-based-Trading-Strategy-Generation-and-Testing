@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams Fractal breakouts with volume confirmation
-# Williams Fractals from 1d provide swing high/low structure aligned with 12h timeframe
-# Volume confirmation (current 12h volume > 1.5x 20-period average) filters false breakouts
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# Works in bull/bear: price reacts to 1d swing structure, volume confirms validity
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation
+# Camarilla pivots from 1w provide weekly structure aligned with daily timeframe
+# Volume confirmation (current 1d volume > 2.0x 20-period average) filters false breakouts
+# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# Works in bull/bear: price reacts to weekly structure, volume confirms validity
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
 
-name = "12h_1d_williams_fractal_volume_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Williams Fractals (5-bar pattern)
-    # Bearish fractal: high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]
-    # Bullish fractal: low[n-2] > low[n] and low[n-1] > low[n] and low[n+1] > low[n] and low[n+2] > low[n]
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
+    # Calculate 1w Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # Resistance levels: R1 = C + Range * 1.1/12, R2 = C + Range * 1.1/6, R3 = C + Range * 1.1/4, R4 = C + Range * 1.1/2
+    # Support levels: S1 = C - Range * 1.1/12, S2 = C - Range * 1.1/6, S3 = C - Range * 1.1/4, S4 = C - Range * 1.1/2
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    for i in range(2, n_1d - 2):
-        if (high_1d[i-2] < high_1d[i] and high_1d[i-1] < high_1d[i] and 
-            high_1d[i+1] < high_1d[i] and high_1d[i+2] < high_1d[i]):
-            bearish_fractal[i] = high_1d[i]  # Swing high
-        if (low_1d[i-2] > low_1d[i] and low_1d[i-1] > low_1d[i] and 
-            low_1d[i+1] > low_1d[i] and low_1d[i+2] > low_1d[i]):
-            bullish_fractal[i] = low_1d[i]   # Swing low
+    # Key levels for trading: R3, R4, S3, S4 (stronger levels)
+    camarilla_r3 = close_1w + range_1w * 1.1 / 4.0
+    camarilla_r4 = close_1w + range_1w * 1.1 / 2.0
+    camarilla_s3 = close_1w - range_1w * 1.1 / 4.0
+    camarilla_s4 = close_1w - range_1w * 1.1 / 2.0
     
-    # Align Williams Fractals to 12h timeframe with 2-bar extra delay for confirmation
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Align Camarilla levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average for 1d)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,37 +61,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 12h volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 2.0x average 1d volume
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit on retracement to recent bullish fractal (support)
-            if close[i] < bullish_aligned[i]:
+            # Exit on Camarilla S3 retracement (mean reversion from strong level)
+            if close[i] < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on retracement to recent bearish fractal (resistance)
-            if close[i] > bearish_aligned[i]:
+            # Exit on Camarilla R3 retracement (mean reversion from strong level)
+            if close[i] > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Breakout trading with volume confirmation
-            # Long on bearish fractal breakout (above resistance), Short on bullish fractal breakout (below support)
+            # Long on Camarilla R4 breakout, Short on Camarilla S4 breakout
             if volume_confirmed:
-                if close[i] > bearish_aligned[i]:
+                if close[i] > r4_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < bullish_aligned[i]:
+                elif close[i] < s4_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
