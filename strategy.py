@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian channel breakout with weekly volume confirmation and ATR regime filter
-# Uses Donchian(20) from 1d for breakout triggers, confirmed by weekly volume spike (>2.0x avg)
-# Only takes breakouts when weekly ATR(14) is below its 50-period MA (low volatility regime) for reliability
+# Hypothesis: 6h Williams %R + 1d EMA trend filter + volume confirmation
+# Uses Williams %R(14) on 6h for overbought/oversold signals, confirmed by 1d EMA(50) trend direction
+# Only takes trades when 6h volume > 1.5x 20-period average for conviction
+# In bull markets (price > 1d EMA): long when WR < -80, exit at WR > -20
+# In bear markets (price < 1d EMA): short when WR > -20, exit at WR < -80
 # Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag
-# Works in both bull/bear: weekly ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Works in both bull/bear: 1d EMA filter ensures we trade with the higher timeframe trend
 
-name = "1d_1w_donchian_volume_atr_v1"
-timeframe = "1d"
+name = "6h_1d_williamsr_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,108 +26,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for volume confirmation and ATR regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Load 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14) for regime filter
-    tr_1w = np.full(len(df_1w), np.nan)
-    atr_1w = np.full(len(df_1w), np.nan)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d_50 = np.full(len(df_1d), np.nan)
+    if len(close_1d) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_1d_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d_50[i] = (close_1d[i] * multiplier) + (ema_1d_50[i-1] * (1 - multiplier))
     
-    for i in range(1, len(df_1w)):
-        tr = max(
-            df_1w['high'].iloc[i] - df_1w['low'].iloc[i],
-            abs(df_1w['high'].iloc[i] - df_1w['close'].iloc[i-1]),
-            abs(df_1w['low'].iloc[i] - df_1w['close'].iloc[i-1])
-        )
-        tr_1w[i] = tr
-    
-    # Calculate ATR with Wilder's smoothing
-    for i in range(len(df_1w)):
+    # Calculate 6h Williams %R(14)
+    williams_r = np.full(n, np.nan)
+    for i in range(n):
         if i < 14:
-            atr_1w[i] = np.nan
-        elif i == 14:
-            atr_1w[i] = np.nanmean(tr_1w[1:15])
+            williams_r[i] = np.nan
         else:
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
+            highest_high = np.max(high[i-13:i+1])
+            lowest_low = np.min(low[i-13:i+1])
+            if highest_high - lowest_low != 0:
+                williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
+            else:
+                williams_r[i] = np.nan
     
-    # Calculate 50-period MA of ATR for regime filter
-    atr_ma_50_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        if i < 50:
-            atr_ma_50_1w[i] = np.nan
-        else:
-            atr_ma_50_1w[i] = np.mean(atr_1w[i-50:i])
-    
-    # Calculate weekly average volume for volume confirmation
-    avg_volume_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        if i < 20:
-            avg_volume_1w[i] = np.nan
-        else:
-            avg_volume_1w[i] = np.mean(df_1w['volume'].iloc[i-20:i])
-    
-    # Align weekly indicators to 1d timeframe
-    atr_ma_50_1d = align_htf_to_ltf(prices, df_1w, atr_ma_50_1w)
-    atr_1d = align_htf_to_ltf(prices, df_1w, atr_1w)
-    avg_volume_1d = align_htf_to_ltf(prices, df_1w, avg_volume_1w)
-    
-    # Calculate 1d Donchian channel (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
+    # Calculate 20-period average volume for volume confirmation
+    avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
+            avg_volume[i] = np.nan
         else:
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
+            avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # Align 1d EMA to 6h timeframe
+    ema_1d_50_6h = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(atr_ma_50_1d[i]) or 
-            np.isnan(atr_1d[i]) or 
-            np.isnan(avg_volume_1d[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_1d_50_6h[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period weekly average (aligned)
-        volume_confirm = volume[i] > 2.0 * avg_volume_1d[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
-        # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
-        atr_regime = atr_1d[i] < atr_ma_50_1d[i]
+        # Trend filter: price relative to 1d EMA(50)
+        trend_up = close[i] > ema_1d_50_6h[i]
+        trend_down = close[i] < ema_1d_50_6h[i]
         
         if position == 1:  # Long position
-            # Exit conditions: price closes below Donchian low OR ATR regime turns unfavorable
-            if close[i] < donchian_low[i] or not atr_regime:
+            # Exit conditions: Williams %R > -20 (overbought) OR volume confirmation fails
+            if williams_r[i] > -20 or not volume_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price closes above Donchian high OR ATR regime turns unfavorable
-            if close[i] > donchian_high[i] or not atr_regime:
+            # Exit conditions: Williams %R < -80 (oversold) OR volume confirmation fails
+            if williams_r[i] < -80 or not volume_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Donchian breakout with volume confirmation and ATR regime filter
-            if volume_confirm and atr_regime:
-                # Long breakout: price closes above Donchian high
-                if close[i] > donchian_high[i]:
+            # Entry logic: Williams %R extreme with volume confirmation and trend filter
+            if volume_confirm:
+                # Long entry: oversold in uptrend
+                if williams_r[i] < -80 and trend_up:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below Donchian low
-                elif close[i] < donchian_low[i]:
+                # Short entry: overbought in downtrend
+                elif williams_r[i] > -20 and trend_down:
                     position = -1
                     signals[i] = -0.25
     
