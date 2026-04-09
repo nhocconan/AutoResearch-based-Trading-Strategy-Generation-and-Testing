@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_v3
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and chop filter.
-# In ranging markets (2025+), price tends to revert from pivot support/resistance levels.
-# Volume confirmation filters false touches. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-# Added stricter volume confirmation (2.0x average) and chop > 55 to reduce overtrading.
-# Target: 50-150 total trades over 4 years by requiring pivot touch + volume spike + chop filter.
-# Primary timeframe: 12h, HTF: 1d for Camarilla levels and regime filter.
+# 4h_camarilla_pivot_volume_v4
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and chop filter.
+# Enters long when price touches L5 with volume spike in ranging markets (chop > 50).
+# Enters short when price touches H5 with volume spike in ranging markets.
+# Exits when price moves to H3/L3 or volume confirmation fails.
+# Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 50-150 trades over 4 years.
+# Works in bull/bear: pivots act as support/resistance in ranging markets; volume confirms validity.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_v3"
-timeframe = "12h"
+name = "4h_camarilla_pivot_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivot levels
+    # 1d HTF data for Camarilla pivot levels and chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -38,7 +38,7 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Camarilla levels (using formula: Close ± (Range * 1.1/12))
+    # Camarilla levels
     camarilla_h5 = close_1d + (range_1d * 1.1 / 12)
     camarilla_h4 = close_1d + (range_1d * 1.1 / 6)
     camarilla_h3 = close_1d + (range_1d * 1.1 / 4)
@@ -46,7 +46,7 @@ def generate_signals(prices):
     camarilla_l4 = close_1d - (range_1d * 1.1 / 6)
     camarilla_l5 = close_1d - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
     h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
@@ -79,11 +79,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (stricter)
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Chop regime: only trade when market is ranging (chop > 55)
-        chop_regime = chop_aligned[i] > 55
+        # Chop regime: only trade when market is ranging (chop > 50)
+        chop_regime = chop_aligned[i] > 50
         
         if position == 1:  # Long position
             # Exit: price moves below L3 or volume dries up
@@ -102,11 +102,11 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             if volume_confirmed and chop_regime:
-                # Long entry: price touches L5 with volume confirmation
+                # Long entry: price touches or breaks below L5 with volume confirmation
                 if close[i] <= l5_aligned[i] and low[i] <= l5_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price touches H5 with volume confirmation
+                # Short entry: price touches or breaks above H5 with volume confirmation
                 elif close[i] >= h5_aligned[i] and high[i] >= h5_aligned[i]:
                     position = -1
                     signals[i] = -0.25
