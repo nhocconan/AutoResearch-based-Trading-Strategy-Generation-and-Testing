@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v1
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
-# Long: Price breaks above 20-period Donchian high with volume > 1.5x 20-period average and chop > 61.8 (range).
-# Short: Price breaks below 20-period Donchian low with volume > 1.5x 20-period average and chop > 61.8 (range).
-# Exit: Price returns to opposite Donchian level or chop < 38.2 (trend) to avoid whipsaw.
-# Uses 1d HTF for choppiness regime (CHOP > 61.8 = ranging market favorable for mean reversion breakouts).
-# Target: 20-50 trades/year to minimize fee drag while capturing range breakouts in both bull and bear markets.
+# 4h_camarilla_pivot_volume_chop_v1
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and choppiness regime filter.
+# Long: Price touches or breaks above H3 pivot level with volume > 1.5x 20-period average and CHOP > 50 (range/mean-reversion regime).
+# Short: Price touches or breaks below L3 pivot level with volume > 1.5x 20-period average and CHOP > 50.
+# Exit: Price returns to opposite pivot level (long exits below H3, short exits above L3) or CHOP < 30 (strong trend regime).
+# Uses 1d trend filter: only long when 1d close > 1d EMA50, only short when 1d close < 1d EMA50.
+# Target: 20-40 trades/year to minimize fee drag while maintaining edge.
+# Camarilla pivots provide precise intraday support/resistance levels that work in ranging markets.
+# Volume confirmation ensures institutional participation. CHOP filter avoids strong trending regimes where mean reversion fails.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v1"
+name = "4h_camarilla_pivot_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,91 +27,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
-    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for choppiness regime
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range for chop calculation
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Calculate 1d EMA50 for trend filter
+    close_1d_s = pd.Series(close_1d)
+    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ATR(14) for denominator
-    tr_s = pd.Series(tr)
-    atr_14 = tr_s.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    # Camarilla levels: based on previous day's range
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # H2 = close + 0.55 * (high - low)
+    # H1 = close + 0.275 * (high - low)
+    # L1 = close - 0.275 * (high - low)
+    # L2 = close - 0.55 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    daily_range = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * daily_range
+    camarilla_l3 = close_1d - 1.1 * daily_range
     
-    # Sum of True Range over 14 periods (numerator)
-    tr_sum_14 = tr_s.rolling(window=14, min_periods=14).sum().values
+    # Align 1d data to 4h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Choppiness Index: CHOP = 100 * log10(sumTR(14) / (ATR(14) * 14)) / log10(14)
-    chop = 100 * np.log10(tr_sum_14 / (atr_14 * 14)) / np.log10(14)
+    # Calculate 4h Choppiness Index (CHOP) for regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (highest_high - lowest_low)))
+    # Simplified version: CHOP = 100 * log10( sum(tr_true_range) / log10(14) / (max_high - min_low) ) over 14 periods
+    # We'll use a common approximation: CHOP = 100 * log10( sum(ATR) / log10(n) / (HHV - LLV) )
+    # For practical purposes, we'll use: CHOP > 50 indicates ranging market, CHOP < 30 indicates trending
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
     
-    # Align Donchian, volume MA, and chop to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, prices, donchian_high)  # Same timeframe
-    donchian_low_aligned = align_htf_to_ltf(prices, prices, donchian_low)
-    volume_ma_aligned = align_htf_to_ltf(prices, prices, volume_ma)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # True Range calculation
+    tr1 = high_s - low_s
+    tr2 = abs(high_s - close_s.shift(1))
+    tr3 = abs(low_s - close_s.shift(1))
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # ATR(14)
+    atr_14 = true_range.rolling(window=14, min_periods=14).mean()
+    
+    # Sum of ATR over 14 periods
+    sum_atr_14 = atr_14.rolling(window=14, min_periods=14).sum()
+    
+    # Highest high and lowest low over 14 periods
+    highest_high_14 = high_s.rolling(window=14, min_periods=14).max()
+    lowest_low_14 = low_s.rolling(window=14, min_periods=14).min()
+    
+    # Choppiness Index
+    chop = 100 * np.log10(sum_atr_14 / (np.log10(14) * (highest_high_14 - lowest_low_14)))
+    chop_values = chop.values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_ma_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(volume[i]) or np.isnan(close[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_values[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma_aligned[i]
-        # Choppiness regime: CHOP > 61.8 = ranging market (favorable for breakout mean reversion)
-        chop_regime = chop_aligned[i] > 61.8
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # 1d trend filter: close > EMA50 for uptrend, < EMA50 for downtrend
+        trend_1d_up = close[i] > ema_50_1d_aligned[i]  # Using 4h close vs 1d EMA (aligned)
+        trend_1d_down = close[i] < ema_50_1d_aligned[i]
+        # Choppiness regime filter: CHOP > 50 indicates ranging/mean-reversion regime
+        chop_regime = chop_values[i] > 50
+        # Strong trend regime filter: CHOP < 30 indicates strong trend (avoid mean reversion)
+        strong_trend_regime = chop_values[i] < 30
         
         if position == 1:  # Long position
-            # Exit: Price returns to Donchian low OR chop < 38.2 (trending market)
-            if close[i] <= donchian_low_aligned[i] or chop_aligned[i] < 38.2:
+            # Exit: Price returns to Camarilla H3 level or enters strong trend regime
+            if close[i] <= camarilla_h3_aligned[i] or strong_trend_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to Donchian high OR chop < 38.2 (trending market)
-            if close[i] >= donchian_high_aligned[i] or chop_aligned[i] < 38.2:
+            # Exit: Price returns to Camarilla L3 level or enters strong trend regime
+            if close[i] >= camarilla_l3_aligned[i] or strong_trend_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above Donchian high with volume and chop regime
-            if (close[i] > donchian_high_aligned[i] and    # Break above Donchian high
+            # Long entry: Price touches/breaks above H3 with volume, uptrend, and ranging regime
+            if (close[i] >= camarilla_h3_aligned[i] and    # Touch/break above H3
                 volume_confirmed and                       # Volume spike
-                chop_regime):                              # Ranging market (chop > 61.8)
+                trend_1d_up and                            # 1d uptrend
+                chop_regime):                              # Ranging market (mean reversion favorable)
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low with volume and chop regime
-            elif (close[i] < donchian_low_aligned[i] and   # Break below Donchian low
+            # Short entry: Price touches/breaks below L3 with volume, downtrend, and ranging regime
+            elif (close[i] <= camarilla_l3_aligned[i] and  # Touch/break below L3
                   volume_confirmed and                     # Volume spike
-                  chop_regime):                            # Ranging market (chop > 61.8)
+                  trend_1d_down and                        # 1d downtrend
+                  chop_regime):                            # Ranging market (mean reversion favorable)
                 position = -1
                 signals[i] = -0.25
     
