@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 1d_donchian_1w_volume_chop_v1
-# Hypothesis: Daily timeframe Donchian channel breakout with weekly trend filter, volume confirmation, and choppiness regime filter.
-# Uses 1d timeframe to minimize trade frequency and fee drag. Donchian(20) breakout captures strong momentum moves.
-# Weekly trend filter ensures trades align with higher timeframe direction. Volume confirmation filters weak breakouts.
-# Choppiness regime filter (CHOP > 61.8) only allows mean-reversion in ranging markets, but since we use breakouts,
-# we actually want CHOP < 38.2 (trending) to avoid false breakouts in chop. Designed for 7-25 trades/year (30-100 over 4 years).
-# Works in bull/bear markets: breakouts capture strong moves, weekly filter avoids counter-trend fakes, volume confirms conviction.
+# 6h_keltner_breakout_1d_atr_v1
+# Hypothesis: 6h Keltner Channel breakout with 1d ATR regime filter and volume confirmation.
+# Uses 6h timeframe to balance trade frequency and responsiveness. Keltner Channel breakouts capture volatility expansion moves.
+# 1d ATR regime filter ensures we only trade when daily volatility is elevated (ATR > 20-period MA), avoiding low-volatility chop.
+# Volume confirmation ensures institutional participation. Designed for 12-37 trades/year (50-150 over 4 years).
+# Works in bull/bear markets: breakouts work in trending markets, ATR filter avoids false signals in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_1w_volume_chop_v1"
-timeframe = "1d"
+name = "6h_keltner_breakout_1d_atr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +24,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation (primary timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 6h data for Keltner Channel calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:  # Need enough for EMA(20) and ATR(10)
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 6h EMA(20) for Keltner Channel middle line
+    close_6h = df_6h['close'].values
+    ema_20 = pd.Series(close_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate 6h ATR(10) for Keltner Channel width
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    tr1 = high_6h - low_6h
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner Channel bands: EMA(20) ± 2 * ATR(10)
+    upper_band = ema_20 + 2 * atr_10
+    lower_band = ema_20 - 2 * atr_10
+    
+    # Align 6h Keltner Channel to 6h timeframe (completed 6h candle only)
+    ema_20_aligned = align_htf_to_ltf(prices, df_6h, ema_20)
+    upper_band_aligned = align_htf_to_ltf(prices, df_6h, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_6h, lower_band)
+    
+    # Get 1d HTF data ONCE before loop for ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:  # Need enough for ATR(20) calculation
+        return np.zeros(n)
+    
+    # Calculate 1d ATR(20) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]  # First period TR is just high-low
+    atr_20_1d = pd.Series(tr_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Donchian upper = max(high, lookback=20)
-    # Donchian lower = min(low, lookback=20)
-    high_roll_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d ATR(20) moving average for regime filter
+    atr_ma_20_1d = pd.Series(atr_20_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align Donchian levels to 1d timeframe (completed daily candle only)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_roll_max)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_roll_min)
+    # ATR regime: trade only when daily ATR > 20-period MA (elevated volatility)
+    atr_regime = atr_20_1d > atr_ma_20_1d
     
-    # Get 1w HTF data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Align 1d ATR regime to 6h timeframe (completed daily candle only)
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
     
-    # Calculate 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align 1w EMA to 1d timeframe (completed weekly candle only)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume spike detection (20-period volume average on 1d)
+    # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 1.5)  # 1.5x volume average
-    
-    # Choppiness filter (use 1d data)
-    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    # We'll use a simplified version: if CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    # For breakout strategy, we want trending markets (CHOP < 38.2) to avoid false breakouts
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])  # align length
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    
-    max_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = 100 * (np.log10(atr14 / (max_high14 - min_low14 + 1e-10)) / np.log10(14))
-    # Only trade when market is trending (CHOP < 38.2) to avoid false breakouts in ranging markets
-    trending_regime = chop < 38.2
+    vol_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(trending_regime[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or np.isnan(atr_regime_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower (20-day low) or weekly trend turns bearish
-            if close[i] < donchian_low_aligned[i] or close[i] < ema_1w_aligned[i]:
+            # Exit: price closes below 6h EMA(20) (middle line)
+            if close[i] < ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper (20-day high) or weekly trend turns bullish
-            if close[i] > donchian_high_aligned[i] or close[i] > ema_1w_aligned[i]:
+            # Exit: price closes above 6h EMA(20) (middle line)
+            if close[i] > ema_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above Donchian upper, weekly trend bullish, volume spike, trending regime
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema_1w_aligned[i] and 
-                vol_spike[i] and 
-                trending_regime[i]):
+            # Enter long: price closes above 6h Keltner upper band, with ATR regime and volume spike
+            if (close[i] > upper_band_aligned[i]) and atr_regime_aligned[i] and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian lower, weekly trend bearish, volume spike, trending regime
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema_1w_aligned[i] and 
-                  vol_spike[i] and 
-                  trending_regime[i]):
+            # Enter short: price closes below 6h Keltner lower band, with ATR regime and volume spike
+            elif (close[i] < lower_band_aligned[i]) and atr_regime_aligned[i] and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
