@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
 # In trending regimes (CHOP < 38.2): breakout above/below Camarilla H3/L3 levels with volume confirmation
 # In ranging regimes (CHOP > 61.8): mean reversion at Camarilla H3/L3 levels with volume confirmation
-# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
+# Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
 # Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
 
-name = "12h_1d_camarilla_breakout_volume_chop_v3"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -67,14 +67,13 @@ def generate_signals(prices):
                        50)
     
     # Calculate 1d Camarilla pivot levels (based on prior day to avoid look-ahead)
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
     range_1d = high_1d - low_1d
     h3_1d = close_1d + 1.1 * range_1d
     l3_1d = close_1d - 1.1 * range_1d
     h4_1d = close_1d + 1.5 * range_1d
     l4_1d = close_1d - 1.5 * range_1d
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
