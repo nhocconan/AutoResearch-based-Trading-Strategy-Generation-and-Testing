@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakout of daily Camarilla pivot levels with 1-day EMA50 trend filter and volume confirmation.
+# 4h_1d_camarilla_breakout_v1
+# Hypothesis: 4-hour breakout of daily Camarilla pivot levels with daily EMA50 trend filter and volume confirmation.
 # Long when price breaks above R4 resistance with price > daily EMA50 and volume > 1.5x 24-bar average.
 # Short when price breaks below S4 support with price < daily EMA50 and volume > 1.5x 24-bar average.
 # Exit when price returns to opposite pivot level (S4 for longs, R4 for shorts).
 # Daily Camarilla levels calculated from prior day's OHLC: PP=(H+L+C)/3, R4=C+(H-L)*1.1/2, S4=C-(H-L)*1.1/2.
 # Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
-# Target: 50-150 total trades over 4 years (12-37/year). Position size: 0.25.
+# Target: 75-200 total trades over 4 years (19-50/year). Position size: 0.25.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,7 +43,7 @@ def generate_signals(prices):
         r4[i] = pc + (ph - pl) * 1.1 / 2
         s4[i] = pc - (ph - pl) * 1.1 / 2
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_d, pp)
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
@@ -59,10 +59,10 @@ def generate_signals(prices):
         for i in range(50, len(close_d)):
             ema_50_d[i] = (close_d[i] - ema_50_d[i-1]) * multiplier + ema_50_d[i-1]
     
-    # Align daily EMA50 to 12h timeframe
+    # Align daily EMA50 to 4h timeframe
     ema_50_d_aligned = align_htf_to_ltf(prices, df_d, ema_50_d)
     
-    # Volume confirmation: 24-period average (24*12h = 12 days)
+    # Volume confirmation: 24-period average (24*4h = 4 days)
     vol_ma_24 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
