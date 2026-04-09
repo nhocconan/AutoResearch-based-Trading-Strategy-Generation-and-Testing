@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter
-# - Uses 1d EMA50 > EMA200 for uptrend, < for downtrend
-# - 6h Williams %R(14) for overbought/oversold: > -20 = overbought, < -80 = oversold
-# - Mean reversion: short when overbought in uptrend, long when oversold in downtrend
-# - Volume filter: current 6h volume > 1.2x 20-period average to avoid low-vol false signals
-# - Fixed position size 0.25 to manage drawdown
-# - Target: 12-25 trades/year on 6h (48-100 total over 4 years)
-# - Works in bull/bear: mean reversion effective in ranging markets, trend filter avoids counter-trend in strong moves
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50 > EMA200) and volume confirmation
+# - Uses 1d HTF for trend direction (EMA50 > EMA200 = uptrend, < = downtrend)
+# - 12h Donchian channel (20-period high/low) from prior 12h bar
+# - Long on break above upper band in uptrend, short on break below lower band in downtrend
+# - Volume confirmation: current 12h volume > 1.5x 20-period average
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years)
+# - Works in bull (trend breakouts) and bear (mean reversion via trend filter + volatility expansion)
 
-name = "6h_1d_williamsr_mean_reversion_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +25,36 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 1d EMAs for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 6h Williams %R(14)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Avoid division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 12h Donchian channel (20-period) from prior completed bar
+    # We need at least 20 bars of 12h data
+    if len(high) < 20 or len(low) < 20:
+        return np.zeros(n)
     
-    # Align 1d EMAs to 6h timeframe (wait for completed 1d bar)
+    # Rolling max/min for 20-period Donchian
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Align all 1d data to 12h timeframe (wait for completed 1d bar)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Pre-compute volume confirmation (20-period average for 6h)
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -60,49 +63,45 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or np.isnan(vol_ma_20[i]) or
-            vol_ma_20[i] <= 0):
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.2x average
-        volume_confirmed = volume[i] > 1.2 * vol_ma_20[i]
+        # Volume confirmation: current 12h volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         # Trend filter: 1d EMA50 > EMA200 = uptrend, < = downtrend
         uptrend = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
         downtrend = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
         
-        # Williams %R levels
-        overbought = williams_r[i] > -20
-        oversold = williams_r[i] < -80
-        
         # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit when Williams %R rises above -50 (momentum returning)
-            if williams_r[i] > -50:
+            # Exit when price closes below 12h Donchian lower band (trend change or mean reversion)
+            if close[i] < lowest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit when Williams %R falls below -50 (momentum returning)
-            if williams_r[i] < -50:
+            # Exit when price closes above 12h Donchian upper band (trend change or mean reversion)
+            if close[i] > highest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
-            # Mean reversion entry with volume confirmation and trend alignment
+            # Breakout entry with volume confirmation and trend alignment
             if volume_confirmed:
-                # Long: oversold in downtrend (mean reversion up)
-                if downtrend and oversold:
+                # Long: break above upper band in uptrend
+                if uptrend and close[i] > highest_20[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: overbought in uptrend (mean reversion down)
-                elif uptrend and overbought:
+                # Short: break below lower band in downtrend
+                elif downtrend and close[i] < lowest_20[i]:
                     position = -1
                     signals[i] = -position_size
     
