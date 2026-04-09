@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_camarilla_pullback_v1
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels with 1d trend filter and volume confirmation.
-# Long: Price breaks above 12h Camarilla R3 level, pulls back to touch or cross above 6h EMA(20), with volume > 1.3x 20-period average and 1d close > 1d EMA(50).
-# Short: Price breaks below 12h Camarilla S3 level, pulls back to touch or cross below 6h EMA(20), with volume > 1.3x 20-period average and 1d close < 1d EMA(50).
-# Exit: Opposite Camarilla break (R4/S4) or ATR trailing stop (2.5x ATR from extreme).
-# Uses 12h Camarilla for structure, 6h EMA for pullback entry, 1d EMA for trend filter, volume for confirmation, ATR for dynamic stops.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# 4h_1d_donchian_breakout_volume_chop_v6
+# Hypothesis: 4h strategy using daily Donchian channel breakout with volume confirmation and choppiness regime filter.
+# Long: Price breaks above daily Donchian(20) high, volume > 1.5x 20-period average, and choppiness > 61.8 (range regime) for mean reversion logic.
+# Short: Price breaks below daily Donchian(20) low, volume > 1.5x 20-period average, and choppiness > 61.8 (range regime).
+# Exit: Opposite Donchian breakout or ATR trailing stop (2.5x ATR from extreme).
+# Uses daily Donchian for structure, volume for confirmation, choppiness for regime filter, ATR for dynamic stops.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_camarilla_pullback_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_chop_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
@@ -40,60 +39,50 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 12h data for Camarilla pivot levels (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
-        return np.zeros(n)
+    # Choppiness Index (14) for regime filter
+    chop_period = 14
+    atr_sum = high_s.rolling(window=chop_period, min_periods=chop_period).apply(
+        lambda x: (x - low_s.iloc[x.index]).sum(), raw=False
+    ).values
+    highest_high = high_s.rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = low_s.rolling(window=chop_period, min_periods=chop_period).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(chop_period)
+    # Handle division by zero and invalid values
+    chop = np.where((highest_high - lowest_low) == 0, 100, chop)
+    chop = np.where(np.isnan(chop), 50, chop)
     
-    # Calculate 12h Camarilla pivot levels
-    high_12h = pd.Series(df_12h['high'].values)
-    low_12h = pd.Series(df_12h['low'].values)
-    close_12h = pd.Series(df_12h['close'].values)
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    camarilla_r3 = pivot + range_12h * 1.1 / 4
-    camarilla_s3 = pivot - range_12h * 1.1 / 4
-    camarilla_r4 = pivot + range_12h * 1.1 / 2
-    camarilla_s4 = pivot - range_12h * 1.1 / 2
-    
-    # Align HTF Camarilla levels to 6h timeframe (wait for completed 12h bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3.values)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4.values)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4.values)
-    
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for Donchian channel (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate daily Donchian(20) channels
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    donchian_high = high_1d.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_1d.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h EMA(20) for pullback entry
-    close_s = pd.Series(close)
-    ema20_6h = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align HTF Donchian levels to 4h timeframe (wait for completed 1d bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     long_high = 0.0   # highest high since long entry
     short_low = 0.0   # lowest low since short entry
-    long_triggered = False  # flag to wait for pullback after breakout
-    short_triggered = False  # flag to wait for pullback after breakout
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(open_price[i]) or np.isnan(volume[i]) or np.isnan(ema20_6h[i]) or np.isnan(ema50_1d_aligned[i])):
+            np.isnan(volume[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: choppiness > 61.8 indicates ranging market (good for mean reversion at extremes)
+        regime_filter = chop[i] > 61.8
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -102,13 +91,11 @@ def generate_signals(prices):
             if long_high > 0 and close[i] < long_high - 2.5 * atr[i]:
                 position = 0
                 long_high = 0.0
-                long_triggered = False
                 signals[i] = 0.0
-            # Exit: Price breaks above 12h Camarilla R4 (continuation break)
-            elif close[i] > camarilla_r4_aligned[i]:
+            # Exit: Price breaks below daily Donchian low
+            elif close[i] < donchian_low_aligned[i]:
                 position = 0
                 long_high = 0.0
-                long_triggered = False
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
@@ -120,39 +107,26 @@ def generate_signals(prices):
             if short_low > 0 and close[i] > short_low + 2.5 * atr[i]:
                 position = 0
                 short_low = 0.0
-                short_triggered = False
                 signals[i] = 0.0
-            # Exit: Price breaks below 12h Camarilla S4 (continuation break)
-            elif close[i] < camarilla_s4_aligned[i]:
+            # Exit: Price breaks above daily Donchian high
+            elif close[i] > donchian_high_aligned[i]:
                 position = 0
                 short_low = 0.0
-                short_triggered = False
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout and set trigger flags
-            bullish_breakout = (close[i] > camarilla_r3_aligned[i]) and volume_confirmed and (close[i] > ema50_1d_aligned[i])
-            bearish_breakout = (close[i] < camarilla_s3_aligned[i]) and volume_confirmed and (close[i] < ema50_1d_aligned[i])
+            # Check for breakout with volume and regime confirmation
+            bullish_breakout = (close[i] > donchian_high_aligned[i]) and volume_confirmed and regime_filter
+            bearish_breakout = (close[i] < donchian_low_aligned[i]) and volume_confirmed and regime_filter
             
             if bullish_breakout:
-                long_triggered = True
-                short_triggered = False
-            elif bearish_breakout:
-                short_triggered = True
-                long_triggered = False
-            
-            # Long entry: after bullish breakout, price pulls back to EMA20 or above
-            if long_triggered and close[i] >= ema20_6h[i]:
                 position = 1
                 long_high = high[i]
-                long_triggered = False
                 signals[i] = 0.25
-            # Short entry: after bearish breakout, price pulls back to EMA20 or below
-            elif short_triggered and close[i] <= ema20_6h[i]:
+            elif bearish_breakout:
                 position = -1
                 short_low = low[i]
-                short_triggered = False
                 signals[i] = -0.25
     
     return signals
