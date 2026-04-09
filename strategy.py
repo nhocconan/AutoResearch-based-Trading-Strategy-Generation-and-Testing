@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v2
-# Hypothesis: 12-hour breakouts at Camarilla pivot levels (H3/L3) from daily timeframe with volume confirmation (>2x 20-bar average volume).
-# Camarilla levels act as intraday support/resistance; breaks signal momentum continuation.
-# Volume filter reduces false breakouts. Works in bull markets (upward breaks) and bear markets (downward breaks).
-# Target: 15-35 trades per year per symbol (~60-140 total over 4 years).
-# Uses 12h primary timeframe and 1h timeframe for HTF context.
+# 4h_1d_camarilla_breakout_v18
+# Hypothesis: 4-hour breakouts at Camarilla pivot levels (H4/L4) from daily timeframe with volume confirmation (>2x 20-bar average volume).
+# Camarilla H4/L4 represent stronger support/resistance than H3/L3, reducing false breakouts.
+# Works in bull markets (upward breaks at H4) and bear markets (downward breaks at L4).
+# Volume filter reduces false signals. Target: 20-40 trades per year per symbol (~80-160 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v18"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,16 +30,16 @@ def generate_signals(prices):
     
     # Calculate daily close for Camarilla levels
     daily_close = df_1d['close'].values
-    
-    # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
-    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
-    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Camarilla levels: H4/L4 = C ± (H-L)*1.1
+    camarilla_h4 = daily_close + (daily_high - daily_low) * 1.1
+    camarilla_l4 = daily_close - (daily_high - daily_low) * 1.1
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -57,32 +56,32 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L3 level
-            if close[i] <= camarilla_l3_aligned[i]:
+            # Exit: price returns to or below L4 level
+            if close[i] <= camarilla_l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H3 level
-            if close[i] >= camarilla_h3_aligned[i]:
+            # Exit: price returns to or above H4 level
+            if close[i] >= camarilla_h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H3 with volume confirmation
-            if close[i] > camarilla_h3_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
+            # Enter long: price breaks above H4 with volume confirmation
+            if close[i] > camarilla_h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L3 with volume confirmation
-            elif close[i] < camarilla_l3_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
+            # Enter short: price breaks below L4 with volume confirmation
+            elif close[i] < camarilla_l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = -1
                 signals[i] = -0.25
     
