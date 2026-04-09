@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v2
-# Hypothesis: Breakout above/below 1d Camarilla pivot levels (H4/L4) on 4h chart with volume confirmation and ATR volatility filter.
+# 1d_1w_camarilla_breakout_v1
+# Hypothesis: Breakout above/below 1w Camarilla pivot levels (H4/L4) on daily chart with volume confirmation and ATR volatility filter.
 # Long when price closes above H4 (bullish breakout), short when price closes below L4 (bearish breakout).
 # Exit when price returns to pivot point (mean reversion).
 # Uses 1d trend filter: only take long trades when price > 1d EMA(50), only short trades when price < 1d EMA(50).
-# Target: 25-40 trades/year (100-160 total over 4 years) with strict entry conditions.
+# Target: 15-25 trades/year (60-100 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,39 +38,36 @@ def generate_signals(prices):
     for i in range(1, n):
         atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # Load 1d data ONCE before loop for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data ONCE before loop for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous day
-    ph = df_1d['high'].values  # previous day high
-    pl = df_1d['low'].values   # previous day low
-    pc = df_1d['close'].values # previous day close
+    # Calculate Camarilla levels for previous week
+    ph = df_1w['high'].values  # previous week high
+    pl = df_1w['low'].values   # previous week low
+    pc = df_1w['close'].values # previous week close
     
-    range_1d = ph - pl
+    range_1w = ph - pl
     # H4 = close + 1.5 * (high - low) * 1.1/2
     # L4 = close - 1.5 * (high - low) * 1.1/2
-    h4 = pc + 1.5 * range_1d * 1.1 / 2
-    l4 = pc - 1.5 * range_1d * 1.1 / 2
+    h4 = pc + 1.5 * range_1w * 1.1 / 2
+    l4 = pc - 1.5 * range_1w * 1.1 / 2
     # Pivot point = (high + low + close) / 3
     pp = (ph + pl + pc) / 3
     
-    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align Camarilla levels to daily timeframe (wait for previous week's close)
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
     
     # Load 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
+    close_1d = close.copy()
     ema_1d = np.zeros_like(close_1d, dtype=float)
     ema_1d[0] = close_1d[0]
     alpha = 2.0 / (50 + 1)
     for i in range(1, len(close_1d)):
         ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
-    
-    # Align 1d EMA to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
@@ -87,7 +84,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_1d[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -98,8 +95,8 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma_20[i] * 1.25
         
         # Trend filter: price > 1d EMA for longs, price < 1d EMA for shorts
-        trend_long = close[i] > ema_1d_aligned[i]
-        trend_short = close[i] < ema_1d_aligned[i]
+        trend_long = close[i] > ema_1d[i]
+        trend_short = close[i] < ema_1d[i]
         
         if position == 1:  # Long position
             # Exit: price closes below pivot point (mean reversion)
