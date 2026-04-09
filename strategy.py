@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_daily_pivot_breakout_volume_v1
-# Hypothesis: 6h strategy using daily Camarilla pivot levels with volume confirmation.
-# Long: Price breaks above daily R4 level with volume > 1.8x 20-period average.
-# Short: Price breaks below daily S4 level with volume > 1.8x 20-period average.
-# Exit: Price returns to daily pivot point (PP) or opposite S4/R4 breakout.
-# Uses daily Camarilla for key intraday support/resistance, 6h for execution, volume for confirmation.
+# 12h_daily_camarilla_breakout_volume_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation.
+# Long: Price breaks above daily R4 level with volume > 1.5x 20-period average.
+# Short: Price breaks below daily S4 level with volume > 1.5x 20-period average.
+# Exit: Price returns to daily pivot point (PP) or breaks opposite S4/R4 level.
+# Uses daily Camarilla for key support/resistance, 12h for execution, volume for confirmation.
 # Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_daily_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_daily_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,16 +44,10 @@ def generate_signals(prices):
     
     # Camarilla levels
     r4 = close_1d + range_1d * 1.1 / 2.0
-    r3 = close_1d + range_1d * 1.1 / 4.0
-    s3 = close_1d - range_1d * 1.1 / 4.0
     s4 = close_1d - range_1d * 1.1 / 2.0
-    
-    # Align HTF Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -65,8 +59,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to daily pivot or breaks below S4
