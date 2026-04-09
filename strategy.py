@@ -1,109 +1,138 @@
 #!/usr/bin/env python3
-# 1d_weekly_kama_rsi_chop_v2
-# Hypothesis: Daily KAMA trend direction with RSI mean reversion and Choppiness Index regime filter.
-# Long: KAMA rising (trend up), RSI < 30 (oversold), and CHOP > 61.8 (ranging market) → mean reversion long.
-# Short: KAMA falling (trend down), RSI > 70 (overbought), and CHOP > 61.8 (ranging market) → mean reversion short.
-# Exit: Opposing RSI extreme (RSI > 70 for long exit, RSI < 30 for short exit) or trend reversal.
-# Uses 1d primary timeframe with 1w HTF for trend context (KAMA calculated on weekly close).
-# Designed for low trade frequency (~10-25/year) to minimize fee drag in ranging/mean reverting markets.
-# Works in bull markets via buying dips in uptrends and bear markets via selling rallies in downtrends.
+# 6h_1d_ichimoku_cloud_filter_v1
+# Hypothesis: 6h strategy using 1d Ichimoku cloud for trend direction and 6h Tenkan-Kijun cross for entries.
+# Long: Price above 1d cloud (Senkou Span A/B) AND 6h Tenkan > Kijun (bullish momentum).
+# Short: Price below 1d cloud AND 6h Tenkan < Kijun (bearish momentum).
+# Exit: Tenkan-Kijun cross reverses OR price crosses cloud midpoint (Kumo Senkou).
+# Uses 6h primary timeframe with 1d HTF for Ichimoku cloud filter.
+# Designed for low trade frequency (~15-30/year) to avoid fee drag in ranging markets.
+# Works in bull markets via trend-following and bear markets via short signals from cloud breaks.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_kama_rsi_chop_v2"
-timeframe = "1d"
+name = "6h_1d_ichimoku_cloud_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Weekly KAMA for trend direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # 6h Ichimoku components (Tenkan, Kijun, Senkou Span A/B)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    tenkan = (high_s.rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+              low_s.rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    kijun = (high_s.rolling(window=period_kijun, min_periods=period_kijun).max() + 
+             low_s.rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    senkou_b = ((high_s.rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                 low_s.rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2).shift(26)
+    
+    # Kumo (cloud) boundaries: Senkou Span A and B
+    # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
+    cloud_top = np.maximum(senkou_a.values, senkou_b.values)
+    cloud_bottom = np.minimum(senkou_a.values, senkou_b.values)
+    cloud_midpoint = (cloud_top + cloud_bottom) / 2
+    
+    # Get 1d data for HTF Ichimoku cloud filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change_1w = np.abs(np.diff(close_1w, n=10))
-    volatility_1w = np.sum(np.abs(np.diff(close_1w, n=1)), axis=0)[:len(change_1w)]
-    er_1w = np.where(volatility_1w > 0, change_1w / volatility_1w, 0)
-    # Smoothing constants
-    sc_1w = (er_1w * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama_1w = np.full_like(close_1w, np.nan)
-    kama_1w[29] = close_1w[29]  # seed
-    for i in range(30, len(close_1w)):
-        kama_1w[i] = kama_1w[i-1] + sc_1w[i-1] * (close_1w[i] - kama_1w[i-1])
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d Ichimoku components for cloud filter
+    high_1d_s = pd.Series(high_1d)
+    low_1d_s = pd.Series(low_1d)
+    close_1d_s = pd.Series(close_1d)
     
-    # Daily Choppiness Index(14)
-    atr_1 = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    atr_1 = np.concatenate([[np.nan], atr_1])
-    atr_sum = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    # Tenkan-sen (1d)
+    tenkan_1d = (high_1d_s.rolling(window=9, min_periods=9).max() + 
+                 low_1d_s.rolling(window=9, min_periods=9).min()) / 2
+    
+    # Kijun-sen (1d)
+    kijun_1d = (high_1d_s.rolling(window=26, min_periods=26).max() + 
+                low_1d_s.rolling(window=26, min_periods=26).min()) / 2
+    
+    # Senkou Span A (1d)
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(26)
+    
+    # Senkou Span B (1d)
+    senkou_b_1d = ((high_1d_s.rolling(window=52, min_periods=52).max() + 
+                    low_1d_s.rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # 1d Cloud boundaries
+    cloud_top_1d = np.maximum(senkou_a_1d.values, senkou_b_1d.values)
+    cloud_bottom_1d = np.minimum(senkou_a_1d.values, senkou_b_1d.values)
+    
+    # Align 1d Ichimoku cloud to 6h
+    cloud_top_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
+    cloud_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(52, n):  # Start after warmup (max lookback)
         # Skip if any required data is NaN
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(cloud_top_1d_aligned[i]) or np.isnan(cloud_bottom_1d_aligned[i]) or
+            np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA trend: rising if current > previous, falling if current < previous
-        kama_rising = kama_1w_aligned[i] > kama_1w_aligned[i-1]
-        kama_falling = kama_1w_aligned[i] < kama_1w_aligned[i-1]
+        # 6h Tenkan-Kijun cross signals
+        tenkan_kijun_bullish = tenkan[i] > kijun[i]
+        tenkan_kijun_bearish = tenkan[i] < kijun[i]
         
-        # RSI extremes
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
-        # Chop regime: ranging market
-        chop_ranging = chop[i] > 61.8
+        # Price vs 1d cloud
+        price_above_1d_cloud = close[i] > cloud_top_1d_aligned[i]
+        price_below_1d_cloud = close[i] < cloud_bottom_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: RSI overbought or trend turns down
-            if rsi_overbought or not kama_rising:
+            # Exit: Tenkan-Kijun cross turns bearish OR price drops below cloud midpoint
+            if (not tenkan_kijun_bullish) or (close[i] < cloud_midpoint[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI oversold or trend turns up
-            if rsi_oversold or not kama_falling:
+            # Exit: Tenkan-Kijun cross turns bullish OR price rises above cloud midpoint
+            if (not tenkan_kijun_bearish) or (close[i] > cloud_midpoint[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: KAMA rising, RSI oversold, choppy market
-            if kama_rising and rsi_oversold and chop_ranging:
+            # Long entry: Price above 1d cloud AND bullish Tenkan-Kijun cross
+            if price_above_1d_cloud and tenkan_kijun_bullish:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: KAMA falling, RSI overbought, choppy market
-            elif kama_falling and rsi_overbought and chop_ranging:
+            # Short entry: Price below 1d cloud AND bearish Tenkan-Kijun cross
+            elif price_below_1d_cloud and tenkan_kijun_bearish:
                 position = -1
                 signals[i] = -0.25
     
