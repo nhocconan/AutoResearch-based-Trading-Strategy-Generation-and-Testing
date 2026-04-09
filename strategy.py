@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v10
-# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
-# Uses 1d HTF for signal direction (Camarilla H3/L3 levels + EMA50 trend), 4h only for execution.
-# Discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 20-50 trades/year.
-# Designed to work in both bull and bear markets via trend filter (EMA50) and volatility filter.
+# 12h_camarilla_1d_trend_volume_v1
+# Hypothesis: 12h strategy using 1d HTF Camarilla pivot levels (H3/L3) + volume confirmation + 1d EMA50 trend filter.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Uses discrete position sizing (±0.25) to minimize fee churn. Works in both bull and bear markets via trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v10"
-timeframe = "4h"
+name = "12h_camarilla_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -59,7 +58,7 @@ def generate_signals(prices):
     h3 = pivot_point + (range_1d * 1.1 / 4)
     l3 = pivot_point - (range_1d * 1.1 / 4)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
