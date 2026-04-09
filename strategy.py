@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume spike confirmation.
-# Long: Price breaks above H4 pivot with volume > 2.0x 20-period average
-# Short: Price breaks below L4 pivot with volume > 2.0x 20-period average
+# 4h_daily_camarilla_pivot_volume_spike_v8
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume spike confirmation.
+# Long: Price breaks above H4 pivot with volume > 2.5x 20-period average (tighter filter)
+# Short: Price breaks below L4 pivot with volume > 2.5x 20-period average (tighter filter)
 # Exit: Price returns to H3/L3 levels
-# Uses 12h primary timeframe with 1d HTF for Camarilla pivot calculation.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
+# Target: 75-150 total trades over 4 years (19-38/year) to reduce fee drag.
+# Tighter volume confirmation (2.5x vs 2.2x) reduces false breakouts and trade frequency.
 # Works in both bull and bear markets by capturing institutional breakouts with confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v8"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,7 +51,7 @@ def generate_signals(prices):
     h4_1d = pivot_1d + (range_1d * 1.1 / 2)
     l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
@@ -67,8 +68,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 2.5x 20-period average (tighter filter)
+        volume_confirmed = volume[i] > 2.5 * volume_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to H3 level
