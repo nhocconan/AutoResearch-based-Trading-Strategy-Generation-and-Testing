@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d Donchian breakouts with ATR filtering and session filter
-# 4h/1d Donchian channels (20-period) identify major support/resistance
-# Breakouts above upper channel or below lower channel with volume confirmation
-# ATR filter ensures sufficient volatility for meaningful moves
-# Session filter (08-20 UTC) reduces noise trades
-# Fixed position size of 0.20 to control drawdown
-# Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
+# Hypothesis: 6h strategy using 1d/1w Camarilla pivot levels with volume confirmation and chop regime filter
+# Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) identify institutional support/resistance
+# Mean reversion at R3/S3 when choppy market (CHOP > 61.8), breakout continuation at R4/S4 when trending (CHOP < 38.2)
+# Volume confirmation ensures institutional participation
+# Fixed position size 0.25 to balance return and drawdown
+# Target: 12-25 trades/year on 6h timeframe (50-100 total over 4 years)
 
-name = "1h_4h_1d_donchian_atr_volume_v1"
-timeframe = "1h"
+name = "6h_1d_1w_camarilla_chop_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,121 +23,147 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 5 or len(df_1w) < 5:
         return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels
+    pivot_1d = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3.0
+    range_1d = high_1d[-1] - low_1d[-1]
+    r3_1d = pivot_1d + range_1d * 1.1 / 2
+    s3_1d = pivot_1d - range_1d * 1.1 / 2
+    r4_1d = pivot_1d + range_1d * 1.1
+    s4_1d = pivot_1d - range_1d * 1.1
     
-    # Calculate 4h ATR (14-period) for volatility filtering
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    # Calculate 1w Camarilla pivot levels
+    pivot_1w = (high_1w[-1] + low_1w[-1] + close_1w[-1]) / 3.0
+    range_1w = high_1w[-1] - low_1w[-1]
+    r3_1w = pivot_1w + range_1w * 1.1 / 2
+    s3_1w = pivot_1w - range_1w * 1.1 / 2
+    r4_1w = pivot_1w + range_1w * 1.1
+    s4_1w = pivot_1w - range_1w * 1.1
+    
+    # Align 1d Camarilla levels to 6h timeframe (constant until new 1d bar)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, pivot_1d))
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, r3_1d))
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, s3_1d))
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, r4_1d))
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, s4_1d))
+    
+    # Align 1w Camarilla levels to 6h timeframe (constant until new 1w bar)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, pivot_1w))
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, r3_1w))
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, s3_1w))
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, r4_1w))
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, s4_1w))
+    
+    # Calculate 1d Choppiness Index (CHOP) for regime detection
+    atr_period = 14
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr_14_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Calculate 1d ATR (14-period) for volatility filtering
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]  # First period has no previous close
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    highest_high_1d = pd.Series(high_1d).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=atr_period, min_periods=atr_period).min().values
     
-    # Align all HTF data to 1h timeframe
-    highest_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_4h)
-    lowest_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_4h)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    sum_atr = pd.Series(atr_1d).rolling(window=atr_period, min_periods=atr_period).sum().values
+    range_1d_period = highest_high_1d - lowest_low_1d
+    chop_1d = 100 * np.log10(sum_atr / range_1d_period) / np.log10(atr_period)
+    chop_1d = np.where(range_1d_period == 0, 50, chop_1d)  # Avoid division by zero
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    highest_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_1d)
-    lowest_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Pre-compute volume confirmation (20-period average for 1h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Pre-compute volume confirmation (24-period average for 6h, approx 6d)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(highest_4h_aligned[i]) or np.isnan(lowest_4h_aligned[i]) or
-            np.isnan(highest_1d_aligned[i]) or np.isnan(lowest_1d_aligned[i]) or
-            np.isnan(atr_4h_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or not in_session[i] or
-            atr_4h_aligned[i] <= 0 or atr_1d_aligned[i] <= 0):
+        # Skip if any required data is invalid
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_24[i]) or
+            vol_ma_24[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1h volume > 1.3x average 1h volume
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_24[i]
         
-        # Volatility filter: only trade when both 4h and 1d ATR are above their 30-period averages
-        atr_ma_30_4h = pd.Series(atr_4h_aligned).rolling(window=30, min_periods=30).mean()
-        atr_ma_30_1d = pd.Series(atr_1d_aligned).rolling(window=30, min_periods=30).mean()
-        if len(atr_ma_30_4h) > i and len(atr_ma_30_1d) > i:
-            vol_filter = (atr_4h_aligned[i] > atr_ma_30_4h.iloc[i]) and (atr_1d_aligned[i] > atr_ma_30_1d.iloc[i])
-        else:
-            vol_filter = True  # Not enough data for MA, allow trading
-            
-        if not vol_filter:
+        if not volume_confirmed:
             signals[i] = 0.0
             continue
         
         # Fixed position size to minimize fee churn
-        position_size = 0.20
+        position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit on retracement to midpoint of 4h or 1d channel
-            midpoint_4h = (highest_4h_aligned[i] + lowest_4h_aligned[i]) / 2.0
-            midpoint_1d = (highest_1d_aligned[i] + lowest_1d_aligned[i]) / 2.0
-            if close[i] < midpoint_4h or close[i] < midpoint_1d:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size
-                
+            # Exit conditions: mean reversion to pivot in choppy, or stop at S3/S4
+            if chop_1d_aligned[i] > 61.8:  # Choppy regime - mean reversion
+                if close[i] < pivot_1d_aligned[i] or close[i] < pivot_1w_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+            else:  # Trending regime - trail with S3/S4
+                if close[i] < s3_1d_aligned[i] or close[i] < s3_1w_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+                    
         elif position == -1:  # Short position
-            # Exit on retracement to midpoint of 4h or 1d channel
-            midpoint_4h = (highest_4h_aligned[i] + lowest_4h_aligned[i]) / 2.0
-            midpoint_1d = (highest_1d_aligned[i] + lowest_1d_aligned[i]) / 2.0
-            if close[i] > midpoint_4h or close[i] > midpoint_1d:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
+            # Exit conditions: mean reversion to pivot in choppy, or stop at R3/R4
+            if chop_1d_aligned[i] > 61.8:  # Choppy regime - mean reversion
+                if close[i] > pivot_1d_aligned[i] or close[i] > pivot_1w_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
+            else:  # Trending regime - trail with R3/R4
+                if close[i] > r3_1d_aligned[i] or close[i] > r3_1w_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
         else:  # Flat
-            # Donchian breakout with volume and volatility confirmation
-            if volume_confirmed:
-                # Breakout above upper channel (buy)
-                if close[i] > highest_4h_aligned[i] or close[i] > highest_1d_aligned[i]:
+            # Entry logic based on regime
+            if chop_1d_aligned[i] > 61.8:  # Choppy regime - mean reversion at R3/S3
+                # Long at S3 rejection
+                if close[i] <= s3_1d_aligned[i] * 1.005 and close[i] > s3_1d_aligned[i]:
+                    # Additional confirmation: price also above weekly S3
+                    if close[i] > s3_1w_aligned[i]:
+                        position = 1
+                        signals[i] = position_size
+                # Short at R3 rejection
+                elif close[i] >= r3_1d_aligned[i] * 0.995 and close[i] < r3_1d_aligned[i]:
+                    # Additional confirmation: price also below weekly R3
+                    if close[i] < r3_1w_aligned[i]:
+                        position = -1
+                        signals[i] = -position_size
+            else:  # Trending regime - breakout continuation at R4/S4
+                # Long on R4 breakout
+                if close[i] > r4_1d_aligned[i] * 1.002 or close[i] > r4_1w_aligned[i] * 1.002:
                     position = 1
                     signals[i] = position_size
-                # Breakout below lower channel (sell)
-                elif close[i] < lowest_4h_aligned[i] or close[i] < lowest_1d_aligned[i]:
+                # Short on S4 breakdown
+                elif close[i] < s4_1d_aligned[i] * 0.998 or close[i] < s4_1w_aligned[i] * 0.998:
                     position = -1
                     signals[i] = -position_size
     
