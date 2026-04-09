@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and ATR stoploss
-# - Uses 1d Donchian(20) channels for breakout entries on 4h timeframe
+# Hypothesis: 12h Donchian breakout with 1d volume spike and ATR stoploss
+# - Uses 1d Donchian(20) channels for breakout entries on 12h timeframe
 # - Requires volume > 2.0 * 20-period volume average for confirmation (strict filter)
 # - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
 # - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
-# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to avoid fee drag
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to avoid fee drag
 
-name = "4h_1d_donchian_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,11 +33,11 @@ def generate_signals(prices):
     # Lower channel: lowest low of last 20 days
     lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian levels to 4h timeframe
+    # Align Donchian levels to 12h timeframe
     upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
     lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
     
-    # Pre-compute 4h ATR(14) for stoploss
+    # Pre-compute 12h ATR(14) for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
