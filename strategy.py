@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 4h_higher_high_lower_low_12h_ema_volume_v1
-# Hypothesis: 4h higher high/lower low breakout with 12h EMA(34) trend filter and 4h volume confirmation.
-# 12h EMA(34) determines primary trend (only long above, short below).
-# 4h breakout above recent swing high (higher high) or below recent swing low (lower low) provides entry.
-# 4h volume > 1.6x 20-period average confirms institutional participation.
-# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-50 trades/year.
-# Works in bull/bear: EMA filter avoids counter-trend trades, volume ensures momentum validity.
+# mtf_1h_ema_rsi_pullback_4h1d_v1
+# Hypothesis: On 1h timeframe, enter pullbacks in the direction of the 4h/1d trend.
+# 4h EMA(50) and 1d EMA(200) define the trend (both must agree).
+# 1h RSI(14) pullback to 30-40 (long) or 60-70 (short) provides entry during uptrend/downtrend.
+# 1h volume > 1.5x 20-period average confirms momentum.
+# Session filter: 08-20 UTC to avoid low-liquidity hours.
+# Discrete sizing (0.0, ±0.20) minimizes fee churn. Target: 15-35 trades/year.
+# Works in bull/bear: trend filter prevents counter-trend trades, volume ensures follow-through.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_higher_high_lower_low_12h_ema_volume_v1"
-timeframe = "4h"
+name = "mtf_1h_ema_rsi_pullback_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,74 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h HTF data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # 4h data for swing high/low detection and volume
+    # 4h EMA(50) for intermediate trend
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Swing high: highest high in last 20 4h bars
-    swing_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    # Swing low: lowest low in last 20 4h bars
-    swing_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # 1d EMA(200) for long-term trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    # Volume confirmation
-    volume_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Align all 4h indicators to primary timeframe
-    swing_high_4h_aligned = align_htf_to_ltf(prices, df_4h, swing_high_4h)
-    swing_low_4h_aligned = align_htf_to_ltf(prices, df_4h, swing_low_4h)
-    volume_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_4h)
+    # 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # 1h volume MA(20)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (precomputed for efficiency)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(140, n):  # Warmup for 1d EMA(200) and other indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(swing_high_4h_aligned[i]) or
-            np.isnan(swing_low_4h_aligned[i]) or np.isnan(volume_ma_4h_aligned[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(rsi_values[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: price falls below swing low OR 12h EMA turns bearish (price < EMA)
-            if close[i] < swing_low_4h_aligned[i] or close[i] < ema_34_12h_aligned[i]:
+            # Exit: RSI > 70 (overbought) OR trend turns bearish (4h EMA < 1d EMA)
+            if rsi_values[i] > 70 or ema_50_4h_aligned[i] < ema_200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price rises above swing high OR 12h EMA turns bullish (price > EMA)
-            if close[i] > swing_high_4h_aligned[i] or close[i] > ema_34_12h_aligned[i]:
+            # Exit: RSI < 30 (oversold) OR trend turns bullish (4h EMA > 1d EMA)
+            if rsi_values[i] < 30 or ema_50_4h_aligned[i] > ema_200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Volume confirmation: current volume > 1.6x 20-period average of 4h volume
-            volume_confirmed = volume[i] > 1.6 * volume_ma_4h_aligned[i]
-            
-            if volume_confirmed:
-                # Long entry: price breaks above swing high (higher high) AND above 12h EMA (uptrend)
-                if close[i] > swing_high_4h_aligned[i] and close[i] > ema_34_12h_aligned[i]:
+            if volume_confirmed and in_session:
+                # Long entry: RSI pullback to 30-40 in uptrend (4h EMA > 1d EMA)
+                if 30 <= rsi_values[i] <= 40 and ema_50_4h_aligned[i] > ema_200_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short entry: price breaks below swing low (lower low) AND below 12h EMA (downtrend)
-                elif close[i] < swing_low_4h_aligned[i] and close[i] < ema_34_12h_aligned[i]:
+                    signals[i] = 0.20
+                # Short entry: RSI pullback to 60-70 in downtrend (4h EMA < 1d EMA)
+                elif 60 <= rsi_values[i] <= 70 and ema_50_4h_aligned[i] < ema_200_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
