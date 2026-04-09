@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + ATR volatility filter + volume confirmation
-# - Primary signal: Donchian channel breakout (20-period high/low) for trend capture
-# - Volatility filter: ATR(14) > 20-period median ATR to avoid low-volatility chop
-# - Volume confirmation: 4h volume > 20-period median volume to ensure participation
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# - Primary signal: Donchian breakout above 20-period high for long, below 20-period low for short
+# - Trend filter: 1w EMA50 - price must be above EMA for longs, below for shorts (higher timeframe alignment)
+# - Volume confirmation: 1d volume > 20-period median volume (avoid low-participation signals)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
-# - Works in bull/bear: Donchian captures breakouts in trends, volatility filter avoids false signals in ranging markets
+# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
+# - Works in bull/bear: Donchian captures trends, EMA50 filter ensures alignment with higher timeframe trend, volume confirms conviction
 
-name = "4h_donchian_atr_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,39 +21,28 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA50 for higher timeframe trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Pre-compute 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pre-compute ATR(14) on primary timeframe
+    # Pre-compute Donchian channels on 1d timeframe
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # True Range calculation
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # ATR regime: ATR > 20-period median ATR (avoid low volatility)
-    median_atr_20 = pd.Series(atr).rolling(window=20, min_periods=20).median().values
-    atr_regime = atr > median_atr_20
-    
-    # Volume regime: volume > 20-period median volume
     volume = prices['volume'].values
-    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
-    volume_regime = volume > median_volume_20
     
-    # Donchian channels (20-period)
+    # 20-period Donchian high and low
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1d volume regime: volume > 20-period median volume
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > median_volume_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -61,16 +50,14 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(atr_regime[i]) or
-            np.isnan(volume_regime[i]) or
             np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+            np.isnan(donchian_low[i]) or
+            np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low OR price crosses below 1d EMA50
+            # Exit: price closes below Donchian low OR price crosses below 1w EMA50
             if close[i] < donchian_low[i] or close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -78,24 +65,22 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high OR price crosses above 1d EMA50
+            # Exit: price closes above Donchian high OR price crosses above 1w EMA50
             if close[i] > donchian_high[i] or close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with ATR and volume confirmation and 1d EMA50 filter
-            # Long: price breaks above Donchian high AND ATR regime AND volume regime AND price above 1d EMA50
+            # Look for Donchian breakout with volume confirmation and 1w EMA50 filter
+            # Long: price breaks above Donchian high AND volume regime AND price above 1w EMA50
             if (close[i] > donchian_high[i] and 
-                atr_regime[i] and 
                 volume_regime[i] and 
                 close[i] > ema_50_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low AND ATR regime AND volume regime AND price below 1d EMA50
+            # Short: price breaks below Donchian low AND volume regime AND price below 1w EMA50
             elif (close[i] < donchian_low[i] and 
-                  atr_regime[i] and 
                   volume_regime[i] and 
                   close[i] < ema_50_aligned[i]):
                 position = -1
