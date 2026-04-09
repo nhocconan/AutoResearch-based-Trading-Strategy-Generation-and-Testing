@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d Elder Ray regime filter
-# - Uses 6h Williams %R(14) for oversold/overbought signals (long < -80, short > -20)
-# - Filters by 1d Elder Ray regime: Bull Power > 0 for longs, Bear Power < 0 for shorts
-# - Elder Ray confirms trend strength: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Only takes mean-reversion trades in the direction of the 1d trend (as measured by Elder Ray)
-# - Exits when Williams %R reverts to midpoint (-50) or opposite extreme
-# - Position size: 0.25 (25% of capital) to limit drawdown in volatile 6h markets
-# - Target: 12-25 trades/year on 6h timeframe (48-100 total over 4 years) to minimize fee drag
-# - Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# - Williams %R provides timely mean-reversion signals, Elder Ray filters for trend alignment
+# Hypothesis: 12h Camarilla pivot levels from 1w + volume confirmation + chop regime filter
+# - Uses weekly Camarilla pivot levels (H3/L3) for breakout signals
+# - Confirms with 1d volume > 1.5x 20-period average (institutional participation)
+# - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range) OR CHOP < 38.2 (trend)
+# - Exits when price touches opposite Camarilla level (H3/L3) or ATR-based stoploss (2.0x ATR)
+# - Position size: 0.25 (25% of capital) for balanced risk/return
+# - Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years) to minimize fee drag
+# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
+# - Camarilla levels provide adaptive support/resistance that works in all regimes
 
-name = "6h_1d_williamsr_elderray_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,74 +23,116 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1w) < 10 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute HTF indicators
+    # Pre-compute 1w HTF indicators for Camarilla levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w Camarilla levels (H3, L3)
+    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
+    #           L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
+    # We use H3 and L3 as breakout levels
+    hl_range_1w = high_1w - low_1w
+    camarilla_h3 = close_1w + (1.1 * hl_range_1w * 1.1 / 4)
+    camarilla_l3 = close_1w - (1.1 * hl_range_1w * 1.1 / 4)
+    
+    # Pre-compute 1d indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d EMA(13) for Elder Ray
-    close_1d_series = pd.Series(close_1d)
-    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d True Range for ATR and chop
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # 1d Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # 1d ATR(14) for stoploss
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Elder Ray to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # 1d Volume > 1.5x 20-period average (volume confirmation)
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * avg_volume_20)
     
-    # 6h price data
+    # 1d Choppiness Index(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.where((highest_14 - lowest_14) > 0, highest_14 - lowest_14, 1e-10)
+    chop = 100 * np.log10(sum_tr_14 / chop_denom) / np.log10(14)
+    chop_range = chop > 61.8  # range-bound market
+    chop_trend = chop < 38.2  # trending market
+    
+    # Align all HTF indicators to 12h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
+    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # 6h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    denominator = highest_high - lowest_low
-    # Avoid division by zero
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    williams_r = -100 * (highest_high - close) / denominator
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_range_aligned[i]) or
+            np.isnan(chop_trend_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit when Williams %R reverts to midpoint (-50) or reaches overbought (-20)
-            if williams_r[i] >= -50:  # Reverted to midpoint or above
+            # Exit conditions: opposite Camarilla touch (L3) or ATR stoploss
+            if low[i] <= camarilla_l3_aligned[i]:  # Touch opposite band
+                position = 0
+                signals[i] = 0.0
+            elif high[i] >= entry_price + (2.0 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when Williams %R reverts to midpoint (-50) or reaches oversold (-80)
-            if williams_r[i] <= -50:  # Reverted to midpoint or below
+            # Exit conditions: opposite Camarilla touch (H3) or ATR stoploss
+            if high[i] >= camarilla_h3_aligned[i]:  # Touch opposite band
+                position = 0
+                signals[i] = 0.0
+            elif low[i] <= entry_price - (2.0 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Williams %R extreme with Elder Ray regime confirmation
-            if (williams_r[i] <= -80 and      # Oversold
-                bull_power_aligned[i] > 0):   # Bullish regime (Bull Power > 0)
+            # Look for Camarilla breakout with volume confirmation and regime filter
+            if (high[i] >= camarilla_h3_aligned[i] and  # Break above H3
+                volume_spike_aligned[i] and         # Volume confirmation
+                (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = 1
+                entry_price = high[i]
+                atr_stop = atr_1d_aligned[i]
                 signals[i] = 0.25
-            elif (williams_r[i] >= -20 and    # Overbought
-                  bear_power_aligned[i] < 0): # Bearish regime (Bear Power < 0)
+            elif (low[i] <= camarilla_l3_aligned[i] and   # Break below L3
+                  volume_spike_aligned[i] and         # Volume confirmation
+                  (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = -1
+                entry_price = low[i]
+                atr_stop = atr_1d_aligned[i]
                 signals[i] = -0.25
     
     return signals
