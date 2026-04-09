@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 6h_1d_weekly_pivot_breakout_v3
+# 6h_1d_weekly_pivot_breakout_v4
 # Hypothesis: 6-hour breakout of weekly pivot levels with daily EMA200 trend filter and volume confirmation.
 # Long when price breaks above R3 resistance with price > daily EMA200 and volume > 2.5x 20-bar average.
 # Short when price breaks below S3 support with price < daily EMA200 and volume > 2.5x 20-bar average.
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_weekly_pivot_breakout_v3"
+name = "6h_1d_weekly_pivot_breakout_v4"
 timeframe = "6h"
 leverage = 1.0
 
@@ -62,7 +62,7 @@ def generate_signals(prices):
         ema_200_d[199] = sma
         multiplier = 2 / (200 + 1)
         for i in range(200, len(close_d)):
-            ema = (close_d[i] - ema) * multiplier + ema
+            ema = (close_d[i] - ema_200_d[i-1]) * multiplier + ema_200_d[i-1]
             ema_200_d[i] = ema
     
     # Align daily EMA200 to 6h timeframe
