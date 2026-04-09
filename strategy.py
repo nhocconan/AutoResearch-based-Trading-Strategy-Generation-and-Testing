@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness filter
-# Works in bull/bear by using mean-reversion at extreme levels (S4/R4) with volume confirmation
-# Target: 20-40 trades/year to avoid fee drag, focusing on high-probability breakouts
+# Hypothesis: 1h strategy using 4h Donchian breakout + volume confirmation + 1d ATR filter
+# Direction from higher timeframe: 4h Donchian channels determine trend, 1d ATR filters volatility regime
+# Entry timing on 1h with volume confirmation to avoid false breakouts
+# Target: 15-30 trades/year to minimize fee drag in challenging 1h timeframe
+# Works in bull/bear by using volatility-adjusted breakouts with volume confirmation
 
-name = "4h_1d_camarilla_breakout_v30"
-timeframe = "4h"
+name = "1h_4h_1d_donchian_atr_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,102 +23,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 4h data ONCE before loop for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    r4 = np.full(len(df_1d), np.nan)
-    s4 = np.full(len(df_1d), np.nan)
-    prev_high = np.full(len(df_1d), np.nan)
-    prev_low = np.full(len(df_1d), np.nan)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = np.full(len(df_4h), np.nan)
+    donchian_low = np.full(len(df_4h), np.nan)
     
-    for i in range(1, len(df_1d)):
-        ph = float(df_1d['high'].iloc[i-1])
-        pl = float(df_1d['low'].iloc[i-1])
-        pc = float(df_1d['close'].iloc[i-1])
-        r4[i] = pc + (ph - pl) * 1.1 / 2
-        s4[i] = pc - (ph - pl) * 1.1 / 2
-        prev_high[i] = ph
-        prev_low[i] = pl
+    for i in range(19, len(df_4h)):
+        donchian_high[i] = np.max(high_4h[i-19:i+1])
+        donchian_low[i] = np.min(low_4h[i-19:i+1])
     
-    # Align 1d values to 4h timeframe
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
-    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Align Donchian levels to 1h timeframe
+    donchian_high_1h = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_1h = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Volume confirmation: 4-period average (16h)
-    vol_ma_4 = np.full(n, np.nan)
+    # Load 1d data ONCE before loop for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate 1d ATR (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    atr_1d = np.full(len(df_1d), np.nan)
+    tr = np.zeros(len(df_1d))
+    
+    for i in range(len(df_1d)):
+        if i == 0:
+            tr[i] = high_1d[i] - low_1d[i]
+        else:
+            tr[i] = max(high_1d[i] - low_1d[i], 
+                       abs(high_1d[i] - close_1d[i-1]),
+                       abs(low_1d[i] - close_1d[i-1]))
+    
+    for i in range(13, len(df_1d)):
+        atr_1d[i] = np.mean(tr[i-13:i+1])
+    
+    # Align ATR to 1h timeframe
+    atr_1d_1h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume confirmation: 20-period average on 1h
+    vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 4:
-            vol_sum -= volume[i-4]
-        if i >= 3:
-            vol_ma_4[i] = vol_sum / 4
-    
-    # Choppiness regime filter (14-period) - optimized version
-    chop = np.full(n, np.nan)
-    for i in range(13, n):
-        high_max = np.max(high[i-13:i+1])
-        low_min = np.min(low[i-13:i+1])
-        if high_max <= low_min:
-            chop[i] = np.nan
-            continue
-        sum_true_range = 0.0
-        for j in range(14):
-            idx = i - j
-            tr = high[idx] - low[idx]
-            if idx > 0:
-                tr = max(tr, abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
-            sum_true_range += tr
-        if sum_true_range > 0:
-            chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_4h[i]) or 
-            np.isnan(s4_4h[i]) or 
-            np.isnan(prev_high_4h[i]) or 
-            np.isnan(prev_low_4h[i]) or 
-            np.isnan(vol_ma_4[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(donchian_high_1h[i]) or 
+            np.isnan(donchian_low_1h[i]) or 
+            np.isnan(atr_1d_1h[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: only trade when 1d ATR is above 25th percentile (avoid low volatility)
+        if i >= 50:
+            atr_slice = atr_1d_1h[max(0, i-49):i+1]
+            valid_atr = atr_slice[~np.isnan(atr_slice)]
+            if len(valid_atr) >= 20:
+                atr_percentile = np.percentile(valid_atr, 25)
+                if atr_1d_1h[i] < atr_percentile:
+                    signals[i] = 0.0
+                    continue
+        
         if position == 1:  # Long position
-            # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
-            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
+            # Exit: price closes below Donchian low OR ATR drops significantly
+            if close[i] < donchian_low_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside previous day's range OR chop > 61.8
-            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
+            # Exit: price closes above Donchian high OR ATR drops significantly
+            if close[i] > donchian_high_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
-            vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
-            if (close[i] > r4_4h[i] and 
-                vol_ratio > 2.0 and 
-                chop[i] < 61.8):
+            # Enter long: price closes above Donchian high with volume confirmation
+            vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+            if (close[i] > donchian_high_1h[i] and 
+                vol_ratio > 1.8):
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
-            elif (close[i] < s4_4h[i] and 
-                  vol_ratio > 2.0 and 
-                  chop[i] < 61.8):
+                signals[i] = 0.20
+            # Enter short: price closes below Donchian low with volume confirmation
+            elif (close[i] < donchian_low_1h[i] and 
+                  vol_ratio > 1.8):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
