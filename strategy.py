@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_volume_confirmation_v2
-# Hypothesis: Refined Ichimoku strategy with stricter entry conditions to reduce trade frequency.
-# Uses daily Ichimoku Cloud for trend/regime filter, 6h TK cross for momentum, and volume confirmation.
-# Added requirement: price must close beyond cloud by at least 0.5*ATR(6h) to avoid whipsaws.
-# Discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year.
-# Uses 1d HTF data for Ichimoku components, called ONCE before loop.
+# 1d_funding_rate_mean_reversion_v1
+# Hypothesis: Funding rate mean reversion on 1d timeframe with 1w HTF trend filter.
+# Extreme funding rates (Z-score > 2.0 or < -2.0 over 30d window) signal overextended
+# perpetual futures sentiment. Counter-trend positions taken when funding extreme
+# coincides with 1w trend alignment (price above/below 1w EMA50). Works in both bull
+# and bear markets by fading funding extremes while respecting higher timeframe trend.
+# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 15-25 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_volume_confirmation_v2"
-timeframe = "6h"
+name = "1d_funding_rate_mean_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,105 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Ichimoku Cloud
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need enough for daily Ichimoku (26*2)
+    # 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Daily Ichimoku parameters
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2.0
+    # Funding rate data (assumed available in prices DataFrame)
+    # If not available, fallback to price-based proxy
+    if 'funding_rate' in prices.columns:
+        funding = prices['funding_rate'].values
+    else:
+        # Proxy: calculate funding rate basis from price deviation from VWAP
+        # This is a simplified proxy - in reality funding rate comes from separate data
+        vwap = (prices['close'] * prices['volume']).cumsum() / prices['volume'].cumsum()
+        funding = (close - vwap.values) / vwap.values * 0.01  # scaled proxy
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2.0)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2.0)
-    
-    # Align daily Ichimoku data to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # 6h TK cross (Tenkan/Kijun cross) for entry timing
-    tenkan_6h = (pd.Series(close).rolling(window=9, min_periods=9).max().values +
-                 pd.Series(close).rolling(window=9, min_periods=9).min().values) / 2.0
-    kijun_6h = (pd.Series(close).rolling(window=26, min_periods=26).max().values +
-                pd.Series(close).rolling(window=26, min_periods=26).min().values) / 2.0
-    tk_cross = tenkan_6h - kijun_6h  # Positive when Tenkan > Kijun (bullish)
-    
-    # 6h ATR for volatility filter
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_6h = tr.rolling(window=14, min_periods=14).mean().values
-    atr_6h[0] = np.nan  # First value invalid due to roll
-    
-    # Volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Funding rate Z-score (30-day window)
+    funding_series = pd.Series(funding)
+    funding_mean = funding_series.rolling(window=30, min_periods=30).mean().values
+    funding_std = funding_series.rolling(window=30, min_periods=30).std().values
+    funding_z = (funding - funding_mean) / (funding_std + 1e-8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(tk_cross[i]) or np.isnan(volume_ma[i]) or np.isnan(atr_6h[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(funding_z[i]) or
+            np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Extreme funding rate thresholds
+        funding_extreme_long = funding_z[i] < -2.0  # Very negative funding = long opportunity
+        funding_extreme_short = funding_z[i] > 2.0   # Very positive funding = short opportunity
         
-        # Determine cloud boundaries (Senkou Span A/B)
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        
-        # Cloud thickness as filter (avoid thin cloud whipsaws)
-        cloud_thickness = cloud_top - cloud_bottom
-        min_cloud_thickness = 0.5 * atr_6h[i]  # Require cloud thicker than half ATR
+        # 1w trend filter: price above/below 1w EMA50
+        price_above_1w_trend = close[i] > ema_50_1w_aligned[i]
+        price_below_1w_trend = close[i] < ema_50_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price falls below cloud OR TK cross turns bearish
-            if close[i] < cloud_bottom or tk_cross[i] < 0:
+            # Exit: funding normalizes OR price crosses below 1w EMA
+            if funding_z[i] > -0.5 or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above cloud OR TK cross turns bullish
-            if close[i] > cloud_top or tk_cross[i] > 0:
+            # Exit: funding normalizes OR price crosses above 1w EMA
+            if funding_z[i] < 0.5 or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed and cloud_thickness > min_cloud_thickness:
-                # Long entry: price above cloud by at least 0.5*ATR AND TK cross bullish
-                if close[i] > cloud_top + 0.5 * atr_6h[i] and tk_cross[i] > 0:
-                    position = 1
-                    signals[i] = 0.25
-                # Short entry: price below cloud by at least 0.5*ATR AND TK cross bearish
-                elif close[i] < cloud_bottom - 0.5 * atr_6h[i] and tk_cross[i] < 0:
-                    position = -1
-                    signals[i] = -0.25
+            if funding_extreme_long and price_above_1w_trend:
+                position = 1
+                signals[i] = 0.25
+            elif funding_extreme_short and price_below_1w_trend:
+                position = -1
+                signals[i] = -0.25
     
     return signals
