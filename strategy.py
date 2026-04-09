@@ -3,114 +3,121 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-week Camarilla pivot levels with volume confirmation
-# Long when price breaks above weekly R4 with volume > 1.5x average 6h volume
-# Short when price breaks below weekly S4 with volume confirmation
-# Uses discrete position sizing 0.25 to target ~20-40 trades/year
-# Weekly pivots provide structural support/resistance that works in both bull and bear markets
-# Volume confirmation filters false breakouts
-# 6h timeframe balances trade frequency and signal quality
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels + volume spike + choppiness regime filter
+# Long when price touches Camarilla H3 level with volume confirmation and chop < 61.8 (trending)
+# Short when price touches Camarilla L3 level with volume confirmation and chop < 61.8 (trending)
+# Uses discrete position sizing 0.25 to target ~20-40 trades/year and minimize fee drag
+# Works in bull/bear markets: pivot levels act as support/resistance, volume confirms breakouts,
+# chop filter avoids ranging markets where pivot touches fail
 
-name = "6h_1w_camarilla_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_volume_chop_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels
-    # Based on previous week's OHLC
-    def calculate_camarilla(h, l, c):
-        # Camarilla levels based on previous period
-        pivot = (h + l + c) / 3
-        range_ = h - l
-        # Resistance levels
-        r4 = c + (range_ * 1.1 / 2)
-        r3 = c + (range_ * 1.1/4)
-        r2 = c + (range_ * 1.1/6)
-        r1 = c + (range_ * 1.1/12)
-        # Support levels
-        s1 = c - (range_ * 1.1/12)
-        s2 = c - (range_ * 1.1/6)
-        s3 = c - (range_ * 1.1/4)
-        s4 = c - (range_ * 1.1/2)
-        return r4, r3, r2, r1, pivot, s1, s2, s3, s4
+    # Calculate 1d Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # H3 = Pivot + (Range * 1.1 / 2)
+    # L3 = Pivot - (Range * 1.1 / 2)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_h3_1d = pivot_1d + (range_1d * 1.1 / 2.0)
+    camarilla_l3_1d = pivot_1d - (range_1d * 1.1 / 2.0)
     
-    # Calculate for each week (using previous week's data)
-    r4_1w = np.full(len(high_1w), np.nan)
-    s4_1w = np.full(len(high_1w), np.nan)
+    # Calculate 14-period choppiness index on 1d
+    def true_range(high_arr, low_arr, close_arr):
+        tr1 = high_arr - low_arr
+        tr2 = np.abs(high_arr - np.roll(close_arr, 1))
+        tr3 = np.abs(low_arr - np.roll(close_arr, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # first period
+        return tr
     
-    for i in range(1, len(high_1w)):  # Start from 1 to use previous week
-        r4, _, _, _, _, _, _, _, s4 = calculate_camarilla(
-            high_1w[i-1], low_1w[i-1], close_1w[i-1]
-        )
-        r4_1w[i] = r4
-        s4_1w[i] = s4
+    tr_1d = true_range(high_1d, low_1d, close_1d)
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly Camarilla levels to 6h timeframe
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Chop = 100 * log10(sum(TR14) / (ATR14 * 14)) / log10(14)
+    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    chop_1d = 100 * np.log10(sum_tr_14 / (atr_14_1d * 14)) / np.log10(14)
+    chop_1d = np.where(atr_14_1d > 0, chop_1d, 50.0)  # avoid division by zero
     
-    # Calculate 6h average volume (20-period)
-    vol_s = pd.Series(volume)
-    avg_vol_6h = vol_s.rolling(window=20, min_periods=20).mean().values
+    # Align 1d indicators to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Pre-compute session filter (08-20 UTC) for additional confirmation
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: current 4h volume > 2.0x average 4h volume (20-period)
+    vol_s_4h = pd.Series(volume)
+    avg_vol_4h = vol_s_4h.rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 2.0 * avg_vol_4h
+    volume_confirmed = np.where(np.isnan(avg_vol_4h), False, volume_confirmed)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
-            np.isnan(avg_vol_6h[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(avg_vol_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x average 6h volume (20-period)
-        volume_confirmed = volume[i] > 1.5 * avg_vol_6h[i]
+        # Regime filter: only trade when chop < 61.8 (trending market)
+        if chop_aligned[i] >= 61.8:
+            # In ranging market, exit any position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit long if price falls below weekly S3 (strong support)
-            if close[i] < s4_1w_aligned[i] * 1.02:  # Small buffer below S4
+            # Exit long if price falls below L3 or reverses from H3
+            if close[i] < camarilla_l3_aligned[i] or (close[i] < camarilla_h3_aligned[i] * 0.998):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if price rises above weekly R3 (strong resistance)
-            if close[i] > r4_1w_aligned[i] * 0.98:  # Small buffer below R4
+            # Exit short if price rises above H3 or reverses from L3
+            if close[i] > camarilla_h3_aligned[i] or (close[i] > camarilla_l3_aligned[i] * 1.002):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout strategy: enter on weekly R4/S4 breakout with volume confirmation
-            if close[i] > r4_1w_aligned[i] and volume_confirmed and in_session[i]:
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < s4_1w_aligned[i] and volume_confirmed and in_session[i]:
-                position = -1
-                signals[i] = -0.25
+            # Enter long when price touches H3 with volume confirmation
+            if (abs(high[i] - camarilla_h3_aligned[i]) < (camarilla_h3_aligned[i] * 0.002) or
+                abs(low[i] - camarilla_h3_aligned[i]) < (camarilla_h3_aligned[i] * 0.002)):
+                if volume_confirmed[i]:
+                    position = 1
+                    signals[i] = 0.25
+            # Enter short when price touches L3 with volume confirmation
+            elif (abs(high[i] - camarilla_l3_aligned[i]) < (camarilla_l3_aligned[i] * 0.002) or
+                  abs(low[i] - camarilla_l3_aligned[i]) < (camarilla_l3_aligned[i] * 0.002)):
+                if volume_confirmed[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
