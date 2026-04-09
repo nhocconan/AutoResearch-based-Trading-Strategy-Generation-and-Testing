@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_12h_camarilla_pivot_breakout_v1
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels (H3/L3) with volume confirmation.
-# Long: Price breaks above 12h H3, volume > 1.5x 20-period average, and ATR(14) > 0.008*close.
-# Short: Price breaks below 12h L3, volume > 1.5x 20-period average, and ATR(14) > 0.008*close.
+# 12h_1d_camarilla_pivot_breakout_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels (H3/L3) with volume confirmation.
+# Long: Price breaks above daily H3, volume > 1.3x 20-period average, and ATR(14) > 0.008*close.
+# Short: Price breaks below daily L3, volume > 1.3x 20-period average, and ATR(14) > 0.008*close.
 # Exit: Opposite pivot break (L3 for long, H3 for short) or ATR trailing stop (1.5x ATR from extreme).
-# Uses 12h Camarilla H3/L3 for breakout structure, volume to filter weak moves, ATR for dynamic stops.
-# Target: 12-30 trades/year (50-120 total over 4 years) on BTC/ETH/SOL.
+# Uses daily Camarilla H3/L3 for breakout structure (less frequent than H4/L4), volume to filter weak moves, ATR for dynamic stops.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_camarilla_pivot_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,23 +39,23 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 12h data for Camarilla pivots (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) == 0:
+    # Get 1d data for Camarilla pivots (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from 12h OHLC
+    # Calculate Camarilla pivots from 1d OHLC
     # Camarilla: H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    camarilla_h3 = close_12h + 1.125 * (high_12h - low_12h)
-    camarilla_l3 = close_12h - 1.125 * (high_12h - low_12h)
+    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
     
-    # Align HTF Camarilla levels to 6h timeframe (wait for completed 12h bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    # Align HTF Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,8 +70,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
         # Volatility filter: ATR > 0.8% of price (avoid low-vol chop)
         vol_filter = atr[i] > 0.008 * close[i]
