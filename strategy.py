@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_regime_v1
-# Hypothesis: 4h strategy using Donchian(20) breakout for trend capture, volume confirmation for conviction, and Choppiness Index regime filter to avoid whipsaws.
-# Long when price breaks above Donchian upper band with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Short when price breaks below Donchian lower band with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Exit when price crosses back through the Donchian midpoint (mean reversion within the channel).
+# 4h_donchian_breakout_volume_chop_regime_v2
+# Hypothesis: 4h strategy using Donchian channel breakout with volume confirmation and chop regime filter.
+# Long when price breaks above upper Donchian(20) with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when price breaks below lower Donchian(20) with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when price crosses back through the Donchian midpoint.
 # Uses discrete position sizing (0.25) to minimize fee churn.
 # Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
-# Works in both bull and bear markets: Donchian captures breakouts, volume confirms conviction, chop filter avoids false signals in ranging markets.
+# Works in both bull and bear markets: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_regime_v1"
+name = "4h_donchian_breakout_volume_chop_regime_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,9 +33,9 @@ def generate_signals(prices):
     # Donchian Channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # Choppiness Index regime filter (14-period)
     atr_period = 14
@@ -48,23 +48,19 @@ def generate_signals(prices):
     highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
     lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
-    
-    # Multi-timeframe: 1d trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Avoid division by zero or log of zero
+    denominator = highest_high - lowest_low
+    denominator = np.where(denominator == 0, 1e-10, denominator)
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / denominator)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
@@ -72,9 +68,6 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
-        # 1d trend filter: price above/below 50 EMA for bias
-        bullish_bias = close[i] > ema50_1d_aligned[i]
-        bearish_bias = close[i] < ema50_1d_aligned[i]
         
         if position == 1:  # Long position
             # Exit: price crosses below Donchian midpoint
@@ -92,9 +85,11 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for Donchian breakout with volume, regime, and trend confirmation
-            bullish_breakout = (close[i] > donchian_upper[i]) and volume_confirmed and trending_market and bullish_bias
-            bearish_breakout = (close[i] < donchian_lower[i]) and volume_confirmed and trending_market and bearish_bias
+            # Check for Donchian breakout with volume and regime confirmation
+            bullish_breakout = (close[i] > donchian_high[i] and 
+                               volume_confirmed and trending_market)
+            bearish_breakout = (close[i] < donchian_low[i] and 
+                               volume_confirmed and trending_market)
             
             if bullish_breakout:
                 position = 1
