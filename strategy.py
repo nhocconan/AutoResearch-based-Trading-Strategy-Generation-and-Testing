@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_volume_confirmation_v1
-# Hypothesis: 6h strategy using weekly pivot points for trend structure,
-# volume confirmation on 6h timeframe to ensure institutional participation,
-# and price rejection at pivot support/resistance levels for entries.
-# Weekly pivot levels (calculated from prior week) act as significant
-# support/resistance that price tends to respect. Volume spikes (>2x 20-period
-# MA) confirm breakout/continuation validity. Discrete sizing (0.0, ±0.25)
-# minimizes fee churn. Target: 15-25 trades/year.
-# Uses weekly HTF data called ONCE before loop.
+# 4h_donchian_volume_chop_v5
+# Hypothesis: 4h Donchian breakout with volume confirmation and choppiness regime filter.
+# Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + CHOP > 61.8 (ranging market = mean reversion setup).
+# Short when price breaks below Donchian(20) low + volume > 1.5x 20-period average + CHOP > 61.8.
+# Uses 1d HTF for choppiness regime to avoid trading against strong daily trends.
+# Discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 20-40 trades/year.
+# Works in both bull and bear markets by fading breaks in ranging regimes (CHOP > 61.8).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_volume_confirmation_v1"
-timeframe = "6h"
+name = "4h_donchian_volume_chop_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,82 +25,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly HTF data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # 1d HTF data for choppiness regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week's OHLC
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # Shift by 1 to use prior week's data (no look-ahead)
-    pivot_w = (np.roll(high_w, 1) + np.roll(low_w, 1) + np.roll(close_w, 1)) / 3.0
-    range_w = np.roll(high_w, 1) - np.roll(low_w, 1)
+    # True Range for 1d
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    r1_w = 2 * pivot_w - np.roll(low_w, 1)
-    s1_w = 2 * pivot_w - np.roll(high_w, 1)
-    r2_w = pivot_w + range_w
-    s2_w = pivot_w - range_w
-    r3_w = np.roll(high_w, 1) + 2 * (pivot_w - np.roll(low_w, 1))
-    s3_w = np.roll(low_w, 1) - 2 * (np.roll(high_w, 1) - pivot_w)
+    # ATR(14) for 1d
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly pivot points to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
+    max_high_14 = pd.Series(high_d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_d).rolling(window=14, min_periods=14).min().values
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14)) / np.log10(14)
     
-    # 6h volume confirmation
+    # Align 1d choppiness to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 4h Donchian(20)
+    max_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    min_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4h volume confirmation
     volume_s = pd.Series(volume)
-    volume_ma_6h = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_ma_20 = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
-            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or
-            np.isnan(s2_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
-            np.isnan(s3_1w_aligned[i]) or np.isnan(volume_ma_6h[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(max_high_20[i]) or
+            np.isnan(min_low_20[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * volume_ma_6h[i]
+        # Regime filter: only trade in ranging markets (CHOP > 61.8)
+        if chop_aligned[i] <= 61.8:
+            # In trending markets, stay flat to avoid whipsaws
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * volume_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit: price falls below S1 OR volume dries up
-            if close[i] < s1_1w_aligned[i] or not volume_confirmed:
+            # Exit: price falls below Donchian low OR volume drops
+            if close[i] < min_low_20[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above R1 OR volume dries up
-            if close[i] > r1_1w_aligned[i] or not volume_confirmed:
+            # Exit: price rises above Donchian high OR volume drops
+            if close[i] > max_high_20[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             if volume_confirmed:
-                # Long entry: price breaks above R1 with volume
-                if close[i] > r1_1w_aligned[i]:
+                # Long entry: price breaks above Donchian high
+                if close[i] > max_high_20[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price breaks below S1 with volume
-                elif close[i] < s1_1w_aligned[i]:
+                # Short entry: price breaks below Donchian low
+                elif close[i] < min_low_20[i]:
                     position = -1
                     signals[i] = -0.25
     
