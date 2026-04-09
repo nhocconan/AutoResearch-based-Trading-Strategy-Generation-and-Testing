@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 6h_daily_elder_ray_regime_v1
-# Hypothesis: 6h strategy using Elder Ray (Bull/Bear Power) from 1d to determine regime,
-# combined with 6h EMA(21) for entry timing. In bull regime (Bull Power > 0), go long
-# when price crosses above EMA(21); in bear regime (Bear Power > 0), go short when
-# price crosses below EMA(21). Uses volume confirmation to avoid false breakouts.
-# Designed to work in both bull and bear markets by adapting to the daily regime.
+# 12h_daily_camarilla_breakout_volume_v2
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with stricter volume confirmation and ATR filter to reduce trades and improve Sharpe.
+# Long: Price breaks above daily R4 with volume > 2.0x 20-period average AND ATR(14) > 0.5 * ATR(50) (volatility regime filter).
+# Short: Price breaks below daily S4 with volume > 2.0x 20-period average AND ATR(14) > 0.5 * ATR(50).
+# Exit: Price returns to daily pivot point (PP) or breaks opposite S4/R4 level.
+# Uses daily Camarilla for key support/resistance, 12h for execution, volume and volatility filters for confirmation.
 # Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_daily_elder_ray_regime_v1"
-timeframe = "6h"
+name = "12h_daily_camarilla_breakout_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,79 +25,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h EMA(21) for entry timing
-    close_s = pd.Series(close)
-    ema_21 = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values
-    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Elder Ray calculation (HTF)
+    # ATR for volatility regime filter
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    close_s = pd.Series(close)
+    tr1 = high_s - low_s
+    tr2 = (high_s - close_s.shift()).abs()
+    tr3 = (low_s - close_s.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
+    atr_50 = tr.rolling(window=50, min_periods=50).mean().values
+    vol_regime = atr_14 > (0.5 * atr_50)  # Only trade when volatility is elevated
+    
+    # Get 1d data for Camarilla pivot levels (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate daily EMA(13) for Elder Ray
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    ema_13_1d = close_1d_s.ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power = high_1d - ema_13_1d
-    bear_power = ema_13_1d - low_1d
+    close_1d = df_1d['close'].values
     
-    # Align HTF data to LTF
-    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21)  # Dummy call to get alignment structure
-    # Actually we need to align the Elder Ray components
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema_21_6h = close_s.ewm(span=21, min_periods=21, adjust=False).mean().values  # Recalculate for 6h
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)  # Dummy for structure
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Recompute volume MA properly aligned
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels
+    r4 = close_1d + range_1d * 1.1 / 2.0
+    s4 = close_1d - range_1d * 1.1 / 2.0
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema_21_6h[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(volume[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (stricter)
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        
+        # Volatility regime filter: only trade when ATR(14) > 0.5 * ATR(50)
+        vol_filter = vol_regime[i]
         
         if position == 1:  # Long position
-            # Exit: Price crosses below EMA(21) or regime changes to bear
-            if close[i] < ema_21_6h[i] or bear_power_aligned[i] > bull_power_aligned[i]:
+            # Exit: Price returns to daily pivot or breaks below S4
+            if close[i] <= pivot_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above EMA(21) or regime changes to bull
-            if close[i] > ema_21_6h[i] or bull_power_aligned[i] > bear_power_aligned[i]:
+            # Exit: Price returns to daily pivot or breaks above R4
+            if close[i] >= pivot_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for entry with volume confirmation
-            bullish_entry = (bull_power_aligned[i] > bear_power_aligned[i]) and (close[i] > ema_21_6h[i]) and volume_confirmed
-            bearish_entry = (bear_power_aligned[i] > bull_power_aligned[i]) and (close[i] < ema_21_6h[i]) and volume_confirmed
+            # Check for breakout with volume confirmation AND volatility filter
+            bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed and vol_filter
+            bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed and vol_filter
             
-            if bullish_entry:
+            if bullish_breakout:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_entry:
+            elif bearish_breakout:
                 position = -1
                 signals[i] = -0.25
     
