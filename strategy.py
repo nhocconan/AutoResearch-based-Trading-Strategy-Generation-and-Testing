@@ -1,15 +1,18 @@
-# 6h_1d_camarilla_breakout_v1
-# Hypothesis: 6-hour breakouts above/below daily Camarilla pivot levels (H5/L5) with volume confirmation and ATR volatility filter.
-# Uses H5/L5 levels (stronger breakout) for higher probability moves. Exits when price returns to daily pivot point (PP).
-# Designed for 6h timeframe to reduce trade frequency vs 4h, targeting 50-150 total trades over 4 years.
+#!/usr/bin/env python3
+# 4h_1d_camarilla_breakout_v13
+# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
+# Uses breakout of H4/L4 levels (stronger breakout than H3/L3) for higher probability moves.
+# Exit when price returns to the daily pivot point (PP).
 # Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# This version reduces trade frequency by tightening volume and volatility filters, and adding a volume spike filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v13"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,14 +54,14 @@ def generate_signals(prices):
     pp_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # H5 and L5 levels (stronger breakout levels: H5 = Close + 1.1*(H-L), L5 = Close - 1.1*(H-L))
-    h5_1d = close_1d + (range_1d * 1.1)
-    l5_1d = close_1d - (range_1d * 1.1)
+    # H4 and L4 levels (stronger breakout levels)
+    h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
+    l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
     
-    # Align 1d levels to 6h timeframe
+    # Align 1d levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h5_aligned = align_htf_to_ltf(prices, df_1d, h5_1d)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, l5_1d)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.full(n, np.nan)
@@ -70,20 +73,23 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
-    # Volume spike: current volume > 1.8x 20-period average (moderate filter)
-    vol_ok = volume > vol_ma_20 * 1.8
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_spike = volume > vol_ma_20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility
-        vol_filter = atr[i] < 0.025 * close[i]  # ATR less than 2.5% of price
+        # Volatility filter: avoid extremely high volatility (more restrictive)
+        vol_filter = atr[i] < 0.025 * close[i]  # ATR less than 2.5% of price (was 4%)
+        
+        # Volume confirmation: current volume > 1.8x 20-period average (more restrictive)
+        vol_ok = volume[i] > vol_ma_20[i] * 1.8  # Was 1.3
         
         if position == 1:  # Long position
             # Exit: price returns to or below Pivot Point
@@ -101,12 +107,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H5 level with volume confirmation and volatility filter
-            if close[i] > h5_aligned[i] and vol_ok[i] and vol_filter:
+            # Enter long: price breaks above H4 level with volume confirmation and volatility filter
+            if close[i] > h4_aligned[i] and vol_ok and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L5 level with volume confirmation and volatility filter
-            elif close[i] < l5_aligned[i] and vol_ok[i] and vol_filter:
+            # Enter short: price breaks below L4 level with volume confirmation and volatility filter
+            elif close[i] < l4_aligned[i] and vol_ok and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
