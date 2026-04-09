@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d ADX regime filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions for mean reversion in ranging markets
-# 1d ADX > 25 = trending (avoid mean reversion), ADX < 20 = ranging (enable mean reversion)
-# Volume confirmation ensures participation in price moves
-# Works in bull/bear: regime filter adapts to market conditions, Williams %R captures reversals
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
+# Hypothesis: 12h Williams Alligator + 1d volume confirmation + chop regime filter
+# Williams Alligator identifies trend via smoothed SMAs (Jaw/Teeth/Lips)
+# 1d volume spike confirms breakout authenticity
+# Chop regime filter: CHOP < 38.2 = trending (follow Alligator signals), CHOP > 61.8 = range (mean revert at extremes)
+# Works in bull/bear: regime filter adapts, Alligator captures trends in trending markets and fades extremes in ranging markets
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "6h_1d_williamsr_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,12 +24,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX and volume calculation
+    # Load 1d data ONCE before loop for volume and chop calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX (14-period)
+    # Calculate 1d average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d Choppiness Index (CHOP)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,93 +45,113 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]),
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]),
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    
-    # Wilder's smoothing
+    # ATR(14) - smoothed TR using Wilder's smoothing
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
         alpha = 1.0 / period
         result = np.full(len(values), np.nan)
+        # First value is simple average
         result[period-1] = np.nanmean(values[:period])
         for i in range(period, len(values)):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    tr_14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    atr_1d = wilders_smoothing(tr, 14)
     
-    # DI+ and DI-
-    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
-    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
+    # Highest high and lowest low over 14 periods
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, 14)
+    # Chop calculation: 100 * log10(sum(atr14) / (hh14 - ll14)) / log10(14)
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0, 
+                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
+                       50)  # neutral when range is zero
     
-    # Calculate 1d average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_s_1d = pd.Series(volume_1d)
-    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to 6h timeframe (wait for 1d bar close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d indicators to 12h timeframe (wait for 1d bar close)
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          -100 * (highest_high - close) / (highest_high - lowest_low),
-                          -50)  # neutral when range is zero
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA, shifted 8 bars
+    # Teeth: 8-period SMMA, shifted 5 bars  
+    # Lips: 5-period SMMA, shifted 3 bars
+    def smma(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        result = np.full(len(values), np.nan)
+        # First value is simple average
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Apply shifts (Alligator lines are shifted into the future)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Set NaN for shifted values that go beyond array bounds
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(avg_volume_1d_aligned[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.3x 1d average volume
-        volume_confirmed = volume[i] > 1.3 * avg_volume_1d_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x 1d average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
-        # Regime filter: ADX < 20 = ranging (enable mean reversion), ADX > 25 = trending (avoid)
-        ranging_regime = adx_aligned[i] < 20
-        trending_regime = adx_aligned[i] > 25
+        # Regime filter: CHOP < 38.2 = trending (follow Alligator signals), CHOP > 61.8 = range (mean revert)
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: Williams %R crosses above -20 (overbought) OR regime shifts to trending
-            if williams_r[i] > -20 or trending_regime:
+            # Exit: Alligator lines cross bearish (lips < teeth < jaw) OR regime shifts to ranging
+            if (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]) or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R crosses below -80 (oversold) OR regime shifts to trending
-            if williams_r[i] < -80 or trending_regime:
+            # Exit: Alligator lines cross bullish (lips > teeth > jaw) OR regime shifts to ranging
+            if (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]) or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: only in ranging regime with volume confirmation
-            if ranging_regime and volume_confirmed:
-                # Mean reversion at Williams %R extremes
-                if williams_r[i] < -80:  # Oversold -> long
+            # Entry logic
+            if trending_regime:
+                # Follow Alligator alignment in trending regime
+                if lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif williams_r[i] > -20:  # Overbought -> short
+                elif lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i] and volume_confirmed:
+                    position = -1
+                    signals[i] = -0.25
+            elif ranging_regime:
+                # Mean revert at Alligator extremes in ranging regime
+                # Long when price touches lower extreme (lips below all) with volume
+                if lips_shifted[i] < jaw_shifted[i] and lips_shifted[i] < teeth_shifted[i] and volume_confirmed:
+                    position = 1
+                    signals[i] = 0.25
+                # Short when price touches upper extreme (lips above all) with volume
+                elif lips_shifted[i] > jaw_shifted[i] and lips_shifted[i] > teeth_shifted[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
     
