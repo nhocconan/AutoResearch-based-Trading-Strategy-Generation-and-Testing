@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d regime filter (choppiness index) and volume confirmation
-# - Uses 4h Donchian channel breakout for entry signals (long on upper band breakout, short on lower band breakout)
-# - Uses 1d Choppiness Index (CHOP) to filter regimes: only trade when CHOP < 50 (trending market)
-# - Uses 4h volume confirmation: require volume > 1.5x 20-period average volume
-# - Exits on opposite Donchian band touch or when CHOP > 60 (range market)
-# - Position size: 0.25 (25% of capital) to balance risk and reward
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+# - Uses Donchian(20) breakout on 4h for entry (long on upper band, short on lower band)
+# - Confirms with 1d volume > 1.5x 20-period average (institutional participation)
+# - Filters by 1d choppiness index: only trade when CHOP > 61.8 (range-bound) or CHOP < 38.2 (trending)
+# - Exits when price touches opposite Donchian band or ATR-based stoploss (2x ATR)
+# - Position size: 0.25 (25% of capital) to balance return and drawdown
 # - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to minimize fee drag
-# - Combines price breakout with regime filter to work in both bull and bear markets
-# - Works on BTC/ETH/SOL: breakouts work in trends, regime filter avoids whipsaws in ranges
+# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
 
-name = "4h_1d_donchian_breakout_chop_volume_v1"
+name = "4h_1d_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,94 +23,105 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute HTF indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d Choppiness Index (CHOP) - measures whether market is trending or ranging
-    # CHOP > 61.8 = ranging market, CHOP < 38.2 = strongly trending
-    # We'll use CHOP < 50 as trending regime filter
+    # 1d ATR(14) for Donchian and stoploss
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # 1d Donchian(20) channels
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_20 + lowest_20) / 2
     
-    # Avoid division by zero
-    chop_denominator = np.where((highest_high_14 - lowest_low_14) != 0,
-                               (highest_high_14 - lowest_low_14),
-                               np.nan)
-    chop_raw = 100 * np.log10(atr_1d / chop_denominator * np.sqrt(14)) / np.log10(14)
-    chop_1d = chop_raw  # No additional smoothing for simplicity
+    # 1d Volume > 1.5x 20-period average
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * avg_volume_20)
     
-    # Align 1d Choppiness Index to 4h
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # 1d Choppiness Index(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.where((highest_14 - lowest_14) > 0, highest_14 - lowest_14, 1e-10)
+    chop = 100 * np.log10(sum_tr_14 / chop_denom) / np.log10(14)
+    chop_range = chop > 61.8  # range-bound market
+    chop_trend = chop < 38.2  # trending market
     
-    # 4h Donchian Channel (20-period)
+    # Align all 1d indicators to 4h
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
+    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Calculate Donchian channels
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 4h volume confirmation: volume > 1.5x 20-period average volume
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_volume_20[i]) or
-            avg_volume_20[i] <= 0):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_range_aligned[i]) or
+            np.isnan(chop_trend_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: price touches lower Donchian band OR choppy regime
-            if close[i] <= lowest_low_20[i]:  # Return to lower band
+            # Exit conditions: opposite Donchian touch or ATR stoploss
+            if low[i] <= lowest_20_aligned[i]:  # Touch opposite band
                 position = 0
                 signals[i] = 0.0
-            elif chop_1d_aligned[i] > 60:  # Market becoming too choppy/ranging
+            elif high[i] >= entry_price + (2.0 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price touches upper Donchian band OR choppy regime
-            if close[i] >= highest_high_20[i]:  # Return to upper band
+            # Exit conditions: opposite Donchian touch or ATR stoploss
+            if high[i] >= highest_20_aligned[i]:  # Touch opposite band
                 position = 0
                 signals[i] = 0.0
-            elif chop_1d_aligned[i] > 60:  # Market becoming too choppy/ranging
+            elif low[i] <= entry_price - (2.0 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout entries with volume confirmation and trending regime
-            if (close[i] >= highest_high_20[i] and  # Break above upper band
-                volume_confirmed[i] and           # Volume confirmation
-                chop_1d_aligned[i] < 50):         # Trending regime (not choppy)
+            # Look for Donchian breakout with volume confirmation and regime filter
+            if (high[i] >= highest_20_aligned[i] and  # Break above upper band
+                volume_spike_aligned[i] and         # Volume confirmation
+                (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = 1
+                entry_price = high[i]
+                atr_stop = atr_1d_aligned[i]
                 signals[i] = 0.25
-            elif (close[i] <= lowest_low_20[i] and   # Break below lower band
-                  volume_confirmed[i] and            # Volume confirmation
-                  chop_1d_aligned[i] < 50):          # Trending regime (not choppy)
+            elif (low[i] <= lowest_20_aligned[i] and   # Break below lower band
+                  volume_spike_aligned[i] and         # Volume confirmation
+                  (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = -1
+                entry_price = low[i]
+                atr_stop = atr_1d_aligned[i]
                 signals[i] = -0.25
     
     return signals
