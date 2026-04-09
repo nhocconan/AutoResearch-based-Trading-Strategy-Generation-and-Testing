@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_donchian_1d_camarilla_volume_v1
-# Hypothesis: 12h Donchian(20) breakout with 1d Camarilla H4/L4 filter and volume confirmation.
-# Uses 12h timeframe to minimize trade frequency and fee drag. Donchian provides trend following structure,
-# Camarilla H4/L4 from daily timeframe acts as strong directional bias filter (only trade in direction of daily extremes),
-# volume spike confirms institutional participation. Designed for 12-37 trades/year (50-150 over 4 years).
-# Works in bull/bear markets: breakouts capture sustained moves, Camarilla filter avoids counter-trend entries during corrections.
+# 12h_donchian_1d_camarilla_volume_v2
+# Hypothesis: 12h Donchian(20) breakout with 1d Camarilla H3/L3 filter and volume confirmation.
+# Uses 12h timeframe to reduce trade frequency (target: 12-37 trades/year). Donchian provides trend following,
+# Camarilla H3/L3 acts as medium-strength bias filter (only trade in direction of daily pivot extremes),
+# volume spike (2x 20-period average) confirms institutional interest. Designed to work in both bull and bear markets:
+# breakouts capture trends, Camarilla filter avoids counter-trend fakes, volume confirmation reduces false breakouts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_1d_camarilla_volume_v1"
+name = "12h_donchian_1d_camarilla_volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -53,13 +53,13 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels for daily (H4/L4 for stronger direction filter)
-    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # Camarilla levels for daily (H3/L3 for medium-strength direction filter)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
     # Align Camarilla levels to 12h timeframe (completed daily candle only)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,7 +71,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -92,12 +92,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 12h Donchian upper, above 1d H4, with volume spike
-            if (close[i] > donchian_upper_aligned[i]) and (close[i] > h4_1d_aligned[i]) and vol_spike[i]:
+            # Enter long: price closes above 12h Donchian upper, above 1d H3, with volume spike
+            if (close[i] > donchian_upper_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 12h Donchian lower, below 1d L4, with volume spike
-            elif (close[i] < donchian_lower_aligned[i]) and (close[i] < l4_1d_aligned[i]) and vol_spike[i]:
+            # Enter short: price closes below 12h Donchian lower, below 1d L3, with volume spike
+            elif (close[i] < donchian_lower_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
