@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot + volume spike + choppiness regime filter
-# - Primary signal: 12h price touches Camarilla H3/L3 levels with volume confirmation
-# - Volume confirmation: 12h volume > 1.5 * 20-period median volume (avoid low-participation touches)
-# - Regime filter: 12h Choppiness Index > 61.8 = range (mean reversion at Camarilla levels)
-# - In trending markets (CHOP < 38.2), only trade in direction of 12h EMA21 trend
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + choppiness regime filter
+# - Primary signal: 4h price breaks above/below 20-period Donchian channel
+# - Volume confirmation: 4h volume > 20-period median volume (avoid low-participation breakouts)
+# - Regime filter: 4h Choppiness Index > 61.8 (range) enables mean reversion at Donchian bounds
+# - In trending markets (CHOP < 38.2), only trade breakouts in direction of 4h EMA21 trend
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Camarilla provides mean reversion in range, trend filter captures momentum
+# - Target: 20-50 trades/year (80-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Donchian captures structure, regime filter adapts to market state
 
-name = "12h_1d_camarilla_vol_chop_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_vol_chop_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -54,9 +54,9 @@ def generate_signals(prices):
     chop_range = chop_1d > 61.8
     chop_trend = chop_1d < 38.2
     
-    # 1d volume regime: volume > 1.5 * 20-period median volume (volume spike filter)
+    # 1d volume regime: volume > 20-period median volume (avoid low participation)
     median_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
-    volume_spike = volume_1d > (1.5 * median_volume_20)
+    volume_regime = volume_1d > median_volume_20
     
     # 1d EMA21 for trend direction in trending regimes
     ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
@@ -67,15 +67,15 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.0 * (high_1d - low_1d)
     camarilla_l3 = close_1d - 1.0 * (high_1d - low_1d)
     
-    # Align all 1d indicators to 12h timeframe (completed 1d bar only)
+    # Align all 1d indicators to 4h timeframe (completed 1d bar only)
     chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
     chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
     ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -88,7 +88,7 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(chop_range_aligned[i]) or
             np.isnan(chop_trend_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or
+            np.isnan(volume_regime_aligned[i]) or
             np.isnan(ema_21_aligned[i]) or
             np.isnan(camarilla_h3_aligned[i]) or
             np.isnan(camarilla_l3_aligned[i])):
@@ -131,16 +131,16 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla level touch with volume spike confirmation
-            # Long: price touches or crosses above Camarilla H3 AND volume spike
-            if high[i] >= camarilla_h3_aligned[i] and volume_spike_aligned[i]:
+            # Look for Camarilla level touch with volume confirmation
+            # Long: price touches or crosses above Camarilla H3 AND volume regime
+            if high[i] >= camarilla_h3_aligned[i] and volume_regime_aligned[i]:
                 # In chop regime (>61.8): only long if also in range (mean reversion setup)
                 # In trend regime (<38.2): only long if price above EMA21 (trend continuation)
                 if chop_range_aligned[i] or close[i] > ema_21_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-            # Short: price touches or crosses below Camarilla L3 AND volume spike
-            elif low[i] <= camarilla_l3_aligned[i] and volume_spike_aligned[i]:
+            # Short: price touches or crosses below Camarilla L3 AND volume regime
+            elif low[i] <= camarilla_l3_aligned[i] and volume_regime_aligned[i]:
                 # In chop regime (>61.8): only short if also in range (mean reversion setup)
                 # In trend regime (<38.2): only short if price below EMA21 (trend continuation)
                 if chop_range_aligned[i] or close[i] < ema_21_aligned[i]:
