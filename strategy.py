@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v26"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,81 +17,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 10:
+    # Load weekly data ONCE before loop
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 10:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    pp = np.full(len(df_d), np.nan)
-    r4 = np.full(len(df_d), np.nan)
-    s4 = np.full(len(df_d), np.nan)
-    prev_high = np.full(len(df_d), np.nan)
-    prev_low = np.full(len(df_d), np.nan)
-    for i in range(1, len(df_d)):
-        ph = df_d['high'].iloc[i-1]
-        pl = df_d['low'].iloc[i-1]
-        pc = df_d['close'].iloc[i-1]
-        pp[i] = (ph + pl + pc) / 3.0
-        r4[i] = pc + (ph - pl) * 1.1 / 2
-        s4[i] = pc - (ph - pl) * 1.1 / 2
-        prev_high[i] = ph
-        prev_low[i] = pl
+    # Calculate weekly high/low for trend filter
+    weekly_high = df_w['high'].values
+    weekly_low = df_w['low'].values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_w, weekly_low)
     
-    # Align daily values to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_d, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
-    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
+    # Calculate daily ATR for volatility filter
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = np.full(n, np.nan)
+    atr_sum = 0.0
+    for i in range(n):
+        atr_sum += tr[i]
+        if i >= 14:
+            atr_sum -= tr[i - 14]
+        if i >= 13:
+            atr[i] = atr_sum / 14
     
-    # Volume confirmation: 3-period average (3*4h = 12h ~ half day)
-    vol_ma_3 = np.full(n, np.nan)
+    # Calculate daily volume moving average
+    vol_ma = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 3:
-            vol_sum -= volume[i-3]
-        if i >= 2:
-            vol_ma_3[i] = vol_sum / 3
+        if i >= 19:
+            vol_sum -= volume[i - 20]
+        if i >= 18:
+            vol_ma[i] = vol_sum / 20
+    
+    # Calculate daily close moving average for trend
+    close_ma = np.full(n, np.nan)
+    close_sum = 0.0
+    for i in range(n):
+        close_sum += close[i]
+        if i >= 49:
+            close_sum -= close[i - 50]
+        if i >= 48:
+            close_ma[i] = close_sum / 50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(prev_high_aligned[i]) or 
-            np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_3[i])):
+        if (np.isnan(weekly_high_aligned[i]) or 
+            np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i]) or 
+            np.isnan(close_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes back inside previous day's range
-            if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
+            # Exit: close below weekly low or ATR-based stop
+            if close[i] < weekly_low_aligned[i] or close[i] < close[i-1] - 1.5 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside previous day's range
-            if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
+            # Exit: close above weekly high or ATR-based stop
+            if close[i] > weekly_high_aligned[i] or close[i] > close[i-1] + 1.5 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation
-            if (close[i] > r4_aligned[i] and 
-                volume[i] > vol_ma_3[i] * 1.5):
+            # Enter long: price above weekly high, above MA, and volume surge
+            if (close[i] > weekly_high_aligned[i] and 
+                close[i] > close_ma[i] and 
+                volume[i] > vol_ma[i] * 2.0):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation
-            elif (close[i] < s4_aligned[i] and 
-                  volume[i] > vol_ma_3[i] * 1.5):
+            # Enter short: price below weekly low, below MA, and volume surge
+            elif (close[i] < weekly_low_aligned[i] and 
+                  close[i] < close_ma[i] and 
+                  volume[i] > vol_ma[i] * 2.0):
                 position = -1
                 signals[i] = -0.25
     
