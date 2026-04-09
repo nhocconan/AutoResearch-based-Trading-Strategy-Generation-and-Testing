@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 6h_1d_price_position_reversal_v1
-# Hypothesis: On 6-hour chart, mean reversion when price reaches extreme daily price position levels.
-# Uses daily price position (PP = (Close - Low)/(High - Low)) to identify overbought/oversold conditions.
-# Extreme PP (<0.2 or >0.8) combined with 6h RSI extremes signals mean reversion.
-# Works in both bull and bear markets as it captures overextended moves regardless of trend.
-# Target: 60-120 total trades over 4 years (15-30/year).
+# 4h_1d_camarilla_breakout_v2
+# Hypothesis: 4-hour breakouts at daily Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-bar average volume) and trend filter using 4h EMA(20).
+# Daily Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
+# EMA(20) filter ensures trades align with intermediate trend to reduce whipsaws in sideways markets.
+# Volume filter reduces false breakouts. Works in bull markets (upward breaks above EMA) and bear markets (downward breaks below EMA).
+# Target: 20-50 trades per year per symbol (~80-200 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_price_position_reversal_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,73 +22,71 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily price position: (Close - Low)/(High - Low)
+    # Calculate daily close for Camarilla levels
+    daily_close = df_1d['close'].values
+    
+    # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    daily_range = daily_high - daily_low
-    # Avoid division by zero
-    daily_range = np.where(daily_range == 0, 1e-10, daily_range)
-    daily_pp = (daily_close - daily_low) / daily_range
+    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Align daily price position to 6h timeframe
-    daily_pp_aligned = align_htf_to_ltf(prices, df_1d, daily_pp)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate 6h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Trend filter: 4h EMA(20)
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    
-    for i in range(1, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after RSI warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(daily_pp_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to neutral PP or RSI > 50
-            if daily_pp_aligned[i] >= 0.5 or rsi[i] > 50:
+            # Exit: price returns to or below L3 level
+            if close[i] <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to neutral PP or RSI < 50
-            if daily_pp_aligned[i] <= 0.5 or rsi[i] < 50:
+            # Exit: price returns to or above H3 level
+            if close[i] >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: oversold conditions (PP < 0.2 and RSI < 30)
-            if daily_pp_aligned[i] < 0.2 and rsi[i] < 30:
+            # Enter long: price breaks above H3 with volume confirmation AND above EMA20 (uptrend)
+            if close[i] > camarilla_h3_aligned[i] and volume[i] > vol_ma_20[i] * 1.5 and close[i] > ema_20[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: overbought conditions (PP > 0.8 and RSI > 70)
-            elif daily_pp_aligned[i] > 0.8 and rsi[i] > 70:
+            # Enter short: price breaks below L3 with volume confirmation AND below EMA20 (downtrend)
+            elif close[i] < camarilla_l3_aligned[i] and volume[i] > vol_ma_20[i] * 1.5 and close[i] < ema_20[i]:
                 position = -1
                 signals[i] = -0.25
     
