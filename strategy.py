@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_donchian_1w_trend_volume_v1
-# Hypothesis: 4h Donchian breakout with 1-week trend filter (EMA50) and volume confirmation.
+# 1d_weekly_ema_trend_v1
+# Hypothesis: Daily Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation.
 # Works in bull/bear: 1w EMA50 defines institutional trend; Donchian(20) breakouts capture momentum;
-# volume confirms institutional participation. Target: 19-50 trades/year.
+# volume filters false breakouts. Target: 7-25 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1w_trend_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_ema_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +33,7 @@ def generate_signals(prices):
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 4h Donchian channels (20-period)
+    # Daily Donchian channels (20-period)
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
