@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout + 1d volume spike + choppiness regime filter
-# Camarilla levels provide high-probability reversal/breakout points from 1d timeframe
-# Volume spike confirms institutional participation at these key levels
-# Choppiness filter avoids whipsaws in ranging markets (CHOP > 61.8 = range, < 38.2 = trend)
-# Discrete sizing 0.25 limits fee drag while maintaining sufficient exposure
-# Works in bull/bear: Camarilla effective in all regimes, volume confirms validity
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout + 1d Williams %R(14) mean reversion + volume confirmation
+# Donchian captures breakouts; 1d Williams %R identifies overextended conditions for fade
+# Volume ensures breakout authenticity; discrete sizing 0.25 limits drawdown
+# Works in bull/bear: Donchian breakouts work in both directions, Williams %R avoids chasing extremes
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_williamsr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,129 +23,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla and chop calculation
+    # Load 1d data ONCE before loop for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (using previous day's OHLC)
+    # Calculate 1d Williams %R(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    camarilla_h5 = np.full(len(close_1d), np.nan)  # Resistance 5
-    camarilla_h4 = np.full(len(close_1d), np.nan)  # Resistance 4
-    camarilla_h3 = np.full(len(close_1d), np.nan)  # Resistance 3
-    camarilla_l3 = np.full(len(close_1d), np.nan)  # Support 3
-    camarilla_l4 = np.full(len(close_1d), np.nan)  # Support 4
-    camarilla_l5 = np.full(len(close_1d), np.nan)  # Support 5
-    
-    for i in range(1, len(close_1d)):  # Start from 1 to use previous day
-        # Previous day's OHLC
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        
-        # Calculate range
-        range_val = prev_high - prev_low
-        
-        if range_val > 0:
-            camarilla_h5[i] = prev_close + 1.1 * range_val * 1.1 / 2
-            camarilla_h4[i] = prev_close + 1.1 * range_val * 1.1 / 4
-            camarilla_h3[i] = prev_close + 1.1 * range_val * 1.1 / 6
-            camarilla_l3[i] = prev_close - 1.1 * range_val * 1.1 / 6
-            camarilla_l4[i] = prev_close - 1.1 * range_val * 1.1 / 4
-            camarilla_l5[i] = prev_close - 1.1 * range_val * 1.1 / 2
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar close)
-    h5_12h = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5_12h = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    
-    # Calculate 1d Choppiness Index (CHOP) for regime filter
-    # CHOP > 61.8 = ranging market (mean revert), CHOP < 38.2 = trending
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    chop_1d = np.full(len(close_1d_arr), np.nan)
-    atr_period = 14
-    
-    for i in range(atr_period, len(close_1d_arr)):
-        # True Range
-        tr1 = high_1d_arr[i] - low_1d_arr[i]
-        tr2 = abs(high_1d_arr[i] - close_1d_arr[i-1])
-        tr3 = abs(low_1d_arr[i] - close_1d_arr[i-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        # Sum of TR over period
-        atr_sum = np.sum(tr[i-atr_period+1:i+1])
-        
-        # Highest high and lowest low over period
-        hh = np.max(high_1d_arr[i-atr_period+1:i+1])
-        ll = np.min(low_1d_arr[i-atr_period+1:i+1])
-        
-        if hh != ll:
-            chop_1d[i] = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(atr_period)
+    williams_r = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        highest_high = np.max(high_1d[i-14:i+1])
+        lowest_low = np.min(low_1d[i-14:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_1d[i]) / (highest_high - lowest_low) * -100
         else:
-            chop_1d[i] = 50.0  # Neutral when no range
+            williams_r[i] = -50  # neutral when no range
     
-    # Align Choppiness to 12h timeframe
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Align 1d Williams %R to 4h timeframe (wait for 1d bar close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate 20-period average volume for volume confirmation (1d)
-    avg_volume_1d = np.full(len(close_1d), np.nan)
-    for i in range(20, len(close_1d)):
-        avg_volume_1d[i] = np.mean(volume[i-20:i])
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Align average volume to 12h timeframe
-    avg_volume_12h = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    for i in range(n):
+        if i < 20:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
+        else:
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
+    
+    # Calculate 20-period average volume for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            avg_volume[i] = np.nan
+        else:
+            avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h5_12h[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(l5_12h[i]) or np.isnan(chop_12h[i]) or np.isnan(avg_volume_12h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(williams_r_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * avg_volume_12h[i]
-        
-        # Chop regime: we prefer trending markets (CHOP < 38.2) for breakouts
-        # In ranging markets (CHOP > 61.8), we avoid breakout trades
-        chop_filter = chop_12h[i] < 38.2  # Only trade in trending conditions
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price < Camarilla L3 OR chop becomes too high (ranging)
-            if close[i] < l3_12h[i] or chop_12h[i] > 61.8:
+            # Exit: price < Donchian low OR Williams %R > -20 (overbought)
+            if close[i] < donchian_low[i] or williams_r_aligned[i] > -20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Camarilla H3 OR chop becomes too high (ranging)
-            if close[i] > h3_12h[i] or chop_12h[i] > 61.8:
+            # Exit: price > Donchian high OR Williams %R < -80 (oversold)
+            if close[i] > donchian_high[i] or williams_r_aligned[i] < -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and chop filter
-            if volume_confirmed and chop_filter:
-                # Long entry: price > Camarilla H3 (break above resistance)
-                if close[i] > h3_12h[i]:
+            # Entry logic with volume confirmation and Donchian breakout + Williams %R filter
+            if volume_confirmed:
+                # Long entry: price > Donchian high AND Williams %R < -50 (not overbought)
+                if close[i] > donchian_high[i] and williams_r_aligned[i] < -50:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Camarilla L3 (break below support)
-                elif close[i] < l3_12h[i]:
+                # Short entry: price < Donchian low AND Williams %R > -50 (not oversold)
+                elif close[i] < donchian_low[i] and williams_r_aligned[i] > -50:
                     position = -1
                     signals[i] = -0.25
     
