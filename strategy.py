@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian breakout + volume confirmation + ATR trailing stop
-# Donchian(20) breakout from 1d captures medium-term trend with proven edge on SOL/ETH
-# Volume confirmation filters false breakouts (current 12h volume > 2x 20-period average)
-# ATR trailing stop (3x ATR) manages risk and reduces whipsaw in bear markets
-# Designed for 12h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ATR trailing stop
+# Donchian(20) breakout from 1d captures medium-term trend with proven edge on BTC/ETH/SOL
+# Volume confirmation (current 4h volume > 1.5x 20-period average) filters false breakouts
+# ATR trailing stop (2.5x ATR) manages risk and reduces whipsaw in volatile markets
+# Designed for 4h timeframe targeting 20-50 trades/year (80-200 over 4 years)
 # Works in bull/bear: breakout follows trends, volume confirms validity, ATR stop adapts to volatility
 
-name = "12h_1d_donchian_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,17 +31,16 @@ def generate_signals(prices):
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Calculate 1d Donchian channels (20-period)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Donchian to 12h timeframe
+    # Align 1d Donchian to 4h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Pre-compute ATR(14) for 12h timeframe
+    # Pre-compute ATR(14) for 4h timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,15 +65,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2x average 12h volume
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.5x average 4h volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             if close[i] > highest_since_long:
                 highest_since_long = close[i]
-            # ATR trailing stop: exit if price drops 3x ATR from highest
-            if close[i] < highest_since_long - 3.0 * atr[i]:
+            # ATR trailing stop: exit if price drops 2.5x ATR from highest
+            if close[i] < highest_since_long - 2.5 * atr[i]:
                 position = 0
                 highest_since_long = 0.0
                 signals[i] = 0.0
@@ -85,8 +84,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             if close[i] < lowest_since_short:
                 lowest_since_short = close[i]
-            # ATR trailing stop: exit if price rises 3x ATR from lowest
-            if close[i] > lowest_since_short + 3.0 * atr[i]:
+            # ATR trailing stop: exit if price rises 2.5x ATR from lowest
+            if close[i] > lowest_since_short + 2.5 * atr[i]:
                 position = 0
                 lowest_since_short = 0.0
                 signals[i] = 0.0
