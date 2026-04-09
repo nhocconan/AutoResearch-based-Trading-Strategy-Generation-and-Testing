@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -37,80 +37,79 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align 1d values to 12h timeframe (12h bar aligns with daily close)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
-    prev_high_12h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_12h = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Align 1d values to 4h timeframe
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
     
-    # Volume confirmation: 2-period average (24h)
-    vol_ma_2 = np.full(n, np.nan)
+    # Volume confirmation: 4-period average (16h)
+    vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 2:
-            vol_sum -= volume[i-2]
-        if i >= 1:
-            vol_ma_2[i] = vol_sum / 2
+        if i >= 4:
+            vol_sum -= volume[i-4]
+        if i >= 3:
+            vol_ma_4[i] = vol_sum / 4
     
-    # Choppiness regime filter (14-period) - simplified for speed
+    # Choppiness regime filter (14-period) - optimized
     chop = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 13:
-            high_max = np.max(high[i-13:i+1])
-            low_min = np.min(low[i-13:i+1])
-            sum_true_range = 0.0
-            for j in range(14):
-                idx = i - j
-                tr1 = high[idx] - low[idx]
-                tr2 = abs(high[idx] - close[idx-1]) if idx-1 >= 0 else tr1
-                tr3 = abs(low[idx] - close[idx-1]) if idx-1 >= 0 else tr1
-                sum_true_range += max(tr1, tr2, tr3)
-            if sum_true_range > 0 and (high_max - low_min) > 0:
-                chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
+    for i in range(13, n):
+        high_max = np.max(high[i-13:i+1])
+        low_min = np.min(low[i-13:i+1])
+        sum_true_range = 0.0
+        for j in range(14):
+            idx = i - j
+            tr = max(high[idx] - low[idx],
+                     abs(high[idx] - close[idx-1]) if idx-1 >= 0 else high[idx] - low[idx],
+                     abs(low[idx] - close[idx-1]) if idx-1 >= 0 else high[idx] - low[idx])
+            sum_true_range += tr
+        if sum_true_range > 0 and high_max > low_min:
+            chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_12h[i]) or 
-            np.isnan(s4_12h[i]) or 
-            np.isnan(prev_high_12h[i]) or 
-            np.isnan(prev_low_12h[i]) or 
-            np.isnan(vol_ma_2[i]) or 
+        if (np.isnan(r4_4h[i]) or 
+            np.isnan(s4_4h[i]) or 
+            np.isnan(prev_high_4h[i]) or 
+            np.isnan(prev_low_4h[i]) or 
+            np.isnan(vol_ma_4[i]) or 
             np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
-            if (close[i] <= prev_high_12h[i] and close[i] >= prev_low_12h[i]) or chop[i] > 61.8:
+            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit: price closes back inside previous day's range OR chop > 61.8
-            if (close[i] <= prev_high_12h[i] and close[i] >= prev_low_12h[i]) or chop[i] > 61.8:
+            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
             # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
-            vol_ratio = volume[i] / vol_ma_2[i] if vol_ma_2[i] > 0 else 0
-            if (close[i] > r4_12h[i] and 
+            vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
+            if (close[i] > r4_4h[i] and 
                 vol_ratio > 2.0 and 
                 chop[i] < 61.8):
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
-            elif (close[i] < s4_12h[i] and 
+            elif (close[i] < s4_4h[i] and 
                   vol_ratio > 2.0 and 
                   chop[i] < 61.8):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
