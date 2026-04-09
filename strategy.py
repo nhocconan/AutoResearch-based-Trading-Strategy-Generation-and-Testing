@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and ATR filter
-# Uses 1d Camarilla levels (H3, L3) as key support/resistance
-# Breakouts above H3 or below L3 with volume > 1.5x 20-period average
-# ATR(14) filter ensures sufficient volatility (current ATR > 20-period ATR average)
-# Fixed position size 0.25 to balance return and drawdown
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Hypothesis: 1d strategy using 1w Williams %R for mean reversion in ranging markets
+# Williams %R identifies overbought/oversold conditions on weekly timeframe
+# Entry when weekly Williams %R shows extreme readings and price touches daily Bollinger Bands
+# Bollinger Band squeeze filter ensures we trade during low volatility periods
+# Fixed position size of 0.25 to control drawdown and minimize fee churn
+# Target: 20-50 trades/year on 1d timeframe (80-200 total over 4 years)
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_williams_r_bollinger_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,57 +25,56 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR (14-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1w Williams %R (14-period)
+    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_1w - close_1w) / (highest_high_1w - lowest_low_1w)
+    williams_r[highest_high_1w == lowest_low_1w] = -50  # Avoid division by zero
     
-    # Calculate 1d Camarilla levels (H3, L3)
-    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2.0
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2.0
+    # Calculate daily Bollinger Bands (20-period, 2 std)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Align HTF data to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Bollinger Band width for squeeze filter (low volatility regime)
+    bb_width = (upper_band - lower_band) / sma_20
+    bb_width_ma_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
     
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Align Williams %R to 1d timeframe (with 1-bar delay for completed weekly bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
+    
+    # Pre-compute volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute ATR filter (20-period average)
-    atr_ma_20 = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_ma_20[i]) or atr_14_1d_aligned[i] <= 0 or atr_ma_20[i] <= 0):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or
+            np.isnan(bb_width_ma_50[i]) or np.isnan(vol_ma_20[i]) or
+            vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume
+        # Volume confirmation: current daily volume > 1.5x average daily volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # ATR filter: only trade when current ATR > 20-period ATR average
-        atr_filter = atr_14_1d_aligned[i] > atr_ma_20[i]
+        # Bollinger Band squeeze filter: only trade when volatility is low (regime filter)
+        volatility_filter = bb_width[i] < bb_width_ma_50[i]
         
-        if not (volume_confirmed and atr_filter):
+        if not (volume_confirmed and volatility_filter):
             signals[i] = 0.0
             continue
         
@@ -83,31 +82,28 @@ def generate_signals(prices):
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit on retracement to midpoint of Camarilla H3-L3 range
-            midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2.0
-            if close[i] < midpoint:
+            # Exit when price returns to middle of Bollinger Bands
+            if close[i] >= sma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit on retracement to midpoint of Camarilla H3-L3 range
-            midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2.0
-            if close[i] > midpoint:
+            # Exit when price returns to middle of Bollinger Bands
+            if close[i] <= sma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
-            # Camarilla breakout with volume and ATR confirmation
-            if volume_confirmed and atr_filter:
-                # Breakout above H3 (buy)
-                if close[i] > camarilla_h3_aligned[i]:
+            # Mean reversion entry: Williams %R extremes + Bollinger Band touch
+            if williams_r_aligned[i] <= -80 and volume_confirmed:  # Oversold
+                if close[i] <= lower_band[i]:  # Price touching or below lower Bollinger Band
                     position = 1
                     signals[i] = position_size
-                # Breakout below L3 (sell)
-                elif close[i] < camarilla_l3_aligned[i]:
+            elif williams_r_aligned[i] >= -20 and volume_confirmed:  # Overbought
+                if close[i] >= upper_band[i]:  # Price touching or above upper Bollinger Band
                     position = -1
                     signals[i] = -position_size
     
