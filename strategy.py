@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_donchian_breakout_volume_chop_regime_v1
-# Hypothesis: Daily Donchian channel breakout with volume confirmation (>1.5x 20-period average) and choppiness regime filter (CHOP < 38.2 = trending). Enters long when price breaks above Donchian(20) upper band with volume confirmation and trending regime; short when price breaks below Donchian(20) lower band with volume confirmation and trending regime. Exits on opposite Donchian band touch. Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 7-25 trades/year) to work in both bull and bear markets by capturing strong trending moves with institutional volume confirmation.
+# 12h_camarilla_pivot_breakout_volume_v3
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation (>1.3x 20-period average) and 1d HTF trend filter (price > 50-period EMA). Enters long when price breaks above H3 level with volume confirmation and bullish 1d trend; short when price breaks below L3 level with volume confirmation and bearish 1d trend. Exits on opposite Camarilla level touch (L3 for long, H3 for short). Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 12-37 trades/year) to work in both bull and bear markets by following institutional volume-driven breakouts in alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_volume_chop_regime_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_breakout_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +24,37 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Donchian channels (20-period)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donchian_upper = high_s.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_s.rolling(window=20, min_periods=20).min().values
-    
-    # Choppiness Index (14-period) - measures trend vs range
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low) / log10(14))
-    # Simplified: CHOP < 38.2 = trending, CHOP > 61.8 = ranging
-    tr_s = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.append(close[0], close[:-1]))), np.abs(low - np.append(close[0], close[:-1]))))
-    atr14 = tr_s.rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    highest_high = high_s.rolling(window=14, min_periods=14).max().values
-    lowest_low = low_s.rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr14) / np.log10(highest_high - lowest_low) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((highest_high - lowest_low) > 0, chop, 50.0)
-    chop = np.where(np.isnan(chop), 50.0, chop)
-    
-    # 1w HTF trend filter: 50-period EMA on 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Previous day's OHLC for Camarilla calculation (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    # H4 = C + 1.5*(H-L), H3 = C + 1.0*(H-L), H2 = C + 0.5*(H-L), H1 = C + 0.25*(H-L)
+    # L1 = C - 0.25*(H-L), L2 = C - 0.5*(H-L), L3 = C - 1.0*(H-L), L4 = C - 1.5*(H-L)
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    
+    # True range for the day
+    day_range = prev_high - prev_low
+    
+    # Camarilla levels
+    H3 = prev_close + 1.0 * day_range
+    L3 = prev_close - 1.0 * day_range
+    H4 = prev_close + 1.5 * day_range
+    L4 = prev_close - 1.5 * day_range
+    
+    # Align Camarilla levels to 12h timeframe (using previous day's close as anchor)
+    # The Camarilla levels are valid for the entire day following the previous day's close
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # 1d HTF trend filter: 50-period EMA on 1d timeframe
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -56,46 +62,43 @@ def generate_signals(prices):
     for i in range(60, n):  # Start after warmup
         # Skip if any required data is NaN
         if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(volume[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(chop[i]) or np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(volume[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        
-        # Trending regime: CHOP < 38.2
-        trending_regime = chop[i] < 38.2
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price touches or breaks Donchian lower band
-            if close[i] <= donchian_lower[i]:
+            # Exit: price touches or breaks L3 level (or stoploss at L4)
+            if close[i] <= L3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches or breaks Donchian upper band
-            if close[i] >= donchian_upper[i]:
+            # Exit: price touches or breaks H3 level (or stoploss at H4)
+            if close[i] >= H3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter only with volume confirmation, trending regime, and 1w trend alignment
-            if volume_confirmed and trending_regime:
-                # Bullish 1w trend: price above 50-period EMA
-                bullish_trend = close[i] > ema_50_1w_aligned[i]
-                # Bearish 1w trend: price below 50-period EMA
-                bearish_trend = close[i] < ema_50_1w_aligned[i]
+            # Enter only with volume confirmation and 1d trend alignment
+            if volume_confirmed:
+                # Bullish 1d trend: price above 50-period EMA
+                bullish_trend = close[i] > ema_50_1d_aligned[i]
+                # Bearish 1d trend: price below 50-period EMA
+                bearish_trend = close[i] < ema_50_1d_aligned[i]
                 
-                # Long: price breaks above Donchian upper band with volume confirmation, trending regime, and bullish 1w trend
-                if close[i] > donchian_upper[i] and bullish_trend:
+                # Long: price breaks above H3 level with volume and bullish 1d trend
+                if close[i] > H3_aligned[i] and bullish_trend:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below Donchian lower band with volume confirmation, trending regime, and bearish 1w trend
-                elif close[i] < donchian_lower[i] and bearish_trend:
+                # Short: price breaks below L3 level with volume and bearish 1d trend
+                elif close[i] < L3_aligned[i] and bearish_trend:
                     position = -1
                     signals[i] = -0.25
     
