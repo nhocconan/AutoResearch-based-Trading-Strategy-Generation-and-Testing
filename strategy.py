@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 4h_higher_high_lower_low_12h_ema_volume_v2
-# Hypothesis: 4h price action forming higher highs/lows (HH/LL) in uptrend or lower highs/lows (LH/LL) in downtrend,
-# confirmed by 12h EMA trend and volume spike. Exits on trend reversal or mean reversion to 12h EMA.
-# Works in bull/bear: 12h EMA filters trend direction, HH/LL structure captures momentum, volume ensures validity.
-# Target: 20-40 trades/year.
+# 12h_camarilla_pivot_1d_volume_v1
+# Hypothesis: 12h Camarilla pivot levels (H3/L3) from 1d HTF act as support/resistance with volume confirmation.
+# In bull markets: buy near L3 with volume spike; in bear markets: sell near H3 with volume spike.
+# Uses 1d HTF for pivot calculation (properly aligned) and 12h EMA(50) for trend filter.
+# Target: 12-30 trades/year (50-120 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_higher_high_lower_low_12h_ema_volume_v2"
-timeframe = "4h"
+name = "12h_camarilla_pivot_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,64 +23,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h HTF data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # 1d HTF data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # 12h EMA(21)
-    ema_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate Camarilla levels from previous 1d bar
+    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # 12h EMA(50) for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(ema_50[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: trend turns bearish OR price reverts to 12h EMA (mean reversion)
-            if close[i] < ema_12h_aligned[i]:
+            # Exit: price crosses below L3 OR trend turns bearish
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend turns bullish OR price reverts to 12h EMA (mean reversion)
-            if close[i] > ema_12h_aligned[i]:
+            # Exit: price crosses above H3 OR trend turns bullish
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need at least 2 bars to check HH/LL structure
-            if i < 2:
-                signals[i] = 0.0
-                continue
-                
             # Volume confirmation
-            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
             if volume_confirmed:
-                # Check for HH/LL structure (uptrend)
-                hh_ll = (high[i] > high[i-1]) and (low[i] > low[i-1])
-                # Check for LH/LL structure (downtrend)
-                lh_ll = (high[i] < high[i-1]) and (low[i] < low[i-1])
-                
-                if hh_ll and close[i] > ema_12h_aligned[i]:
-                    # Uptrend structure + price above 12h EMA → long
+                # Long setup: price near L3 and above EMA50 (bullish alignment)
+                if close[i] <= camarilla_l3_aligned[i] * 1.005 and close[i] > ema_50[i]:
                     position = 1
                     signals[i] = 0.25
-                elif lh_ll and close[i] < ema_12h_aligned[i]:
-                    # Downtrend structure + price below 12h EMA → short
+                # Short setup: price near H3 and below EMA50 (bearish alignment)
+                elif close[i] >= camarilla_h3_aligned[i] * 0.995 and close[i] < ema_50[i]:
                     position = -1
                     signals[i] = -0.25
     
