@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + choppiness regime
-# - Primary signal: 12h price touches Camarilla H3/L3 levels from prior 1d session
-# - Volume confirmation: 1d volume > 20-period median volume (ensures participation)
-# - Regime filter: 1d Choppiness Index > 61.8 (range) enables mean reversion at Camarilla extremes
-# - In trending markets (CHOP < 38.2), only trade touches in direction of 1d EMA21 trend
+# Hypothesis: 1d Donchian channel breakout with 1w trend filter and volume confirmation
+# - Primary signal: Daily price breaks above/below 20-day Donchian channel
+# - Trend filter: 1-week EMA50 slope (rising/falling) to align with higher timeframe trend
+# - Volume confirmation: Daily volume > 20-day median volume (ensures institutional participation)
+# - In trending markets (1w EMA50 rising), only take long breakouts; in falling 1w EMA50, only shorts
+# - In sideways 1w EMA50 (flat slope), take both directions for mean reversion at extremes
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Camarilla captures key support/resistance, regime filter adapts to market state
+# - Stoploss: Exit when price returns to midpoint of Donchian channel
+# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
+# - Works in bull/bear: Donchian captures breakouts, 1w EMA50 filters counter-trend noise
 
-name = "12h_1d_camarilla_vol_chop_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,127 +24,96 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
     # Pre-compute 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d ATR for true range (needed for CHOP)
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # 1d Choppiness Index (CHOP) - measures trend vs range
-    # CHOP = 100 * log10(sum(atr14) / (n * (max(high)n - min(low)n))) / log10(n)
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = 14 * (max_high_14 - min_low_14)
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid div by zero
-    chop_raw = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
-    chop_1d = np.where(np.isnan(chop_raw), 50.0, chop_raw)  # neutral when undefined
-    
-    # Choppiness regimes: >61.8 = range, <38.2 = trend
-    chop_range = chop_1d > 61.8
-    chop_trend = chop_1d < 38.2
-    
-    # 1d volume regime: volume > 20-period median volume (avoid low participation)
-    median_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
-    volume_regime = volume_1d > median_volume_20
-    
-    # 1d EMA21 for trend direction in trending regimes
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # 1d Camarilla pivot levels (based on prior day's range)
-    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low)
-    # L3 = close - 1.0*(high-low), L4 = close - 1.5*(high-low)
-    camarilla_h3 = close_1d + 1.0 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.0 * (high_1d - low_1d)
-    
-    # Align all 1d indicators to 12h timeframe (completed 1d bar only)
-    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend)
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
-    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 1d Donchian Channel (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high_20 + lowest_low_20) / 2.0
+    
+    # 1d volume regime: volume > 20-period median volume
+    median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    volume_regime = volume > median_volume_20
+    
+    # Pre-compute 1w indicators
+    df_1w_close = df_1w['close'].values
+    
+    # 1w EMA50 for trend direction
+    ema_50_1w = pd.Series(df_1w_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 1w EMA50 slope (trend strength): positive = rising, negative = falling, near zero = flat
+    # Use 5-period slope to smooth noise
+    ema_50_slope = pd.Series(ema_50_1w).diff(5).values / 5.0  # 5-period change per period
+    
+    # Trend regimes: rising (> 0.001*price), falling (< -0.001*price), flat (otherwise)
+    # Scale threshold by price to make it adaptive
+    price_level = pd.Series(df_1w_close).rolling(window=50, min_periods=50).mean().values
+    threshold = 0.001 * price_level  # 0.1% of price per 5 periods
+    w_trend_rising = ema_50_slope > threshold
+    w_trend_falling = ema_50_slope < -threshold
+    w_trend_flat = np.abs(ema_50_slope) <= threshold
+    
+    # Align all 1w indicators to 1d timeframe (completed 1w bar only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    w_trend_rising_aligned = align_htf_to_ltf(prices, df_1w, w_trend_rising)
+    w_trend_falling_aligned = align_htf_to_ltf(prices, df_1w, w_trend_falling)
+    w_trend_flat_aligned = align_htf_to_ltf(prices, df_1w, w_trend_flat)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(chop_range_aligned[i]) or
-            np.isnan(chop_trend_aligned[i]) or
-            np.isnan(volume_regime_aligned[i]) or
-            np.isnan(ema_21_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(camarilla_l3_aligned[i])):
+        if (np.isnan(highest_high_20[i]) or
+            np.isnan(lowest_low_20[i]) or
+            np.isnan(donchian_mid[i]) or
+            np.isnan(volume_regime[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(w_trend_rising_aligned[i]) or
+            np.isnan(w_trend_falling_aligned[i]) or
+            np.isnan(w_trend_flat_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Camarilla L3 (mean reversion target) OR
-            #         in trend regime, price closes below EMA21
-            if chop_range_aligned[i]:
-                # In range: exit at Camarilla L3 (mean reversion)
-                if close[i] <= camarilla_l3_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+            # Exit: price returns to Donchian midpoint (mean reversion)
+            if close[i] <= donchian_mid[i]:
+                position = 0
+                signals[i] = 0.0
             else:
-                # In trend: exit if trend reverses
-                if close[i] < ema_21_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-                    
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit: price closes above Camarilla H3 (mean reversion target) OR
-            #         in trend regime, price closes above EMA21
-            if chop_range_aligned[i]:
-                # In range: exit at Camarilla H3 (mean reversion)
-                if close[i] >= camarilla_h3_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit: price returns to Donchian midpoint (mean reversion)
+            if close[i] >= donchian_mid[i]:
+                position = 0
+                signals[i] = 0.0
             else:
-                # In trend: exit if trend reverses
-                if close[i] > ema_21_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla level touch with volume confirmation
-            # Long: price touches or crosses above Camarilla H3 AND volume regime
-            if high[i] >= camarilla_h3_aligned[i] and volume_regime_aligned[i]:
-                # In chop regime (>61.8): only long if also in range (mean reversion setup)
-                # In trend regime (<38.2): only long if price above EMA21 (trend continuation)
-                if chop_range_aligned[i] or close[i] > ema_21_aligned[i]:
+            # Look for Donchian breakout with volume confirmation
+            # Long breakout: price closes above upper Donchian band
+            if close[i] > highest_high_20[i] and volume_regime[i]:
+                # In rising 1w trend: take long breakouts (trend continuation)
+                # In flat 1w trend: take long breakouts (mean reversion setup from extreme)
+                # Avoid long in falling 1w trend (counter-trend)
+                if w_trend_rising_aligned[i] or w_trend_flat_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-            # Short: price touches or crosses below Camarilla L3 AND volume regime
-            elif low[i] <= camarilla_l3_aligned[i] and volume_regime_aligned[i]:
-                # In chop regime (>61.8): only short if also in range (mean reversion setup)
-                # In trend regime (<38.2): only short if price below EMA21 (trend continuation)
-                if chop_range_aligned[i] or close[i] < ema_21_aligned[i]:
+            # Short breakout: price closes below lower Donchian band
+            elif close[i] < lowest_low_20[i] and volume_regime[i]:
+                # In falling 1w trend: take short breakouts (trend continuation)
+                # In flat 1w trend: take short breakouts (mean reversion setup from extreme)
+                # Avoid short in rising 1w trend (counter-trend)
+                if w_trend_falling_aligned[i] or w_trend_flat_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
