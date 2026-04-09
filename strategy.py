@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-# 6h_funding_rate_mean_reversion_v1
-# Hypothesis: Funding rate mean reversion on 6h timeframe. Extreme positive funding (longs paying shorts) predicts short-term mean reversion downward; extreme negative funding predicts upward reversion. Works in both bull and bear markets as funding extremes occur during crowded trades. Uses 1d HTF EMA filter to avoid trading against the daily trend. Discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year.
+# mtf_1h_ema_pullback_volume_4h1d_v1
+# Hypothesis: 1h strategy trading pullbacks to EMA21 in the direction of 4h/1d trend.
+# Uses 4h EMA50 for trend direction and 1d EMA200 for regime filter (avoid counter-trend in strong trends).
+# Entry: price pulls back to 1h EMA21 with volume confirmation in direction of 4h/1d trend.
+# Exit: opposite EMA21 cross or volume fade. Designed for low trade frequency (15-35/year) to minimize fee drag.
+# Works in bull markets (trend continuation) and bear markets (trend continuation short).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_funding_rate_mean_reversion_v1"
-timeframe = "6h"
+name = "mtf_1h_ema_pullback_volume_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,91 +24,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load funding rate data (assuming available as column; if not, this will need adjustment)
-    # For now, we'll simulate using a proxy: we cannot load external funding data without file path
-    # Instead, we use a volume-price divergence proxy for crowded trades
-    # But per rules, we must use mtf_data for HTF - we'll use 1d for trend and simulate funding proxy
+    # 4h HTF for trend direction: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # 1d HTF for trend filter: 50 EMA (to avoid counter-trend trades)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # 1d HTF for regime filter: EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Proxy for funding rate extreme: 6h RSI divergence from price
-    # When price makes new high but RSI fails to confirm (bearish divergence) -> short signal
-    # When price makes new low but RSI fails to confirm (bullish divergence) -> long signal
-    # We'll use 14-period RSI on 6h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # 1h indicators: EMA21 for dynamic support/resistance, volume MA20 for confirmation
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Price action for divergence detection
-    # Look for bearish divergence: price higher high, RSI lower high
-    # Bullish divergence: price lower low, RSI higher low
-    # We'll use 20-period lookback for swing points
-    lookback = 20
+    volume_s = pd.Series(volume)
+    volume_ma20 = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_aligned[i]) or np.isnan(rsi_values[i]):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(ema_21[i]) or np.isnan(volume_ma20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma20[i]
+        
         if position == 1:  # Long position
-            # Exit: RSI > 70 (overbought) or price below EMA
-            if rsi_values[i] > 70 or close[i] < ema_50_aligned[i]:
+            # Exit: price crosses below EMA21 OR volume dries up
+            if close[i] < ema_21[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 30 (oversold) or price above EMA
-            if rsi_values[i] < 30 or close[i] > ema_50_aligned[i]:
+            # Exit: price crosses above EMA21 OR volume dries up
+            if close[i] > ema_21[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Check for bullish divergence: price makes lower low, RSI makes higher low
-            # Find lowest low in lookback window
-            window_low = low[i-lookback:i+1]
-            window_high = high[i-lookback:i+1]
-            if len(window_low) == lookback + 1 and len(window_high) == lookback + 1:
-                lowest_low = np.min(window_low)
-                highest_high = np.max(window_high)
-                # Current point is the lowest in window?
-                is_lowest_low = low[i] == lowest_low
-                # Current point is the highest in window?
-                is_highest_high = high[i] == highest_high
+            if volume_confirmed:
+                # Determine trend direction from 4h EMA50
+                trend_up = close[i] > ema_50_4h_aligned[i]
+                trend_down = close[i] < ema_50_4h_aligned[i]
                 
-                if is_lowest_low:
-                    # Find RSI at the point of lowest low in window
-                    min_idx = np.argmin(window_low)
-                    rsi_at_low = rsi_values[i-lookback+min_idx]
-                    # Bullish divergence: current RSI > RSI at past low
-                    if rsi_values[i] > rsi_at_low and close[i] > ema_50_aligned[i]:
-                        position = 1
-                        signals[i] = 0.25
-                elif is_highest_high:
-                    # Find RSI at the point of highest high in window
-                    max_idx = np.argmax(window_high)
-                    rsi_at_high = rsi_values[i-lookback+max_idx]
-                    # Bearish divergence: current RSI < RSI at past high
-                    if rsi_values[i] < rsi_at_high and close[i] < ema_50_aligned[i]:
-                        position = -1
-                        signals[i] = -0.25
+                # Regime filter: avoid counter-trend trades when price is far from 1d EMA200
+                price_vs_200ema = close[i] / ema_200_1d_aligned[i]
+                extreme_bull = price_vs_200ema > 1.25   # Avoid longs in extreme bull
+                extreme_bear = price_vs_200ema < 0.75   # Avoid shorts in extreme bear
+                
+                # Long setup: pullback to EMA21 in uptrend, not extreme bull
+                if trend_up and close[i] <= ema_21[i] * 1.01 and not extreme_bull:
+                    # Additional filter: price above 4h EMA50 (already in trend_up) and volume confirmation
+                    position = 1
+                    signals[i] = 0.20
+                # Short setup: pullback to EMA21 in downtrend, not extreme bear
+                elif trend_down and close[i] >= ema_21[i] * 0.99 and not extreme_bear:
+                    # Additional filter: price below 4h EMA50 (already in trend_down) and volume confirmation
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
