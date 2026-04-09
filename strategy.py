@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_cloud_tk_cross_1d_v2
-# Hypothesis: 6h strategy using Ichimoku cloud from 1d timeframe for trend direction and TK cross on 6h for entry timing.
-# In both bull and bear markets, price tends to respect the Ichimoku cloud as dynamic support/resistance.
-# TK cross provides momentum entry signals aligned with the higher timeframe trend.
-# Volume confirmation filters false signals. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-# Target: 12-37 trades/year (50-150 over 4 years).
+# 12h_hma_trend_volume_v1
+# Hypothesis: 12h strategy using Hull Moving Average (HMA) trend with volume confirmation.
+# HMA reduces lag while maintaining smoothness for trend identification. Volume confirms
+# institutional participation in moves. Works in both bull/bear by following the trend.
+# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_tk_cross_1d_v2"
-timeframe = "6h"
+name = "12h_hma_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def _hma(arr, period):
+    """Calculate Hull Moving Average."""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=np.float64)
+    half = period // 2
+    sqrt = int(np.sqrt(period))
+    arr = np.asarray(arr, dtype=np.float64)
+    wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+    wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+    raw = 2 * wma2 - wma1
+    hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,85 +36,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Ichimoku cloud
+    # 1d HTF data for volume regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need enough for Ichimoku calculations
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate HMA (55-period) on close
+    hma_55 = _hma(close, 55)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Align Ichimoku components to 6h timeframe (with proper delay for completed 1d bars)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Volume average for confirmation (20-period on 6h)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d average volume for regime filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(hma_55[i]) or np.isnan(hma_55[i-1]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud top and bottom (Senkou Span A and B)
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume regime: current 12h volume > 1.2x 1d average volume (scaled)
+        # Scale 1d average to 12h by dividing by 2 (approx 2x 12h bars in 1d)
+        volume_regime = volume[i] > 1.2 * (vol_ma_1d_aligned[i] / 2.0)
         
         if position == 1:  # Long position
-            # Exit: price falls below cloud bottom or TK cross turns bearish
-            if close[i] < cloud_bottom or tenkan_aligned[i] < kijun_aligned[i]:
+            # Exit: price closes below HMA
+            if close[i] < hma_55[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above cloud top or TK cross turns bullish
-            if close[i] > cloud_top or tenkan_aligned[i] > kijun_aligned[i]:
+            # Exit: price closes above HMA
+            if close[i] > hma_55[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed:
-                # Long entry: price above cloud AND TK cross bullish
-                if close[i] > cloud_top and tenkan_aligned[i] > kijun_aligned[i]:
+            if volume_regime:
+                # Long entry: price closes above HMA and HMA is rising
+                if close[i] > hma_55[i] and hma_55[i] > hma_55[i-1]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price below cloud AND TK cross bearish
-                elif close[i] < cloud_bottom and tenkan_aligned[i] < kijun_aligned[i]:
+                # Short entry: price closes below HMA and HMA is falling
+                elif close[i] < hma_55[i] and hma_55[i] < hma_55[i-1]:
                     position = -1
                     signals[i] = -0.25
     
