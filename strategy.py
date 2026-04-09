@@ -3,129 +3,140 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d ATR regime filter
-# Uses Donchian(20) from 4h for breakout triggers, confirmed by volume spike (>2.0x avg)
-# Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) for reliability
-# Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
-# Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
+# Hypothesis: 6h Ichimoku Cloud with TK cross and 1d weekly pivot direction filter
+# Uses Ichimoku (Tenkan/Kijun/Senkou) from 6h for trend and momentum signals
+# Only takes trades aligned with 1d weekly pivot (price above weekly pivot = long bias, below = short bias)
+# Weekly pivot calculated from prior 1d week (Mon-Sun) high/low/close
+# Position size 0.25 to manage drawdown, target 50-150 total trades over 4 years (12-37/year)
+# Works in both bull/bear: weekly pivot provides structural bias, Ichimoku TK cross captures momentum
 
-name = "4h_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1d_ichimoku_weekly_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR regime filter
+    # Load 1d data ONCE before loop for weekly pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for regime filter
-    tr_1d = np.full(len(df_1d), np.nan)
-    atr_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):
-        tr = max(
-            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-        )
-        tr_1d[i] = tr
-    
-    # Calculate ATR with Wilder's smoothing
-    for i in range(len(df_1d)):
-        if i < 14:
-            atr_1d[i] = np.nan
-        elif i == 14:
-            atr_1d[i] = np.nanmean(tr_1d[1:15])
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    # Calculate 50-period MA of ATR for regime filter
-    atr_ma_50 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        if i < 50:
-            atr_ma_50[i] = np.nan
-        else:
-            atr_ma_50[i] = np.mean(atr_1d[i-50:i])
-    
-    # Align 1d indicators to 4h timeframe
-    atr_ma_50_4h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 20-period Donchian channels on 4h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = np.full(n, np.nan)
+    period9_low = np.full(n, np.nan)
     for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
+        if i < 9:
+            period9_high[i] = np.nan
+            period9_low[i] = np.nan
         else:
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
+            period9_high[i] = np.max(high[i-9:i])
+            period9_low[i] = np.min(low[i-9:i])
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate 20-period average volume for volume confirmation
-    avg_volume = np.full(n, np.nan)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = np.full(n, np.nan)
+    period26_low = np.full(n, np.nan)
     for i in range(n):
-        if i < 20:
-            avg_volume[i] = np.nan
+        if i < 26:
+            period26_high[i] = np.nan
+            period26_low[i] = np.nan
         else:
-            avg_volume[i] = np.mean(volume[i-20:i])
+            period26_high[i] = np.max(high[i-26:i])
+            period26_low[i] = np.min(low[i-26:i])
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period52_high = np.full(n, np.nan)
+    period52_low = np.full(n, np.nan)
+    for i in range(n):
+        if i < 52:
+            period52_high[i] = np.nan
+            period52_low[i] = np.nan
+        else:
+            period52_high[i] = np.max(high[i-52:i])
+            period52_low[i] = np.min(low[i-52:i])
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Calculate weekly pivot from 1d data (prior week's high, low, close)
+    # Assuming 1d data is daily, weekly pivot uses prior 7 days (Mon-Sun)
+    weekly_high = np.full(len(df_1d), np.nan)
+    weekly_low = np.full(len(df_1d), np.nan)
+    weekly_close = np.full(len(df_1d), np.nan)
+    
+    for i in range(len(df_1d)):
+        if i < 7:
+            weekly_high[i] = np.nan
+            weekly_low[i] = np.nan
+            weekly_close[i] = np.nan
+        else:
+            weekly_high[i] = np.max(df_1d['high'].iloc[i-7:i])
+            weekly_low[i] = np.min(df_1d['low'].iloc[i-7:i])
+            weekly_close[i] = df_1d['close'].iloc[i-1]  # prior day's close as weekly close proxy
+    
+    # Weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    
+    # Align 1d weekly pivot to 6h timeframe
+    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(52, n):  # Start after warmup for longest Ichimoku component
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(atr_ma_50_4h[i]) or 
-            np.isnan(atr_4h[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(weekly_pivot_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume[i] > 2.0 * avg_volume[i]
+        # Ichimoku TK cross: Tenkan crosses above/below Kijun
+        tk_cross_above = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
+        tk_cross_below = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
         
-        # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
-        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
+        # Price relative to cloud: above cloud = bullish, below cloud = bearish
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # Weekly pivot bias: price above pivot = long bias, below = short bias
+        price_above_pivot = close[i] > weekly_pivot_6h[i]
+        price_below_pivot = close[i] < weekly_pivot_6h[i]
         
         if position == 1:  # Long position
-            # Exit conditions: price closes below Donchian low OR ATR regime turns unfavorable
-            if close[i] < donchian_low[i] or not atr_regime:
+            # Exit: TK cross below OR price breaks below cloud OR pivot bias turns bearish
+            if tk_cross_below or price_below_cloud or (not price_above_pivot and close[i] < weekly_pivot_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price closes above Donchian high OR ATR regime turns unfavorable
-            if close[i] > donchian_high[i] or not atr_regime:
+            # Exit: TK cross above OR price breaks above cloud OR pivot bias turns bullish
+            if tk_cross_above or price_above_cloud or (not price_below_pivot and close[i] > weekly_pivot_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Donchian breakout with volume confirmation and ATR regime filter
-            if volume_confirm and atr_regime:
-                # Long breakout: price closes above Donchian high
-                if close[i] > donchian_high[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short breakout: price closes below Donchian low
-                elif close[i] < donchian_low[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Entry: TK cross in direction of price vs cloud AND aligned with weekly pivot bias
+            if tk_cross_above and price_above_cloud and price_above_pivot:
+                position = 1
+                signals[i] = 0.25
+            elif tk_cross_below and price_below_cloud and price_below_pivot:
+                position = -1
+                signals[i] = -0.25
     
     return signals
