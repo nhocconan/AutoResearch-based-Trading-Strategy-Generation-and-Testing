@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_regime_v2
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation (>1.8x 20-bar avg volume) and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 4h_donchian_breakout_volume_chop_regime_v1_revised
+# Hypothesis: 4h strategy using Donchian(20) breakouts with volume confirmation (>1.5x 20-bar avg volume) and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Fixed logic to avoid excessive flat signals and ensure proper entry/exit. Discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year (75-200 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_regime_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_chop_regime_v1_revised"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -65,8 +65,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
         # HTF trend filter: price above/below 1d EMA(50)
@@ -99,5 +99,7 @@ def generate_signals(prices):
             elif bearish_breakout:
                 position = -1
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0  # Explicitly flat
     
     return signals
