@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_donchian_volume_chop_regime_v3
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-period average) and
-# choppiness regime filter (CHOP(14) between 38.2 and 61.8 for ranging markets). Long on upper
-# band breakout, short on lower band breakout. Uses discrete sizing (0.0, ±0.25) to minimize
-# fee churn. Target: 20-50 trades/year. Works in both bull (breakouts) and bear (mean reversion
-# in chop regime) markets by aligning with structure and filtering false signals.
+# mtf_1h_donchian_volume_chop_regime_v1
+# Hypothesis: 1h strategy using 4h/1d Donchian breakouts with volume confirmation and Choppiness Index regime filter.
+# In bull/bear markets: trade breakouts in trending regimes (CHOP < 38.2), avoid range (CHOP > 61.8).
+# Uses 4h for trend direction (price vs 20-period EMA) and 1d for Donchian channels (20-period high/low).
+# Volume confirmation (>1.3x 20-period average) filters false breakouts.
+# Discrete sizing (0.0, ±0.20) minimizes fee churn. Target: 15-35 trades/year.
+# Session filter: 08-20 UTC to avoid low-liquidity hours.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_volume_chop_regime_v3"
-timeframe = "4h"
+name = "mtf_1h_donchian_volume_chop_regime_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +25,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) on 4h
-    highest = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h HTF data for trend direction (EMA20)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # 1d HTF data for Donchian channels (20-period high/low)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    
+    # 1h Choppiness Index (14-period) for regime filter
+    atr_1h = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
+    hh_1h = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll_1h = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.log10(hh_1h - ll_1h) * np.sqrt(14)
+    chop_num = np.log10(atr_1h.sum()) if hasattr(atr_1h, 'sum') else np.log10(np.nansum(atr_1h))
+    # Avoid division by zero and handle NaN
+    hh_minus_ll = hh_1h - ll_1h
+    chop = np.where(
+        (hh_minus_ll > 0) & (~np.isnan(hh_minus_ll)),
+        100 * np.log10(atr_1h / hh_minus_ll) / np.log10(14),
+        50.0  # neutral when range is zero
+    )
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (14) - ranging market filter
-    # True Range
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(atr14/(hh14-ll14)) / log10(14)
-    # Avoid division by zero
-    range_14 = hh14 - ll14
-    chop = np.zeros_like(atr14)
-    mask = range_14 > 0
-    chop[mask] = 100 * np.log10(atr14[mask] / range_14[mask]) / np.log10(14)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(highest[i]) or np.isnan(lowest[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(chop[i])):
+        # Skip if any required data is NaN or not in session
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or np.isnan(chop[i]) or np.isnan(volume_ma[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
-        # Choppiness regime filter: only trade in ranging markets (38.2 <= CHOP <= 61.8)
-        chop_filter = (chop[i] >= 38.2) and (chop[i] <= 61.8)
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        trending_regime = chop[i] < 38.2
         
         if position == 1:  # Long position
-            # Exit: price falls below Donchian lower band OR chop exits range (trending)
-            if close[i] < lowest[i] or not chop_filter:
+            # Exit: price falls below 4h EMA20 OR Donchian low breaks
+            if close[i] < ema_20_4h_aligned[i] or close[i] < donch_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian upper band OR chop exits range (trending)
-            if close[i] > highest[i] or not chop_filter:
+            # Exit: price rises above 4h EMA20 OR Donchian high breaks
+            if close[i] > ema_20_4h_aligned[i] or close[i] > donch_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            if volume_confirmed and chop_filter:
-                # Long entry: price breaks above upper Donchian band
-                if close[i] > highest[i]:
+            if volume_confirmed and trending_regime:
+                # Long entry: price above 4h EMA20 AND above 1d Donchian high
+                if close[i] > ema_20_4h_aligned[i] and close[i] > donch_high_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short entry: price breaks below lower Donchian band
-                elif close[i] < lowest[i]:
+                    signals[i] = 0.20
+                # Short entry: price below 4h EMA20 AND below 1d Donchian low
+                elif close[i] < ema_20_4h_aligned[i] and close[i] < donch_low_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
