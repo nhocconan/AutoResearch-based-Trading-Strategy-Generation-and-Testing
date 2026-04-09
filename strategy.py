@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v13
-# Hypothesis: 4-hour breakouts above/below daily Camarilla H5/L5 levels (extreme breakout) with volume confirmation and volatility filter.
-# Uses H5/L5 levels for stronger breakout signals than H4/L4, reducing false signals.
-# Exit when price returns to the daily pivot point (PP).
-# Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
-# This version further tightens entry conditions to reduce trade frequency and improve quality.
+# 1d_1w_momentum_pullback_v1
+# Hypothesis: On daily timeframe, buy pullbacks in uptrend and sell rallies in downtrend using 200 EMA as trend filter and RSI for entry timing. 
+# Weekly trend confirms direction to avoid counter-trend trades. Works in both bull/bear as trend adapts.
+# Entry: Long when price > daily EMA200, weekly EMA200 rising, and RSI(14) pulls back from oversold (<30) to >30.
+# Entry: Short when price < daily EMA200, weekly EMA200 falling, and RSI(14) rallies from overbought (>70) to <70.
+# Exit: Opposite signal or RSI reaches extreme (70/30) to avoid mean-reversion traps.
+# Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v13"
-timeframe = "4h"
+name = "1d_1w_momentum_pullback_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,99 +20,84 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate ATR(20) for volatility filter
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1])
-        lc = abs(low[i] - close[i-1])
-        tr[i] = max(hl, hc, lc)
+    # Daily EMA200 for trend filter
+    close_s = pd.Series(close)
+    ema200_d = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    atr = np.full(n, np.nan)
-    if n >= 20:
-        atr[19] = np.mean(tr[:20])
-        for i in range(20, n):
-            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
-    
-    # Load 1d data ONCE before loop for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_rising = ema200_1w > np.roll(ema200_1w, 1)
+    ema200_1w_falling = ema200_1w < np.roll(ema200_1w, 1)
+    ema200_1w_rising[0] = False
+    ema200_1w_falling[0] = False
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align weekly EMA200 and its direction to daily
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    ema200_1w_rising_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w_rising.astype(float))
+    ema200_1w_falling_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w_falling.astype(float))
     
-    # Camarilla formulas
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # RSI(14) for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # H5 and L5 levels (extreme breakout levels - stronger than H4/L4)
-    h5_1d = close_1d + (range_1d * 1.1)  # H5 level
-    l5_1d = close_1d - (range_1d * 1.1)  # L5 level
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    # Align 1d levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h5_aligned = align_htf_to_ltf(prices, df_1d, h5_1d)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, l5_1d)
+    # Wilder's smoothing
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume confirmation - 20 period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
-    
-    # Volume spike: current volume > 2.2x 20-period average (more restrictive)
-    vol_spike = volume > vol_ma_20 * 2.2
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema200_d[i]) or np.isnan(ema200_1w_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility (more restrictive)
-        vol_filter = atr[i] < 0.022 * close[i]  # ATR less than 2.2% of price (was 2.5%)
-        
-        # Volume confirmation: current volume > 2.0x 20-period average (more restrictive)
-        vol_ok = volume[i] > vol_ma_20[i] * 2.0  # Was 1.8
-        
         if position == 1:  # Long position
-            # Exit: price returns to or below Pivot Point
-            if close[i] <= pp_aligned[i]:
+            # Exit: RSI reaches overbought or trend turns
+            if rsi[i] >= 70 or close[i] < ema200_d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above Pivot Point
-            if close[i] >= pp_aligned[i]:
+            # Exit: RSI reaches oversold or trend turns
+            if rsi[i] <= 30 or close[i] > ema200_d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H5 level with volume confirmation and volatility filter
-            if close[i] > h5_aligned[i] and vol_ok and vol_filter:
+            # Enter long: price above daily EMA200, weekly EMA200 rising, RSI pulling back from oversold
+            if (close[i] > ema200_d[i] and 
+                ema200_1w_rising_aligned[i] > 0.5 and 
+                rsi[i-1] < 30 and rsi[i] >= 30):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L5 level with volume confirmation and volatility filter
-            elif close[i] < l5_aligned[i] and vol_ok and vol_filter:
+            # Enter short: price below daily EMA200, weekly EMA200 falling, RSI pulling back from overbought
+            elif (close[i] < ema200_d[i] and 
+                  ema200_1w_falling_aligned[i] > 0.5 and 
+                  rsi[i-1] > 70 and rsi[i] <= 70):
                 position = -1
                 signals[i] = -0.25
     
