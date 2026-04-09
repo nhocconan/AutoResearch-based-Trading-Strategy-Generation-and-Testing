@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# In strong trends (ADX > 25): trade with Elder Ray direction (long if Bull Power > 0 and rising, short if Bear Power > 0 and rising)
-# In weak trends/ranging (ADX <= 25): fade Elder Ray extremes (long if Bear Power < 0 and falling, short if Bull Power < 0 and falling)
+# Hypothesis: 12h Donchian breakout with 1d volume spike and choppiness regime filter
+# In trending regimes (CHOP < 38.2): breakout above/below Donchian(20) H/L with volume confirmation
+# In ranging regimes (CHOP > 61.8): mean reversion at Donchian(20) H/L with volume confirmation
 # Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
-# Works in bull/bear markets: trend following captures moves, regime filter avoids whipsaws in ranging markets
+# Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
 
-name = "6h_1d_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,29 +31,14 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(13) for Elder Ray
-    close_s_1d = pd.Series(close_1d)
-    ema13_1d = close_s_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate 1d Elder Ray components
-    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA(13)
-    bear_power_1d = ema13_1d - low_1d   # Bear Power = EMA(13) - Low
-    
-    # Calculate 1d ADX(14) for trend strength
-    # True Range
+    # Calculate 1d ATR(14) for volatility normalization
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Wilder's smoothing for TR and DM
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
@@ -66,77 +50,102 @@ def generate_signals(prices):
         return result
     
     atr_1d = wilders_smoothing(tr, 14)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, 14)
     
-    # Align 1d indicators to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 1d average volume (20-period) normalized by ATR
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.where(atr_1d > 0, avg_volume_1d / atr_1d, np.nan)
+    avg_vol_ratio_1d = pd.Series(vol_ratio_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d Choppiness Index (CHOP)
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0, 
+                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
+                       50)
+    
+    # Calculate 1d Donchian channels (20-period) based on prior day to avoid look-ahead
+    # Donchian: upper = max(high, 20), lower = min(low, 20)
+    high_s_1d = pd.Series(high_1d)
+    low_s_1d = pd.Series(low_1d)
+    donch_h_1d = high_s_1d.rolling(window=20, min_periods=20).max().values
+    donch_l_1d = low_s_1d.rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d indicators to 12h timeframe
+    avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    donch_h_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_h_1d)
+    donch_l_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_l_1d)
+    
+    # Pre-compute volume confirmation array
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    volume_confirmed = volume > 2.0 * avg_volume_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
+            np.isnan(donch_h_1d_aligned[i]) or np.isnan(donch_l_1d_aligned[i]) or
+            np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: strong trend vs weak trend/ranging
-        strong_trend = adx_1d_aligned[i] > 25
-        weak_trend = adx_1d_aligned[i] <= 25
+        # Regime filter
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            if strong_trend:
-                # Exit long if Bull Power turns negative or starts falling
-                if bull_power_1d_aligned[i] <= 0 or (i > 50 and bull_power_1d_aligned[i] < bull_power_1d_aligned[i-1]):
+            if trending_regime:
+                # Exit long if price breaks below Donchian lower or we enter ranging regime
+                if close[i] < donch_l_1d_aligned[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            else:  # weak_trend
-                # Exit long if Bear Power rises above zero (fade failure)
-                if bear_power_1d_aligned[i] > 0:
+            elif ranging_regime:
+                # Exit long if price rises above Donchian upper or drops below lower
+                if close[i] > donch_h_1d_aligned[i] or close[i] < donch_l_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if strong_trend:
-                # Exit short if Bear Power turns negative or starts falling
-                if bear_power_1d_aligned[i] <= 0 or (i > 50 and bear_power_1d_aligned[i] < bear_power_1d_aligned[i-1]):
+            if trending_regime:
+                # Exit short if price breaks above Donchian upper or we enter ranging regime
+                if close[i] > donch_h_1d_aligned[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            else:  # weak_trend
-                # Exit short if Bull Power rises above zero (fade failure)
-                if bull_power_1d_aligned[i] > 0:
+            elif ranging_regime:
+                # Exit short if price drops below Donchian lower or rises above upper
+                if close[i] < donch_l_1d_aligned[i] or close[i] > donch_h_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            if strong_trend:
-                # Enter long on rising positive Bull Power
-                if bull_power_1d_aligned[i] > 0 and (i <= 50 or bull_power_1d_aligned[i] > bull_power_1d_aligned[i-1]):
+            if trending_regime:
+                # Enter long on breakout above Donchian upper with volume confirmation
+                if close[i] > donch_h_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short on rising positive Bear Power
-                elif bear_power_1d_aligned[i] > 0 and (i <= 50 or bear_power_1d_aligned[i] > bear_power_1d_aligned[i-1]):
+                # Enter short on breakout below Donchian lower with volume confirmation
+                elif close[i] < donch_l_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
-            else:  # weak_trend
-                # Fade extremes: long on falling negative Bear Power, short on falling negative Bull Power
-                if bear_power_1d_aligned[i] < 0 and (i > 50 and bear_power_1d_aligned[i] < bear_power_1d_aligned[i-1]):
+            elif ranging_regime:
+                # Mean reversion: buy near Donchian lower, sell near Donchian upper
+                if close[i] <= donch_l_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                elif bull_power_1d_aligned[i] < 0 and (i > 50 and bull_power_1d_aligned[i] < bull_power_1d_aligned[i-1]):
+                elif close[i] >= donch_h_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
     
