@@ -3,168 +3,200 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and chop regime filter
-# Uses 4h Donchian(20) breakouts for trend capture
-# Confirms with 1d volume > 1.8x 20-day average (institutional participation)
-# Uses 1d Choppiness Index > 61.8 for ranging markets (avoid false breakouts in chop)
-# Exits when price closes opposite Donchian level or chop regime shifts
+# Hypothesis: 6h Elder Ray + ADX regime filter using 1d HTF
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# ADX > 25 indicates trending market (use 1d ADX for regime)
+# In trending regime (ADX > 25): go long when Bull Power > 0 and rising, short when Bear Power < 0 and falling
+# In ranging regime (ADX <= 25): fade extremes - long when Bear Power < -std and turning up, short when Bull Power > +std and turning down
+# Uses 1d EMA(13) and ADX(14) for regime detection, 6h for entry timing
 # Position size 0.25 to limit drawdown
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag
-# Works in both bull/bear: Donchian captures trends, chop filter avoids whipsaws in ranging markets
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Works in both bull/bear: adapts to regime via ADX filter
 
-name = "4h_1d_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for volume and chop regime
+    # Load 1d data ONCE before loop for EMA and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d volume 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    vol_sum = 0.0
-    for i in range(len(df_1d)):
-        vol_sum += vol_1d[i]
-        if i >= 20:
-            vol_sum -= vol_1d[i-20]
-        if i >= 19:
-            vol_ma_20_1d[i] = vol_sum / 20
+    # Calculate 1d EMA(13) for Elder Ray
+    close_1d = df_1d['close'].values
+    ema_13 = np.full(len(df_1d), np.nan)
+    multiplier = 2 / (13 + 1)
+    ema_13[0] = close_1d[0]
+    for i in range(1, len(df_1d)):
+        ema_13[i] = (close_1d[i] * multiplier) + (ema_13[i-1] * (1 - multiplier))
     
-    # Calculate 1d Choppiness Index (14-period)
+    # Calculate 1d ADX(14) for regime detection
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # True Range
-    tr_1d = np.zeros(len(df_1d))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
         tr0 = high_1d[i] - low_1d[i]
         tr1 = abs(high_1d[i] - close_1d[i-1])
         tr2 = abs(low_1d[i] - close_1d[i-1])
-        tr_1d[i] = max(tr0, tr1, tr2)
+        tr[i] = max(tr0, tr1, tr2)
     
-    # Sum of TR over 14 periods
-    tr_sum_14 = np.full(len(df_1d), np.nan)
-    tr_sum = 0.0
-    for i in range(len(df_1d)):
-        tr_sum += tr_1d[i]
-        if i >= 14:
-            tr_sum -= tr_1d[i-14]
-        if i >= 13:
-            tr_sum_14[i] = tr_sum
+    # Directional Movement
+    plus_dm = np.zeros(len(df_1d))
+    minus_dm = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        else:
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = np.full(len(df_1d), np.nan)
-    ll_14 = np.full(len(df_1d), np.nan)
-    hh = high_1d[0]
-    ll = low_1d[0]
-    for i in range(len(df_1d)):
-        if high_1d[i] > hh:
-            hh = high_1d[i]
-        if low_1d[i] < ll:
-            ll = low_1d[i]
-        if i >= 14:
-            if high_1d[i-14] == hh:
-                hh = max(high_1d[i-13:i+1]) if i+1 <= len(df_1d) else max(high_1d[i-13:])
-            if low_1d[i-14] == ll:
-                ll = min(low_1d[i-13:i+1]) if i+1 <= len(df_1d) else min(low_1d[i-13:])
-        if i >= 13:
-            hh_14[i] = hh
-            ll_14[i] = ll
+    # Smoothed DM and TR (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full(len(data), np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Choppiness Index
-    chop_1d = np.full(len(df_1d), np.nan)
-    for i in range(13, len(df_1d)):
-        if tr_sum_14[i] > 0 and hh_14[i] > ll_14[i]:
-            chop_1d[i] = 100 * np.log10(tr_sum_14[i] / (hh_14[i] - ll_14[i])) / np.log10(14)
+    # Calculate smoothed values
+    tr_14 = wilders_smoothing(tr, 14)
+    plus_dm_14 = wilders_smoothing(plus_dm, 14)
+    minus_dm_14 = wilders_smoothing(minus_dm, 14)
     
-    # Align 1d data to 4h timeframe (only use completed daily bars)
-    vol_ma_20_4h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate DI and DX
+    plus_di_14 = np.full(len(df_1d), np.nan)
+    minus_di_14 = np.full(len(df_1d), np.nan)
+    dx_14 = np.full(len(df_1d), np.nan)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
-    hh_4h = high[0]
-    ll_4h = low[0]
-    for i in range(n):
-        if high[i] > hh_4h:
-            hh_4h = high[i]
-        if low[i] < ll_4h:
-            ll_4h = low[i]
-        if i >= 20:
-            if high[i-20] == hh_4h:
-                hh_4h = max(high[i-19:i+1]) if i+1 <= n else max(high[i-19:])
-            if low[i-20] == ll_4h:
-                ll_4h = min(low[i-19:i+1]) if i+1 <= n else min(low[i-19:])
-        if i >= 19:
-            donchian_h[i] = hh_4h
-            donchian_l[i] = ll_4h
+    for i in range(14, len(df_1d)):
+        if tr_14[i] != 0:
+            plus_di_14[i] = (plus_dm_14[i] / tr_14[i]) * 100
+            minus_di_14[i] = (minus_dm_14[i] / tr_14[i]) * 100
+            if (plus_di_14[i] + minus_di_14[i]) != 0:
+                dx_14[i] = (abs(plus_di_14[i] - minus_di_14[i]) / (plus_di_14[i] + minus_di_14[i])) * 100
+    
+    # Calculate ADX (smoothed DX)
+    adx_14 = wilders_smoothing(dx_14, 14)
+    
+    # Align 1d data to 6h timeframe
+    ema_13_6h = align_htf_to_ltf(prices, df_1d, ema_13)
+    adx_14_6h = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate Elder Ray on 6h
+    bull_power = high - ema_13_6h
+    bear_power = low - ema_13_6h
+    
+    # Calculate standard deviation of bear/bull power for regime-based thresholds
+    bull_power_ma = np.full(n, np.nan)
+    bear_power_ma = np.full(n, np.nan)
+    bull_power_std = np.full(n, np.nan)
+    bear_power_std = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        bull_power_ma[i] = np.nanmean(bull_power[max(0, i-20):i+1])
+        bear_power_ma[i] = np.nanmean(bear_power[max(0, i-20):i+1])
+        bull_power_std[i] = np.nanstd(bull_power[max(0, i-20):i+1])
+        bear_power_std[i] = np.nanstd(bear_power[max(0, i-20):i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_h[i]) or 
-            np.isnan(donchian_l[i]) or 
-            np.isnan(vol_ma_20_4h[i]) or 
-            np.isnan(chop_4h[i])):
+        if (np.isnan(ema_13_6h[i]) or 
+            np.isnan(adx_14_6h[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or
+            np.isnan(bull_power_std[i]) or
+            np.isnan(bear_power_std[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in ranging to trending markets (avoid extreme chop > 61.8)
-        if chop_4h[i] > 61.8:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        adx = adx_14_6h[i]
+        bp = bull_power[i]
+        br = bear_power[i]
+        bp_std = bull_power_std[i]
+        br_std = bear_power_std[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian low
-            if close[i] <= donchian_l[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
+            # Exit conditions
+            if adx > 25:  # Trending regime
+                # Exit when bull power turns negative
+                if bp <= 0:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            else:  # Ranging regime
+                # Exit when price returns to mean (bull power crosses zero)
+                if bp >= 0:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian high
-            if close[i] >= donchian_h[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            # Exit conditions
+            if adx > 25:  # Trending regime
+                # Exit when bear power turns positive
+                if br >= 0:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:  # Ranging regime
+                # Exit when price returns to mean (bear power crosses zero)
+                if br <= 0:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Volume confirmation: current 4h volume > 1.8x 1d average volume per 4h bar
-            # Approximate: 1d volume / 6 = average 4h bar volume
-            vol_4h_avg_estimate = vol_ma_20_4h[i] / 6.0
-            vol_ratio = volume[i] / vol_4h_avg_estimate if vol_4h_avg_estimate > 0 else 0
-            
-            # Enter long: price closes above 4h Donchian high with volume confirmation
-            if (close[i] > donchian_h[i] and 
-                vol_ratio > 1.8):
-                position = 1
-                signals[i] = 0.25
-            # Enter short: price closes below 4h Donchian low with volume confirmation
-            elif (close[i] < donchian_l[i] and 
-                  vol_ratio > 1.8):
-                position = -1
-                signals[i] = -0.25
+            # Entry logic based on regime
+            if adx > 25:  # Trending regime - follow momentum
+                # Go long when bull power is positive and rising
+                # Go short when bear power is negative and falling
+                if i > 30:
+                    bp_prev = bull_power[i-1]
+                    br_prev = bear_power[i-1]
+                    if bp > 0 and bp > bp_prev:
+                        position = 1
+                        signals[i] = 0.25
+                    elif br < 0 and br < br_prev:
+                        position = -1
+                        signals[i] = -0.25
+            else:  # Ranging regime - mean reversion
+                # Go long when bear power is extremely negative and turning up
+                # Go short when bull power is extremely positive and turning down
+                if i > 30:
+                    br_prev = bear_power[i-1]
+                    bp_prev = bull_power[i-1]
+                    # Long: bear power below -1 std and turning up
+                    if br < -br_std and br > br_prev:
+                        position = 1
+                        signals[i] = 0.25
+                    # Short: bull power above +1 std and turning down
+                    elif bp > bp_std and bp < bp_prev:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
